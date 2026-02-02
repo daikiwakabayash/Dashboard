@@ -141,25 +141,22 @@ function formatRowData(row, columnMap) {
     // 口コミ
     gReviews: getNumber('G口コミ'),
     hReviews: getNumber('H口コミ'),
-    hpbReviews: getNumber('HPB口コミ'),
 
     // 売上
     individualSales: getNumber('個別税込売上'),
     recurringSales: getNumber('継続売上'),
 
-    // 福利厚生・手当（チェック項目）
-    healthCheck: getNumber('健康診断') > 0 ? 1 : 0,
-    marathon: getNumber('フルマラソン') > 0 ? 1 : 0,
-    dental: getNumber('歯クリーニング') > 0 ? 1 : 0,
-    familyAllowance: getNumber('家族手当') > 0 ? 1 : 0,
-    event: getNumber('イベントアクセス手当') > 0 ? 1 : 0,
-    welcomeAllowance: getNumber('ウェルカムファミリー手当') > 0 ? 1 : 0,
-
-    // 手当金額
+    // 福利厚生・手当（チェック項目 + 金額）
+    healthCheck: getNumber('健康診断'),
     healthAllowance: getNumber('健康手当'),
+    marathon: getNumber('フルマラソン'),
     studyAllowance: getNumber('勉強代手当'),
     birthdayAllowance: getNumber('誕生日手当'),
     childAllowance: getNumber('子供手当'),
+    dental: getNumber('歯クリーニング'),
+    familyAllowance: getNumber('家族手当'),
+    accessAllowance: getNumber('イベントアクセス手当'),
+    welcomeAllowance: getNumber('ウェルカムファミリー手当'),
     goalAllowance: getNumber('目標達成手当'),
 
     // パフォーマンス指標

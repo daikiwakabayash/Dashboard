@@ -75,8 +75,9 @@ function getSpreadsheetData() {
 
   // データを整形
   const formattedData = dataRows
-    .filter(row => row[columnMap['日付']] && row[columnMap['名前']]) // 空行をスキップ
-    .map(row => formatRowData(row, columnMap));
+    .map((row, index) => ({ row, index: index + 2 })) // 行番号を保持（2行目から開始）
+    .filter(({ row }) => row[columnMap['日付']] && row[columnMap['名前']]) // 空行をスキップ
+    .map(({ row, index }) => formatRowData(row, columnMap, index));
 
   return formattedData;
 }
@@ -97,7 +98,7 @@ function createColumnMap(headers) {
 /**
  * 1行のデータを整形
  */
-function formatRowData(row, columnMap) {
+function formatRowData(row, columnMap, rowIndex) {
   // 安全に値を取得するヘルパー関数
   const getValue = (colName, defaultValue = '') => {
     const index = columnMap[colName];
@@ -121,6 +122,7 @@ function formatRowData(row, columnMap) {
 
   return {
     // 基本情報
+    rowIndex: rowIndex, // スプレッドシートの行番号
     month: getDate('日付'),
     name: getValue('名前'),
     branch: getValue('院名'),

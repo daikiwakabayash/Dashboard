@@ -1,0 +1,446 @@
+import React, { useState, useMemo } from 'react';
+import { 
+  TrendingUp, Users, Target, LogOut, Calendar, MapPin, 
+  Search, Award, BarChart3, DollarSign, Heart, 
+  MessageSquare, Star, Gift, CheckCircle, Info,
+  Filter, Download, ChevronRight, Activity, Wallet
+} from 'lucide-react';
+
+// 提供された膨大なテキストデータをパースして整理（主要なサンプルを構造化）
+const rawData = [
+  // 2026年1月データ
+  { month: "2026年1月", name: "宮崎 生光", branch: "大森", newCount: 9, newEnroll: 1, enrollRate: 11, newAvgPrice: 42350, newSales: 42350, prevMembers: 100, churnCount: 2, churnRate: 2, gap: -1, gReviews: 3, hReviews: 7, hpbReviews: 5, individualSales: 1334280, recurringSales: 1291930, healthCheck: 1, healthAllowance: 15000, marathon: 1, studyAllowance: 5000, birthdayAllowance: 0, childAllowance: 0, dental: 1, familyAllowance: 1, event: 1, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 20000, productivity: 1291930, conversionRate: 11, adRatio: 12, referrals: 3, taskMiss: 0, totalScore: 85, status: "達成", achieveCount: 12, healthBalance: 5000, studyBalance: 10000 },
+  { month: "2026年1月", name: "内田翔一郎", branch: "千葉駅", newCount: 33, newEnroll: 20, enrollRate: 61, newAvgPrice: 24750, newSales: 495000, prevMembers: 109, churnCount: 1, churnRate: 1, gap: 19, gReviews: 5, hReviews: 8, hpbReviews: 4, individualSales: 1546100, recurringSales: 1051100, healthCheck: 1, healthAllowance: 7700, marathon: 0, studyAllowance: 10000, birthdayAllowance: 20000, childAllowance: 0, dental: 0, familyAllowance: 0, event: 0, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 10000, productivity: 1051100, conversionRate: 61, adRatio: 15, referrals: 5, taskMiss: 0, totalScore: 92, status: "達成", achieveCount: 15, healthBalance: 2000, studyBalance: 5000 },
+  { month: "2026年1月", name: "河合優樹", branch: "千葉駅", newCount: 71, newEnroll: 22, enrollRate: 31, newAvgPrice: 26850, newSales: 590700, prevMembers: 77, churnCount: 8, churnRate: 10, gap: 14, gReviews: 9, hReviews: 11, hpbReviews: 2, individualSales: 1346150, recurringSales: 755450, healthCheck: 0, healthAllowance: 7700, marathon: 0, studyAllowance: 0, birthdayAllowance: 0, childAllowance: 0, dental: 0, familyAllowance: 0, event: 0, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 0, productivity: 755450, conversionRate: 31, adRatio: 10, referrals: 2, taskMiss: 1, totalScore: 78, status: "未達成", achieveCount: 8, healthBalance: 0, studyBalance: 0 },
+  { month: "2026年1月", name: "中澤祐一郎", branch: "銀座", newCount: 13, newEnroll: 6, enrollRate: 46, newAvgPrice: 28050, newSales: 168300, prevMembers: 55, churnCount: 5, churnRate: 9, gap: 1, gReviews: 5, hReviews: 5, hpbReviews: 3, individualSales: 1707350, recurringSales: 1539050, healthCheck: 1, healthAllowance: 5000, marathon: 0, studyAllowance: 8000, birthdayAllowance: 0, childAllowance: 0, dental: 0, familyAllowance: 0, event: 0, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 15000, productivity: 1539050, conversionRate: 46, adRatio: 12, referrals: 4, taskMiss: 0, totalScore: 88, status: "達成", achieveCount: 11, healthBalance: 4000, studyBalance: 2000 },
+  
+  // 2021年からのヒストリカルデータ（サンプルパース）
+  { month: "2021年5月", name: "齋藤 敦紀", branch: "大森", newCount: 38, newEnroll: 28, enrollRate: 74, newAvgPrice: 24357, newSales: 682000, prevMembers: 0, churnCount: 0, churnRate: 0, gap: 0, gReviews: 2, hReviews: 3, hpbReviews: 1, individualSales: 1200000, recurringSales: 518000, healthCheck: 0, healthAllowance: 0, marathon: 0, studyAllowance: 0, birthdayAllowance: 0, childAllowance: 0, dental: 0, familyAllowance: 0, event: 0, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 0, productivity: 518000, conversionRate: 74, adRatio: 10, referrals: 5, taskMiss: 0, totalScore: 70, status: "達成", achieveCount: 1, healthBalance: 0, studyBalance: 0 },
+  { month: "2021年6月", name: "内田翔一郎", branch: "千葉駅", newCount: 58, newEnroll: 18, enrollRate: 31, newAvgPrice: 24444, newSales: 440000, prevMembers: 50, churnCount: 2, churnRate: 4, gap: 16, gReviews: 3, hReviews: 4, hpbReviews: 2, individualSales: 1100000, recurringSales: 660000, healthCheck: 0, healthAllowance: 0, marathon: 0, studyAllowance: 0, birthdayAllowance: 0, childAllowance: 0, dental: 0, familyAllowance: 0, event: 0, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 0, productivity: 660000, conversionRate: 31, adRatio: 15, referrals: 2, taskMiss: 0, totalScore: 65, status: "達成", achieveCount: 2, healthBalance: 0, studyBalance: 0 },
+  { month: "2022年12月", name: "齋藤 敦紀", branch: "大森", newCount: 10, newEnroll: 7, enrollRate: 70, newAvgPrice: 23179, newSales: 162250, prevMembers: 83, churnCount: 6, churnRate: 7, gap: 1, gReviews: 5, hReviews: 3, hpbReviews: 2, individualSales: 1250000, recurringSales: 1087750, healthCheck: 0, healthAllowance: 5000, marathon: 0, studyAllowance: 2000, birthdayAllowance: 0, childAllowance: 0, dental: 0, familyAllowance: 0, event: 0, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 5000, productivity: 1087750, conversionRate: 70, adRatio: 12, referrals: 3, taskMiss: 1, totalScore: 75, status: "達成", achieveCount: 10, healthBalance: 1000, studyBalance: 500 },
+  { month: "2023年7月", name: "伊藤りりか", branch: "仙台", newCount: 25, newEnroll: 22, enrollRate: 88, newAvgPrice: 24750, newSales: 544500, prevMembers: 70, churnCount: 3, churnRate: 4, gap: 19, gReviews: 8, hReviews: 12, hpbReviews: 10, individualSales: 2196500, recurringSales: 1652000, healthCheck: 1, healthAllowance: 10000, marathon: 1, studyAllowance: 10000, birthdayAllowance: 0, childAllowance: 0, dental: 1, familyAllowance: 1, event: 1, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 20000, productivity: 1652000, conversionRate: 88, adRatio: 8, referrals: 10, taskMiss: 0, totalScore: 98, status: "達成", achieveCount: 20, healthBalance: 8000, studyBalance: 12000 },
+  { month: "2024年4月", name: "貞末恭輔", branch: "鶴見", newCount: 20, newEnroll: 10, enrollRate: 50, newAvgPrice: 24750, newSales: 247500, prevMembers: 50, churnCount: 6, churnRate: 12, gap: 4, gReviews: 6, hReviews: 4, hpbReviews: 2, individualSales: 1720150, recurringSales: 1472650, healthCheck: 0, healthAllowance: 5000, marathon: 0, studyAllowance: 5000, birthdayAllowance: 0, childAllowance: 0, dental: 1, familyAllowance: 0, event: 0, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 15000, productivity: 1472650, conversionRate: 50, adRatio: 10, referrals: 3, taskMiss: 0, totalScore: 82, status: "達成", achieveCount: 8, healthBalance: 3000, studyBalance: 1500 },
+  { month: "2025年1月", name: "西田 健人", branch: "浅草", newCount: 9, newEnroll: 3, enrollRate: 33, newAvgPrice: 29150, newSales: 87450, prevMembers: 86, churnCount: 8, churnRate: 9, gap: -5, gReviews: 4, hReviews: 5, hpbReviews: 4, individualSales: 1615450, recurringSales: 1528000, healthCheck: 1, healthAllowance: 10000, marathon: 0, studyAllowance: 5000, birthdayAllowance: 0, childAllowance: 0, dental: 1, familyAllowance: 0, event: 1, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 15000, productivity: 1528000, conversionRate: 33, adRatio: 18, referrals: 2, taskMiss: 1, totalScore: 79, status: "達成", achieveCount: 12, healthBalance: 2000, studyBalance: 3000 }
+];
+
+const App = () => {
+  const [selectedMonth, setSelectedMonth] = useState("2026年1月");
+  const [selectedBranch, setSelectedBranch] = useState("すべて");
+  const [searchTerm, setSearchTerm] = useState("");
+
+  const months = useMemo(() => Array.from(new Set(rawData.map(d => d.month))).sort((a, b) => {
+    const [ay, am] = a.replace('年', '-').replace('月', '').split('-');
+    const [by, bm] = b.replace('年', '-').replace('月', '').split('-');
+    return new Date(by, bm - 1) - new Date(ay, am - 1);
+  }), []);
+
+  const branches = useMemo(() => ["すべて", ...Array.from(new Set(rawData.map(d => d.branch)))], []);
+
+  const filteredData = useMemo(() => {
+    return rawData.filter(d => {
+      const matchMonth = d.month === selectedMonth;
+      const matchBranch = selectedBranch === "すべて" || d.branch === selectedBranch;
+      const matchSearch = d.name.includes(searchTerm) || d.branch.includes(searchTerm);
+      return matchMonth && matchBranch && matchSearch;
+    });
+  }, [selectedMonth, selectedBranch, searchTerm]);
+
+  const stats = useMemo(() => {
+    const totalSales = filteredData.reduce((acc, curr) => acc + curr.individualSales, 0);
+    const totalNew = filteredData.reduce((acc, curr) => acc + curr.newCount, 0);
+    const avgEnroll = filteredData.length ? (filteredData.reduce((acc, curr) => acc + curr.enrollRate, 0) / filteredData.length).toFixed(1) : 0;
+    const avgScore = filteredData.length ? (filteredData.reduce((acc, curr) => acc + curr.totalScore, 0) / filteredData.length).toFixed(1) : 0;
+    return { totalSales, totalNew, avgEnroll, avgScore };
+  }, [filteredData]);
+
+  const branchSales = useMemo(() => {
+    const map = {};
+    filteredData.forEach(d => {
+      map[d.branch] = (map[d.branch] || 0) + d.individualSales;
+    });
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  }, [filteredData]);
+
+  const formatYen = (num) => `¥${Math.round(num || 0).toLocaleString()}`;
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-4 lg:p-6 font-sans text-slate-900 overflow-x-hidden">
+      {/* Dynamic Header */}
+      <div className="max-w-[1600px] mx-auto space-y-6">
+        <header className="flex flex-col xl:flex-row xl:items-end justify-between gap-6">
+          <div className="space-y-1">
+            <div className="inline-flex items-center gap-2 px-3 py-1 bg-indigo-100 text-indigo-700 rounded-full text-xs font-black uppercase tracking-widest mb-2">
+              <Activity size={14} /> Management System
+            </div>
+            <h1 className="text-3xl font-black tracking-tight text-slate-900">
+              整体院 経営総合ダッシュボード
+            </h1>
+            <p className="text-slate-500 font-medium flex items-center gap-2 italic">
+              <Calendar size={16} /> {selectedMonth} のパフォーマンス・分析レポート
+            </p>
+          </div>
+
+          <div className="flex flex-wrap gap-3 bg-white p-2 rounded-2xl shadow-sm border border-slate-200 ring-1 ring-slate-100">
+            <FilterSet icon={<Calendar size={18}/>} label="対象年月">
+              <select 
+                className="bg-transparent font-bold focus:outline-none text-sm pr-4 cursor-pointer"
+                value={selectedMonth}
+                onChange={(e) => setSelectedMonth(e.target.value)}
+              >
+                {months.map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+            </FilterSet>
+            <div className="w-px h-10 bg-slate-100 hidden sm:block" />
+            <FilterSet icon={<MapPin size={18}/>} label="対象店舗">
+              <select 
+                className="bg-transparent font-bold focus:outline-none text-sm pr-4 cursor-pointer"
+                value={selectedBranch}
+                onChange={(e) => setSelectedBranch(e.target.value)}
+              >
+                {branches.map(b => <option key={b} value={b}>{b}</option>)}
+              </select>
+            </FilterSet>
+            <div className="w-px h-10 bg-slate-100 hidden sm:block" />
+            <div className="relative flex-grow min-w-[200px] px-3 py-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input 
+                type="text"
+                placeholder="スタッフ名で検索..."
+                className="w-full pl-8 pr-4 py-1.5 bg-slate-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+            </div>
+          </div>
+        </header>
+
+        {/* Top KPI Metrics */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <KpiBox title="総売上(個別税込)" value={formatYen(stats.totalSales)} icon={<DollarSign/>} sub="当月実績合計" color="bg-emerald-600" />
+          <KpiBox title="総新規数" value={`${stats.totalNew} 名`} icon={<Users/>} sub="集客パフォーマンス" color="bg-blue-600" />
+          <KpiBox title="平均入会率" value={`${stats.avgEnroll}%`} icon={<Target/>} sub="成約クオリティ" color="bg-indigo-600" />
+          <KpiBox title="スタッフ平均得点" value={`${stats.avgScore} pt`} icon={<Star/>} sub="総合評価指標" color="bg-orange-500" />
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+          {/* Rankings Section */}
+          <div className="xl:col-span-2 space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <RankCard 
+                title="個人生産性 (売上)" 
+                data={[...filteredData].sort((a,b) => b.individualSales - a.individualSales).slice(0, 5)}
+                valKey="individualSales"
+                isCurrency
+              />
+              <RankCard 
+                title="入会率 TOP5" 
+                data={[...filteredData].sort((a,b) => b.enrollRate - a.enrollRate).slice(0, 5)}
+                valKey="enrollRate"
+                suffix="%"
+              />
+              <RankCard 
+                title="総合得点ランキング" 
+                data={[...filteredData].sort((a,b) => b.totalScore - a.totalScore).slice(0, 5)}
+                valKey="totalScore"
+                suffix=" pt"
+              />
+            </div>
+
+            {/* Performance Visualization by Churn and Growth */}
+            <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
+              <h2 className="text-lg font-bold mb-6 flex items-center gap-2">
+                <ChevronRight className="text-indigo-500" />
+                店舗別 売上シェア
+              </h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-6">
+                {branchSales.map(([branch, sales], idx) => (
+                  <div key={branch} className="group">
+                    <div className="flex justify-between items-end mb-2">
+                      <span className="text-sm font-black text-slate-600">{branch}</span>
+                      <span className="text-xs font-mono font-bold text-slate-400">{formatYen(sales)}</span>
+                    </div>
+                    <div className="h-3 w-full bg-slate-100 rounded-full overflow-hidden flex shadow-inner">
+                      <div 
+                        className={`h-full transition-all duration-1000 ${idx === 0 ? 'bg-indigo-500' : 'bg-slate-400'}`}
+                        style={{ width: `${(sales / branchSales[0][1]) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Welfare & Allowance Breakdown */}
+          <div className="xl:col-span-1 bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
+            <h2 className="text-lg font-bold mb-6 flex items-center justify-between">
+              <span className="flex items-center gap-2"><Gift className="text-rose-500" /> 福利厚生・手当支給状況</span>
+              <span className="text-[10px] bg-slate-100 px-2 py-1 rounded text-slate-500 font-black tracking-tighter">MONTHLY</span>
+            </h2>
+            <div className="space-y-4">
+              <AllowanceStat label="健康手当 合計" val={filteredData.reduce((a,c)=>a+c.healthAllowance,0)} color="bg-emerald-50 text-emerald-700" />
+              <AllowanceStat label="勉強代手当 合計" val={filteredData.reduce((a,c)=>a+c.studyAllowance,0)} color="bg-blue-50 text-blue-700" />
+              <AllowanceStat label="目標達成手当 合計" val={filteredData.reduce((a,c)=>a+c.goalAllowance,0)} color="bg-indigo-50 text-indigo-700" />
+              <AllowanceStat label="誕生日手当 合計" val={filteredData.reduce((a,c)=>a+c.birthdayAllowance,0)} color="bg-rose-50 text-rose-700" />
+              
+              <div className="mt-8 pt-6 border-t border-dashed border-slate-200">
+                <div className="flex items-center gap-2 mb-4 text-sm font-bold text-slate-500 uppercase tracking-widest">
+                  <Wallet size={16}/> 支給項目内訳
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <WelfareItem label="健康診断" count={filteredData.filter(d=>d.healthCheck).length} />
+                  <WelfareItem label="フルマラソン" count={filteredData.filter(d=>d.marathon).length} />
+                  <WelfareItem label="歯クリーニング" count={filteredData.filter(d=>d.dental).length} />
+                  <WelfareItem label="家族手当" count={filteredData.filter(d=>d.familyAllowance).length} />
+                  <WelfareItem label="イベント" count={filteredData.filter(d=>d.event).length} />
+                  <WelfareItem label="ウェルカムF" count={filteredData.filter(d=>d.welcomeAllowance).length} />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Master Detailed Table (Reflecting ALL columns from input) */}
+        <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+          <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+            <div>
+              <h2 className="text-xl font-black flex items-center gap-2">
+                <BarChart3 className="text-indigo-600" size={24} />
+                経営マスターデータ（全項目詳細）
+              </h2>
+              <p className="text-xs text-slate-400 font-bold mt-1">※全ての管理項目を反映。横スクロールで確認可能。</p>
+            </div>
+            <button className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition-all">
+              <Download size={14} /> CSVエクスポート
+            </button>
+          </div>
+          
+          <div className="overflow-x-auto scrollbar-thin scrollbar-thumb-slate-300 scrollbar-track-transparent">
+            <table className="w-full text-left border-collapse min-w-[2800px]">
+              <thead>
+                <tr className="bg-white text-[10px] uppercase tracking-widest text-slate-400 font-black border-b border-slate-100">
+                  <th className="px-6 py-5 sticky left-0 bg-white z-20 border-r border-slate-50 min-w-[180px]">名前 / 院名 / 月</th>
+                  <th className="px-4 py-5 text-center">達成状況</th>
+                  <th className="px-4 py-5 bg-blue-50/30">新規数(入会/率)</th>
+                  <th className="px-4 py-5 bg-blue-50/30">単価/新規売上</th>
+                  <th className="px-4 py-5 bg-emerald-50/30">会員数/退会率</th>
+                  <th className="px-4 py-5">GAP</th>
+                  <th className="px-4 py-5 text-center">口コミ (G/H/HB)</th>
+                  <th className="px-4 py-5 bg-rose-50/30">売上 (税込/継続)</th>
+                  <th className="px-4 py-5">手当1(健康/診断/マラソン)</th>
+                  <th className="px-4 py-5">手当2(勉強/誕/子/歯)</th>
+                  <th className="px-4 py-5">手当3(家/イ/ア/WF/目)</th>
+                  <th className="px-4 py-5 text-center bg-indigo-50/30">生産性/成約率</th>
+                  <th className="px-4 py-5 text-center bg-indigo-50/30">広告率/紹介</th>
+                  <th className="px-4 py-5 text-center">タスク漏れ</th>
+                  <th className="px-4 py-5 text-right font-black text-indigo-600 bg-indigo-50/30">合計得点</th>
+                  <th className="px-4 py-5">残高(健康/勉強)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filteredData.map((staff, i) => (
+                  <tr key={i} className="hover:bg-slate-50/80 transition-colors group text-sm">
+                    <td className="px-6 py-4 sticky left-0 bg-white group-hover:bg-slate-50 z-20 border-r border-slate-100 shadow-[2px_0_5px_rgba(0,0,0,0.02)]">
+                      <div className="font-black text-slate-800 leading-none mb-1">{staff.name}</div>
+                      <div className="flex items-center gap-2 text-[10px] text-slate-400 font-bold uppercase">
+                        <span>{staff.branch}</span>
+                        <span className="w-1 h-1 bg-slate-300 rounded-full" />
+                        <span>{staff.month}</span>
+                      </div>
+                    </td>
+                    <td className="px-4 py-4 text-center">
+                      <div className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-[10px] font-black shadow-sm ${
+                        staff.status === "達成" ? "bg-emerald-500 text-white" : "bg-slate-200 text-slate-500"
+                      }`}>
+                        {staff.status === "達成" && <CheckCircle size={10} />}
+                        {staff.status}
+                      </div>
+                      <div className="text-[9px] mt-1 text-slate-400 font-bold">達成回数: {staff.achieveCount}回</div>
+                    </td>
+                    <td className="px-4 py-4 bg-blue-50/10">
+                      <div className="font-bold text-slate-700">{staff.newCount} 名 <ChevronRight className="inline opacity-30" size={12}/> {staff.newEnroll} 名</div>
+                      <div className="text-xs font-black text-blue-600">{staff.enrollRate}%</div>
+                    </td>
+                    <td className="px-4 py-4 text-right bg-blue-50/10 font-mono">
+                      <div className="font-bold text-slate-700">{formatYen(staff.newSales)}</div>
+                      <div className="text-[10px] text-slate-400">単価: {formatYen(staff.newAvgPrice)}</div>
+                    </td>
+                    <td className="px-4 py-4 bg-emerald-50/10">
+                      <div className="font-bold text-slate-700">先月: {staff.prevMembers} 名</div>
+                      <div className={`text-xs font-black ${staff.churnRate > 15 ? 'text-rose-500' : 'text-emerald-600'}`}>
+                        退会: {staff.churnCount} ({staff.churnRate}%)
+                      </div>
+                    </td>
+                    <td className="px-4 py-4 text-center font-mono">
+                      <span className={`px-2 py-0.5 rounded font-black text-xs ${staff.gap >= 0 ? 'text-emerald-600 bg-emerald-50' : 'text-rose-500 bg-rose-50'}`}>
+                        {staff.gap >= 0 ? `+${staff.gap}` : staff.gap}
+                      </span>
+                    </td>
+                    <td className="px-4 py-4">
+                      <div className="flex justify-center gap-1">
+                        <ReviewIndicator label="G" val={staff.gReviews} color="bg-slate-700" />
+                        <ReviewIndicator label="H" val={staff.hReviews} color="bg-blue-600" />
+                        <ReviewIndicator label="HB" val={staff.hpbReviews} color="bg-rose-500" />
+                      </div>
+                    </td>
+                    <td className="px-4 py-4 text-right bg-rose-50/10 font-mono">
+                      <div className="font-black text-slate-900 text-base">{formatYen(staff.individualSales)}</div>
+                      <div className="text-[10px] text-slate-400">継続: {formatYen(staff.recurringSales)}</div>
+                    </td>
+                    <td className="px-4 py-4">
+                      <div className="flex flex-col gap-1">
+                        {staff.healthAllowance > 0 && <AllowanceLine label="健康" val={staff.healthAllowance} />}
+                        <div className="flex gap-2 text-[9px] text-slate-400 font-bold">
+                          <span>検: {staff.healthCheck ? "◯" : "×"}</span>
+                          <span>走: {staff.marathon ? "◯" : "×"}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-4 py-4">
+                      <div className="flex flex-col gap-1">
+                        <AllowanceLine label="勉強" val={staff.studyAllowance} />
+                        <AllowanceLine label="誕" val={staff.birthdayAllowance} />
+                        <AllowanceLine label="子" val={staff.childAllowance} />
+                      </div>
+                    </td>
+                    <td className="px-4 py-4">
+                      <div className="flex flex-col gap-1 text-[10px]">
+                        <AllowanceLine label="目標" val={staff.goalAllowance} />
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          <StatusDot label="家" active={staff.familyAllowance} />
+                          <StatusDot label="イ" active={staff.event} />
+                          <StatusDot label="WF" active={staff.welcomeAllowance} />
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-4 py-4 text-center bg-indigo-50/10">
+                      <div className="font-bold text-slate-800">{formatYen(staff.productivity)}</div>
+                      <div className="text-xs text-indigo-600 font-black">成約: {staff.conversionRate}%</div>
+                    </td>
+                    <td className="px-4 py-4 text-center bg-indigo-50/10">
+                      <div className="text-xs font-bold">広告: {staff.adRatio}%</div>
+                      <div className="text-xs font-bold text-emerald-600 italic underline underline-offset-2">紹介: {staff.referrals}件</div>
+                    </td>
+                    <td className="px-4 py-4 text-center">
+                      {staff.taskMiss > 0 ? (
+                        <div className="flex items-center justify-center gap-1 text-rose-500 font-black bg-rose-50 rounded-lg py-1 px-2">
+                           {staff.taskMiss}
+                        </div>
+                      ) : (
+                        <CheckCircle size={18} className="text-emerald-400 mx-auto" />
+                      )}
+                    </td>
+                    <td className="px-4 py-4 text-right bg-indigo-50/10 border-l border-indigo-100">
+                      <div className="text-xl font-black text-indigo-700 leading-none">{staff.totalScore}</div>
+                      <div className="text-[9px] text-indigo-400 font-bold uppercase tracking-widest mt-1">Total Pts</div>
+                    </td>
+                    <td className="px-4 py-4 text-[10px] font-mono">
+                      <div className="text-emerald-600 font-bold">健: {formatYen(staff.healthBalance)}</div>
+                      <div className="text-blue-600 font-bold">学: {formatYen(staff.studyBalance)}</div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// UI Parts
+const KpiBox = ({ title, value, icon, sub, color }) => (
+  <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
+    <div className={`absolute top-0 right-0 w-24 h-24 ${color} opacity-[0.03] -mr-8 -mt-8 rounded-full group-hover:scale-110 transition-transform`} />
+    <div className="flex items-start justify-between mb-3 relative z-10">
+      <div className={`p-2.5 rounded-2xl ${color} text-white shadow-lg`}>
+        {React.cloneElement(icon, { size: 20 })}
+      </div>
+      <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{sub}</div>
+    </div>
+    <div className="relative z-10">
+      <h3 className="text-xs font-bold text-slate-400 mb-1">{title}</h3>
+      <p className="text-2xl font-black text-slate-900 tracking-tight">{value}</p>
+    </div>
+  </div>
+);
+
+const FilterSet = ({ icon, label, children }) => (
+  <div className="px-3 py-1">
+    <div className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-tighter mb-1">
+      {icon} <span>{label}</span>
+    </div>
+    {children}
+  </div>
+);
+
+const RankCard = ({ title, data, valKey, suffix = "", isCurrency = false }) => (
+  <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200">
+    <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-6 flex items-center gap-2">
+      <Award size={16} className="text-indigo-500" /> {title} TOP5
+    </h3>
+    <div className="space-y-4">
+      {data.map((staff, idx) => (
+        <div key={idx} className="flex items-center justify-between group cursor-default">
+          <div className="flex items-center gap-3">
+            <div className={`w-7 h-7 rounded-xl flex items-center justify-center text-[10px] font-black shadow-sm ${
+              idx === 0 ? "bg-yellow-400 text-white" : 
+              idx === 1 ? "bg-slate-200 text-slate-600" : 
+              idx === 2 ? "bg-orange-300 text-white" : "bg-slate-50 text-slate-400"
+            }`}>
+              {idx + 1}
+            </div>
+            <div>
+              <div className="text-xs font-black text-slate-700 group-hover:text-indigo-600 transition-colors">{staff.name}</div>
+              <div className="text-[10px] text-slate-400 font-bold">{staff.branch}</div>
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="text-sm font-black text-slate-900">
+              {isCurrency ? `¥${Math.round(staff[valKey] / 10000).toLocaleString()}万` : `${staff[valKey]}${suffix}`}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>
+);
+
+const AllowanceStat = ({ label, val, color }) => (
+  <div className={`p-4 rounded-2xl ${color} flex flex-col gap-1`}>
+    <span className="text-[10px] font-black uppercase tracking-widest opacity-70">{label}</span>
+    <span className="text-lg font-black tracking-tight font-mono">¥{val.toLocaleString()}</span>
+  </div>
+);
+
+const WelfareItem = ({ label, count }) => (
+  <div className="flex items-center justify-between px-3 py-2 bg-slate-50 rounded-xl border border-slate-100">
+    <span className="text-[11px] font-bold text-slate-500">{label}</span>
+    <span className="text-xs font-black text-slate-900">{count}名</span>
+  </div>
+);
+
+const ReviewIndicator = ({ label, val, color }) => (
+  <div className={`flex flex-col items-center justify-center w-8 h-10 rounded-lg ${color} text-white shadow-sm ring-1 ring-white/20`}>
+    <span className="text-[8px] font-black leading-none mb-1 opacity-70">{label}</span>
+    <span className="text-[11px] font-black leading-none">{val}</span>
+  </div>
+);
+
+const AllowanceLine = ({ label, val }) => (
+  <div className="flex justify-between items-center gap-2 text-[10px] font-bold text-slate-500">
+    <span className="bg-slate-100 px-1 rounded text-[8px] text-slate-400">{label}</span>
+    <span className="font-mono">¥{val.toLocaleString()}</span>
+  </div>
+);
+
+const StatusDot = ({ label, active }) => (
+  <span className={`px-1 rounded text-[8px] font-black ${
+    active ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-300 line-through'
+  }`}>
+    {label}
+  </span>
+);
+
+export default App;

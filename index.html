@@ -5,19 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>整体院 経営総合ダッシュボード</title>
    
-    <script src="https://cdn.tailwindcss.com"></script>
-   
-    <script async src="https://ga.jspm.io/npm:es-module-shims@1.7.0/dist/es-module-shims.js"></script>
-    <script type="importmap">
-    {
-      "imports": {
-        "react": "https://esm.sh/react@18.2.0?dev",
-        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client?dev",
-        "lucide-react": "https://esm.sh/lucide-react@0.292.0?bundle"
-      }
-    }
+    <script src="https://cdn.tailwindcss.com" onload="console.log('✅ Tailwind CSS loaded')" onerror="console.error('❌ Failed to load Tailwind CSS')"></script>
+
+    <!-- React & ReactDOM (UMD) -->
+    <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.development.js" onload="console.log('✅ React loaded')"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.development.js" onload="console.log('✅ ReactDOM loaded')"></script>
+
+    <!-- Lucide React (UMD) -->
+    <script src="https://unpkg.com/lucide-react@0.292.0/dist/umd/lucide-react.js" onload="console.log('✅ Lucide React loaded')"></script>
+
+    <!-- Babel Standalone -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js" onload="console.log('✅ Babel Standalone loaded')" onerror="console.error('❌ Failed to load Babel Standalone')"></script>
+
+    <script>
+        console.log('🌐 Document loaded, waiting for external scripts...');
     </script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
     <style>
         /* スクロールバーのカスタマイズなど */
@@ -87,20 +89,27 @@
         }, 10000);
     </script>
 
-    <script type="text/babel" data-type="module">
-        import React, { useState, useMemo, useEffect, useRef } from 'react';
-        import { createRoot } from 'react-dom/client';
-        import {
+    <script type="text/babel">
+        // Use global variables provided by UMD modules
+        const React = window.React;
+        const ReactDOM = window.ReactDOM;
+        const { useState, useMemo, useEffect, useRef } = React;
+        const { createRoot } = ReactDOM;
+
+        // Lucide React icons
+        const {
             TrendingUp, Users, Target, Calendar, MapPin,
             Search, Award, BarChart3, DollarSign, Heart,
             MessageSquare, Star, Gift, CheckCircle, Info,
             Filter, Download, ChevronRight, Activity, Wallet, Loader2, AlertCircle,
             Hash, Percent, RefreshCw, ChevronDown, Check, Trophy
-        } from 'lucide-react';
+        } = window.lucideReact;
 
         const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbzVslBpl0zqDx0m6DWgvl_uvDTD2ROXyAQOJvTSVnT0RtDeGA5H65vJWdywaGgcyN8_/exec';
 
         const App = () => {
+            console.log('🎯 App component initializing...');
+
             const [rawData, setRawData] = useState([]);
             const [loading, setLoading] = useState(true);
             const [error, setError] = useState(null);
@@ -110,7 +119,12 @@
             const [isBranchMenuOpen, setIsBranchMenuOpen] = useState(false);
             const branchMenuRef = useRef(null);
 
+            console.log('✅ App state initialized');
+
             const fetchDataFromSpreadsheet = async () => {
+                console.log('📡 Fetching data from GAS API...');
+                console.log('🔗 API URL:', GAS_API_URL);
+
                 try {
                     setLoading(true);
                     setError(null);
@@ -120,18 +134,24 @@
                     const timeoutId = setTimeout(() => controller.abort(), 30000);
 
                     try {
+                        console.log('⏳ Sending request...');
                         const response = await fetch(GAS_API_URL, {
                             redirect: 'follow',
                             signal: controller.signal
                         });
                         clearTimeout(timeoutId);
 
+                        console.log('✅ Response received:', response.status, response.statusText);
+
                         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
 
+                        console.log('📦 Parsing JSON...');
                         const result = await response.json();
+                        console.log('✅ JSON parsed:', result);
 
                         if (!result.success) throw new Error(result.error || 'データの取得に失敗しました');
 
+                        console.log('💾 Setting raw data:', result.data ? result.data.length : 0, 'records');
                         setRawData(result.data || []);
 
                         if (result.data && result.data.length > 0) {
@@ -140,35 +160,49 @@
                                 const [by, bm] = b.replace('年', '-').replace('月', '').split('-');
                                 return new Date(by, bm - 1) - new Date(ay, am - 1);
                             });
+                            console.log('📅 Setting selected month:', sortedMonths[0]);
                             setSelectedMonth(sortedMonths[0] || '');
 
                             const allBranches = Array.from(new Set(result.data.map(d => d.branch)));
+                            console.log('🏢 Setting selected branches:', allBranches);
                             setSelectedBranches(allBranches);
                         }
+
+                        console.log('✅ Data fetch completed successfully');
                     } catch (fetchError) {
                         clearTimeout(timeoutId);
+                        console.error('❌ Fetch error:', fetchError);
                         if (fetchError.name === 'AbortError') {
                             throw new Error('タイムアウト: サーバーの応答に時間がかかりすぎています');
                         }
                         throw fetchError;
                     }
                 } catch (err) {
-                    console.error('データ取得エラー:', err);
+                    console.error('❌ データ取得エラー:', err);
                     setError(err.message || 'データの取得に失敗しました。ネットワーク接続を確認してください。');
                 } finally {
                     setLoading(false);
+                    console.log('🏁 Fetch completed (loading=false)');
                 }
             };
 
             useEffect(() => {
+                console.log('🔄 useEffect triggered - mounting component');
                 fetchDataFromSpreadsheet();
+
                 const handleClickOutside = (event) => {
                     if (branchMenuRef.current && !branchMenuRef.current.contains(event.target)) {
                         setIsBranchMenuOpen(false);
                     }
                 };
+
                 document.addEventListener("mousedown", handleClickOutside);
-                return () => document.removeEventListener("mousedown", handleClickOutside);
+                console.log('👂 Click outside listener added');
+
+                return () => {
+                    document.removeEventListener("mousedown", handleClickOutside);
+                    console.log('🧹 Cleanup: Click outside listener removed');
+                };
             }, []);
 
             const months = useMemo(() => {
@@ -279,24 +313,33 @@
 
             const formatYen = (num) => `¥${Math.round(num || 0).toLocaleString()}`;
 
+            console.log('🎨 Rendering App - loading:', loading, 'error:', error, 'rawData length:', rawData.length);
+
             if (loading) {
+                console.log('⏳ Rendering loading screen');
                 return (
                     <div className="min-h-screen bg-slate-50 flex items-center justify-center">
                         <div className="text-center space-y-4">
                             <Loader2 className="w-12 h-12 text-indigo-600 animate-spin mx-auto" />
                             <div className="text-slate-600 font-bold tracking-wider italic">Loading Business Data...</div>
+                            <div className="text-xs text-slate-400 font-mono">Check browser console for details</div>
                         </div>
                     </div>
                 );
             }
 
             if (error) {
+                console.log('❌ Rendering error screen:', error);
                 return (
                     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
                         <div className="bg-white p-6 rounded-xl shadow-lg text-center max-w-md w-full">
                             <AlertCircle className="w-12 h-12 text-rose-500 mx-auto mb-4" />
                             <h3 className="text-lg font-bold text-slate-800 mb-2">Data Load Error</h3>
                             <p className="text-slate-600 mb-4 text-sm">{error}</p>
+                            <details className="mb-4 text-left">
+                                <summary className="cursor-pointer text-xs text-slate-500 hover:text-slate-700">Technical Details</summary>
+                                <pre className="mt-2 p-2 bg-slate-50 rounded text-xs overflow-auto">{error}</pre>
+                            </details>
                             <button
                                 onClick={fetchDataFromSpreadsheet}
                                 className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors font-bold text-sm"
@@ -307,6 +350,8 @@
                     </div>
                 );
             }
+
+            console.log('✅ Rendering main dashboard');
 
             return (
                 <div className="min-h-screen bg-slate-50 p-4 lg:p-6 font-sans text-slate-900 overflow-x-hidden">
@@ -677,10 +722,54 @@
             </div>
         );
 
-        // Reactマウント処理
-        const container = document.getElementById('root');
-        const root = createRoot(container);
-        root.render(<App />);
+        // Reactマウント処理（エラーハンドリング付き）
+        try {
+            console.log('🚀 Starting React app initialization...');
+            const container = document.getElementById('root');
+
+            if (!container) {
+                throw new Error('Root element not found');
+            }
+
+            console.log('✅ Root element found');
+            console.log('📦 Creating React root...');
+
+            const root = createRoot(container);
+            console.log('✅ React root created');
+            console.log('🎨 Rendering App component...');
+
+            root.render(<App />);
+            console.log('✅ App component rendered successfully');
+        } catch (error) {
+            console.error('❌ Fatal error during React initialization:', error);
+            const container = document.getElementById('root');
+            if (container) {
+                container.innerHTML = `
+                    <div style="display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: sans-serif; background: #f8fafc; padding: 20px;">
+                        <div style="background: white; padding: 24px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); max-width: 600px; width: 100%;">
+                            <h2 style="color: #dc2626; margin-bottom: 12px;">🚨 Reactアプリケーションの起動に失敗しました</h2>
+                            <p style="color: #64748b; margin-bottom: 16px; font-size: 14px;">アプリケーションの初期化中に致命的なエラーが発生しました。</p>
+                            <div style="background: #fef2f2; border-left: 4px solid #dc2626; padding: 12px; margin-bottom: 16px; border-radius: 4px;">
+                                <p style="color: #991b1b; font-size: 13px; font-weight: bold; margin-bottom: 4px;">エラー内容:</p>
+                                <pre style="color: #7f1d1d; font-size: 12px; white-space: pre-wrap; word-wrap: break-word; margin: 0;">${error.message}\n\n${error.stack || ''}</pre>
+                            </div>
+                            <div style="background: #f1f5f9; padding: 12px; border-radius: 8px; margin-bottom: 16px;">
+                                <p style="color: #475569; font-size: 13px; font-weight: bold; margin-bottom: 8px;">トラブルシューティング:</p>
+                                <ul style="color: #64748b; font-size: 13px; margin: 0; padding-left: 20px;">
+                                    <li>ブラウザのコンソールを開いて詳細なエラーを確認してください</li>
+                                    <li>ブラウザのキャッシュをクリアしてください</li>
+                                    <li>別のブラウザで試してみてください</li>
+                                    <li>インターネット接続を確認してください</li>
+                                </ul>
+                            </div>
+                            <button onclick="location.reload()" style="width: 100%; padding: 10px 16px; background: #4f46e5; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 14px;">
+                                ページを再読み込み
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }
+        }
     </script>
 </body>
 </html>

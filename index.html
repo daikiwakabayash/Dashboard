@@ -190,8 +190,8 @@
             const [loading, setLoading] = useState(true);
             const [error, setError] = useState(null);
             const [lastFetchTime, setLastFetchTime] = useState(null);
-            const [selectedMonth, setSelectedMonth] = useState("");
-            const [comparisonMode, setComparisonMode] = useState("single");
+            const [startMonth, setStartMonth] = useState("");
+            const [endMonth, setEndMonth] = useState("");
             const [selectedBranches, setSelectedBranches] = useState([]);
             const [searchTerm, setSearchTerm] = useState("");
             const [isBranchMenuOpen, setIsBranchMenuOpen] = useState(false);
@@ -227,7 +227,8 @@
                                     const [by, bm] = b.replace('年', '-').replace('月', '').split('-');
                                     return new Date(by, bm - 1) - new Date(ay, am - 1);
                                 });
-                                if (!selectedMonth) setSelectedMonth(sortedMonths[0] || '');
+                                if (!startMonth) setStartMonth(sortedMonths[0] || '');
+                                if (!endMonth) setEndMonth(sortedMonths[0] || '');
 
                                 const allBranches = Array.from(new Set(cachedData.map(d => d.branch)));
                                 if (selectedBranches.length === 0) setSelectedBranches(allBranches);
@@ -276,8 +277,9 @@
                                 const [by, bm] = b.replace('年', '-').replace('月', '').split('-');
                                 return new Date(by, bm - 1) - new Date(ay, am - 1);
                             });
-                            console.log('📅 Setting selected month:', sortedMonths[0]);
-                            setSelectedMonth(sortedMonths[0] || '');
+                            console.log('📅 Setting start and end months:', sortedMonths[0]);
+                            setStartMonth(sortedMonths[0] || '');
+                            setEndMonth(sortedMonths[0] || '');
 
                             const allBranches = Array.from(new Set(fetchedData.map(d => d.branch)));
                             console.log('🏢 Setting selected branches:', allBranches);
@@ -351,24 +353,21 @@
                 );
             }, [allStaffNames, staffSearchTerm]);
 
-            // 比較モードに基づいて対象月を計算
+            // 期間に基づいて対象月を計算
             const targetMonths = useMemo(() => {
-                if (!selectedMonth) return [];
+                if (!startMonth || !endMonth) return [];
 
-                const selectedIndex = months.indexOf(selectedMonth);
-                if (selectedIndex === -1) return [selectedMonth];
+                const startIndex = months.indexOf(startMonth);
+                const endIndex = months.indexOf(endMonth);
 
-                if (comparisonMode === "single") {
-                    return [selectedMonth];
-                } else if (comparisonMode === "3months") {
-                    // 選択月から過去2ヶ月を含む3ヶ月
-                    return months.slice(Math.max(0, selectedIndex - 2), selectedIndex + 1).reverse();
-                } else if (comparisonMode === "6months") {
-                    // 選択月から過去5ヶ月を含む6ヶ月
-                    return months.slice(Math.max(0, selectedIndex - 5), selectedIndex + 1).reverse();
-                }
-                return [selectedMonth];
-            }, [selectedMonth, comparisonMode, months]);
+                if (startIndex === -1 || endIndex === -1) return [];
+
+                // startIndexからendIndexまでの範囲を取得（逆順の可能性も考慮）
+                const minIndex = Math.min(startIndex, endIndex);
+                const maxIndex = Math.max(startIndex, endIndex);
+
+                return months.slice(minIndex, maxIndex + 1).reverse();
+            }, [startMonth, endMonth, months]);
 
             const toggleBranch = (branch) => {
                 setSelectedBranches(prev =>
@@ -490,7 +489,7 @@
 
             // 比較モード用データ整理
             const comparisonData = useMemo(() => {
-                if (comparisonMode === "single") return null;
+                if (targetMonths.length <= 1) return null;
 
                 // スタッフごとに月別データを整理
                 const staffMap = {};
@@ -514,7 +513,7 @@
                     const bLatest = b.monthlyData[latestMonth]?.individualSales || 0;
                     return bLatest - aLatest;
                 });
-            }, [filteredData, comparisonMode, targetMonths]);
+            }, [filteredData, targetMonths]);
 
             // 手当管理システム: 個別税込売上1,000,000円超えるごとに10,000円支給（最大120,000円）
             const allowanceTracking = useMemo(() => {
@@ -529,12 +528,17 @@
                             branch: d.branch,
                             totalSales: 0,
                             studyUsed: 0,
-                            accessUsed: 0
+                            accessUsed: 0,
+                            rowIndex: d.rowIndex || 9999 // スプレッドシート行番号を保持
                         };
                     }
                     staffMap[key].totalSales += d.individualSales || 0;
                     staffMap[key].studyUsed += d.studyAllowance || 0;
                     staffMap[key].accessUsed += d.accessAllowance || 0;
+                    // より小さい行番号を優先（最初に出現した行）
+                    if (d.rowIndex && d.rowIndex < staffMap[key].rowIndex) {
+                        staffMap[key].rowIndex = d.rowIndex;
+                    }
                 });
 
                 // 各スタッフの手当計算
@@ -562,7 +566,7 @@
                         studyProgress,
                         accessProgress
                     };
-                }).sort((a, b) => b.remaining - a.remaining);
+                }).sort((a, b) => a.rowIndex - b.rowIndex); // スプレッドシート行順にソート
             }, [filteredData]);
 
             console.log('🎨 Rendering App - loading:', loading, 'error:', error, 'rawData length:', rawData.length);
@@ -634,26 +638,24 @@
 
                             <div className="flex flex-wrap items-center gap-3">
                                 <div className="flex flex-col gap-1 min-w-[160px]">
-                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">対象年月</span>
+                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">開始年月</span>
                                     <select
                                         className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-base font-bold focus:ring-2 focus:ring-indigo-500 outline-none appearance-none cursor-pointer shadow-sm"
-                                        value={selectedMonth}
-                                        onChange={(e) => setSelectedMonth(e.target.value)}
+                                        value={startMonth}
+                                        onChange={(e) => setStartMonth(e.target.value)}
                                     >
                                         {months.map(m => <option key={m} value={m}>{m}</option>)}
                                     </select>
                                 </div>
 
                                 <div className="flex flex-col gap-1 min-w-[160px]">
-                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">表示モード</span>
+                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">終了年月</span>
                                     <select
                                         className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-base font-bold focus:ring-2 focus:ring-indigo-500 outline-none appearance-none cursor-pointer shadow-sm"
-                                        value={comparisonMode}
-                                        onChange={(e) => setComparisonMode(e.target.value)}
+                                        value={endMonth}
+                                        onChange={(e) => setEndMonth(e.target.value)}
                                     >
-                                        <option value="single">単月表示</option>
-                                        <option value="3months">3ヶ月比較</option>
-                                        <option value="6months">6ヶ月比較</option>
+                                        {months.map(m => <option key={m} value={m}>{m}</option>)}
                                     </select>
                                 </div>
 
@@ -943,22 +945,6 @@
                                             </div>
                                         </div>
 
-                                        <div className="space-y-3 mb-4">
-                                            <div className="flex justify-between items-center">
-                                                <span className="text-sm text-slate-600 font-bold">使用可能額</span>
-                                                <span className="text-base font-black text-indigo-600">{formatYen(staff.eligibleAmount)}</span>
-                                            </div>
-                                            <div className="flex justify-between items-center">
-                                                <span className="text-sm text-slate-600 font-bold">使用合計額</span>
-                                                <span className="text-base font-black text-slate-700">{formatYen(staff.totalUsed)}</span>
-                                            </div>
-                                            <div className="pt-2 border-t border-dashed border-slate-200">
-                                                <div className="flex justify-between items-center">
-                                                    <span className="text-sm text-slate-600 font-black">残り使用可能額</span>
-                                                    <span className="text-xl font-black text-emerald-600">{formatYen(staff.remaining)}</span>
-                                                </div>
-                                            </div>
-                                        </div>
 
                                         {/* 個別の手当使用状況 */}
                                         <div className="space-y-4 mb-4">
@@ -988,23 +974,6 @@
                                             </div>
                                         </div>
 
-                                        {/* 全体の使用状況 */}
-                                        <div className="space-y-2 pt-3 border-t border-slate-200">
-                                            <div className="flex justify-between text-xs font-bold text-slate-400">
-                                                <span>全体使用状況</span>
-                                                <span>{Math.min(Math.round(staff.progress), 100)}%</span>
-                                            </div>
-                                            <div className="h-3 bg-slate-100 rounded-full overflow-hidden">
-                                                <div
-                                                    className={`h-full transition-all duration-500 ${
-                                                        staff.progress >= 100 ? 'bg-rose-500' :
-                                                        staff.progress >= 75 ? 'bg-amber-500' :
-                                                        staff.progress >= 50 ? 'bg-blue-500' : 'bg-emerald-500'
-                                                    }`}
-                                                    style={{ width: `${Math.min(staff.progress, 100)}%` }}
-                                                />
-                                            </div>
-                                        </div>
                                     </div>
                                 ))}
                             </div>
@@ -1016,15 +985,15 @@
                                 <h2 className="text-xl font-black flex items-center gap-2 text-slate-800 italic">
                                     <BarChart3 className="text-indigo-600" size={24} /> 経営詳細マスターデータ
                                 </h2>
-                                {comparisonMode !== "single" && (
+                                {targetMonths.length > 1 && (
                                     <div className="text-xs font-bold text-slate-500 flex items-center gap-2">
                                         <Calendar size={14} />
-                                        {comparisonMode === "3months" ? "3ヶ月比較表示" : "6ヶ月比較表示"} ({targetMonths.length}ヶ月)
+                                        期間表示: {startMonth} 〜 {endMonth} ({targetMonths.length}ヶ月)
                                     </div>
                                 )}
                             </div>
                             <div className="overflow-x-auto scrollbar-thin scrollbar-thumb-slate-300">
-                                {comparisonMode === "single" ? (
+                                {targetMonths.length <= 1 ? (
                                 <table className="w-full text-left border-collapse min-w-[3000px]">
                                     <thead>
                                         <tr className="bg-white text-[10px] uppercase tracking-widest text-slate-400 font-black border-b border-slate-100">

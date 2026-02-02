@@ -16,8 +16,8 @@
  */
 
 // スプレッドシートのIDを設定（URLから取得）
-const SPREADSHEET_ID = 'YOUR_SPREADSHEET_ID_HERE'; // 実際のスプレッドシートIDに置き換えてください
-const SHEET_NAME = 'シート1'; // シート名を適切に設定してください
+const SPREADSHEET_ID = '1osh7Cu59jh3tFIULiCs9p2oW-Om3h6XNnNyw7bZOwAY'; // 実際のスプレッドシートIDに置き換えてください
+const SHEET_NAME = '新規入会/退会率'; // シート名を適切に設定してください
 
 /**
  * GET リクエストを処理

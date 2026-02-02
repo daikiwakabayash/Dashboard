@@ -27,7 +27,65 @@
     </style>
 </head>
 <body class="bg-slate-50">
+    <noscript>
+        <div style="display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: sans-serif;">
+            <div style="text-align: center; padding: 20px;">
+                <h1 style="color: #dc2626; margin-bottom: 10px;">JavaScriptが無効です</h1>
+                <p style="color: #64748b;">このダッシュボードを使用するには、JavaScriptを有効にしてください。</p>
+            </div>
+        </div>
+    </noscript>
+
     <div id="root"></div>
+
+    <!-- エラーハンドリング用のスクリプト -->
+    <script>
+        // グローバルエラーキャッチ
+        window.addEventListener('error', function(event) {
+            console.error('Global error:', event.error);
+            const root = document.getElementById('root');
+            if (root && !root.innerHTML.trim()) {
+                root.innerHTML = `
+                    <div style="display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: sans-serif; background: #f8fafc;">
+                        <div style="background: white; padding: 24px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); max-width: 500px; text-align: center;">
+                            <h2 style="color: #dc2626; margin-bottom: 12px;">⚠️ エラーが発生しました</h2>
+                            <p style="color: #64748b; margin-bottom: 16px; font-size: 14px;">アプリケーションの読み込み中にエラーが発生しました。</p>
+                            <details style="text-align: left; margin-top: 16px; padding: 12px; background: #f1f5f9; border-radius: 8px; font-size: 12px; color: #475569;">
+                                <summary style="cursor: pointer; font-weight: bold; margin-bottom: 8px;">エラー詳細</summary>
+                                <pre style="white-space: pre-wrap; word-wrap: break-word;">${event.error ? event.error.stack || event.error.message : event.message}</pre>
+                            </details>
+                            <button onclick="location.reload()" style="margin-top: 16px; padding: 8px 16px; background: #4f46e5; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold;">
+                                ページを再読み込み
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }
+        });
+
+        // タイムアウトチェック (10秒後もrootが空なら警告表示)
+        setTimeout(function() {
+            const root = document.getElementById('root');
+            if (root && !root.innerHTML.trim()) {
+                root.innerHTML = `
+                    <div style="display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: sans-serif; background: #f8fafc;">
+                        <div style="background: white; padding: 24px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); max-width: 500px; text-align: center;">
+                            <h2 style="color: #f59e0b; margin-bottom: 12px;">⏳ 読み込みに時間がかかっています</h2>
+                            <p style="color: #64748b; margin-bottom: 16px; font-size: 14px;">外部リソース(React, TailwindCSS)の読み込みに失敗した可能性があります。</p>
+                            <ul style="text-align: left; color: #64748b; font-size: 14px; margin-bottom: 16px;">
+                                <li>インターネット接続を確認してください</li>
+                                <li>CDNへのアクセスがブロックされていないか確認してください</li>
+                                <li>ブラウザの拡張機能を無効にしてみてください</li>
+                            </ul>
+                            <button onclick="location.reload()" style="padding: 8px 16px; background: #4f46e5; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold;">
+                                ページを再読み込み
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }
+        }, 10000);
+    </script>
 
     <script type="text/babel" data-type="module">
         import React, { useState, useMemo, useEffect, useRef } from 'react';
@@ -56,32 +114,47 @@
                 try {
                     setLoading(true);
                     setError(null);
-                    // GASのリダイレクトに対応するために redirect: 'follow' を明示的推奨
-                    const response = await fetch(GAS_API_URL, { redirect: 'follow' });
-                   
-                    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-                   
-                    const result = await response.json();
-                   
-                    // GASがtext/plainで返してくる場合などの予備パース処理等は省略し、JSON前提とします
-                    if (!result.success) throw new Error(result.error || 'データの取得に失敗しました');
 
-                    setRawData(result.data);
+                    // タイムアウト付きfetch (30秒)
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 30000);
 
-                    if (result.data && result.data.length > 0) {
-                        const sortedMonths = Array.from(new Set(result.data.map(d => d.month))).sort((a, b) => {
-                            const [ay, am] = a.replace('年', '-').replace('月', '').split('-');
-                            const [by, bm] = b.replace('年', '-').replace('月', '').split('-');
-                            return new Date(by, bm - 1) - new Date(ay, am - 1);
+                    try {
+                        const response = await fetch(GAS_API_URL, {
+                            redirect: 'follow',
+                            signal: controller.signal
                         });
-                        setSelectedMonth(sortedMonths[0]);
-                       
-                        const allBranches = Array.from(new Set(result.data.map(d => d.branch)));
-                        setSelectedBranches(allBranches);
+                        clearTimeout(timeoutId);
+
+                        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+                        const result = await response.json();
+
+                        if (!result.success) throw new Error(result.error || 'データの取得に失敗しました');
+
+                        setRawData(result.data || []);
+
+                        if (result.data && result.data.length > 0) {
+                            const sortedMonths = Array.from(new Set(result.data.map(d => d.month))).sort((a, b) => {
+                                const [ay, am] = a.replace('年', '-').replace('月', '').split('-');
+                                const [by, bm] = b.replace('年', '-').replace('月', '').split('-');
+                                return new Date(by, bm - 1) - new Date(ay, am - 1);
+                            });
+                            setSelectedMonth(sortedMonths[0] || '');
+
+                            const allBranches = Array.from(new Set(result.data.map(d => d.branch)));
+                            setSelectedBranches(allBranches);
+                        }
+                    } catch (fetchError) {
+                        clearTimeout(timeoutId);
+                        if (fetchError.name === 'AbortError') {
+                            throw new Error('タイムアウト: サーバーの応答に時間がかかりすぎています');
+                        }
+                        throw fetchError;
                     }
                 } catch (err) {
                     console.error('データ取得エラー:', err);
-                    setError(err.message);
+                    setError(err.message || 'データの取得に失敗しました。ネットワーク接続を確認してください。');
                 } finally {
                     setLoading(false);
                 }

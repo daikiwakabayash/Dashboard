@@ -145,6 +145,43 @@
         console.log('✅ All icon components defined');
 
         const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbzVslBpl0zqDx0m6DWgvl_uvDTD2ROXyAQOJvTSVnT0RtDeGA5H65vJWdywaGgcyN8_/exec';
+        const CACHE_KEY = 'dashboard_data_cache';
+        const CACHE_EXPIRY_MS = 15 * 60 * 1000; // 15分
+
+        // キャッシュヘルパー関数
+        const getCachedData = () => {
+            try {
+                const cached = localStorage.getItem(CACHE_KEY);
+                if (!cached) return null;
+
+                const { data, timestamp } = JSON.parse(cached);
+                const now = Date.now();
+
+                // キャッシュが期限切れかチェック
+                if (now - timestamp > CACHE_EXPIRY_MS) {
+                    localStorage.removeItem(CACHE_KEY);
+                    return null;
+                }
+
+                console.log('📦 Using cached data (age:', Math.round((now - timestamp) / 1000), 'seconds)');
+                return data;
+            } catch (e) {
+                console.error('❌ Cache read error:', e);
+                return null;
+            }
+        };
+
+        const setCachedData = (data) => {
+            try {
+                localStorage.setItem(CACHE_KEY, JSON.stringify({
+                    data,
+                    timestamp: Date.now()
+                }));
+                console.log('💾 Data cached successfully');
+            } catch (e) {
+                console.error('❌ Cache write error:', e);
+            }
+        };
 
         const App = () => {
             console.log('🎯 App component initializing...');
@@ -152,30 +189,62 @@
             const [rawData, setRawData] = useState([]);
             const [loading, setLoading] = useState(true);
             const [error, setError] = useState(null);
+            const [lastFetchTime, setLastFetchTime] = useState(null);
             const [selectedMonth, setSelectedMonth] = useState("");
             const [comparisonMode, setComparisonMode] = useState("single");
             const [selectedBranches, setSelectedBranches] = useState([]);
             const [searchTerm, setSearchTerm] = useState("");
             const [isBranchMenuOpen, setIsBranchMenuOpen] = useState(false);
             const [branchSearchTerm, setBranchSearchTerm] = useState("");
+            const [isMobileView, setIsMobileView] = useState(false);
+            const [selectedStaffNames, setSelectedStaffNames] = useState([]);
+            const [isStaffMenuOpen, setIsStaffMenuOpen] = useState(false);
+            const [staffSearchTerm, setStaffSearchTerm] = useState("");
             const branchMenuRef = useRef(null);
+            const staffMenuRef = useRef(null);
 
             console.log('✅ App state initialized');
 
-            const fetchDataFromSpreadsheet = async () => {
-                console.log('📡 Fetching data from GAS API...');
+            const fetchDataFromSpreadsheet = async (forceRefresh = false) => {
+                console.log('📡 Fetching data from GAS API... (forceRefresh:', forceRefresh, ')');
                 console.log('🔗 API URL:', GAS_API_URL);
 
                 try {
                     setLoading(true);
                     setError(null);
 
+                    // キャッシュをチェック（強制更新でない場合）
+                    if (!forceRefresh) {
+                        const cachedData = getCachedData();
+                        if (cachedData && cachedData.length > 0) {
+                            console.log('💾 Using cached data:', cachedData.length, 'records');
+                            setRawData(cachedData);
+
+                            // 初期選択を設定
+                            if (cachedData.length > 0) {
+                                const sortedMonths = Array.from(new Set(cachedData.map(d => d.month))).sort((a, b) => {
+                                    const [ay, am] = a.replace('年', '-').replace('月', '').split('-');
+                                    const [by, bm] = b.replace('年', '-').replace('月', '').split('-');
+                                    return new Date(by, bm - 1) - new Date(ay, am - 1);
+                                });
+                                if (!selectedMonth) setSelectedMonth(sortedMonths[0] || '');
+
+                                const allBranches = Array.from(new Set(cachedData.map(d => d.branch)));
+                                if (selectedBranches.length === 0) setSelectedBranches(allBranches);
+                            }
+
+                            setLoading(false);
+                            setLastFetchTime(new Date());
+                            return;
+                        }
+                    }
+
                     // タイムアウト付きfetch (30秒)
                     const controller = new AbortController();
                     const timeoutId = setTimeout(() => controller.abort(), 30000);
 
                     try {
-                        console.log('⏳ Sending request...');
+                        console.log('⏳ Sending request to GAS...');
                         const response = await fetch(GAS_API_URL, {
                             redirect: 'follow',
                             signal: controller.signal
@@ -193,10 +262,16 @@
                         if (!result.success) throw new Error(result.error || 'データの取得に失敗しました');
 
                         console.log('💾 Setting raw data:', result.data ? result.data.length : 0, 'records');
-                        setRawData(result.data || []);
+                        const fetchedData = result.data || [];
+                        setRawData(fetchedData);
 
-                        if (result.data && result.data.length > 0) {
-                            const sortedMonths = Array.from(new Set(result.data.map(d => d.month))).sort((a, b) => {
+                        // キャッシュに保存
+                        if (fetchedData.length > 0) {
+                            setCachedData(fetchedData);
+                        }
+
+                        if (fetchedData.length > 0) {
+                            const sortedMonths = Array.from(new Set(fetchedData.map(d => d.month))).sort((a, b) => {
                                 const [ay, am] = a.replace('年', '-').replace('月', '').split('-');
                                 const [by, bm] = b.replace('年', '-').replace('月', '').split('-');
                                 return new Date(by, bm - 1) - new Date(ay, am - 1);
@@ -204,11 +279,12 @@
                             console.log('📅 Setting selected month:', sortedMonths[0]);
                             setSelectedMonth(sortedMonths[0] || '');
 
-                            const allBranches = Array.from(new Set(result.data.map(d => d.branch)));
+                            const allBranches = Array.from(new Set(fetchedData.map(d => d.branch)));
                             console.log('🏢 Setting selected branches:', allBranches);
                             setSelectedBranches(allBranches);
                         }
 
+                        setLastFetchTime(new Date());
                         console.log('✅ Data fetch completed successfully');
                     } catch (fetchError) {
                         clearTimeout(timeoutId);
@@ -234,6 +310,9 @@
                 const handleClickOutside = (event) => {
                     if (branchMenuRef.current && !branchMenuRef.current.contains(event.target)) {
                         setIsBranchMenuOpen(false);
+                    }
+                    if (staffMenuRef.current && !staffMenuRef.current.contains(event.target)) {
+                        setIsStaffMenuOpen(false);
                     }
                 };
 
@@ -263,6 +342,15 @@
                 );
             }, [allBranches, branchSearchTerm]);
 
+            const allStaffNames = useMemo(() => Array.from(new Set(rawData.map(d => d.name))), [rawData]);
+
+            const filteredStaffNames = useMemo(() => {
+                if (!staffSearchTerm) return allStaffNames;
+                return allStaffNames.filter(name =>
+                    name.toLowerCase().includes(staffSearchTerm.toLowerCase())
+                );
+            }, [allStaffNames, staffSearchTerm]);
+
             // 比較モードに基づいて対象月を計算
             const targetMonths = useMemo(() => {
                 if (!selectedMonth) return [];
@@ -290,6 +378,14 @@
                 );
             };
 
+            const toggleStaff = (staffName) => {
+                setSelectedStaffNames(prev =>
+                    prev.includes(staffName)
+                        ? prev.filter(n => n !== staffName)
+                        : [...prev, staffName]
+                );
+            };
+
             const fixPercent = (val) => {
                 if (val === undefined || val === null) return 0;
                 const num = val < 1 && val > 0 ? val * 100 : val;
@@ -300,11 +396,18 @@
                 return rawData.filter(d => {
                     const matchMonth = targetMonths.includes(d.month);
                     const matchBranch = selectedBranches.includes(d.branch);
-                    const matchSearch = d.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+
+                    // スタッフ名フィルタリング: selectedStaffNamesが空の場合は全て表示
+                    const matchStaff = selectedStaffNames.length === 0 || selectedStaffNames.includes(d.name);
+
+                    // 旧searchTermも互換性のために維持（店舗・スタッフ両方を検索）
+                    const matchSearch = searchTerm === "" ||
+                                        d.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
                                         d.branch.toLowerCase().includes(searchTerm.toLowerCase());
-                    return matchMonth && matchBranch && matchSearch;
+
+                    return matchMonth && matchBranch && matchStaff && matchSearch;
                 });
-            }, [rawData, targetMonths, selectedBranches, searchTerm]);
+            }, [rawData, targetMonths, selectedBranches, selectedStaffNames, searchTerm]);
 
             const stats = useMemo(() => {
                 const totalSales = filteredData.reduce((acc, curr) => acc + (curr.individualSales || 0), 0);
@@ -365,7 +468,17 @@
                     }).length;
 
                     const totalAmount = filteredData.reduce((acc, curr) => {
-                        const amount = typeof curr[item.key] === 'number' ? curr[item.key] : 0;
+                        let amount = typeof curr[item.key] === 'number' ? curr[item.key] : 0;
+
+                        // データが異常に小さい場合（おそらく単位ミス）を補正
+                        // 例: 0.03や0.02が3円や2円として扱われている場合
+                        // 通常、手当は最低でも数百円以上なので、10円未満は異常値として扱う
+                        if (amount > 0 && amount < 10) {
+                            console.warn(`⚠️ Abnormal welfare amount detected for ${item.label} (${item.key}):`, amount, 'from staff:', curr.name);
+                            // 1000倍して補正（0.03 → 30円ではなく、データの意図を確認する必要がある）
+                            // とりあえず、そのままの値を使用してユーザーに確認してもらう
+                        }
+
                         return acc + amount;
                     }, 0);
 
@@ -432,15 +545,22 @@
                         120000
                     );
 
+                    // 手当は勉強代手当とイベントアクセス手当で共有
                     const totalUsed = staff.studyUsed + staff.accessUsed;
                     const remaining = Math.max(eligibleAmount - totalUsed, 0);
+
+                    // 個別の使用状況も計算
+                    const studyProgress = eligibleAmount > 0 ? (staff.studyUsed / eligibleAmount) * 100 : 0;
+                    const accessProgress = eligibleAmount > 0 ? (staff.accessUsed / eligibleAmount) * 100 : 0;
 
                     return {
                         ...staff,
                         eligibleAmount,
                         totalUsed,
                         remaining,
-                        progress: eligibleAmount > 0 ? (totalUsed / eligibleAmount) * 100 : 0
+                        progress: eligibleAmount > 0 ? (totalUsed / eligibleAmount) * 100 : 0,
+                        studyProgress,
+                        accessProgress
                     };
                 }).sort((a, b) => b.remaining - a.remaining);
             }, [filteredData]);
@@ -488,116 +608,186 @@
             return (
                 <div className="min-h-screen bg-slate-50 p-4 lg:p-6 font-sans text-slate-900 overflow-x-hidden">
                     <div className="max-w-[1600px] mx-auto space-y-6">
-                       
+
                         {/* Filter Header */}
                         <header className="flex flex-col gap-4 bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
                             <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
-                                <div className="space-y-1">
-                                    <div className="inline-flex items-center gap-2 px-3 py-1 bg-indigo-100 text-indigo-700 rounded-full text-[10px] font-black uppercase tracking-widest mb-1">
-                                        <Activity size={12} /> Analytics Dashboard
+                                <div className="space-y-1 flex-1">
+                                    <div className="inline-flex items-center gap-2 px-3 py-1 bg-indigo-100 text-indigo-700 rounded-full text-xs font-black uppercase tracking-widest mb-1">
+                                        <Activity size={14} /> Analytics Dashboard
                                     </div>
-                                    <h1 className="text-2xl font-black tracking-tight text-slate-900 italic">整体院 経営総合ダッシュボード</h1>
+                                    <h1 className="text-3xl font-black tracking-tight text-slate-900 italic">整体院 経営総合ダッシュボード</h1>
                                 </div>
 
-                                <div className="flex flex-wrap items-center gap-3">
-                                    <div className="flex flex-col gap-1 min-w-[140px]">
-                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">対象年月</span>
-                                        <select
-                                            className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none appearance-none cursor-pointer shadow-sm"
-                                            value={selectedMonth}
-                                            onChange={(e) => setSelectedMonth(e.target.value)}
-                                        >
-                                            {months.map(m => <option key={m} value={m}>{m}</option>)}
-                                        </select>
-                                    </div>
+                                {/* Mobile View Toggle */}
+                                <button
+                                    onClick={() => setIsMobileView(!isMobileView)}
+                                    className={`px-4 py-2 rounded-xl font-bold text-sm flex items-center gap-2 transition-all ${
+                                        isMobileView
+                                            ? 'bg-indigo-600 text-white shadow-lg'
+                                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                    }`}
+                                >
+                                    {isMobileView ? '📱 モバイル' : '💻 デスクトップ'}
+                                </button>
+                            </div>
 
-                                    <div className="flex flex-col gap-1 min-w-[140px]">
-                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">表示モード</span>
-                                        <select
-                                            className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none appearance-none cursor-pointer shadow-sm"
-                                            value={comparisonMode}
-                                            onChange={(e) => setComparisonMode(e.target.value)}
-                                        >
-                                            <option value="single">単月表示</option>
-                                            <option value="3months">3ヶ月比較</option>
-                                            <option value="6months">6ヶ月比較</option>
-                                        </select>
-                                    </div>
-
-                                    <div className="flex flex-col gap-1 min-w-[200px] relative" ref={branchMenuRef}>
-                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">店舗選択</span>
-                                        <button
-                                            onClick={() => setIsBranchMenuOpen(!isBranchMenuOpen)}
-                                            className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm font-bold flex items-center justify-between gap-2 hover:bg-slate-100 transition-colors shadow-sm"
-                                        >
-                                            <span className="truncate">
-                                                {selectedBranches.length === allBranches.length ? "全店舗" :
-                                                selectedBranches.length === 0 ? "未選択" :
-                                                `${selectedBranches[0]}${selectedBranches.length > 1 ? ` 他${selectedBranches.length - 1}件` : ''}`}
-                                            </span>
-                                            <ChevronDown size={16} className={`transition-transform ${isBranchMenuOpen ? 'rotate-180' : ''}`} />
-                                        </button>
-                                        {isBranchMenuOpen && (
-                                            <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 p-2 space-y-1 max-h-[400px] overflow-hidden flex flex-col">
-                                                <div className="flex items-center justify-between p-2 border-b border-slate-50 mb-1">
-                                                    <button onClick={() => setSelectedBranches(allBranches)} className="text-[10px] font-black text-indigo-600 hover:bg-indigo-50 px-2 py-1 rounded">全選択</button>
-                                                    <button onClick={() => setSelectedBranches([])} className="text-[10px] font-black text-slate-400 hover:bg-slate-50 px-2 py-1 rounded">解除</button>
-                                                </div>
-                                                <div className="relative px-2 pb-2">
-                                                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400" />
-                                                    <input
-                                                        type="text"
-                                                        placeholder="店舗を検索..."
-                                                        className="w-full pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
-                                                        value={branchSearchTerm}
-                                                        onChange={(e) => setBranchSearchTerm(e.target.value)}
-                                                        onClick={(e) => e.stopPropagation()}
-                                                    />
-                                                </div>
-                                                <div className="overflow-y-auto flex-1 space-y-1">
-                                                    {filteredBranches.length > 0 ? (
-                                                        filteredBranches.map(branch => (
-                                                            <div key={branch} onClick={() => toggleBranch(branch)} className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-indigo-50 cursor-pointer transition-colors">
-                                                                <div className={`w-4 h-4 rounded border flex items-center justify-center ${selectedBranches.includes(branch) ? 'bg-indigo-600 border-indigo-600' : 'border-slate-300'}`}>
-                                                                    {selectedBranches.includes(branch) && <Check size={12} className="text-white" />}
-                                                                </div>
-                                                                <span className={`text-xs font-bold ${selectedBranches.includes(branch) ? 'text-slate-900' : 'text-slate-500'}`}>{branch}</span>
-                                                            </div>
-                                                        ))
-                                                    ) : (
-                                                        <div className="text-center text-xs text-slate-400 py-4">該当する店舗がありません</div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-
-                                    <div className="flex flex-col gap-1 flex-grow min-w-[220px]">
-                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">絞り込み</span>
-                                        <div className="relative">
-                                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                                            <input
-                                                type="text"
-                                                placeholder="スタッフ名検索..."
-                                                className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none shadow-sm"
-                                                value={searchTerm}
-                                                onChange={(e) => setSearchTerm(e.target.value)}
-                                            />
-                                        </div>
-                                    </div>
-
-                                    <button
-                                        onClick={fetchDataFromSpreadsheet}
-                                        className="mt-5 p-2.5 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-all shadow-lg flex items-center gap-2 font-black text-xs uppercase tracking-tighter"
+                            <div className="flex flex-wrap items-center gap-3">
+                                <div className="flex flex-col gap-1 min-w-[160px]">
+                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">対象年月</span>
+                                    <select
+                                        className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-base font-bold focus:ring-2 focus:ring-indigo-500 outline-none appearance-none cursor-pointer shadow-sm"
+                                        value={selectedMonth}
+                                        onChange={(e) => setSelectedMonth(e.target.value)}
                                     >
-                                        <RefreshCw size={16} className={loading ? 'animate-spin' : ''} /> Sync
+                                        {months.map(m => <option key={m} value={m}>{m}</option>)}
+                                    </select>
+                                </div>
+
+                                <div className="flex flex-col gap-1 min-w-[160px]">
+                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">表示モード</span>
+                                    <select
+                                        className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-base font-bold focus:ring-2 focus:ring-indigo-500 outline-none appearance-none cursor-pointer shadow-sm"
+                                        value={comparisonMode}
+                                        onChange={(e) => setComparisonMode(e.target.value)}
+                                    >
+                                        <option value="single">単月表示</option>
+                                        <option value="3months">3ヶ月比較</option>
+                                        <option value="6months">6ヶ月比較</option>
+                                    </select>
+                                </div>
+
+                                <div className="flex flex-col gap-1 min-w-[220px] relative" ref={branchMenuRef}>
+                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">店舗選択</span>
+                                    <button
+                                        onClick={() => setIsBranchMenuOpen(!isBranchMenuOpen)}
+                                        className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-base font-bold flex items-center justify-between gap-2 hover:bg-slate-100 transition-colors shadow-sm"
+                                    >
+                                        <span className="truncate">
+                                            {selectedBranches.length === allBranches.length ? "全店舗" :
+                                            selectedBranches.length === 0 ? "未選択" :
+                                            `${selectedBranches[0]}${selectedBranches.length > 1 ? ` 他${selectedBranches.length - 1}件` : ''}`}
+                                        </span>
+                                        <ChevronDown size={18} className={`transition-transform ${isBranchMenuOpen ? 'rotate-180' : ''}`} />
                                     </button>
+                                    {isBranchMenuOpen && (
+                                        <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 p-3 space-y-2 max-h-[400px] overflow-hidden flex flex-col">
+                                            <div className="flex items-center justify-between p-2 border-b border-slate-100 mb-1">
+                                                <button onClick={() => setSelectedBranches(allBranches)} className="text-xs font-black text-indigo-600 hover:bg-indigo-50 px-3 py-1.5 rounded">全選択</button>
+                                                <button onClick={() => setSelectedBranches([])} className="text-xs font-black text-slate-400 hover:bg-slate-50 px-3 py-1.5 rounded">解除</button>
+                                            </div>
+                                            <div className="relative px-2 pb-2">
+                                                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                                                <input
+                                                    type="text"
+                                                    placeholder="店舗を検索..."
+                                                    className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
+                                                    value={branchSearchTerm}
+                                                    onChange={(e) => setBranchSearchTerm(e.target.value)}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                />
+                                            </div>
+                                            <div className="overflow-y-auto flex-1 space-y-1">
+                                                {filteredBranches.length > 0 ? (
+                                                    filteredBranches.map(branch => (
+                                                        <div key={branch} onClick={() => toggleBranch(branch)} className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-indigo-50 cursor-pointer transition-colors">
+                                                            <div className={`w-5 h-5 rounded border flex items-center justify-center ${selectedBranches.includes(branch) ? 'bg-indigo-600 border-indigo-600' : 'border-slate-300'}`}>
+                                                                {selectedBranches.includes(branch) && <Check size={14} className="text-white" />}
+                                                            </div>
+                                                            <span className={`text-sm font-bold ${selectedBranches.includes(branch) ? 'text-slate-900' : 'text-slate-500'}`}>{branch}</span>
+                                                        </div>
+                                                    ))
+                                                ) : (
+                                                    <div className="text-center text-sm text-slate-400 py-4">該当する店舗がありません</div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Staff Name Selection */}
+                                <div className="flex flex-col gap-1 min-w-[220px] relative" ref={staffMenuRef}>
+                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">スタッフ選択</span>
+                                    <button
+                                        onClick={() => setIsStaffMenuOpen(!isStaffMenuOpen)}
+                                        className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-base font-bold flex items-center justify-between gap-2 hover:bg-slate-100 transition-colors shadow-sm"
+                                    >
+                                        <span className="truncate">
+                                            {selectedStaffNames.length === 0 ? "全スタッフ" :
+                                            selectedStaffNames.length === 1 ? selectedStaffNames[0] :
+                                            `${selectedStaffNames[0]} 他${selectedStaffNames.length - 1}名`}
+                                        </span>
+                                        <ChevronDown size={18} className={`transition-transform ${isStaffMenuOpen ? 'rotate-180' : ''}`} />
+                                    </button>
+                                    {isStaffMenuOpen && (
+                                        <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 p-3 space-y-2 max-h-[400px] overflow-hidden flex flex-col">
+                                            <div className="flex items-center justify-between p-2 border-b border-slate-100 mb-1">
+                                                <button onClick={() => setSelectedStaffNames([])} className="text-xs font-black text-indigo-600 hover:bg-indigo-50 px-3 py-1.5 rounded">全選択</button>
+                                                <button onClick={() => setSelectedStaffNames(allStaffNames)} className="text-xs font-black text-slate-400 hover:bg-slate-50 px-3 py-1.5 rounded">全解除</button>
+                                            </div>
+                                            <div className="relative px-2 pb-2">
+                                                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                                                <input
+                                                    type="text"
+                                                    placeholder="スタッフを検索..."
+                                                    className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
+                                                    value={staffSearchTerm}
+                                                    onChange={(e) => setStaffSearchTerm(e.target.value)}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                />
+                                            </div>
+                                            <div className="overflow-y-auto flex-1 space-y-1">
+                                                {filteredStaffNames.length > 0 ? (
+                                                    filteredStaffNames.map(staffName => (
+                                                        <div key={staffName} onClick={() => toggleStaff(staffName)} className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-indigo-50 cursor-pointer transition-colors">
+                                                            <div className={`w-5 h-5 rounded border flex items-center justify-center ${selectedStaffNames.includes(staffName) ? 'bg-indigo-600 border-indigo-600' : 'border-slate-300'}`}>
+                                                                {selectedStaffNames.includes(staffName) && <Check size={14} className="text-white" />}
+                                                            </div>
+                                                            <span className={`text-sm font-bold ${selectedStaffNames.includes(staffName) ? 'text-slate-900' : 'text-slate-500'}`}>{staffName}</span>
+                                                        </div>
+                                                    ))
+                                                ) : (
+                                                    <div className="text-center text-sm text-slate-400 py-4">該当するスタッフがいません</div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Quick Search Box */}
+                                <div className="flex flex-col gap-1 flex-grow min-w-[220px]">
+                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">クイック検索</span>
+                                    <div className="relative">
+                                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
+                                        <input
+                                            type="text"
+                                            placeholder="スタッフ名・店舗名..."
+                                            className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-base font-bold focus:ring-2 focus:ring-indigo-500 outline-none shadow-sm"
+                                            value={searchTerm}
+                                            onChange={(e) => setSearchTerm(e.target.value)}
+                                        />
+                                    </div>
+                                </div>
+
+                                <div className="flex flex-col gap-2">
+                                    <button
+                                        onClick={() => fetchDataFromSpreadsheet(true)}
+                                        className="p-3 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-all shadow-lg flex items-center gap-2 font-black text-sm uppercase tracking-tighter disabled:opacity-50"
+                                        disabled={loading}
+                                    >
+                                        <RefreshCw size={18} className={loading ? 'animate-spin' : ''} /> Sync
+                                    </button>
+                                    {lastFetchTime && (
+                                        <span className="text-xs text-slate-400 text-center">
+                                            最終更新: {lastFetchTime.toLocaleTimeString('ja-JP')}
+                                        </span>
+                                    )}
                                 </div>
                             </div>
                         </header>
 
                         {/* Top 8 KPI Grid */}
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <div className={`grid gap-4 ${isMobileView ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-4'}`}>
                             <KpiBox title="総売上(個別税込)" value={formatYen(stats.totalSales)} icon={<DollarSign/>} sub="合計実績" color="bg-emerald-600" />
                             <KpiBox title="新規売上" value={formatYen(stats.totalNewSales)} icon={<TrendingUp/>} sub="新規獲得" color="bg-blue-600" />
                             <KpiBox title="継続売上" value={formatYen(stats.totalRecurringSales)} icon={<RefreshCw/>} sub="LTV" color="bg-indigo-600" />
@@ -688,39 +878,39 @@
 
                             {/* Detailed Welfare Section (Q-AA 11 items) */}
                             <div className="xl:col-span-1 bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
-                                <h2 className="text-lg font-black mb-6 flex items-center justify-between">
-                                    <span className="flex items-center gap-2"><Gift className="text-rose-500" /> 福利厚生・手当支給状況</span>
-                                    <span className="text-[9px] bg-slate-900 text-white px-2 py-1 rounded-md font-black tracking-widest">Q-AA (11項目)</span>
+                                <h2 className="text-xl font-black mb-6 flex items-center justify-between">
+                                    <span className="flex items-center gap-2"><Gift className="text-rose-500" size={24} /> 福利厚生・手当支給状況</span>
+                                    <span className="text-xs bg-slate-900 text-white px-3 py-1.5 rounded-md font-black tracking-widest">Q-AA (11項目)</span>
                                 </h2>
-                               
-                                <div className="space-y-2 max-h-[700px] overflow-y-auto pr-1 scrollbar-thin">
-                                    <div className="grid grid-cols-1 gap-2">
+
+                                <div className="space-y-3 max-h-[700px] overflow-y-auto pr-1 scrollbar-thin">
+                                    <div className="grid grid-cols-1 gap-3">
                                         {welfareStats.map((item, idx) => (
-                                            <div key={idx} className="flex items-center justify-between p-3 bg-slate-50 rounded-2xl border border-slate-100 hover:border-indigo-200 transition-colors group">
+                                            <div key={idx} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100 hover:border-indigo-200 transition-colors group">
                                                 <div className="flex flex-col">
-                                                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-tighter mb-0.5">{item.label}</span>
+                                                    <span className="text-xs font-black text-slate-400 uppercase tracking-tighter mb-1">{item.label}</span>
                                                     <div className="flex items-center gap-2">
-                                                        <span className="text-xs font-black text-slate-800">{item.count} 名</span>
+                                                        <span className="text-sm font-black text-slate-800">{item.count} 名</span>
                                                         <span className="w-1 h-1 bg-slate-300 rounded-full" />
-                                                        <span className="text-xs font-mono font-bold text-indigo-600 group-hover:text-indigo-700">{formatYen(item.totalAmount)}</span>
+                                                        <span className="text-sm font-mono font-bold text-indigo-600 group-hover:text-indigo-700">{formatYen(item.totalAmount)}</span>
                                                     </div>
                                                 </div>
-                                                <div className={`p-2 rounded-xl transition-colors ${item.count > 0 ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-200 text-slate-400'}`}>
-                                                    <Check size={14} className={item.count > 0 ? "opacity-100" : "opacity-30"} />
+                                                <div className={`p-2.5 rounded-xl transition-colors ${item.count > 0 ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-200 text-slate-400'}`}>
+                                                    <Check size={16} className={item.count > 0 ? "opacity-100" : "opacity-30"} />
                                                 </div>
                                             </div>
                                         ))}
                                     </div>
-                                   
+
                                     <div className="mt-4 pt-4 border-t border-dashed border-slate-200">
-                                        <div className="p-4 bg-indigo-600 text-white rounded-2xl shadow-lg shadow-indigo-100 flex justify-between items-center transition-transform hover:scale-[1.02]">
+                                        <div className="p-5 bg-indigo-600 text-white rounded-2xl shadow-lg shadow-indigo-100 flex justify-between items-center transition-transform hover:scale-[1.02]">
                                             <div>
-                                                <div className="text-[10px] font-black opacity-80 uppercase tracking-widest">支給合計額 (選択月)</div>
-                                                <div className="text-2xl font-black font-mono">
+                                                <div className="text-xs font-black opacity-80 uppercase tracking-widest">支給合計額 (選択月)</div>
+                                                <div className="text-3xl font-black font-mono">
                                                     {formatYen(welfareStats.reduce((a,c)=>a+c.totalAmount,0))}
                                                 </div>
                                             </div>
-                                            <Wallet size={32} className="opacity-20" />
+                                            <Wallet size={36} className="opacity-20" />
                                         </div>
                                     </div>
                                 </div>
@@ -731,51 +921,80 @@
                         <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-6">
                             <div className="flex items-center justify-between mb-6">
                                 <div>
-                                    <h2 className="text-xl font-black flex items-center gap-2 text-slate-800 italic mb-2">
-                                        <Wallet className="text-indigo-600" size={24} /> 手当使用状況管理
+                                    <h2 className="text-2xl font-black flex items-center gap-2 text-slate-800 italic mb-2">
+                                        <Wallet className="text-indigo-600" size={28} /> 手当使用状況管理
                                     </h2>
-                                    <p className="text-xs text-slate-500 font-bold">
+                                    <p className="text-sm text-slate-500 font-bold">
                                         「勉強代手当」「イベントアクセス手当」は個別税込売上が<span className="text-indigo-600">1,000,000円</span>超えるごとに<span className="text-emerald-600">10,000円</span>支給されます。
                                         繰越可能で最大<span className="text-rose-600">120,000円</span>まで使用可能（毎年12月リセット）
                                     </p>
                                 </div>
                             </div>
-                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            <div className={`grid gap-4 ${isMobileView ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'}`}>
                                 {allowanceTracking.map((staff, idx) => (
-                                    <div key={idx} className="bg-gradient-to-br from-slate-50 to-white p-5 rounded-2xl border border-slate-200 hover:shadow-lg transition-all group">
+                                    <div key={idx} className="bg-gradient-to-br from-slate-50 to-white p-6 rounded-2xl border border-slate-200 hover:shadow-lg transition-all group">
                                         <div className="flex items-start justify-between mb-4">
                                             <div>
-                                                <div className="font-black text-slate-800 text-base leading-none mb-1">{staff.name}</div>
-                                                <div className="text-[10px] text-slate-400 font-black uppercase tracking-tighter">{staff.branch}</div>
+                                                <div className="font-black text-slate-800 text-lg leading-none mb-1">{staff.name}</div>
+                                                <div className="text-xs text-slate-400 font-black uppercase tracking-tighter">{staff.branch}</div>
                                             </div>
-                                            <div className="text-xs font-mono font-bold text-slate-400">
+                                            <div className="text-sm font-mono font-bold text-slate-400">
                                                 {formatYen(staff.totalSales)}
                                             </div>
                                         </div>
 
                                         <div className="space-y-3 mb-4">
                                             <div className="flex justify-between items-center">
-                                                <span className="text-xs text-slate-600 font-bold">使用可能額</span>
-                                                <span className="text-sm font-black text-indigo-600">{formatYen(staff.eligibleAmount)}</span>
+                                                <span className="text-sm text-slate-600 font-bold">使用可能額</span>
+                                                <span className="text-base font-black text-indigo-600">{formatYen(staff.eligibleAmount)}</span>
                                             </div>
                                             <div className="flex justify-between items-center">
-                                                <span className="text-xs text-slate-600 font-bold">使用合計額</span>
-                                                <span className="text-sm font-black text-slate-700">{formatYen(staff.totalUsed)}</span>
+                                                <span className="text-sm text-slate-600 font-bold">使用合計額</span>
+                                                <span className="text-base font-black text-slate-700">{formatYen(staff.totalUsed)}</span>
                                             </div>
                                             <div className="pt-2 border-t border-dashed border-slate-200">
                                                 <div className="flex justify-between items-center">
-                                                    <span className="text-xs text-slate-600 font-black">残り使用可能額</span>
-                                                    <span className="text-lg font-black text-emerald-600">{formatYen(staff.remaining)}</span>
+                                                    <span className="text-sm text-slate-600 font-black">残り使用可能額</span>
+                                                    <span className="text-xl font-black text-emerald-600">{formatYen(staff.remaining)}</span>
                                                 </div>
                                             </div>
                                         </div>
 
-                                        <div className="space-y-2">
-                                            <div className="flex justify-between text-[10px] font-bold text-slate-400">
-                                                <span>使用状況</span>
+                                        {/* 個別の手当使用状況 */}
+                                        <div className="space-y-4 mb-4">
+                                            <div>
+                                                <div className="flex justify-between text-xs font-bold text-slate-400 mb-2">
+                                                    <span>勉強代手当</span>
+                                                    <span>{formatYen(staff.studyUsed)} ({Math.min(Math.round(staff.studyProgress), 100)}%)</span>
+                                                </div>
+                                                <div className="h-3 bg-slate-100 rounded-full overflow-hidden">
+                                                    <div
+                                                        className="h-full transition-all duration-500 bg-blue-500"
+                                                        style={{ width: `${Math.min(staff.studyProgress, 100)}%` }}
+                                                    />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <div className="flex justify-between text-xs font-bold text-slate-400 mb-2">
+                                                    <span>イベントアクセス手当</span>
+                                                    <span>{formatYen(staff.accessUsed)} ({Math.min(Math.round(staff.accessProgress), 100)}%)</span>
+                                                </div>
+                                                <div className="h-3 bg-slate-100 rounded-full overflow-hidden">
+                                                    <div
+                                                        className="h-full transition-all duration-500 bg-purple-500"
+                                                        style={{ width: `${Math.min(staff.accessProgress, 100)}%` }}
+                                                    />
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* 全体の使用状況 */}
+                                        <div className="space-y-2 pt-3 border-t border-slate-200">
+                                            <div className="flex justify-between text-xs font-bold text-slate-400">
+                                                <span>全体使用状況</span>
                                                 <span>{Math.min(Math.round(staff.progress), 100)}%</span>
                                             </div>
-                                            <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                                            <div className="h-3 bg-slate-100 rounded-full overflow-hidden">
                                                 <div
                                                     className={`h-full transition-all duration-500 ${
                                                         staff.progress >= 100 ? 'bg-rose-500' :
@@ -784,17 +1003,6 @@
                                                     }`}
                                                     style={{ width: `${Math.min(staff.progress, 100)}%` }}
                                                 />
-                                            </div>
-                                        </div>
-
-                                        <div className="mt-3 pt-3 border-t border-slate-100 grid grid-cols-2 gap-2 text-[10px]">
-                                            <div>
-                                                <div className="text-slate-400 font-bold mb-1">勉強代手当</div>
-                                                <div className="font-mono font-black text-slate-700">{formatYen(staff.studyUsed)}</div>
-                                            </div>
-                                            <div>
-                                                <div className="text-slate-400 font-bold mb-1">イベント手当</div>
-                                                <div className="font-mono font-black text-slate-700">{formatYen(staff.accessUsed)}</div>
                                             </div>
                                         </div>
                                     </div>
@@ -958,32 +1166,32 @@
         // --- Sub-Components ---
 
         const KpiBox = ({ title, value, icon, sub, color }) => (
-            <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
+            <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
                 <div className={`absolute top-0 right-0 w-20 h-20 ${color} opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform`} />
-                <div className="flex items-start justify-between mb-3 relative z-10">
-                    <div className={`p-2.5 rounded-2xl ${color} text-white shadow-lg`}>
-                        {React.cloneElement(icon, { size: 18 })}
+                <div className="flex items-start justify-between mb-4 relative z-10">
+                    <div className={`p-3 rounded-2xl ${color} text-white shadow-lg`}>
+                        {React.cloneElement(icon, { size: 22 })}
                     </div>
-                    <div className="text-[9px] font-black text-slate-400 uppercase tracking-widest">{sub}</div>
+                    <div className="text-xs font-black text-slate-400 uppercase tracking-widest">{sub}</div>
                 </div>
                 <div className="relative z-10">
-                    <h3 className="text-[11px] font-black text-slate-400 mb-1">{title}</h3>
-                    <p className="text-xl font-black text-slate-900 tracking-tight">{value}</p>
+                    <h3 className="text-sm font-black text-slate-400 mb-2">{title}</h3>
+                    <p className="text-2xl font-black text-slate-900 tracking-tight">{value}</p>
                 </div>
             </div>
         );
 
         const RankCard = ({ title, data, valKey, suffix = "", isCurrency = false, isPercent = false, reverseColor = false, fixFn = null, icon = null, accentColor = "text-indigo-600" }) => (
-            <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 hover:shadow-md transition-shadow">
-                <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-5 flex items-center justify-between">
+            <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 hover:shadow-md transition-shadow">
+                <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-5 flex items-center justify-between">
                     <span className="flex items-center gap-2">{icon} {title}</span>
-                    <Trophy size={14} className="opacity-20" />
+                    <Trophy size={16} className="opacity-20" />
                 </h3>
                 <div className="space-y-4">
                     {data.map((staff, idx) => (
                         <div key={idx} className="flex items-center justify-between group">
                             <div className="flex items-center gap-3">
-                                <div className={`w-6 h-6 rounded-lg flex items-center justify-center text-[9px] font-black ${
+                                <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-black ${
                                     idx === 0 ? "bg-yellow-400 text-white shadow-sm shadow-yellow-200" :
                                     idx === 1 ? "bg-slate-200 text-slate-600" :
                                     idx === 2 ? "bg-amber-100 text-amber-700" : "bg-slate-50 text-slate-400"
@@ -991,12 +1199,12 @@
                                     {idx + 1}
                                 </div>
                                 <div>
-                                    <div className="text-xs font-black text-slate-700 group-hover:text-indigo-600 transition-colors">{staff.name}</div>
-                                    <div className="text-[9px] text-slate-400 font-bold tracking-tighter uppercase">{staff.branch}</div>
+                                    <div className="text-sm font-black text-slate-700 group-hover:text-indigo-600 transition-colors">{staff.name}</div>
+                                    <div className="text-xs text-slate-400 font-bold tracking-tighter uppercase">{staff.branch}</div>
                                 </div>
                             </div>
                             <div className="text-right">
-                                <div className={`text-sm font-black ${reverseColor && idx === 0 ? 'text-emerald-600' : (idx === 0 ? accentColor : 'text-slate-900')}`}>
+                                <div className={`text-base font-black ${reverseColor && idx === 0 ? 'text-emerald-600' : (idx === 0 ? accentColor : 'text-slate-900')}`}>
                                     {isCurrency ? `¥${Math.round((staff[valKey] || 0) / 10000).toLocaleString()}万` :
                                     isPercent && fixFn ? `${fixFn(staff[valKey])}${suffix}` :
                                     `${(staff[valKey] || 0).toLocaleString()}${suffix}`}

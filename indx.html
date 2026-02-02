@@ -4,7 +4,7 @@ import {
   Search, Award, BarChart3, DollarSign, Heart,
   MessageSquare, Star, Gift, CheckCircle, Info,
   Filter, Download, ChevronRight, Activity, Wallet, Loader2, AlertCircle,
-  Hash, Percent, RefreshCw, ChevronDown, Check, Trophy
+  Hash, Percent, RefreshCw, ChevronDown, Check, Trophy, Zap, Clock, User
 } from 'lucide-react';
 
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbzVslBpl0zqDx0m6DWgvl_uvDTD2ROXyAQOJvTSVnT0RtDeGA5H65vJWdywaGgcyN8_/exec';
@@ -134,16 +134,16 @@ const App = () => {
   const welfareStats = useMemo(() => {
     // ユーザー指定の11項目リスト (Q列〜AA列)
     const items = [
-      { key: 'healthCheck', label: '健康診断', amountSource: 'fixed', price: 12000 }, // 修正: 12,000円
+      { key: 'healthCheck', label: '健康診断', amountSource: 'fixed', price: 0 },
       { key: 'healthAllowance', label: '健康手当', amountSource: 'direct' },
       { key: 'marathon', label: 'フルマラソン', amountSource: 'fixed', price: 0 },
       { key: 'studyAllowance', label: '勉強代手当', amountSource: 'direct' },
       { key: 'birthdayAllowance', label: '誕生日手当', amountSource: 'direct' },
       { key: 'childAllowance', label: '子供手当', amountSource: 'direct' },
       { key: 'dental', label: '歯クリーニング', amountSource: 'fixed', price: 0 },
-      { key: 'familyAllowance', label: '家族手当', amountSource: 'fixed', price: 10000 }, // 修正: 単価10,000円 (3名で3万)
-      { key: 'accessAllowance', label: 'イベントアクセス手当', amountSource: 'direct' }, 
-      { key: 'welcomeAllowance', label: 'ウェルカムファミリー手当', amountSource: 'fixed', price: 30000 }, // 修正: 単価30,000円 (2名で6万)
+      { key: 'familyAllowance', label: '家族手当', amountSource: 'direct' },
+      { key: 'accessAllowance', label: 'イベントアクセス手当', amountSource: 'direct' },
+      { key: 'welcomeAllowance', label: 'ウェルカムファミリー手当', amountSource: 'direct' },
       { key: 'goalAllowance', label: '目標達成手当', amountSource: 'direct' },
     ];
 
@@ -153,7 +153,7 @@ const App = () => {
         const val = d[item.key];
         return val === true || (typeof val === 'number' && val > 0);
       }).length;
-      
+
       // 合計金額
       const totalAmount = filteredData.reduce((acc, curr) => {
         let amount = 0;
@@ -171,6 +171,53 @@ const App = () => {
       return { ...item, count, totalAmount };
     });
   }, [filteredData]);
+
+  // 特別支給ルールに基づく進捗計算
+  const staffAllowanceTable = useMemo(() => {
+    if (!selectedMonth) return [];
+    const [currentYear] = selectedMonth.split('年');
+    const staffMap = {};
+
+    rawData.forEach(d => {
+      if (!d.month.startsWith(currentYear)) return;
+      const [mY, mM] = d.month.replace('年', '-').replace('月', '').split('-');
+      const [sY, sM] = selectedMonth.replace('年', '-').replace('月', '').split('-');
+      if (parseInt(mM) > parseInt(sM)) return;
+
+      if (!staffMap[d.name]) {
+        staffMap[d.name] = {
+          name: d.name,
+          branch: d.branch,
+          earnedMonths: 0,
+          usedStudy: 0,
+          usedAccess: 0,
+          currentSales: 0
+        };
+      }
+
+      if ((d.individualSales || 0) >= 1000000) {
+        staffMap[d.name].earnedMonths += 1;
+      }
+
+      if (d.month === selectedMonth) {
+        staffMap[d.name].currentSales = d.individualSales || 0;
+      }
+
+      staffMap[d.name].usedStudy += (d.studyAllowance || 0);
+      staffMap[d.name].usedAccess += (d.accessAllowance || 0);
+    });
+
+    return Object.values(staffMap)
+      .filter(s => selectedBranches.includes(s.branch))
+      .map(s => ({
+        ...s,
+        availableAmount: Math.min(s.earnedMonths * 10000, 120000), // 最大12万円
+        remainingStudy: Math.max(Math.min(s.earnedMonths * 10000, 120000) - s.usedStudy, 0),
+        remainingAccess: Math.max(Math.min(s.earnedMonths * 10000, 120000) - s.usedAccess, 0),
+        balance: Math.max(Math.min(s.earnedMonths * 10000, 120000) - s.usedStudy, 0) + Math.max(Math.min(s.earnedMonths * 10000, 120000) - s.usedAccess, 0)
+      }))
+      .sort((a, b) => b.currentSales - a.currentSales);
+  }, [rawData, selectedMonth, selectedBranches]);
 
   const formatYen = (num) => `¥${Math.round(num || 0).toLocaleString()}`;
 
@@ -397,87 +444,111 @@ const App = () => {
           </div>
         </div>
 
-        {/* Master Data Table */}
-        <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
-          <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
-            <h2 className="text-xl font-black flex items-center gap-2 text-slate-800 italic">
-              <BarChart3 className="text-indigo-600" size={24} /> 経営詳細マスターデータ
-            </h2>
+        {/* 特別手当（勉強代・イベントアクセス）年間進捗テーブル */}
+        <div className="bg-white rounded-3xl p-8 shadow-sm border border-slate-200">
+          <div className="flex items-center justify-between mb-8 pb-4 border-b border-slate-100">
+             <div className="space-y-1">
+               <h2 className="text-2xl font-black flex items-center gap-3 text-slate-800 uppercase italic tracking-tight">
+                 <Zap className="text-yellow-500 fill-yellow-500" size={28} /> 「勉強代手当・イベントアクセス手当」進捗詳細
+               </h2>
+               <p className="text-xs text-slate-400 font-bold tracking-widest">
+                 月間売上 1,000,000円超で1万円支給 / 年間最大12万円（12月リセット）
+               </p>
+             </div>
+             <div className="px-4 py-2 bg-indigo-50 text-indigo-700 rounded-xl text-xs font-black border border-indigo-100">
+                年間累計データ ({selectedMonth.split('年')[0]}年1月〜{selectedMonth.split('年')[1]})
+             </div>
           </div>
+
           <div className="overflow-x-auto scrollbar-thin scrollbar-thumb-slate-300">
-            <table className="w-full text-left border-collapse min-w-[3000px]">
+            <table className="w-full text-left border-collapse">
               <thead>
-                <tr className="bg-white text-[10px] uppercase tracking-widest text-slate-400 font-black border-b border-slate-100">
-                  <th className="px-6 py-5 sticky left-0 bg-white z-20 border-r border-slate-50 min-w-[180px]">名前 / 院名 / 月</th>
-                  <th className="px-4 py-5 text-center">達成</th>
-                  <th className="px-4 py-5 bg-blue-50/30 text-center">入会率</th>
-                  <th className="px-4 py-5 bg-blue-50/30 text-right">新規売上</th>
-                  <th className="px-4 py-5 bg-emerald-50/30 text-center">退会率</th>
-                  <th className="px-4 py-5 text-center">口コミ (G/H/HB)</th>
-                  <th className="px-4 py-5 bg-rose-50/30 text-right font-black">個人売上</th>
-                  <th className="px-4 py-5 bg-indigo-50/30 text-right">継続売上</th>
-                  <th className="px-4 py-5 text-center">新規数</th>
-                  <th className="px-4 py-5">手当1(健康/勉)</th>
-                  <th className="px-4 py-5">手当2(誕/子/目)</th>
-                  <th className="px-4 py-5 text-center">タスク</th>
-                  <th className="px-4 py-5 text-right font-black text-indigo-600 bg-indigo-50/10">合計点</th>
-                  <th className="px-4 py-5">手当残高</th>
+                <tr className="text-[11px] uppercase tracking-widest text-slate-400 font-black border-b border-slate-100">
+                  <th className="px-6 py-4 min-w-[200px]">氏名 / 院名</th>
+                  <th className="px-4 py-4 text-center">今月の売上状況</th>
+                  <th className="px-4 py-4 bg-indigo-50/30 text-center border-x border-indigo-50">勉強代手当 (獲得計 / 使用額)</th>
+                  <th className="px-4 py-4 bg-sky-50/30 text-center border-r border-sky-50">イベントアクセス手当 (獲得計 / 使用額)</th>
+                  <th className="px-6 py-4 text-right">年間残高 (計)</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {filteredData.map((staff, i) => (
-                  <tr key={i} className="hover:bg-slate-50/80 transition-colors group text-sm font-bold">
-                    <td className="px-6 py-4 sticky left-0 bg-white group-hover:bg-slate-50 z-20 border-r border-slate-100 shadow-sm">
-                      <div className="font-black text-slate-800 leading-none mb-1 underline decoration-indigo-200 decoration-2">{staff.name}</div>
-                      <div className="text-[10px] text-slate-400 font-black uppercase tracking-tighter">{staff.branch} / {staff.month}</div>
-                    </td>
-                    <td className="px-4 py-4 text-center">
-                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${staff.status === "達成" ? "bg-emerald-500 text-white" : "bg-slate-200 text-slate-500"}`}>
-                        {staff.status}
-                      </span>
-                    </td>
-                    <td className="px-4 py-4 text-center bg-blue-50/10 font-black text-blue-600 text-lg">
-                      {fixPercent(staff.enrollRate)}%
-                    </td>
-                    <td className="px-4 py-4 text-right bg-blue-50/10 font-mono font-bold">
-                      {formatYen(staff.newSales)}
-                    </td>
-                    <td className={`px-4 py-4 bg-emerald-50/10 text-center text-lg ${fixPercent(staff.churnRate) > 15 ? 'text-rose-500' : 'text-emerald-600'}`}>
-                      {fixPercent(staff.churnRate)}%
-                    </td>
-                    <td className="px-4 py-4">
-                      <div className="flex justify-center gap-1">
-                        <ReviewIndicator label="G" val={staff.gReviews} color="bg-slate-700" />
-                        <ReviewIndicator label="H" val={staff.hReviews} color="bg-blue-600" />
-                        <ReviewIndicator label="HB" val={staff.hpbReviews} color="bg-rose-500" />
+                {staffAllowanceTable.length > 0 ? staffAllowanceTable.map((staff, idx) => (
+                  <tr key={idx} className="hover:bg-slate-50/50 transition-colors font-bold group">
+                    <td className="px-6 py-5">
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-400 group-hover:bg-indigo-100 group-hover:text-indigo-500 transition-colors">
+                          <User size={16} />
+                        </div>
+                        <div>
+                          <div className="text-slate-900 font-black">{staff.name}</div>
+                          <div className="text-[10px] text-slate-400 uppercase">{staff.branch}</div>
+                        </div>
                       </div>
                     </td>
-                    <td className="px-4 py-4 text-right bg-rose-50/10 font-mono font-black text-lg text-slate-900 italic">
-                      {formatYen(staff.individualSales)}
+                    <td className="px-4 py-5 text-center">
+                      <div className="text-xs mb-1 font-mono">{formatYen(staff.currentSales)}</div>
+                      {staff.currentSales >= 1000000 ? (
+                        <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 text-[9px] font-black rounded-full border border-emerald-200">100万達成</span>
+                      ) : (
+                        <span className="px-2 py-0.5 bg-slate-100 text-slate-400 text-[9px] font-black rounded-full">未達成</span>
+                      )}
                     </td>
-                    <td className="px-4 py-4 text-right bg-indigo-50/10 font-mono">
-                      {formatYen(staff.recurringSales)}
+                    <td className="px-4 py-5 bg-indigo-50/10 border-x border-indigo-50/30">
+                       <div className="flex flex-col items-center">
+                          <div className="flex items-center gap-4 mb-2">
+                             <div className="text-center">
+                               <div className="text-[9px] text-slate-400 font-black">使用可能額</div>
+                               <div className="text-sm font-black text-indigo-700">{formatYen(staff.availableAmount)}</div>
+                             </div>
+                             <ChevronRight className="text-slate-200" size={12} />
+                             <div className="text-center">
+                               <div className="text-[9px] text-slate-400 font-black">使用額</div>
+                               <div className="text-sm font-black text-slate-600">{formatYen(staff.usedStudy)}</div>
+                             </div>
+                          </div>
+                          <div className="w-full max-w-[150px] h-1.5 bg-slate-200 rounded-full overflow-hidden">
+                             <div
+                               className="h-full bg-indigo-500"
+                               style={{ width: `${Math.min((staff.usedStudy / staff.availableAmount) * 100 || 0, 100)}%` }}
+                             />
+                          </div>
+                       </div>
                     </td>
-                    <td className="px-4 py-4 text-center text-slate-500 font-black">
-                      {staff.newCount} 名
+                    <td className="px-4 py-5 bg-sky-50/10 border-r border-sky-50/30">
+                       <div className="flex flex-col items-center">
+                          <div className="flex items-center gap-4 mb-2">
+                             <div className="text-center">
+                               <div className="text-[9px] text-slate-400 font-black">使用可能額</div>
+                               <div className="text-sm font-black text-sky-700">{formatYen(staff.availableAmount)}</div>
+                             </div>
+                             <ChevronRight className="text-slate-200" size={12} />
+                             <div className="text-center">
+                               <div className="text-[9px] text-slate-400 font-black">使用額</div>
+                               <div className="text-sm font-black text-slate-600">{formatYen(staff.usedAccess)}</div>
+                             </div>
+                          </div>
+                          <div className="w-full max-w-[150px] h-1.5 bg-slate-200 rounded-full overflow-hidden">
+                             <div
+                               className="h-full bg-sky-500"
+                               style={{ width: `${Math.min((staff.usedAccess / staff.availableAmount) * 100 || 0, 100)}%` }}
+                             />
+                          </div>
+                       </div>
                     </td>
-                    <td className="px-4 py-4">
-                      <AllowanceLine label="健康" val={staff.healthAllowance} />
-                      <AllowanceLine label="勉強" val={staff.studyAllowance} />
-                    </td>
-                    <td className="px-4 py-4">
-                      <AllowanceLine label="誕生" val={staff.birthdayAllowance} />
-                      <AllowanceLine label="目標" val={staff.goalAllowance} />
-                    </td>
-                    <td className="px-4 py-4 text-center">
-                      {staff.taskMiss > 0 ? <span className="text-rose-500 font-black ring-1 ring-rose-200 px-1.5 py-0.5 rounded bg-rose-50">{staff.taskMiss}</span> : <CheckCircle size={18} className="text-emerald-400 mx-auto" />}
-                    </td>
-                    <td className="px-4 py-4 text-right font-black text-xl text-indigo-700 bg-indigo-50/20">{staff.totalScore}</td>
-                    <td className="px-4 py-4 text-[10px] font-mono opacity-60">
-                      健: {formatYen(staff.healthBalance)} / 勉: {formatYen(staff.studyBalance)}
+                    <td className="px-6 py-5 text-right">
+                       <div className="text-xs font-black text-slate-400 mb-1">使用可能残高</div>
+                       <div className="text-lg font-black text-emerald-600 font-mono tracking-tighter">
+                         {formatYen(staff.balance)}
+                       </div>
                     </td>
                   </tr>
-                ))}
+                )) : (
+                  <tr>
+                    <td colSpan="5" className="py-20 text-center text-slate-400 italic font-bold">
+                      データが読み込まれていません。フィルタ条件を確認してください。
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>

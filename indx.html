@@ -1,32 +1,64 @@
-import React, { useState, useMemo } from 'react';
-import { 
-  TrendingUp, Users, Target, LogOut, Calendar, MapPin, 
-  Search, Award, BarChart3, DollarSign, Heart, 
+import React, { useState, useMemo, useEffect } from 'react';
+import {
+  TrendingUp, Users, Target, LogOut, Calendar, MapPin,
+  Search, Award, BarChart3, DollarSign, Heart,
   MessageSquare, Star, Gift, CheckCircle, Info,
-  Filter, Download, ChevronRight, Activity, Wallet
+  Filter, Download, ChevronRight, Activity, Wallet, Loader2, AlertCircle
 } from 'lucide-react';
 
-// 提供された膨大なテキストデータをパースして整理（主要なサンプルを構造化）
-const rawData = [
-  // 2026年1月データ
-  { month: "2026年1月", name: "宮崎 生光", branch: "大森", newCount: 9, newEnroll: 1, enrollRate: 11, newAvgPrice: 42350, newSales: 42350, prevMembers: 100, churnCount: 2, churnRate: 2, gap: -1, gReviews: 3, hReviews: 7, hpbReviews: 5, individualSales: 1334280, recurringSales: 1291930, healthCheck: 1, healthAllowance: 15000, marathon: 1, studyAllowance: 5000, birthdayAllowance: 0, childAllowance: 0, dental: 1, familyAllowance: 1, event: 1, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 20000, productivity: 1291930, conversionRate: 11, adRatio: 12, referrals: 3, taskMiss: 0, totalScore: 85, status: "達成", achieveCount: 12, healthBalance: 5000, studyBalance: 10000 },
-  { month: "2026年1月", name: "内田翔一郎", branch: "千葉駅", newCount: 33, newEnroll: 20, enrollRate: 61, newAvgPrice: 24750, newSales: 495000, prevMembers: 109, churnCount: 1, churnRate: 1, gap: 19, gReviews: 5, hReviews: 8, hpbReviews: 4, individualSales: 1546100, recurringSales: 1051100, healthCheck: 1, healthAllowance: 7700, marathon: 0, studyAllowance: 10000, birthdayAllowance: 20000, childAllowance: 0, dental: 0, familyAllowance: 0, event: 0, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 10000, productivity: 1051100, conversionRate: 61, adRatio: 15, referrals: 5, taskMiss: 0, totalScore: 92, status: "達成", achieveCount: 15, healthBalance: 2000, studyBalance: 5000 },
-  { month: "2026年1月", name: "河合優樹", branch: "千葉駅", newCount: 71, newEnroll: 22, enrollRate: 31, newAvgPrice: 26850, newSales: 590700, prevMembers: 77, churnCount: 8, churnRate: 10, gap: 14, gReviews: 9, hReviews: 11, hpbReviews: 2, individualSales: 1346150, recurringSales: 755450, healthCheck: 0, healthAllowance: 7700, marathon: 0, studyAllowance: 0, birthdayAllowance: 0, childAllowance: 0, dental: 0, familyAllowance: 0, event: 0, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 0, productivity: 755450, conversionRate: 31, adRatio: 10, referrals: 2, taskMiss: 1, totalScore: 78, status: "未達成", achieveCount: 8, healthBalance: 0, studyBalance: 0 },
-  { month: "2026年1月", name: "中澤祐一郎", branch: "銀座", newCount: 13, newEnroll: 6, enrollRate: 46, newAvgPrice: 28050, newSales: 168300, prevMembers: 55, churnCount: 5, churnRate: 9, gap: 1, gReviews: 5, hReviews: 5, hpbReviews: 3, individualSales: 1707350, recurringSales: 1539050, healthCheck: 1, healthAllowance: 5000, marathon: 0, studyAllowance: 8000, birthdayAllowance: 0, childAllowance: 0, dental: 0, familyAllowance: 0, event: 0, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 15000, productivity: 1539050, conversionRate: 46, adRatio: 12, referrals: 4, taskMiss: 0, totalScore: 88, status: "達成", achieveCount: 11, healthBalance: 4000, studyBalance: 2000 },
-  
-  // 2021年からのヒストリカルデータ（サンプルパース）
-  { month: "2021年5月", name: "齋藤 敦紀", branch: "大森", newCount: 38, newEnroll: 28, enrollRate: 74, newAvgPrice: 24357, newSales: 682000, prevMembers: 0, churnCount: 0, churnRate: 0, gap: 0, gReviews: 2, hReviews: 3, hpbReviews: 1, individualSales: 1200000, recurringSales: 518000, healthCheck: 0, healthAllowance: 0, marathon: 0, studyAllowance: 0, birthdayAllowance: 0, childAllowance: 0, dental: 0, familyAllowance: 0, event: 0, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 0, productivity: 518000, conversionRate: 74, adRatio: 10, referrals: 5, taskMiss: 0, totalScore: 70, status: "達成", achieveCount: 1, healthBalance: 0, studyBalance: 0 },
-  { month: "2021年6月", name: "内田翔一郎", branch: "千葉駅", newCount: 58, newEnroll: 18, enrollRate: 31, newAvgPrice: 24444, newSales: 440000, prevMembers: 50, churnCount: 2, churnRate: 4, gap: 16, gReviews: 3, hReviews: 4, hpbReviews: 2, individualSales: 1100000, recurringSales: 660000, healthCheck: 0, healthAllowance: 0, marathon: 0, studyAllowance: 0, birthdayAllowance: 0, childAllowance: 0, dental: 0, familyAllowance: 0, event: 0, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 0, productivity: 660000, conversionRate: 31, adRatio: 15, referrals: 2, taskMiss: 0, totalScore: 65, status: "達成", achieveCount: 2, healthBalance: 0, studyBalance: 0 },
-  { month: "2022年12月", name: "齋藤 敦紀", branch: "大森", newCount: 10, newEnroll: 7, enrollRate: 70, newAvgPrice: 23179, newSales: 162250, prevMembers: 83, churnCount: 6, churnRate: 7, gap: 1, gReviews: 5, hReviews: 3, hpbReviews: 2, individualSales: 1250000, recurringSales: 1087750, healthCheck: 0, healthAllowance: 5000, marathon: 0, studyAllowance: 2000, birthdayAllowance: 0, childAllowance: 0, dental: 0, familyAllowance: 0, event: 0, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 5000, productivity: 1087750, conversionRate: 70, adRatio: 12, referrals: 3, taskMiss: 1, totalScore: 75, status: "達成", achieveCount: 10, healthBalance: 1000, studyBalance: 500 },
-  { month: "2023年7月", name: "伊藤りりか", branch: "仙台", newCount: 25, newEnroll: 22, enrollRate: 88, newAvgPrice: 24750, newSales: 544500, prevMembers: 70, churnCount: 3, churnRate: 4, gap: 19, gReviews: 8, hReviews: 12, hpbReviews: 10, individualSales: 2196500, recurringSales: 1652000, healthCheck: 1, healthAllowance: 10000, marathon: 1, studyAllowance: 10000, birthdayAllowance: 0, childAllowance: 0, dental: 1, familyAllowance: 1, event: 1, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 20000, productivity: 1652000, conversionRate: 88, adRatio: 8, referrals: 10, taskMiss: 0, totalScore: 98, status: "達成", achieveCount: 20, healthBalance: 8000, studyBalance: 12000 },
-  { month: "2024年4月", name: "貞末恭輔", branch: "鶴見", newCount: 20, newEnroll: 10, enrollRate: 50, newAvgPrice: 24750, newSales: 247500, prevMembers: 50, churnCount: 6, churnRate: 12, gap: 4, gReviews: 6, hReviews: 4, hpbReviews: 2, individualSales: 1720150, recurringSales: 1472650, healthCheck: 0, healthAllowance: 5000, marathon: 0, studyAllowance: 5000, birthdayAllowance: 0, childAllowance: 0, dental: 1, familyAllowance: 0, event: 0, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 15000, productivity: 1472650, conversionRate: 50, adRatio: 10, referrals: 3, taskMiss: 0, totalScore: 82, status: "達成", achieveCount: 8, healthBalance: 3000, studyBalance: 1500 },
-  { month: "2025年1月", name: "西田 健人", branch: "浅草", newCount: 9, newEnroll: 3, enrollRate: 33, newAvgPrice: 29150, newSales: 87450, prevMembers: 86, churnCount: 8, churnRate: 9, gap: -5, gReviews: 4, hReviews: 5, hpbReviews: 4, individualSales: 1615450, recurringSales: 1528000, healthCheck: 1, healthAllowance: 10000, marathon: 0, studyAllowance: 5000, birthdayAllowance: 0, childAllowance: 0, dental: 1, familyAllowance: 0, event: 1, accessAllowance: 0, welcomeAllowance: 0, goalAllowance: 15000, productivity: 1528000, conversionRate: 33, adRatio: 18, referrals: 2, taskMiss: 1, totalScore: 79, status: "達成", achieveCount: 12, healthBalance: 2000, studyBalance: 3000 }
-];
+// Google Apps Script のウェブアプリURLを設定
+// デプロイ後に取得したURLをここに貼り付けてください
+const GAS_API_URL = 'YOUR_GAS_WEB_APP_URL_HERE';
 
 const App = () => {
+  const [rawData, setRawData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [selectedMonth, setSelectedMonth] = useState("2026年1月");
   const [selectedBranch, setSelectedBranch] = useState("すべて");
   const [searchTerm, setSearchTerm] = useState("");
+
+  // スプレッドシートからデータを取得
+  useEffect(() => {
+    fetchDataFromSpreadsheet();
+  }, []);
+
+  const fetchDataFromSpreadsheet = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+
+      const response = await fetch(GAS_API_URL);
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const result = await response.json();
+
+      if (!result.success) {
+        throw new Error(result.error || 'データの取得に失敗しました');
+      }
+
+      setRawData(result.data);
+
+      // 最新の月を自動選択
+      if (result.data.length > 0) {
+        const months = Array.from(new Set(result.data.map(d => d.month))).sort((a, b) => {
+          const [ay, am] = a.replace('年', '-').replace('月', '').split('-');
+          const [by, bm] = b.replace('年', '-').replace('月', '').split('-');
+          return new Date(by, bm - 1) - new Date(ay, am - 1);
+        });
+        setSelectedMonth(months[0]);
+      }
+
+    } catch (err) {
+      console.error('データ取得エラー:', err);
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const months = useMemo(() => Array.from(new Set(rawData.map(d => d.month))).sort((a, b) => {
     const [ay, am] = a.replace('年', '-').replace('月', '').split('-');
@@ -62,6 +94,74 @@ const App = () => {
   }, [filteredData]);
 
   const formatYen = (num) => `¥${Math.round(num || 0).toLocaleString()}`;
+
+  // ローディング中の表示
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="text-center space-y-4">
+          <Loader2 className="w-12 h-12 text-indigo-600 animate-spin mx-auto" />
+          <div className="text-slate-600 font-bold">
+            スプレッドシートからデータを読み込み中...
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // エラー時の表示
+  if (error) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-white rounded-3xl shadow-lg border border-red-200 p-8">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="p-3 bg-red-100 rounded-full">
+              <AlertCircle className="w-6 h-6 text-red-600" />
+            </div>
+            <h2 className="text-xl font-black text-slate-900">データ取得エラー</h2>
+          </div>
+          <p className="text-slate-600 mb-6">{error}</p>
+          <div className="space-y-3">
+            <button
+              onClick={fetchDataFromSpreadsheet}
+              className="w-full px-4 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all"
+            >
+              再試行
+            </button>
+            <div className="text-xs text-slate-500 bg-slate-50 p-4 rounded-xl">
+              <strong>確認事項:</strong>
+              <ul className="list-disc list-inside mt-2 space-y-1">
+                <li>GAS_API_URLが正しく設定されているか</li>
+                <li>Google Apps Scriptが正しくデプロイされているか</li>
+                <li>スプレッドシートのIDとシート名が正しいか</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // データがない場合の表示
+  if (rawData.length === 0) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="text-center space-y-4">
+          <div className="p-4 bg-slate-200 rounded-full inline-block">
+            <BarChart3 className="w-12 h-12 text-slate-500" />
+          </div>
+          <h2 className="text-xl font-black text-slate-900">データがありません</h2>
+          <p className="text-slate-600">スプレッドシートにデータを追加してください。</p>
+          <button
+            onClick={fetchDataFromSpreadsheet}
+            className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all"
+          >
+            再読み込み
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 p-4 lg:p-6 font-sans text-slate-900 overflow-x-hidden">
@@ -210,9 +310,18 @@ const App = () => {
               </h2>
               <p className="text-xs text-slate-400 font-bold mt-1">※全ての管理項目を反映。横スクロールで確認可能。</p>
             </div>
-            <button className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition-all">
-              <Download size={14} /> CSVエクスポート
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={fetchDataFromSpreadsheet}
+                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 transition-all"
+                title="スプレッドシートから最新データを取得"
+              >
+                <Activity size={14} /> 再読み込み
+              </button>
+              <button className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition-all">
+                <Download size={14} /> CSVエクスポート
+              </button>
+            </div>
           </div>
           
           <div className="overflow-x-auto scrollbar-thin scrollbar-thumb-slate-300 scrollbar-track-transparent">

@@ -14,6 +14,9 @@
     <!-- Babel Standalone -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js" onload="console.log('✅ Babel Standalone loaded')" onerror="console.error('❌ Failed to load Babel Standalone')"></script>
 
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" onload="console.log('✅ Chart.js loaded')" onerror="console.error('❌ Failed to load Chart.js')"></script>
+
     <script>
         console.log('🌐 Document loaded, waiting for external scripts...');
     </script>
@@ -194,6 +197,8 @@
             const [lastFetchTime, setLastFetchTime] = useState(null);
             const [startMonth, setStartMonth] = useState("");
             const [endMonth, setEndMonth] = useState("");
+            const [startDate, setStartDate] = useState(null);
+            const [endDate, setEndDate] = useState(null);
             const [selectedBranches, setSelectedBranches] = useState([]);
             const [searchTerm, setSearchTerm] = useState("");
             const [isBranchMenuOpen, setIsBranchMenuOpen] = useState(false);
@@ -202,6 +207,7 @@
             const [selectedStaffNames, setSelectedStaffNames] = useState([]);
             const [isStaffMenuOpen, setIsStaffMenuOpen] = useState(false);
             const [staffSearchTerm, setStaffSearchTerm] = useState("");
+            const [selectedMetrics, setSelectedMetrics] = useState(['totalSales']);
             const branchMenuRef = useRef(null);
             const staffMenuRef = useRef(null);
 
@@ -231,6 +237,16 @@
                                 });
                                 if (!startMonth) setStartMonth(sortedMonths[0] || '');
                                 if (!endMonth) setEndMonth(sortedMonths[0] || '');
+
+                                // 日付範囲も設定（最新月の1日から最終日まで）
+                                if (!startDate && sortedMonths.length > 0) {
+                                    const latestMonth = sortedMonths[0];
+                                    const [year, month] = latestMonth.replace('年', '-').replace('月', '').split('-');
+                                    const firstDay = new Date(parseInt(year), parseInt(month) - 1, 1);
+                                    const lastDay = new Date(parseInt(year), parseInt(month), 0);
+                                    setStartDate(firstDay);
+                                    setEndDate(lastDay);
+                                }
 
                                 const allBranches = Array.from(new Set(cachedData.map(d => d.branch)));
                                 if (selectedBranches.length === 0) setSelectedBranches(allBranches);
@@ -282,6 +298,16 @@
                             console.log('📅 Setting start and end months:', sortedMonths[0]);
                             setStartMonth(sortedMonths[0] || '');
                             setEndMonth(sortedMonths[0] || '');
+
+                            // 日付範囲も設定（最新月の1日から最終日まで）
+                            if (!startDate && sortedMonths.length > 0) {
+                                const latestMonth = sortedMonths[0];
+                                const [year, month] = latestMonth.replace('年', '-').replace('月', '').split('-');
+                                const firstDay = new Date(parseInt(year), parseInt(month) - 1, 1);
+                                const lastDay = new Date(parseInt(year), parseInt(month), 0);
+                                setStartDate(firstDay);
+                                setEndDate(lastDay);
+                            }
 
                             const allBranches = Array.from(new Set(fetchedData.map(d => d.branch)));
                             console.log('🏢 Setting selected branches:', allBranches);
@@ -684,26 +710,30 @@
                             </div>
 
                             <div className="flex flex-wrap items-center gap-3">
-                                <div className="flex flex-col gap-1 min-w-[160px]">
-                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">開始年月</span>
-                                    <select
-                                        className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-base font-bold focus:ring-2 focus:ring-indigo-500 outline-none appearance-none cursor-pointer shadow-sm"
-                                        value={startMonth}
-                                        onChange={(e) => setStartMonth(e.target.value)}
-                                    >
-                                        {months.map(m => <option key={m} value={m}>{m}</option>)}
-                                    </select>
-                                </div>
+                                <div className="flex flex-col gap-1">
+                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">期間選択</span>
+                                    <DateRangePicker
+                                        startDate={startDate}
+                                        endDate={endDate}
+                                        onDateChange={(start, end) => {
+                                            setStartDate(start);
+                                            setEndDate(end);
 
-                                <div className="flex flex-col gap-1 min-w-[160px]">
-                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">終了年月</span>
-                                    <select
-                                        className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-base font-bold focus:ring-2 focus:ring-indigo-500 outline-none appearance-none cursor-pointer shadow-sm"
-                                        value={endMonth}
-                                        onChange={(e) => setEndMonth(e.target.value)}
-                                    >
-                                        {months.map(m => <option key={m} value={m}>{m}</option>)}
-                                    </select>
+                                            // 日付範囲から対象月を計算
+                                            if (start && end) {
+                                                const getMonthString = (date) => {
+                                                    return `${date.getFullYear()}年${date.getMonth() + 1}月`;
+                                                };
+
+                                                const startMonthStr = getMonthString(start);
+                                                const endMonthStr = getMonthString(end);
+
+                                                setStartMonth(startMonthStr);
+                                                setEndMonth(endMonthStr);
+                                            }
+                                        }}
+                                        months={months}
+                                    />
                                 </div>
 
                                 <div className="flex flex-col gap-1 min-w-[220px] relative" ref={branchMenuRef}>
@@ -1219,10 +1249,165 @@
                         {currentPage === 'charts' && (
                             <div className="p-4 lg:p-6 font-sans text-slate-900">
                                 <div className="max-w-[1600px] mx-auto space-y-6">
-                                    <div className="bg-white p-12 rounded-3xl shadow-sm border border-slate-200 text-center">
-                                        <BarChart3 size={64} className="mx-auto text-slate-300 mb-4" />
-                                        <h2 className="text-2xl font-black text-slate-900 mb-2">グラフ化ダッシュボード</h2>
-                                        <p className="text-slate-500 font-bold">このページは開発中です。</p>
+                                    {/* ヘッダー */}
+                                    <header className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                                        <div className="flex items-center justify-between mb-4">
+                                            <div>
+                                                <div className="inline-flex items-center gap-2 px-3 py-1 bg-indigo-100 text-indigo-700 rounded-full text-xs font-black uppercase tracking-widest mb-2">
+                                                    <BarChart3 size={14} /> Charts Dashboard
+                                                </div>
+                                                <h1 className="text-3xl font-black tracking-tight text-slate-900 italic">グラフ化ダッシュボード</h1>
+                                            </div>
+                                        </div>
+
+                                        {/* 期間選択 */}
+                                        <div className="flex flex-wrap items-center gap-3 mb-4">
+                                            <div className="flex flex-col gap-1">
+                                                <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">期間選択</span>
+                                                <DateRangePicker
+                                                    startDate={startDate}
+                                                    endDate={endDate}
+                                                    onDateChange={(start, end) => {
+                                                        setStartDate(start);
+                                                        setEndDate(end);
+
+                                                        if (start && end) {
+                                                            const getMonthString = (date) => {
+                                                                return `${date.getFullYear()}年${date.getMonth() + 1}月`;
+                                                            };
+
+                                                            const startMonthStr = getMonthString(start);
+                                                            const endMonthStr = getMonthString(end);
+
+                                                            setStartMonth(startMonthStr);
+                                                            setEndMonth(endMonthStr);
+                                                        }
+                                                    }}
+                                                    months={months}
+                                                />
+                                            </div>
+                                        </div>
+
+                                        {/* 指標選択 */}
+                                        <div className="border-t border-slate-200 pt-4">
+                                            <span className="text-xs font-black text-slate-400 uppercase tracking-widest mb-3 block">表示する指標を選択</span>
+                                            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                                                {[
+                                                    { id: 'totalSales', label: '全体売り上げ', icon: <DollarSign size={16} /> },
+                                                    { id: 'productivity', label: '個人生産性', icon: <TrendingUp size={16} /> },
+                                                    { id: 'branchSales', label: '店舗ごとの売上', icon: <MapPin size={16} /> },
+                                                    { id: 'newCount', label: '新規数', icon: <Users size={16} /> },
+                                                    { id: 'reviews', label: '口コミ数', icon: <MessageSquare size={16} /> },
+                                                    { id: 'branchCount', label: '店舗数の増減', icon: <Activity size={16} /> },
+                                                ].map(metric => (
+                                                    <div
+                                                        key={metric.id}
+                                                        onClick={() => {
+                                                            setSelectedMetrics(prev =>
+                                                                prev.includes(metric.id)
+                                                                    ? prev.filter(m => m !== metric.id)
+                                                                    : [...prev, metric.id]
+                                                            );
+                                                        }}
+                                                        className={`flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all border-2 ${
+                                                            selectedMetrics.includes(metric.id)
+                                                                ? 'bg-indigo-50 border-indigo-500'
+                                                                : 'bg-slate-50 border-slate-200 hover:border-slate-300'
+                                                        }`}
+                                                    >
+                                                        <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
+                                                            selectedMetrics.includes(metric.id)
+                                                                ? 'bg-indigo-600 border-indigo-600'
+                                                                : 'border-slate-300'
+                                                        }`}>
+                                                            {selectedMetrics.includes(metric.id) && <Check size={14} className="text-white" />}
+                                                        </div>
+                                                        <div className="flex items-center gap-2">
+                                                            <span className={selectedMetrics.includes(metric.id) ? 'text-indigo-700' : 'text-slate-400'}>
+                                                                {metric.icon}
+                                                            </span>
+                                                            <span className={`text-sm font-bold ${
+                                                                selectedMetrics.includes(metric.id) ? 'text-slate-900' : 'text-slate-600'
+                                                            }`}>
+                                                                {metric.label}
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </header>
+
+                                    {/* グラフ表示エリア */}
+                                    <div className="grid grid-cols-1 gap-6">
+                                        {selectedMetrics.length === 0 && (
+                                            <div className="bg-white p-12 rounded-3xl shadow-sm border border-slate-200 text-center">
+                                                <BarChart3 size={64} className="mx-auto text-slate-300 mb-4" />
+                                                <h3 className="text-xl font-black text-slate-900 mb-2">指標を選択してください</h3>
+                                                <p className="text-slate-500 font-bold">上のチェックボックスから表示したい指標を選択してください。</p>
+                                            </div>
+                                        )}
+
+                                        {selectedMetrics.includes('totalSales') && (
+                                            <ChartCard
+                                                title="全体売り上げ推移"
+                                                icon={<DollarSign size={20} />}
+                                                data={filteredData}
+                                                targetMonths={targetMonths}
+                                                type="line"
+                                                dataKey="individualSales"
+                                                label="売上"
+                                                color="rgb(59, 130, 246)"
+                                            />
+                                        )}
+
+                                        {selectedMetrics.includes('productivity') && (
+                                            <ChartCard
+                                                title="個人生産性（平均）推移"
+                                                icon={<TrendingUp size={20} />}
+                                                data={filteredData}
+                                                targetMonths={targetMonths}
+                                                type="line"
+                                                dataKey="productivity"
+                                                label="生産性"
+                                                color="rgb(16, 185, 129)"
+                                            />
+                                        )}
+
+                                        {selectedMetrics.includes('branchSales') && (
+                                            <BranchSalesChart
+                                                data={filteredData}
+                                                targetMonths={targetMonths}
+                                                selectedBranches={selectedBranches}
+                                            />
+                                        )}
+
+                                        {selectedMetrics.includes('newCount') && (
+                                            <ChartCard
+                                                title="新規数推移"
+                                                icon={<Users size={20} />}
+                                                data={filteredData}
+                                                targetMonths={targetMonths}
+                                                type="bar"
+                                                dataKey="newCount"
+                                                label="新規数"
+                                                color="rgb(99, 102, 241)"
+                                            />
+                                        )}
+
+                                        {selectedMetrics.includes('reviews') && (
+                                            <ReviewsChart
+                                                data={filteredData}
+                                                targetMonths={targetMonths}
+                                            />
+                                        )}
+
+                                        {selectedMetrics.includes('branchCount') && (
+                                            <BranchCountChart
+                                                data={rawData}
+                                                targetMonths={targetMonths}
+                                            />
+                                        )}
                                     </div>
                                 </div>
                             </div>
@@ -1246,6 +1431,520 @@
         };
 
         // --- Sub-Components ---
+
+        // 日付範囲選択コンポーネント
+        const DateRangePicker = ({ startDate, endDate, onDateChange, months }) => {
+            const [isOpen, setIsOpen] = useState(false);
+            const [viewDate, setViewDate] = useState(new Date());
+            const [selectingStart, setSelectingStart] = useState(true);
+            const pickerRef = useRef(null);
+
+            useEffect(() => {
+                const handleClickOutside = (event) => {
+                    if (pickerRef.current && !pickerRef.current.contains(event.target)) {
+                        setIsOpen(false);
+                    }
+                };
+                document.addEventListener("mousedown", handleClickOutside);
+                return () => document.removeEventListener("mousedown", handleClickOutside);
+            }, []);
+
+            // 月の日付を生成
+            const getDaysInMonth = (date) => {
+                const year = date.getFullYear();
+                const month = date.getMonth();
+                const firstDay = new Date(year, month, 1);
+                const lastDay = new Date(year, month + 1, 0);
+                const daysInMonth = lastDay.getDate();
+                const startingDayOfWeek = firstDay.getDay();
+
+                const days = [];
+                // 前月の日付で埋める
+                for (let i = 0; i < startingDayOfWeek; i++) {
+                    days.push(null);
+                }
+                // 今月の日付
+                for (let i = 1; i <= daysInMonth; i++) {
+                    days.push(new Date(year, month, i));
+                }
+                return days;
+            };
+
+            const formatDate = (date) => {
+                if (!date) return '';
+                return `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}`;
+            };
+
+            const formatDateJa = (date) => {
+                if (!date) return '';
+                return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+            };
+
+            const handleDateClick = (date) => {
+                if (!date) return;
+
+                if (selectingStart) {
+                    onDateChange(date, endDate);
+                    setSelectingStart(false);
+                } else {
+                    if (startDate && date < startDate) {
+                        onDateChange(date, startDate);
+                    } else {
+                        onDateChange(startDate, date);
+                    }
+                    setSelectingStart(true);
+                    setIsOpen(false);
+                }
+            };
+
+            const isDateInRange = (date) => {
+                if (!date || !startDate || !endDate) return false;
+                return date >= startDate && date <= endDate;
+            };
+
+            const isDateSelected = (date) => {
+                if (!date) return false;
+                return (startDate && date.toDateString() === startDate.toDateString()) ||
+                       (endDate && date.toDateString() === endDate.toDateString());
+            };
+
+            const previousMonth = () => {
+                setViewDate(new Date(viewDate.getFullYear(), viewDate.getMonth() - 1));
+            };
+
+            const nextMonth = () => {
+                setViewDate(new Date(viewDate.getFullYear(), viewDate.getMonth() + 1));
+            };
+
+            const days = getDaysInMonth(viewDate);
+            const weekDays = ['日', '月', '火', '水', '木', '金', '土'];
+
+            return (
+                <div className="relative" ref={pickerRef}>
+                    <button
+                        onClick={() => setIsOpen(!isOpen)}
+                        className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-base font-bold flex items-center gap-2 hover:bg-slate-100 transition-colors shadow-sm min-w-[300px]"
+                    >
+                        <Calendar size={18} className="text-slate-400" />
+                        <span className="text-sm">
+                            {startDate && endDate ? `${formatDateJa(startDate)} - ${formatDateJa(endDate)}` : '期間を選択'}
+                        </span>
+                    </button>
+
+                    {isOpen && (
+                        <div className="absolute top-full left-0 mt-2 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 p-4 min-w-[350px]">
+                            {/* カレンダーヘッダー */}
+                            <div className="flex items-center justify-between mb-4">
+                                <button onClick={previousMonth} className="p-2 hover:bg-slate-100 rounded-lg transition-colors">
+                                    <ChevronDown size={20} className="rotate-90" />
+                                </button>
+                                <div className="text-lg font-black">
+                                    {viewDate.getFullYear()}年{viewDate.getMonth() + 1}月
+                                </div>
+                                <button onClick={nextMonth} className="p-2 hover:bg-slate-100 rounded-lg transition-colors">
+                                    <ChevronDown size={20} className="-rotate-90" />
+                                </button>
+                            </div>
+
+                            {/* 曜日ヘッダー */}
+                            <div className="grid grid-cols-7 gap-1 mb-2">
+                                {weekDays.map(day => (
+                                    <div key={day} className="text-center text-xs font-black text-slate-400 py-1">
+                                        {day}
+                                    </div>
+                                ))}
+                            </div>
+
+                            {/* カレンダー日付 */}
+                            <div className="grid grid-cols-7 gap-1">
+                                {days.map((date, idx) => (
+                                    <button
+                                        key={idx}
+                                        onClick={() => handleDateClick(date)}
+                                        disabled={!date}
+                                        className={`
+                                            aspect-square p-2 text-sm font-bold rounded-lg transition-all
+                                            ${!date ? 'invisible' : ''}
+                                            ${isDateSelected(date) ? 'bg-indigo-600 text-white' : ''}
+                                            ${isDateInRange(date) && !isDateSelected(date) ? 'bg-indigo-100 text-indigo-700' : ''}
+                                            ${!isDateSelected(date) && !isDateInRange(date) && date ? 'hover:bg-slate-100 text-slate-700' : ''}
+                                            ${date && date.toDateString() === new Date().toDateString() ? 'ring-2 ring-indigo-300' : ''}
+                                        `}
+                                    >
+                                        {date ? date.getDate() : ''}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* 選択された日付範囲の表示 */}
+                            <div className="mt-4 pt-4 border-t border-slate-200 space-y-2">
+                                <div className="flex items-center justify-between text-sm">
+                                    <span className="font-bold text-slate-600">開始日:</span>
+                                    <span className="font-mono text-slate-900">{startDate ? formatDate(startDate) : '未選択'}</span>
+                                </div>
+                                <div className="flex items-center justify-between text-sm">
+                                    <span className="font-bold text-slate-600">終了日:</span>
+                                    <span className="font-mono text-slate-900">{endDate ? formatDate(endDate) : '未選択'}</span>
+                                </div>
+                            </div>
+
+                            {/* クイック選択ボタン */}
+                            <div className="mt-4 flex gap-2">
+                                <button
+                                    onClick={() => {
+                                        const today = new Date();
+                                        const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
+                                        onDateChange(firstDay, today);
+                                        setIsOpen(false);
+                                    }}
+                                    className="flex-1 px-3 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs font-bold transition-colors"
+                                >
+                                    今月
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        const today = new Date();
+                                        const lastMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+                                        const lastDayOfLastMonth = new Date(today.getFullYear(), today.getMonth(), 0);
+                                        onDateChange(lastMonth, lastDayOfLastMonth);
+                                        setIsOpen(false);
+                                    }}
+                                    className="flex-1 px-3 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs font-bold transition-colors"
+                                >
+                                    先月
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // 汎用チャートコンポーネント
+        const ChartCard = ({ title, icon, data, targetMonths, type, dataKey, label, color }) => {
+            const chartRef = useRef(null);
+            const chartInstanceRef = useRef(null);
+
+            useEffect(() => {
+                if (!chartRef.current || !data || targetMonths.length === 0) return;
+
+                // 既存のチャートを破棄
+                if (chartInstanceRef.current) {
+                    chartInstanceRef.current.destroy();
+                }
+
+                // 月ごとにデータを集計
+                const monthlyData = {};
+                targetMonths.forEach(month => {
+                    const monthData = data.filter(d => d.month === month);
+                    if (monthData.length > 0) {
+                        const total = monthData.reduce((sum, d) => sum + (d[dataKey] || 0), 0);
+                        monthlyData[month] = type === 'bar' ? total : Math.round(total / monthData.length);
+                    } else {
+                        monthlyData[month] = 0;
+                    }
+                });
+
+                const ctx = chartRef.current.getContext('2d');
+                chartInstanceRef.current = new Chart(ctx, {
+                    type: type,
+                    data: {
+                        labels: targetMonths.slice().reverse(),
+                        datasets: [{
+                            label: label,
+                            data: targetMonths.slice().reverse().map(m => monthlyData[m] || 0),
+                            backgroundColor: color.replace('rgb', 'rgba').replace(')', ', 0.2)'),
+                            borderColor: color,
+                            borderWidth: 2,
+                            tension: 0.4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                display: false
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                ticks: {
+                                    callback: function(value) {
+                                        return '¥' + value.toLocaleString();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+
+                return () => {
+                    if (chartInstanceRef.current) {
+                        chartInstanceRef.current.destroy();
+                    }
+                };
+            }, [data, targetMonths, type, dataKey]);
+
+            return (
+                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                    <div className="flex items-center gap-2 mb-6">
+                        <div className="text-indigo-600">{icon}</div>
+                        <h3 className="text-xl font-black">{title}</h3>
+                    </div>
+                    <div style={{ height: '300px' }}>
+                        <canvas ref={chartRef}></canvas>
+                    </div>
+                </div>
+            );
+        };
+
+        // 店舗別売上チャート
+        const BranchSalesChart = ({ data, targetMonths, selectedBranches }) => {
+            const chartRef = useRef(null);
+            const chartInstanceRef = useRef(null);
+
+            useEffect(() => {
+                if (!chartRef.current || !data || targetMonths.length === 0) return;
+
+                if (chartInstanceRef.current) {
+                    chartInstanceRef.current.destroy();
+                }
+
+                // 店舗ごと、月ごとにデータを集計
+                const branchMonthlyData = {};
+                selectedBranches.forEach(branch => {
+                    branchMonthlyData[branch] = {};
+                    targetMonths.forEach(month => {
+                        const monthData = data.filter(d => d.branch === branch && d.month === month);
+                        branchMonthlyData[branch][month] = monthData.reduce((sum, d) => sum + (d.individualSales || 0), 0);
+                    });
+                });
+
+                const colors = [
+                    'rgb(59, 130, 246)',
+                    'rgb(16, 185, 129)',
+                    'rgb(251, 146, 60)',
+                    'rgb(139, 92, 246)',
+                    'rgb(236, 72, 153)',
+                    'rgb(245, 158, 11)'
+                ];
+
+                const datasets = selectedBranches.map((branch, idx) => ({
+                    label: branch,
+                    data: targetMonths.slice().reverse().map(m => branchMonthlyData[branch][m] || 0),
+                    backgroundColor: colors[idx % colors.length].replace('rgb', 'rgba').replace(')', ', 0.2)'),
+                    borderColor: colors[idx % colors.length],
+                    borderWidth: 2,
+                    tension: 0.4
+                }));
+
+                const ctx = chartRef.current.getContext('2d');
+                chartInstanceRef.current = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: targetMonths.slice().reverse(),
+                        datasets: datasets
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: 'top'
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                ticks: {
+                                    callback: function(value) {
+                                        return '¥' + value.toLocaleString();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+
+                return () => {
+                    if (chartInstanceRef.current) {
+                        chartInstanceRef.current.destroy();
+                    }
+                };
+            }, [data, targetMonths, selectedBranches]);
+
+            return (
+                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                    <div className="flex items-center gap-2 mb-6">
+                        <div className="text-indigo-600"><MapPin size={20} /></div>
+                        <h3 className="text-xl font-black">店舗ごとの売上推移</h3>
+                    </div>
+                    <div style={{ height: '300px' }}>
+                        <canvas ref={chartRef}></canvas>
+                    </div>
+                </div>
+            );
+        };
+
+        // 口コミ数チャート
+        const ReviewsChart = ({ data, targetMonths }) => {
+            const chartRef = useRef(null);
+            const chartInstanceRef = useRef(null);
+
+            useEffect(() => {
+                if (!chartRef.current || !data || targetMonths.length === 0) return;
+
+                if (chartInstanceRef.current) {
+                    chartInstanceRef.current.destroy();
+                }
+
+                // 月ごとに集計
+                const monthlyGReviews = {};
+                const monthlyHReviews = {};
+                targetMonths.forEach(month => {
+                    const monthData = data.filter(d => d.month === month);
+                    monthlyGReviews[month] = monthData.reduce((sum, d) => sum + (d.gReviews || 0), 0);
+                    monthlyHReviews[month] = monthData.reduce((sum, d) => sum + (d.hReviews || 0), 0);
+                });
+
+                const ctx = chartRef.current.getContext('2d');
+                chartInstanceRef.current = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: targetMonths.slice().reverse(),
+                        datasets: [
+                            {
+                                label: 'Google口コミ',
+                                data: targetMonths.slice().reverse().map(m => monthlyGReviews[m] || 0),
+                                backgroundColor: 'rgba(71, 85, 105, 0.7)',
+                                borderColor: 'rgb(71, 85, 105)',
+                                borderWidth: 2
+                            },
+                            {
+                                label: 'Hotpepper口コミ',
+                                data: targetMonths.slice().reverse().map(m => monthlyHReviews[m] || 0),
+                                backgroundColor: 'rgba(236, 72, 153, 0.7)',
+                                borderColor: 'rgb(236, 72, 153)',
+                                borderWidth: 2
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: 'top'
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                ticks: {
+                                    stepSize: 1
+                                }
+                            }
+                        }
+                    }
+                });
+
+                return () => {
+                    if (chartInstanceRef.current) {
+                        chartInstanceRef.current.destroy();
+                    }
+                };
+            }, [data, targetMonths]);
+
+            return (
+                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                    <div className="flex items-center gap-2 mb-6">
+                        <div className="text-indigo-600"><MessageSquare size={20} /></div>
+                        <h3 className="text-xl font-black">口コミ数推移</h3>
+                    </div>
+                    <div style={{ height: '300px' }}>
+                        <canvas ref={chartRef}></canvas>
+                    </div>
+                </div>
+            );
+        };
+
+        // 店舗数増減チャート
+        const BranchCountChart = ({ data, targetMonths }) => {
+            const chartRef = useRef(null);
+            const chartInstanceRef = useRef(null);
+
+            useEffect(() => {
+                if (!chartRef.current || !data || targetMonths.length === 0) return;
+
+                if (chartInstanceRef.current) {
+                    chartInstanceRef.current.destroy();
+                }
+
+                // 月ごとのユニークな店舗数を計算
+                const monthlyBranchCount = {};
+                targetMonths.forEach(month => {
+                    const monthData = data.filter(d => d.month === month);
+                    const uniqueBranches = new Set(monthData.map(d => d.branch));
+                    monthlyBranchCount[month] = uniqueBranches.size;
+                });
+
+                const ctx = chartRef.current.getContext('2d');
+                chartInstanceRef.current = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: targetMonths.slice().reverse(),
+                        datasets: [{
+                            label: '店舗数',
+                            data: targetMonths.slice().reverse().map(m => monthlyBranchCount[m] || 0),
+                            backgroundColor: 'rgba(99, 102, 241, 0.2)',
+                            borderColor: 'rgb(99, 102, 241)',
+                            borderWidth: 3,
+                            tension: 0.4,
+                            fill: true
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                display: false
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                ticks: {
+                                    stepSize: 1
+                                }
+                            }
+                        }
+                    }
+                });
+
+                return () => {
+                    if (chartInstanceRef.current) {
+                        chartInstanceRef.current.destroy();
+                    }
+                };
+            }, [data, targetMonths]);
+
+            return (
+                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                    <div className="flex items-center gap-2 mb-6">
+                        <div className="text-indigo-600"><Activity size={20} /></div>
+                        <h3 className="text-xl font-black">店舗数の増減</h3>
+                    </div>
+                    <div style={{ height: '300px' }}>
+                        <canvas ref={chartRef}></canvas>
+                    </div>
+                </div>
+            );
+        };
 
         const Sidebar = ({ currentPage, setCurrentPage }) => {
             const menuItems = [

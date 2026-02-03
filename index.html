@@ -577,10 +577,16 @@
             // スタッフ統計: 全スタッフ数と110万円超え人数
             const staffStats = useMemo(() => {
                 // ユニークなスタッフを取得（名前+店舗の組み合わせ）
+                // ヘルプを除外
                 const uniqueStaff = new Set();
                 let over110MCount = 0;
 
                 filteredData.forEach(d => {
+                    // ヘルプを除外
+                    if (d.name && d.name.includes('ヘルプ')) {
+                        return;
+                    }
+
                     const staffKey = `${d.name}_${d.branch}`;
                     uniqueStaff.add(staffKey);
 
@@ -590,9 +596,13 @@
                     }
                 });
 
+                const totalStaff = uniqueStaff.size;
+                const percentage = totalStaff > 0 ? Math.round((over110MCount / totalStaff) * 100) : 0;
+
                 return {
-                    totalStaff: uniqueStaff.size,
-                    over110MCount: over110MCount
+                    totalStaff: totalStaff,
+                    over110MCount: over110MCount,
+                    percentage: percentage
                 };
             }, [filteredData]);
 
@@ -884,12 +894,12 @@
                                             <span className="flex items-center gap-2"><Users size={14} /> スタッフ統計</span>
                                             <Trophy size={16} className="opacity-20" />
                                         </h3>
-                                        <div className="space-y-6">
+                                        <div className="space-y-4">
                                             {/* 全スタッフ数 */}
                                             <div className="text-center p-6 bg-gradient-to-br from-indigo-50 to-blue-50 rounded-2xl border border-indigo-100">
                                                 <div className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2">全スタッフ</div>
                                                 <div className="text-4xl font-black text-indigo-600">{staffStats.totalStaff}</div>
-                                                <div className="text-xs font-bold text-slate-500 mt-1">名</div>
+                                                <div className="text-xs font-bold text-slate-500 mt-1">名 (ヘルプ除く)</div>
                                             </div>
 
                                             {/* 110万円超え人数 */}
@@ -897,6 +907,13 @@
                                                 <div className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2">110万円超え</div>
                                                 <div className="text-4xl font-black text-emerald-600">{staffStats.over110MCount}</div>
                                                 <div className="text-xs font-bold text-slate-500 mt-1">名</div>
+                                            </div>
+
+                                            {/* パーセント表示 */}
+                                            <div className="text-center p-6 bg-gradient-to-br from-amber-50 to-yellow-50 rounded-2xl border border-amber-100">
+                                                <div className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2">達成率</div>
+                                                <div className="text-4xl font-black text-amber-600">{staffStats.percentage}%</div>
+                                                <div className="text-xs font-bold text-slate-500 mt-1">110万円超え / 全スタッフ</div>
                                             </div>
                                         </div>
                                     </div>

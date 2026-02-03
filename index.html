@@ -17,6 +17,9 @@
     <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" onload="console.log('✅ Chart.js loaded')" onerror="console.error('❌ Failed to load Chart.js')"></script>
 
+    <!-- Chart.js DataLabels Plugin -->
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js" onload="console.log('✅ Chart.js DataLabels loaded')" onerror="console.error('❌ Failed to load Chart.js DataLabels')"></script>
+
     <script>
         console.log('🌐 Document loaded, waiting for external scripts...');
     </script>
@@ -117,6 +120,7 @@
         );
 
         const TrendingUp = (props) => <Icon {...props}><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></Icon>;
+        const TrendingDown = (props) => <Icon {...props}><polyline points="23 18 13.5 8.5 8.5 13.5 1 6"/><polyline points="17 18 23 18 23 12"/></Icon>;
         const Users = (props) => <Icon {...props}><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></Icon>;
         const Target = (props) => <Icon {...props}><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></Icon>;
         const Calendar = (props) => <Icon {...props}><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></Icon>;
@@ -1350,27 +1354,31 @@
 
                                         {selectedMetrics.includes('totalSales') && (
                                             <ChartCard
-                                                title="全体売り上げ推移"
+                                                title="全体売り上げ推移（総売上 個別税込）"
                                                 icon={<DollarSign size={20} />}
                                                 data={filteredData}
                                                 targetMonths={targetMonths}
                                                 type="line"
                                                 dataKey="individualSales"
                                                 label="売上"
-                                                color="rgb(59, 130, 246)"
+                                                color="rgb(16, 185, 129)"
+                                                aggregation="sum"
+                                                isCurrency={true}
                                             />
                                         )}
 
                                         {selectedMetrics.includes('productivity') && (
                                             <ChartCard
-                                                title="個人生産性（平均）推移"
+                                                title="個人生産性推移（生産性 売上）"
                                                 icon={<TrendingUp size={20} />}
                                                 data={filteredData}
                                                 targetMonths={targetMonths}
                                                 type="line"
-                                                dataKey="productivity"
+                                                dataKey="individualSales"
                                                 label="生産性"
-                                                color="rgb(16, 185, 129)"
+                                                color="rgb(59, 130, 246)"
+                                                aggregation="average"
+                                                isCurrency={true}
                                             />
                                         )}
 
@@ -1392,6 +1400,8 @@
                                                 dataKey="newCount"
                                                 label="新規数"
                                                 color="rgb(99, 102, 241)"
+                                                aggregation="sum"
+                                                isCurrency={false}
                                             />
                                         )}
 
@@ -1620,10 +1630,38 @@
             );
         };
 
-        // 汎用チャートコンポーネント
-        const ChartCard = ({ title, icon, data, targetMonths, type, dataKey, label, color }) => {
+        // 汎用チャートコンポーネント（ピッチ資料レベル）
+        const ChartCard = ({ title, icon, data, targetMonths, type, dataKey, label, color, aggregation = 'average', isCurrency = true }) => {
             const chartRef = useRef(null);
             const chartInstanceRef = useRef(null);
+
+            // データ計算とサマリー統計
+            const { monthlyData, totalValue, lastMonthValue, prevMonthValue, changePercent } = useMemo(() => {
+                const monthly = {};
+                targetMonths.forEach(month => {
+                    const monthData = data.filter(d => d.month === month);
+                    if (monthData.length > 0) {
+                        const total = monthData.reduce((sum, d) => sum + (d[dataKey] || 0), 0);
+                        monthly[month] = aggregation === 'sum' ? total : Math.round(total / monthData.length);
+                    } else {
+                        monthly[month] = 0;
+                    }
+                });
+
+                const values = targetMonths.map(m => monthly[m] || 0);
+                const total = values.reduce((sum, v) => sum + v, 0);
+                const lastMonth = values[values.length - 1] || 0;
+                const prevMonth = values[values.length - 2] || 0;
+                const change = prevMonth !== 0 ? ((lastMonth - prevMonth) / prevMonth * 100).toFixed(1) : 0;
+
+                return {
+                    monthlyData: monthly,
+                    totalValue: total,
+                    lastMonthValue: lastMonth,
+                    prevMonthValue: prevMonth,
+                    changePercent: change
+                };
+            }, [data, targetMonths, dataKey, aggregation]);
 
             useEffect(() => {
                 if (!chartRef.current || !data || targetMonths.length === 0) return;
@@ -1633,30 +1671,28 @@
                     chartInstanceRef.current.destroy();
                 }
 
-                // 月ごとにデータを集計
-                const monthlyData = {};
-                targetMonths.forEach(month => {
-                    const monthData = data.filter(d => d.month === month);
-                    if (monthData.length > 0) {
-                        const total = monthData.reduce((sum, d) => sum + (d[dataKey] || 0), 0);
-                        monthlyData[month] = type === 'bar' ? total : Math.round(total / monthData.length);
-                    } else {
-                        monthlyData[month] = 0;
-                    }
-                });
-
                 const ctx = chartRef.current.getContext('2d');
+                const chartData = targetMonths.slice().reverse().map(m => monthlyData[m] || 0);
+
                 chartInstanceRef.current = new Chart(ctx, {
                     type: type,
                     data: {
                         labels: targetMonths.slice().reverse(),
                         datasets: [{
                             label: label,
-                            data: targetMonths.slice().reverse().map(m => monthlyData[m] || 0),
-                            backgroundColor: color.replace('rgb', 'rgba').replace(')', ', 0.2)'),
+                            data: chartData,
+                            backgroundColor: type === 'bar'
+                                ? chartData.map(val => color.replace('rgb', 'rgba').replace(')', ', 0.7)'))
+                                : color.replace('rgb', 'rgba').replace(')', ', 0.15)'),
                             borderColor: color,
-                            borderWidth: 2,
-                            tension: 0.4
+                            borderWidth: 3,
+                            tension: 0.4,
+                            fill: true,
+                            pointRadius: 6,
+                            pointHoverRadius: 8,
+                            pointBackgroundColor: '#ffffff',
+                            pointBorderWidth: 3,
+                            pointHoverBorderWidth: 4
                         }]
                     },
                     options: {
@@ -1665,19 +1701,78 @@
                         plugins: {
                             legend: {
                                 display: false
+                            },
+                            tooltip: {
+                                backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                                padding: 12,
+                                titleFont: {
+                                    size: 14,
+                                    weight: 'bold'
+                                },
+                                bodyFont: {
+                                    size: 16,
+                                    weight: 'bold'
+                                },
+                                callbacks: {
+                                    label: function(context) {
+                                        if (isCurrency) {
+                                            return label + ': ¥' + context.parsed.y.toLocaleString();
+                                        }
+                                        return label + ': ' + context.parsed.y.toLocaleString();
+                                    }
+                                }
+                            },
+                            datalabels: {
+                                display: true,
+                                color: '#1e293b',
+                                font: {
+                                    weight: 'bold',
+                                    size: 11
+                                },
+                                formatter: function(value) {
+                                    if (isCurrency) {
+                                        return '¥' + (value / 10000).toFixed(0) + '万';
+                                    }
+                                    return value.toLocaleString();
+                                },
+                                anchor: 'end',
+                                align: 'top',
+                                offset: 4
                             }
                         },
                         scales: {
+                            x: {
+                                grid: {
+                                    display: false
+                                },
+                                ticks: {
+                                    font: {
+                                        size: 12,
+                                        weight: 'bold'
+                                    }
+                                }
+                            },
                             y: {
                                 beginAtZero: true,
+                                grid: {
+                                    color: 'rgba(0, 0, 0, 0.05)'
+                                },
                                 ticks: {
+                                    font: {
+                                        size: 12,
+                                        weight: 'bold'
+                                    },
                                     callback: function(value) {
-                                        return '¥' + value.toLocaleString();
+                                        if (isCurrency) {
+                                            return '¥' + (value / 10000).toFixed(0) + '万';
+                                        }
+                                        return value.toLocaleString();
                                     }
                                 }
                             }
                         }
-                    }
+                    },
+                    plugins: [ChartDataLabels]
                 });
 
                 return () => {
@@ -1685,25 +1780,83 @@
                         chartInstanceRef.current.destroy();
                     }
                 };
-            }, [data, targetMonths, type, dataKey]);
+            }, [data, targetMonths, type, dataKey, monthlyData, isCurrency]);
+
+            const formatValue = (val) => {
+                if (isCurrency) {
+                    return '¥' + val.toLocaleString();
+                }
+                return val.toLocaleString();
+            };
 
             return (
-                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
-                    <div className="flex items-center gap-2 mb-6">
-                        <div className="text-indigo-600">{icon}</div>
-                        <h3 className="text-xl font-black">{title}</h3>
+                <div className="bg-white rounded-3xl shadow-lg border-2 border-slate-200 overflow-hidden hover:shadow-xl transition-shadow">
+                    <div className="bg-gradient-to-r from-indigo-50 to-blue-50 p-6 border-b-2 border-slate-200">
+                        <div className="flex items-center justify-between mb-4">
+                            <div className="flex items-center gap-3">
+                                <div className="text-indigo-600 bg-white p-3 rounded-xl shadow-sm">{icon}</div>
+                                <h3 className="text-2xl font-black text-slate-900">{title}</h3>
+                            </div>
+                        </div>
+
+                        {/* サマリー統計 */}
+                        <div className="grid grid-cols-3 gap-4 mt-4">
+                            <div className="bg-white p-4 rounded-xl shadow-sm">
+                                <div className="text-xs font-black text-slate-400 uppercase tracking-wider mb-1">
+                                    {aggregation === 'sum' ? '合計' : '期間平均'}
+                                </div>
+                                <div className="text-xl font-black text-slate-900">{formatValue(aggregation === 'sum' ? totalValue : Math.round(totalValue / targetMonths.length))}</div>
+                            </div>
+                            <div className="bg-white p-4 rounded-xl shadow-sm">
+                                <div className="text-xs font-black text-slate-400 uppercase tracking-wider mb-1">最新月</div>
+                                <div className="text-xl font-black text-slate-900">{formatValue(lastMonthValue)}</div>
+                            </div>
+                            <div className="bg-white p-4 rounded-xl shadow-sm">
+                                <div className="text-xs font-black text-slate-400 uppercase tracking-wider mb-1">前月比</div>
+                                <div className={`text-xl font-black ${changePercent >= 0 ? 'text-emerald-600' : 'text-rose-600'} flex items-center gap-1`}>
+                                    {changePercent >= 0 ? <TrendingUp size={20} /> : <TrendingDown size={20} />}
+                                    {changePercent >= 0 ? '+' : ''}{changePercent}%
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                    <div style={{ height: '300px' }}>
-                        <canvas ref={chartRef}></canvas>
+
+                    <div className="p-6">
+                        <div style={{ height: '500px' }}>
+                            <canvas ref={chartRef}></canvas>
+                        </div>
                     </div>
                 </div>
             );
         };
 
-        // 店舗別売上チャート
+        // 店舗別売上チャート（ピッチ資料レベル）
         const BranchSalesChart = ({ data, targetMonths, selectedBranches }) => {
             const chartRef = useRef(null);
             const chartInstanceRef = useRef(null);
+
+            // データ計算とサマリー統計
+            const { branchMonthlyData, branchTotals } = useMemo(() => {
+                const monthly = {};
+                const totals = {};
+
+                selectedBranches.forEach(branch => {
+                    monthly[branch] = {};
+                    let total = 0;
+                    targetMonths.forEach(month => {
+                        const monthData = data.filter(d => d.branch === branch && d.month === month);
+                        const monthTotal = monthData.reduce((sum, d) => sum + (d.individualSales || 0), 0);
+                        monthly[branch][month] = monthTotal;
+                        total += monthTotal;
+                    });
+                    totals[branch] = total;
+                });
+
+                return {
+                    branchMonthlyData: monthly,
+                    branchTotals: totals
+                };
+            }, [data, targetMonths, selectedBranches]);
 
             useEffect(() => {
                 if (!chartRef.current || !data || targetMonths.length === 0) return;
@@ -1711,16 +1864,6 @@
                 if (chartInstanceRef.current) {
                     chartInstanceRef.current.destroy();
                 }
-
-                // 店舗ごと、月ごとにデータを集計
-                const branchMonthlyData = {};
-                selectedBranches.forEach(branch => {
-                    branchMonthlyData[branch] = {};
-                    targetMonths.forEach(month => {
-                        const monthData = data.filter(d => d.branch === branch && d.month === month);
-                        branchMonthlyData[branch][month] = monthData.reduce((sum, d) => sum + (d.individualSales || 0), 0);
-                    });
-                });
 
                 const colors = [
                     'rgb(59, 130, 246)',
@@ -1734,10 +1877,16 @@
                 const datasets = selectedBranches.map((branch, idx) => ({
                     label: branch,
                     data: targetMonths.slice().reverse().map(m => branchMonthlyData[branch][m] || 0),
-                    backgroundColor: colors[idx % colors.length].replace('rgb', 'rgba').replace(')', ', 0.2)'),
+                    backgroundColor: colors[idx % colors.length].replace('rgb', 'rgba').replace(')', ', 0.15)'),
                     borderColor: colors[idx % colors.length],
-                    borderWidth: 2,
-                    tension: 0.4
+                    borderWidth: 3,
+                    tension: 0.4,
+                    fill: true,
+                    pointRadius: 5,
+                    pointHoverRadius: 7,
+                    pointBackgroundColor: '#ffffff',
+                    pointBorderWidth: 2,
+                    pointHoverBorderWidth: 3
                 }));
 
                 const ctx = chartRef.current.getContext('2d');
@@ -1753,16 +1902,60 @@
                         plugins: {
                             legend: {
                                 display: true,
-                                position: 'top'
+                                position: 'top',
+                                labels: {
+                                    font: {
+                                        size: 14,
+                                        weight: 'bold'
+                                    },
+                                    padding: 15,
+                                    usePointStyle: true,
+                                    pointStyle: 'circle'
+                                }
+                            },
+                            tooltip: {
+                                backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                                padding: 12,
+                                titleFont: {
+                                    size: 14,
+                                    weight: 'bold'
+                                },
+                                bodyFont: {
+                                    size: 16,
+                                    weight: 'bold'
+                                },
+                                callbacks: {
+                                    label: function(context) {
+                                        return context.dataset.label + ': ¥' + context.parsed.y.toLocaleString();
+                                    }
+                                }
                             }
                         },
                         scales: {
+                            x: {
+                                grid: {
+                                    display: false
+                                },
+                                ticks: {
+                                    font: {
+                                        size: 12,
+                                        weight: 'bold'
+                                    }
+                                }
+                            },
                             y: {
                                 beginAtZero: true,
                                 ticks: {
+                                    font: {
+                                        size: 12,
+                                        weight: 'bold'
+                                    },
                                     callback: function(value) {
-                                        return '¥' + value.toLocaleString();
+                                        return '¥' + (value / 10000).toFixed(0) + '万';
                                     }
+                                },
+                                grid: {
+                                    color: 'rgba(0, 0, 0, 0.05)'
                                 }
                             }
                         }
@@ -1774,25 +1967,92 @@
                         chartInstanceRef.current.destroy();
                     }
                 };
-            }, [data, targetMonths, selectedBranches]);
+            }, [data, targetMonths, selectedBranches, branchMonthlyData]);
+
+            const formatYen = (val) => '¥' + val.toLocaleString();
 
             return (
-                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
-                    <div className="flex items-center gap-2 mb-6">
-                        <div className="text-indigo-600"><MapPin size={20} /></div>
-                        <h3 className="text-xl font-black">店舗ごとの売上推移</h3>
+                <div className="bg-white rounded-3xl shadow-lg border-2 border-slate-200 overflow-hidden hover:shadow-xl transition-shadow">
+                    <div className="bg-gradient-to-r from-blue-50 to-cyan-50 p-6 border-b-2 border-slate-200">
+                        <div className="flex items-center justify-between mb-4">
+                            <div className="flex items-center gap-3">
+                                <div className="text-blue-600 bg-white p-3 rounded-xl shadow-sm">
+                                    <MapPin size={24} />
+                                </div>
+                                <h3 className="text-2xl font-black text-slate-900">店舗ごとの売上推移</h3>
+                            </div>
+                        </div>
+
+                        {/* 店舗別サマリー */}
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mt-4">
+                            {selectedBranches.map((branch, idx) => {
+                                const colors = [
+                                    'from-blue-500 to-blue-600',
+                                    'from-emerald-500 to-emerald-600',
+                                    'from-orange-500 to-orange-600',
+                                    'from-purple-500 to-purple-600',
+                                    'from-pink-500 to-pink-600',
+                                    'from-amber-500 to-amber-600'
+                                ];
+                                return (
+                                    <div key={branch} className="bg-white p-3 rounded-xl shadow-sm">
+                                        <div className={`text-xs font-black text-white bg-gradient-to-r ${colors[idx % colors.length]} px-2 py-1 rounded-lg inline-block mb-2`}>
+                                            {branch}
+                                        </div>
+                                        <div className="text-lg font-black text-slate-900">{formatYen(branchTotals[branch])}</div>
+                                        <div className="text-xs text-slate-500 font-bold">期間合計</div>
+                                    </div>
+                                );
+                            })}
+                        </div>
                     </div>
-                    <div style={{ height: '300px' }}>
-                        <canvas ref={chartRef}></canvas>
+
+                    <div className="p-6">
+                        <div style={{ height: '500px' }}>
+                            <canvas ref={chartRef}></canvas>
+                        </div>
                     </div>
                 </div>
             );
         };
 
-        // 口コミ数チャート
+        // 口コミ数チャート（ピッチ資料レベル）
         const ReviewsChart = ({ data, targetMonths }) => {
             const chartRef = useRef(null);
             const chartInstanceRef = useRef(null);
+
+            // データ計算とサマリー統計
+            const { monthlyGReviews, monthlyHReviews, totalG, totalH, lastGCount, lastHCount, gChange, hChange } = useMemo(() => {
+                const monthlyG = {};
+                const monthlyH = {};
+                targetMonths.forEach(month => {
+                    const monthData = data.filter(d => d.month === month);
+                    monthlyG[month] = monthData.reduce((sum, d) => sum + (d.gReviews || 0), 0);
+                    monthlyH[month] = monthData.reduce((sum, d) => sum + (d.hReviews || 0), 0);
+                });
+
+                const gValues = targetMonths.map(m => monthlyG[m] || 0);
+                const hValues = targetMonths.map(m => monthlyH[m] || 0);
+                const gTotal = gValues.reduce((sum, v) => sum + v, 0);
+                const hTotal = hValues.reduce((sum, v) => sum + v, 0);
+                const lastG = gValues[gValues.length - 1] || 0;
+                const lastH = hValues[hValues.length - 1] || 0;
+                const prevG = gValues[gValues.length - 2] || 0;
+                const prevH = hValues[hValues.length - 2] || 0;
+                const gChangePercent = prevG !== 0 ? ((lastG - prevG) / prevG * 100).toFixed(1) : 0;
+                const hChangePercent = prevH !== 0 ? ((lastH - prevH) / prevH * 100).toFixed(1) : 0;
+
+                return {
+                    monthlyGReviews: monthlyG,
+                    monthlyHReviews: monthlyH,
+                    totalG: gTotal,
+                    totalH: hTotal,
+                    lastGCount: lastG,
+                    lastHCount: lastH,
+                    gChange: gChangePercent,
+                    hChange: hChangePercent
+                };
+            }, [data, targetMonths]);
 
             useEffect(() => {
                 if (!chartRef.current || !data || targetMonths.length === 0) return;
@@ -1801,16 +2061,10 @@
                     chartInstanceRef.current.destroy();
                 }
 
-                // 月ごとに集計
-                const monthlyGReviews = {};
-                const monthlyHReviews = {};
-                targetMonths.forEach(month => {
-                    const monthData = data.filter(d => d.month === month);
-                    monthlyGReviews[month] = monthData.reduce((sum, d) => sum + (d.gReviews || 0), 0);
-                    monthlyHReviews[month] = monthData.reduce((sum, d) => sum + (d.hReviews || 0), 0);
-                });
-
                 const ctx = chartRef.current.getContext('2d');
+                const gData = targetMonths.slice().reverse().map(m => monthlyGReviews[m] || 0);
+                const hData = targetMonths.slice().reverse().map(m => monthlyHReviews[m] || 0);
+
                 chartInstanceRef.current = new Chart(ctx, {
                     type: 'bar',
                     data: {
@@ -1818,17 +2072,19 @@
                         datasets: [
                             {
                                 label: 'Google口コミ',
-                                data: targetMonths.slice().reverse().map(m => monthlyGReviews[m] || 0),
+                                data: gData,
                                 backgroundColor: 'rgba(71, 85, 105, 0.7)',
                                 borderColor: 'rgb(71, 85, 105)',
-                                borderWidth: 2
+                                borderWidth: 2,
+                                borderRadius: 8
                             },
                             {
                                 label: 'Hotpepper口コミ',
-                                data: targetMonths.slice().reverse().map(m => monthlyHReviews[m] || 0),
+                                data: hData,
                                 backgroundColor: 'rgba(236, 72, 153, 0.7)',
                                 borderColor: 'rgb(236, 72, 153)',
-                                borderWidth: 2
+                                borderWidth: 2,
+                                borderRadius: 8
                             }
                         ]
                     },
@@ -1838,18 +2094,80 @@
                         plugins: {
                             legend: {
                                 display: true,
-                                position: 'top'
+                                position: 'top',
+                                labels: {
+                                    font: {
+                                        size: 14,
+                                        weight: 'bold'
+                                    },
+                                    padding: 15,
+                                    usePointStyle: true,
+                                    pointStyle: 'circle'
+                                }
+                            },
+                            tooltip: {
+                                backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                                padding: 12,
+                                titleFont: {
+                                    size: 14,
+                                    weight: 'bold'
+                                },
+                                bodyFont: {
+                                    size: 16,
+                                    weight: 'bold'
+                                },
+                                callbacks: {
+                                    label: function(context) {
+                                        return context.dataset.label + ': ' + context.parsed.y + '件';
+                                    }
+                                }
+                            },
+                            datalabels: {
+                                display: true,
+                                color: '#1e293b',
+                                font: {
+                                    weight: 'bold',
+                                    size: 11
+                                },
+                                formatter: function(value) {
+                                    return value + '件';
+                                },
+                                anchor: 'end',
+                                align: 'top',
+                                offset: 2
                             }
                         },
                         scales: {
+                            x: {
+                                grid: {
+                                    display: false
+                                },
+                                ticks: {
+                                    font: {
+                                        size: 12,
+                                        weight: 'bold'
+                                    }
+                                }
+                            },
                             y: {
                                 beginAtZero: true,
                                 ticks: {
-                                    stepSize: 1
+                                    stepSize: 1,
+                                    font: {
+                                        size: 12,
+                                        weight: 'bold'
+                                    },
+                                    callback: function(value) {
+                                        return value + '件';
+                                    }
+                                },
+                                grid: {
+                                    color: 'rgba(0, 0, 0, 0.05)'
                                 }
                             }
                         }
-                    }
+                    },
+                    plugins: [ChartDataLabels]
                 });
 
                 return () => {
@@ -1857,25 +2175,97 @@
                         chartInstanceRef.current.destroy();
                     }
                 };
-            }, [data, targetMonths]);
+            }, [data, targetMonths, monthlyGReviews, monthlyHReviews]);
 
             return (
-                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
-                    <div className="flex items-center gap-2 mb-6">
-                        <div className="text-indigo-600"><MessageSquare size={20} /></div>
-                        <h3 className="text-xl font-black">口コミ数推移</h3>
+                <div className="bg-white rounded-3xl shadow-lg border-2 border-slate-200 overflow-hidden hover:shadow-xl transition-shadow">
+                    <div className="bg-gradient-to-r from-pink-50 to-rose-50 p-6 border-b-2 border-slate-200">
+                        <div className="flex items-center justify-between mb-4">
+                            <div className="flex items-center gap-3">
+                                <div className="text-pink-600 bg-white p-3 rounded-xl shadow-sm">
+                                    <MessageSquare size={24} />
+                                </div>
+                                <h3 className="text-2xl font-black text-slate-900">口コミ数推移</h3>
+                            </div>
+                        </div>
+
+                        {/* サマリー統計 */}
+                        <div className="grid grid-cols-2 gap-4 mt-4">
+                            <div className="bg-white p-4 rounded-xl shadow-sm">
+                                <div className="text-xs font-black text-slate-400 uppercase tracking-wider mb-2">Google口コミ</div>
+                                <div className="flex items-center justify-between">
+                                    <div>
+                                        <div className="text-sm text-slate-600 font-bold">期間合計</div>
+                                        <div className="text-xl font-black text-slate-900">{totalG} 件</div>
+                                    </div>
+                                    <div>
+                                        <div className="text-sm text-slate-600 font-bold">最新月</div>
+                                        <div className="text-xl font-black text-slate-700">{lastGCount} 件</div>
+                                    </div>
+                                </div>
+                                <div className={`mt-2 text-sm font-black ${gChange >= 0 ? 'text-emerald-600' : 'text-rose-600'} flex items-center gap-1`}>
+                                    {gChange >= 0 ? <TrendingUp size={16} /> : <TrendingDown size={16} />}
+                                    前月比 {gChange >= 0 ? '+' : ''}{gChange}%
+                                </div>
+                            </div>
+                            <div className="bg-white p-4 rounded-xl shadow-sm">
+                                <div className="text-xs font-black text-slate-400 uppercase tracking-wider mb-2">Hotpepper口コミ</div>
+                                <div className="flex items-center justify-between">
+                                    <div>
+                                        <div className="text-sm text-slate-600 font-bold">期間合計</div>
+                                        <div className="text-xl font-black text-slate-900">{totalH} 件</div>
+                                    </div>
+                                    <div>
+                                        <div className="text-sm text-slate-600 font-bold">最新月</div>
+                                        <div className="text-xl font-black text-slate-700">{lastHCount} 件</div>
+                                    </div>
+                                </div>
+                                <div className={`mt-2 text-sm font-black ${hChange >= 0 ? 'text-emerald-600' : 'text-rose-600'} flex items-center gap-1`}>
+                                    {hChange >= 0 ? <TrendingUp size={16} /> : <TrendingDown size={16} />}
+                                    前月比 {hChange >= 0 ? '+' : ''}{hChange}%
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                    <div style={{ height: '300px' }}>
-                        <canvas ref={chartRef}></canvas>
+
+                    <div className="p-6">
+                        <div style={{ height: '500px' }}>
+                            <canvas ref={chartRef}></canvas>
+                        </div>
                     </div>
                 </div>
             );
         };
 
-        // 店舗数増減チャート
+        // 店舗数増減チャート（ピッチ資料レベル）
         const BranchCountChart = ({ data, targetMonths }) => {
             const chartRef = useRef(null);
             const chartInstanceRef = useRef(null);
+
+            // データ計算とサマリー統計
+            const { monthlyBranchCount, currentCount, prevCount, totalIncrease, changePercent } = useMemo(() => {
+                const monthly = {};
+                targetMonths.forEach(month => {
+                    const monthData = data.filter(d => d.month === month);
+                    const uniqueBranches = new Set(monthData.map(d => d.branch));
+                    monthly[month] = uniqueBranches.size;
+                });
+
+                const values = targetMonths.map(m => monthly[m] || 0);
+                const current = values[values.length - 1] || 0;
+                const prev = values[values.length - 2] || 0;
+                const first = values[0] || 0;
+                const increase = current - first;
+                const change = prev !== 0 ? ((current - prev) / prev * 100).toFixed(1) : 0;
+
+                return {
+                    monthlyBranchCount: monthly,
+                    currentCount: current,
+                    prevCount: prev,
+                    totalIncrease: increase,
+                    changePercent: change
+                };
+            }, [data, targetMonths]);
 
             useEffect(() => {
                 if (!chartRef.current || !data || targetMonths.length === 0) return;
@@ -1884,27 +2274,26 @@
                     chartInstanceRef.current.destroy();
                 }
 
-                // 月ごとのユニークな店舗数を計算
-                const monthlyBranchCount = {};
-                targetMonths.forEach(month => {
-                    const monthData = data.filter(d => d.month === month);
-                    const uniqueBranches = new Set(monthData.map(d => d.branch));
-                    monthlyBranchCount[month] = uniqueBranches.size;
-                });
-
                 const ctx = chartRef.current.getContext('2d');
+                const chartData = targetMonths.slice().reverse().map(m => monthlyBranchCount[m] || 0);
+
                 chartInstanceRef.current = new Chart(ctx, {
                     type: 'line',
                     data: {
                         labels: targetMonths.slice().reverse(),
                         datasets: [{
                             label: '店舗数',
-                            data: targetMonths.slice().reverse().map(m => monthlyBranchCount[m] || 0),
-                            backgroundColor: 'rgba(99, 102, 241, 0.2)',
-                            borderColor: 'rgb(99, 102, 241)',
+                            data: chartData,
+                            backgroundColor: 'rgba(139, 92, 246, 0.15)',
+                            borderColor: 'rgb(139, 92, 246)',
                             borderWidth: 3,
                             tension: 0.4,
-                            fill: true
+                            fill: true,
+                            pointRadius: 6,
+                            pointHoverRadius: 8,
+                            pointBackgroundColor: '#ffffff',
+                            pointBorderWidth: 3,
+                            pointHoverBorderWidth: 4
                         }]
                     },
                     options: {
@@ -1913,17 +2302,70 @@
                         plugins: {
                             legend: {
                                 display: false
+                            },
+                            tooltip: {
+                                backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                                padding: 12,
+                                titleFont: {
+                                    size: 14,
+                                    weight: 'bold'
+                                },
+                                bodyFont: {
+                                    size: 16,
+                                    weight: 'bold'
+                                },
+                                callbacks: {
+                                    label: function(context) {
+                                        return '店舗数: ' + context.parsed.y + '店舗';
+                                    }
+                                }
+                            },
+                            datalabels: {
+                                display: true,
+                                color: '#1e293b',
+                                font: {
+                                    weight: 'bold',
+                                    size: 12
+                                },
+                                formatter: function(value) {
+                                    return value + '店舗';
+                                },
+                                anchor: 'end',
+                                align: 'top',
+                                offset: 4
                             }
                         },
                         scales: {
+                            x: {
+                                grid: {
+                                    display: false
+                                },
+                                ticks: {
+                                    font: {
+                                        size: 12,
+                                        weight: 'bold'
+                                    }
+                                }
+                            },
                             y: {
                                 beginAtZero: true,
                                 ticks: {
-                                    stepSize: 1
+                                    stepSize: 1,
+                                    font: {
+                                        size: 12,
+                                        weight: 'bold'
+                                    },
+                                    callback: function(value) {
+                                        return value + '店舗';
+                                    }
+                                },
+                                grid: {
+                                    color: 'rgba(0, 0, 0, 0.05)'
                                 }
                             }
                         }
-                    }
+                    },
+                    plugins: [ChartDataLabels]
                 });
 
                 return () => {
@@ -1931,16 +2373,47 @@
                         chartInstanceRef.current.destroy();
                     }
                 };
-            }, [data, targetMonths]);
+            }, [data, targetMonths, monthlyBranchCount]);
 
             return (
-                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
-                    <div className="flex items-center gap-2 mb-6">
-                        <div className="text-indigo-600"><Activity size={20} /></div>
-                        <h3 className="text-xl font-black">店舗数の増減</h3>
+                <div className="bg-white rounded-3xl shadow-lg border-2 border-slate-200 overflow-hidden hover:shadow-xl transition-shadow">
+                    <div className="bg-gradient-to-r from-purple-50 to-indigo-50 p-6 border-b-2 border-slate-200">
+                        <div className="flex items-center justify-between mb-4">
+                            <div className="flex items-center gap-3">
+                                <div className="text-purple-600 bg-white p-3 rounded-xl shadow-sm">
+                                    <Activity size={24} />
+                                </div>
+                                <h3 className="text-2xl font-black text-slate-900">店舗数の増減</h3>
+                            </div>
+                        </div>
+
+                        {/* サマリー統計 */}
+                        <div className="grid grid-cols-3 gap-4 mt-4">
+                            <div className="bg-white p-4 rounded-xl shadow-sm">
+                                <div className="text-xs font-black text-slate-400 uppercase tracking-wider mb-1">現在の店舗数</div>
+                                <div className="text-xl font-black text-slate-900">{currentCount} 店舗</div>
+                            </div>
+                            <div className="bg-white p-4 rounded-xl shadow-sm">
+                                <div className="text-xs font-black text-slate-400 uppercase tracking-wider mb-1">期間内増減</div>
+                                <div className={`text-xl font-black ${totalIncrease >= 0 ? 'text-emerald-600' : 'text-rose-600'} flex items-center gap-1`}>
+                                    {totalIncrease >= 0 ? <TrendingUp size={20} /> : <TrendingDown size={20} />}
+                                    {totalIncrease >= 0 ? '+' : ''}{totalIncrease} 店舗
+                                </div>
+                            </div>
+                            <div className="bg-white p-4 rounded-xl shadow-sm">
+                                <div className="text-xs font-black text-slate-400 uppercase tracking-wider mb-1">前月比</div>
+                                <div className={`text-xl font-black ${changePercent >= 0 ? 'text-emerald-600' : 'text-rose-600'} flex items-center gap-1`}>
+                                    {changePercent >= 0 ? <TrendingUp size={20} /> : <TrendingDown size={20} />}
+                                    {changePercent >= 0 ? '+' : ''}{changePercent}%
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                    <div style={{ height: '300px' }}>
-                        <canvas ref={chartRef}></canvas>
+
+                    <div className="p-6">
+                        <div style={{ height: '500px' }}>
+                            <canvas ref={chartRef}></canvas>
+                        </div>
                     </div>
                 </div>
             );

@@ -149,11 +149,13 @@
         const Check = (props) => <Icon {...props}><polyline points="20 6 9 17 4 12"/></Icon>;
         const Trophy = (props) => <Icon {...props}><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></Icon>;
         const Home = (props) => <Icon {...props}><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></Icon>;
+        const Megaphone = (props) => <Icon {...props}><path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></Icon>;
 
         console.log('✅ All icon components defined');
 
         const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbxZKLuzLmqELFQlJVHQj-F8yCBDzrgTfa7P4xNMnG5ZhPk3f4jWL0ACdFPNFpg3ZUpG/exec';
         const CACHE_KEY = 'dashboard_data_cache';
+        const UI_STATE_KEY = 'dashboard_ui_state';
         const CACHE_EXPIRY_MS = 15 * 60 * 1000; // 15分
 
         // キャッシュヘルパー関数
@@ -191,31 +193,61 @@
             }
         };
 
+        // UI状態ヘルパー関数
+        const getUIState = () => {
+            try {
+                const saved = localStorage.getItem(UI_STATE_KEY);
+                if (!saved) return null;
+                const state = JSON.parse(saved);
+                // 日付文字列をDateオブジェクトに変換
+                if (state.startDate) state.startDate = new Date(state.startDate);
+                if (state.endDate) state.endDate = new Date(state.endDate);
+                console.log('📦 Loaded UI state from localStorage');
+                return state;
+            } catch (e) {
+                console.error('❌ UI state read error:', e);
+                return null;
+            }
+        };
+
+        const saveUIState = (state) => {
+            try {
+                localStorage.setItem(UI_STATE_KEY, JSON.stringify(state));
+                console.log('💾 UI state saved');
+            } catch (e) {
+                console.error('❌ UI state write error:', e);
+            }
+        };
+
         const App = () => {
             console.log('🎯 App component initializing...');
 
-            const [currentPage, setCurrentPage] = useState('dashboard');
+            // 保存されたUI状態を取得
+            const savedUIState = getUIState();
+
+            const [currentPage, setCurrentPage] = useState(savedUIState?.currentPage || 'dashboard');
             const [rawData, setRawData] = useState([]);
             const [loading, setLoading] = useState(true);
             const [error, setError] = useState(null);
             const [lastFetchTime, setLastFetchTime] = useState(null);
-            const [startMonth, setStartMonth] = useState("");
-            const [endMonth, setEndMonth] = useState("");
-            const [startDate, setStartDate] = useState(null);
-            const [endDate, setEndDate] = useState(null);
-            const [selectedBranches, setSelectedBranches] = useState([]);
+            const [startMonth, setStartMonth] = useState(savedUIState?.startMonth || "");
+            const [endMonth, setEndMonth] = useState(savedUIState?.endMonth || "");
+            const [startDate, setStartDate] = useState(savedUIState?.startDate || null);
+            const [endDate, setEndDate] = useState(savedUIState?.endDate || null);
+            const [selectedBranches, setSelectedBranches] = useState(savedUIState?.selectedBranches || []);
             const [searchTerm, setSearchTerm] = useState("");
             const [isBranchMenuOpen, setIsBranchMenuOpen] = useState(false);
             const [branchSearchTerm, setBranchSearchTerm] = useState("");
             const [isMobileView, setIsMobileView] = useState(false);
-            const [selectedStaffNames, setSelectedStaffNames] = useState([]);
+            const [selectedStaffNames, setSelectedStaffNames] = useState(savedUIState?.selectedStaffNames || []);
             const [isStaffMenuOpen, setIsStaffMenuOpen] = useState(false);
             const [staffSearchTerm, setStaffSearchTerm] = useState("");
-            const [selectedMetrics, setSelectedMetrics] = useState(['totalSales']);
+            const [selectedMetrics, setSelectedMetrics] = useState(savedUIState?.selectedMetrics || ['totalSales']);
+            const [uiStateLoaded, setUiStateLoaded] = useState(!!savedUIState);
             const branchMenuRef = useRef(null);
             const staffMenuRef = useRef(null);
 
-            console.log('✅ App state initialized');
+            console.log('✅ App state initialized', savedUIState ? '(from localStorage)' : '(default)');
 
             const fetchDataFromSpreadsheet = async (forceRefresh = false) => {
                 console.log('📡 Fetching data from GAS API... (forceRefresh:', forceRefresh, ')');
@@ -232,8 +264,8 @@
                             console.log('💾 Using cached data:', cachedData.length, 'records');
                             setRawData(cachedData);
 
-                            // 初期選択を設定
-                            if (cachedData.length > 0) {
+                            // 初期選択を設定（保存されたUI状態がない場合のみ）
+                            if (cachedData.length > 0 && !savedUIState) {
                                 const sortedMonths = Array.from(new Set(cachedData.map(d => d.month))).sort((a, b) => {
                                     const [ay, am] = a.replace('年', '-').replace('月', '').split('-');
                                     const [by, bm] = b.replace('年', '-').replace('月', '').split('-');
@@ -293,7 +325,8 @@
                             setCachedData(fetchedData);
                         }
 
-                        if (fetchedData.length > 0) {
+                        // 初期選択を設定（保存されたUI状態がない場合のみ）
+                        if (fetchedData.length > 0 && !savedUIState) {
                             const sortedMonths = Array.from(new Set(fetchedData.map(d => d.month))).sort((a, b) => {
                                 const [ay, am] = a.replace('年', '-').replace('月', '').split('-');
                                 const [by, bm] = b.replace('年', '-').replace('月', '').split('-');
@@ -358,6 +391,25 @@
                     console.log('🧹 Cleanup: Click outside listener removed');
                 };
             }, []);
+
+            // UI状態が変更されたらlocalStorageに保存
+            useEffect(() => {
+                // 初回ロード時は保存しない（データ取得後に初期値が設定されるため）
+                if (!uiStateLoaded && !startMonth) return;
+
+                const uiState = {
+                    currentPage,
+                    startMonth,
+                    endMonth,
+                    startDate: startDate ? startDate.toISOString() : null,
+                    endDate: endDate ? endDate.toISOString() : null,
+                    selectedBranches,
+                    selectedStaffNames,
+                    selectedMetrics
+                };
+                saveUIState(uiState);
+                setUiStateLoaded(true);
+            }, [currentPage, startMonth, endMonth, startDate, endDate, selectedBranches, selectedStaffNames, selectedMetrics]);
 
             const months = useMemo(() => {
                 return Array.from(new Set(rawData.map(d => d.month))).sort((a, b) => {
@@ -1435,6 +1487,153 @@
                                 </div>
                             </div>
                         )}
+
+                        {/* マーケティング */}
+                        {currentPage === 'marketing' && (
+                            <div className="p-4 lg:p-6 font-sans text-slate-900">
+                                <div className="max-w-[1600px] mx-auto space-y-6">
+                                    <header className="bg-white rounded-3xl shadow-sm border border-slate-200 p-6 mb-6">
+                                        <div className="flex items-center gap-4 mb-4">
+                                            <div className="p-3 bg-gradient-to-br from-purple-500 to-pink-500 rounded-2xl text-white shadow-lg">
+                                                <Megaphone size={28} />
+                                            </div>
+                                            <div>
+                                                <div className="inline-flex items-center gap-2 px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-xs font-black uppercase tracking-widest mb-2">
+                                                    <Megaphone size={14} /> Marketing Dashboard
+                                                </div>
+                                                <h1 className="text-3xl font-black tracking-tight text-slate-900 italic">マーケティングダッシュボード</h1>
+                                            </div>
+                                        </div>
+                                        <p className="text-slate-600 font-bold">
+                                            別のスプレッドシートからマーケティングデータを取得してダッシュボード化できます。
+                                        </p>
+                                    </header>
+
+                                    {/* セットアップ手順 */}
+                                    <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-8">
+                                        <h2 className="text-2xl font-black text-slate-900 mb-6 flex items-center gap-3">
+                                            <Info size={24} className="text-indigo-500" />
+                                            GASセットアップ手順
+                                        </h2>
+
+                                        <div className="space-y-6">
+                                            {/* Step 1 */}
+                                            <div className="flex gap-4">
+                                                <div className="flex-shrink-0 w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-black text-lg">1</div>
+                                                <div className="flex-1">
+                                                    <h3 className="text-lg font-black text-slate-900 mb-2">スプレッドシートを準備</h3>
+                                                    <p className="text-slate-600 font-bold mb-3">マーケティングデータが入力されたGoogleスプレッドシートを用意します。</p>
+                                                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                                                        <p className="text-sm text-slate-600 font-bold">例：列構成</p>
+                                                        <code className="text-xs text-indigo-600 bg-indigo-50 px-2 py-1 rounded">日付 | 媒体名 | 広告費 | クリック数 | CV数 | CPA</code>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* Step 2 */}
+                                            <div className="flex gap-4">
+                                                <div className="flex-shrink-0 w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-black text-lg">2</div>
+                                                <div className="flex-1">
+                                                    <h3 className="text-lg font-black text-slate-900 mb-2">Apps Scriptエディタを開く</h3>
+                                                    <p className="text-slate-600 font-bold mb-3">スプレッドシートのメニューから「拡張機能」→「Apps Script」を選択します。</p>
+                                                </div>
+                                            </div>
+
+                                            {/* Step 3 */}
+                                            <div className="flex gap-4">
+                                                <div className="flex-shrink-0 w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-black text-lg">3</div>
+                                                <div className="flex-1">
+                                                    <h3 className="text-lg font-black text-slate-900 mb-2">GASコードを作成</h3>
+                                                    <p className="text-slate-600 font-bold mb-3">以下のようなコードをコピーして貼り付けます：</p>
+                                                    <div className="bg-slate-900 p-4 rounded-xl text-green-400 font-mono text-xs overflow-x-auto">
+                                                        <pre>{`// スプレッドシートIDを設定
+const SPREADSHEET_ID = 'あなたのスプレッドシートID';
+const SHEET_NAME = 'シート名';
+
+function doGet(e) {
+  try {
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const sheet = ss.getSheetByName(SHEET_NAME);
+    const data = sheet.getDataRange().getValues();
+
+    // ヘッダー行を取得
+    const headers = data[0];
+
+    // データを整形
+    const formattedData = data.slice(1).map(row => {
+      const obj = {};
+      headers.forEach((header, i) => {
+        obj[header] = row[i];
+      });
+      return obj;
+    });
+
+    return ContentService
+      .createTextOutput(JSON.stringify({
+        success: true,
+        data: formattedData
+      }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (error) {
+    return ContentService
+      .createTextOutput(JSON.stringify({
+        success: false,
+        error: error.toString()
+      }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}`}</pre>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* Step 4 */}
+                                            <div className="flex gap-4">
+                                                <div className="flex-shrink-0 w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-black text-lg">4</div>
+                                                <div className="flex-1">
+                                                    <h3 className="text-lg font-black text-slate-900 mb-2">ウェブアプリとしてデプロイ</h3>
+                                                    <ol className="list-decimal list-inside text-slate-600 font-bold space-y-2">
+                                                        <li>「デプロイ」→「新しいデプロイ」をクリック</li>
+                                                        <li>種類で「ウェブアプリ」を選択</li>
+                                                        <li>「次のユーザーとして実行」: 自分</li>
+                                                        <li>「アクセスできるユーザー」: 全員</li>
+                                                        <li>「デプロイ」をクリック</li>
+                                                        <li>表示されるURLをコピー</li>
+                                                    </ol>
+                                                </div>
+                                            </div>
+
+                                            {/* Step 5 */}
+                                            <div className="flex gap-4">
+                                                <div className="flex-shrink-0 w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-black text-lg">5</div>
+                                                <div className="flex-1">
+                                                    <h3 className="text-lg font-black text-slate-900 mb-2">ダッシュボードに統合</h3>
+                                                    <p className="text-slate-600 font-bold mb-3">取得したURLを使用してデータをフェッチし、このダッシュボードに表示できます。</p>
+                                                    <div className="bg-amber-50 p-4 rounded-xl border border-amber-200">
+                                                        <p className="text-sm text-amber-800 font-bold flex items-center gap-2">
+                                                            <AlertCircle size={16} />
+                                                            ヒント: 既存のgas-code.gsを参考にして、マーケティング用のデータフォーマットを定義してください。
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* 開発中メッセージ */}
+                                    <div className="bg-gradient-to-br from-purple-50 to-pink-50 rounded-3xl shadow-sm border-2 border-purple-200 p-8 text-center">
+                                        <Megaphone size={64} className="mx-auto text-purple-400 mb-4" />
+                                        <h2 className="text-2xl font-black text-slate-900 mb-2">マーケティングダッシュボード</h2>
+                                        <p className="text-slate-500 font-bold mb-4">
+                                            上記の手順でGASを設定した後、このページにマーケティングデータを表示できるようになります。
+                                        </p>
+                                        <p className="text-sm text-purple-600 font-bold">
+                                            広告費、CVR、CPA、ROASなどの指標を可視化予定
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             );
@@ -1442,7 +1641,7 @@
 
         // --- Sub-Components ---
 
-        // 日付範囲選択コンポーネント
+        // 日付範囲選択コンポーネント（改良版）
         const DateRangePicker = ({ startDate, endDate, onDateChange, months }) => {
             const [isOpen, setIsOpen] = useState(false);
             const [viewDate, setViewDate] = useState(new Date());
@@ -1469,11 +1668,9 @@
                 const startingDayOfWeek = firstDay.getDay();
 
                 const days = [];
-                // 前月の日付で埋める
                 for (let i = 0; i < startingDayOfWeek; i++) {
                     days.push(null);
                 }
-                // 今月の日付
                 for (let i = 1; i <= daysInMonth; i++) {
                     days.push(new Date(year, month, i));
                 }
@@ -1494,16 +1691,19 @@
                 if (!date) return;
 
                 if (selectingStart) {
-                    onDateChange(date, endDate);
-                    setSelectingStart(false);
+                    // 開始日を選択中：終了日が開始日より前になる場合は終了日もリセット
+                    if (endDate && date > endDate) {
+                        onDateChange(date, date);
+                    } else {
+                        onDateChange(date, endDate);
+                    }
                 } else {
+                    // 終了日を選択中：開始日より前の日付を選んだ場合は入れ替え
                     if (startDate && date < startDate) {
                         onDateChange(date, startDate);
                     } else {
                         onDateChange(startDate, date);
                     }
-                    setSelectingStart(true);
-                    setIsOpen(false);
                 }
             };
 
@@ -1512,10 +1712,14 @@
                 return date >= startDate && date <= endDate;
             };
 
-            const isDateSelected = (date) => {
-                if (!date) return false;
-                return (startDate && date.toDateString() === startDate.toDateString()) ||
-                       (endDate && date.toDateString() === endDate.toDateString());
+            const isStartDate = (date) => {
+                if (!date || !startDate) return false;
+                return date.toDateString() === startDate.toDateString();
+            };
+
+            const isEndDate = (date) => {
+                if (!date || !endDate) return false;
+                return date.toDateString() === endDate.toDateString();
             };
 
             const previousMonth = () => {
@@ -1531,18 +1735,64 @@
 
             return (
                 <div className="relative" ref={pickerRef}>
-                    <button
-                        onClick={() => setIsOpen(!isOpen)}
-                        className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-base font-bold flex items-center gap-2 hover:bg-slate-100 transition-colors shadow-sm min-w-[300px]"
-                    >
-                        <Calendar size={18} className="text-slate-400" />
-                        <span className="text-sm">
-                            {startDate && endDate ? `${formatDateJa(startDate)} - ${formatDateJa(endDate)}` : '期間を選択'}
-                        </span>
-                    </button>
+                    {/* メインボタン - 開始日と終了日を分けて表示 */}
+                    <div className="flex bg-slate-50 border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                        <button
+                            onClick={() => { setIsOpen(true); setSelectingStart(true); }}
+                            className={`flex-1 px-3 py-2.5 text-sm font-bold flex items-center gap-2 transition-all border-r border-slate-200 ${
+                                isOpen && selectingStart ? 'bg-indigo-100 text-indigo-700' : 'hover:bg-slate-100'
+                            }`}
+                        >
+                            <Calendar size={16} className={isOpen && selectingStart ? 'text-indigo-500' : 'text-slate-400'} />
+                            <div className="text-left">
+                                <div className="text-[10px] text-slate-400 uppercase tracking-wider">開始日</div>
+                                <div className={isOpen && selectingStart ? 'text-indigo-700' : 'text-slate-900'}>
+                                    {startDate ? formatDateJa(startDate) : '選択してください'}
+                                </div>
+                            </div>
+                        </button>
+                        <button
+                            onClick={() => { setIsOpen(true); setSelectingStart(false); }}
+                            className={`flex-1 px-3 py-2.5 text-sm font-bold flex items-center gap-2 transition-all ${
+                                isOpen && !selectingStart ? 'bg-indigo-100 text-indigo-700' : 'hover:bg-slate-100'
+                            }`}
+                        >
+                            <Calendar size={16} className={isOpen && !selectingStart ? 'text-indigo-500' : 'text-slate-400'} />
+                            <div className="text-left">
+                                <div className="text-[10px] text-slate-400 uppercase tracking-wider">終了日</div>
+                                <div className={isOpen && !selectingStart ? 'text-indigo-700' : 'text-slate-900'}>
+                                    {endDate ? formatDateJa(endDate) : '選択してください'}
+                                </div>
+                            </div>
+                        </button>
+                    </div>
 
                     {isOpen && (
-                        <div className="absolute top-full left-0 mt-2 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 p-4 min-w-[350px]">
+                        <div className="absolute top-full left-0 mt-2 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 p-4 min-w-[380px]">
+                            {/* 選択モード表示 */}
+                            <div className="flex gap-2 mb-4">
+                                <button
+                                    onClick={() => setSelectingStart(true)}
+                                    className={`flex-1 px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+                                        selectingStart
+                                            ? 'bg-indigo-600 text-white shadow-md'
+                                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                    }`}
+                                >
+                                    開始日を選択
+                                </button>
+                                <button
+                                    onClick={() => setSelectingStart(false)}
+                                    className={`flex-1 px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+                                        !selectingStart
+                                            ? 'bg-indigo-600 text-white shadow-md'
+                                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                    }`}
+                                >
+                                    終了日を選択
+                                </button>
+                            </div>
+
                             {/* カレンダーヘッダー */}
                             <div className="flex items-center justify-between mb-4">
                                 <button onClick={previousMonth} className="p-2 hover:bg-slate-100 rounded-lg transition-colors">
@@ -1575,10 +1825,11 @@
                                         className={`
                                             aspect-square p-2 text-sm font-bold rounded-lg transition-all
                                             ${!date ? 'invisible' : ''}
-                                            ${isDateSelected(date) ? 'bg-indigo-600 text-white' : ''}
-                                            ${isDateInRange(date) && !isDateSelected(date) ? 'bg-indigo-100 text-indigo-700' : ''}
-                                            ${!isDateSelected(date) && !isDateInRange(date) && date ? 'hover:bg-slate-100 text-slate-700' : ''}
-                                            ${date && date.toDateString() === new Date().toDateString() ? 'ring-2 ring-indigo-300' : ''}
+                                            ${isStartDate(date) ? 'bg-emerald-500 text-white ring-2 ring-emerald-300' : ''}
+                                            ${isEndDate(date) && !isStartDate(date) ? 'bg-rose-500 text-white ring-2 ring-rose-300' : ''}
+                                            ${isDateInRange(date) && !isStartDate(date) && !isEndDate(date) ? 'bg-indigo-100 text-indigo-700' : ''}
+                                            ${!isStartDate(date) && !isEndDate(date) && !isDateInRange(date) && date ? 'hover:bg-slate-100 text-slate-700' : ''}
+                                            ${date && date.toDateString() === new Date().toDateString() && !isStartDate(date) && !isEndDate(date) ? 'ring-2 ring-slate-300' : ''}
                                         `}
                                     >
                                         {date ? date.getDate() : ''}
@@ -1586,28 +1837,31 @@
                                 ))}
                             </div>
 
-                            {/* 選択された日付範囲の表示 */}
-                            <div className="mt-4 pt-4 border-t border-slate-200 space-y-2">
-                                <div className="flex items-center justify-between text-sm">
-                                    <span className="font-bold text-slate-600">開始日:</span>
-                                    <span className="font-mono text-slate-900">{startDate ? formatDate(startDate) : '未選択'}</span>
+                            {/* 凡例 */}
+                            <div className="mt-4 pt-3 border-t border-slate-200 flex items-center justify-center gap-4 text-xs font-bold">
+                                <div className="flex items-center gap-1">
+                                    <div className="w-3 h-3 rounded bg-emerald-500"></div>
+                                    <span className="text-slate-600">開始日</span>
                                 </div>
-                                <div className="flex items-center justify-between text-sm">
-                                    <span className="font-bold text-slate-600">終了日:</span>
-                                    <span className="font-mono text-slate-900">{endDate ? formatDate(endDate) : '未選択'}</span>
+                                <div className="flex items-center gap-1">
+                                    <div className="w-3 h-3 rounded bg-rose-500"></div>
+                                    <span className="text-slate-600">終了日</span>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                    <div className="w-3 h-3 rounded bg-indigo-200"></div>
+                                    <span className="text-slate-600">期間内</span>
                                 </div>
                             </div>
 
                             {/* クイック選択ボタン */}
-                            <div className="mt-4 flex gap-2">
+                            <div className="mt-4 grid grid-cols-4 gap-2">
                                 <button
                                     onClick={() => {
                                         const today = new Date();
                                         const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
                                         onDateChange(firstDay, today);
-                                        setIsOpen(false);
                                     }}
-                                    className="flex-1 px-3 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs font-bold transition-colors"
+                                    className="px-2 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs font-bold transition-colors"
                                 >
                                     今月
                                 </button>
@@ -1617,13 +1871,40 @@
                                         const lastMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1);
                                         const lastDayOfLastMonth = new Date(today.getFullYear(), today.getMonth(), 0);
                                         onDateChange(lastMonth, lastDayOfLastMonth);
-                                        setIsOpen(false);
                                     }}
-                                    className="flex-1 px-3 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs font-bold transition-colors"
+                                    className="px-2 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs font-bold transition-colors"
                                 >
                                     先月
                                 </button>
+                                <button
+                                    onClick={() => {
+                                        const today = new Date();
+                                        const threeMonthsAgo = new Date(today.getFullYear(), today.getMonth() - 2, 1);
+                                        onDateChange(threeMonthsAgo, today);
+                                    }}
+                                    className="px-2 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs font-bold transition-colors"
+                                >
+                                    3ヶ月
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        const today = new Date();
+                                        const yearStart = new Date(today.getFullYear(), 0, 1);
+                                        onDateChange(yearStart, today);
+                                    }}
+                                    className="px-2 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs font-bold transition-colors"
+                                >
+                                    今年
+                                </button>
                             </div>
+
+                            {/* 閉じるボタン */}
+                            <button
+                                onClick={() => setIsOpen(false)}
+                                className="mt-4 w-full py-2 bg-indigo-600 text-white rounded-xl text-sm font-bold hover:bg-indigo-700 transition-colors"
+                            >
+                                適用して閉じる
+                            </button>
                         </div>
                     )}
                 </div>
@@ -2330,18 +2611,26 @@
                                 }
                             },
                             datalabels: {
-                                display: true,
+                                display: function(context) {
+                                    // データポイントが多い場合は間引いて表示
+                                    const dataLength = context.dataset.data.length;
+                                    if (dataLength <= 12) return true; // 12以下なら全て表示
+                                    if (dataLength <= 24) return context.dataIndex % 2 === 0; // 2つごと
+                                    if (dataLength <= 36) return context.dataIndex % 3 === 0; // 3つごと
+                                    return context.dataIndex % 4 === 0 || context.dataIndex === dataLength - 1; // 4つごと + 最後
+                                },
                                 color: '#1e293b',
                                 font: {
                                     weight: 'bold',
-                                    size: 12
+                                    size: 11
                                 },
                                 formatter: function(value) {
                                     return value + '店舗';
                                 },
                                 anchor: 'end',
                                 align: 'top',
-                                offset: 4
+                                offset: 6,
+                                padding: 4
                             }
                         },
                         scales: {
@@ -2360,16 +2649,16 @@
                                 }
                             },
                             y: {
-                                beginAtZero: true,
+                                beginAtZero: false,
                                 ticks: {
-                                    stepSize: 1,
                                     font: {
                                         size: 12,
                                         weight: 'bold'
                                     },
                                     callback: function(value) {
                                         return value + '店舗';
-                                    }
+                                    },
+                                    maxTicksLimit: 8
                                 },
                                 grid: {
                                     color: 'rgba(0, 0, 0, 0.05)'
@@ -2433,9 +2722,10 @@
 
         const Sidebar = ({ currentPage, setCurrentPage }) => {
             const menuItems = [
-                { id: 'dashboard', label: '現在のページ', icon: <Home size={20} /> },
+                { id: 'dashboard', label: '経営ダッシュボード', icon: <Home size={20} /> },
                 { id: 'charts', label: 'グラフ化ダッシュボード', icon: <BarChart3 size={20} /> },
-                { id: 'sales-analysis', label: '売上・媒体分析', icon: <TrendingUp size={20} /> }
+                { id: 'sales-analysis', label: '売上・媒体分析', icon: <TrendingUp size={20} /> },
+                { id: 'marketing', label: 'マーケティング', icon: <Megaphone size={20} /> }
             ];
 
             return (

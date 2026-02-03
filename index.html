@@ -529,12 +529,17 @@
                             totalSales: 0,
                             studyUsed: 0,
                             accessUsed: 0,
+                            over1MCount: 0, // 100万円超えた回数
                             rowIndex: d.rowIndex || 9999 // スプレッドシート行番号を保持
                         };
                     }
                     staffMap[key].totalSales += d.individualSales || 0;
                     staffMap[key].studyUsed += d.studyAllowance || 0;
                     staffMap[key].accessUsed += d.accessAllowance || 0;
+                    // 100万円超えた回数をカウント
+                    if ((d.individualSales || 0) >= 1000000) {
+                        staffMap[key].over1MCount++;
+                    }
                     // より小さい行番号を優先（最初に出現した行）
                     if (d.rowIndex && d.rowIndex < staffMap[key].rowIndex) {
                         staffMap[key].rowIndex = d.rowIndex;
@@ -567,6 +572,28 @@
                         accessProgress
                     };
                 }).sort((a, b) => a.rowIndex - b.rowIndex); // スプレッドシート行順にソート
+            }, [filteredData]);
+
+            // スタッフ統計: 全スタッフ数と110万円超え人数
+            const staffStats = useMemo(() => {
+                // ユニークなスタッフを取得（名前+店舗の組み合わせ）
+                const uniqueStaff = new Set();
+                let over110MCount = 0;
+
+                filteredData.forEach(d => {
+                    const staffKey = `${d.name}_${d.branch}`;
+                    uniqueStaff.add(staffKey);
+
+                    // 個別税込売上が110万円以上かチェック
+                    if ((d.individualSales || 0) >= 1100000) {
+                        over110MCount++;
+                    }
+                });
+
+                return {
+                    totalStaff: uniqueStaff.size,
+                    over110MCount: over110MCount
+                };
             }, [filteredData]);
 
             console.log('🎨 Rendering App - loading:', loading, 'error:', error, 'rawData length:', rawData.length);
@@ -795,7 +822,7 @@
                             <KpiBox title="継続売上" value={formatYen(stats.totalRecurringSales)} icon={<RefreshCw/>} sub="LTV" color="bg-indigo-600" />
                             <KpiBox title="退会率" value={`${stats.avgChurn}%`} icon={<Percent/>} sub="維持率" color="bg-rose-500" />
                             <KpiBox title="総新規数" value={`${stats.totalNewCount} 名`} icon={<Users/>} sub="集客数" color="bg-sky-500" />
-                            <KpiBox title="入会率" value={`${stats.avgEnroll}%`} icon={<Target/>} sub="成約率" color="bg-amber-500" />
+                            <KpiBox title="入会率" value={`${stats.avgEnroll}% (${stats.totalNewCount}名)`} icon={<Target/>} sub="成約率" color="bg-amber-500" />
                             <KpiBox title="G口コミ(合計)" value={`${stats.totalGReviews} 件`} icon={<MessageSquare/>} sub="Google" color="bg-slate-700" />
                             <KpiBox title="H口コミ(合計)" value={`${stats.totalHReviews} 件`} icon={<Heart/>} sub="Hotpepper" color="bg-pink-500" />
                         </div>
@@ -832,8 +859,8 @@
                                     />
                                 </div>
 
-                                {/* Rankings Row 2 (Reviews) */}
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                {/* Rankings Row 2 (Reviews + Staff Stats) */}
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                                     <RankCard
                                         title="G口コミ 獲得 TOP5"
                                         data={[...filteredData].sort((a,b) => (b.gReviews || 0) - (a.gReviews || 0)).slice(0, 5)}
@@ -850,6 +877,29 @@
                                         icon={<Heart size={14}/>}
                                         accentColor="text-pink-500"
                                     />
+
+                                    {/* スタッフ統計カード */}
+                                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 hover:shadow-md transition-shadow">
+                                        <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-5 flex items-center justify-between">
+                                            <span className="flex items-center gap-2"><Users size={14} /> スタッフ統計</span>
+                                            <Trophy size={16} className="opacity-20" />
+                                        </h3>
+                                        <div className="space-y-6">
+                                            {/* 全スタッフ数 */}
+                                            <div className="text-center p-6 bg-gradient-to-br from-indigo-50 to-blue-50 rounded-2xl border border-indigo-100">
+                                                <div className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2">全スタッフ</div>
+                                                <div className="text-4xl font-black text-indigo-600">{staffStats.totalStaff}</div>
+                                                <div className="text-xs font-bold text-slate-500 mt-1">名</div>
+                                            </div>
+
+                                            {/* 110万円超え人数 */}
+                                            <div className="text-center p-6 bg-gradient-to-br from-emerald-50 to-green-50 rounded-2xl border border-emerald-100">
+                                                <div className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2">110万円超え</div>
+                                                <div className="text-4xl font-black text-emerald-600">{staffStats.over110MCount}</div>
+                                                <div className="text-xs font-bold text-slate-500 mt-1">名</div>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
 
                                 {/* Branch Share */}
@@ -940,8 +990,13 @@
                                                 <div className="font-black text-slate-800 text-lg leading-none mb-1">{staff.name}</div>
                                                 <div className="text-xs text-slate-400 font-black uppercase tracking-tighter">{staff.branch}</div>
                                             </div>
-                                            <div className="text-sm font-mono font-bold text-slate-400">
-                                                {formatYen(staff.totalSales)}
+                                            <div className="text-right">
+                                                <div className="text-sm font-mono font-bold text-slate-400">
+                                                    {formatYen(staff.totalSales)}
+                                                </div>
+                                                <div className="text-xs font-bold text-indigo-600 mt-1">
+                                                    100万超: {staff.over1MCount}回
+                                                </div>
                                             </div>
                                         </div>
 

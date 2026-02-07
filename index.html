@@ -164,28 +164,36 @@
         const MARKETING_COLUMN_MAP = {
             '月': 'month', '年月': 'month', '期間': 'month', 'date': 'month', 'Date': 'month',
             '店舗': 'branch', '院名': 'branch', '店舗名': 'branch', 'store': 'branch', 'Branch': 'branch',
+            'エリア': 'area',
             'スタッフ': 'staff', '担当者': 'staff', '担当': 'staff', 'staff': 'staff', 'Staff': 'staff',
             '媒体': 'media', '媒体名': 'media', '集客媒体': 'media', 'チャネル': 'media', 'channel': 'media', 'Media': 'media',
             '新規数': 'newCount', '新規人数': 'newCount', '来店数': 'newCount', '反響数': 'newCount', 'new_count': 'newCount',
+            '実来院': 'newCount',
+            '予約数': 'reservationCount',
             '広告費': 'adSpend', '広告コスト': 'adSpend', 'コスト': 'adSpend', '費用': 'adSpend', 'ad_spend': 'adSpend',
             'CPA': 'cpa', '顧客獲得単価': 'cpa', 'cpa': 'cpa',
+            'CPA来院': 'cpa', 'CPA予約': 'cpaReservation',
             '入会数': 'enrollCount', '成約数': 'enrollCount', '契約数': 'enrollCount', 'enroll_count': 'enrollCount',
             '入会率': 'enrollRate', '成約率': 'enrollRate', '契約率': 'enrollRate', 'enroll_rate': 'enrollRate',
             'キャンセル数': 'cancelCount', 'cancel_count': 'cancelCount',
             'キャンセル率': 'cancelRate', 'cancel_rate': 'cancelRate',
             '売上': 'revenue', '売上金額': 'revenue', '新規売上': 'revenue', 'revenue': 'revenue',
+            '当月売上': 'revenue', '見込売上': 'futureRevenue',
             'CV数': 'cvCount', 'CV': 'cvCount', 'コンバージョン': 'cvCount', 'cv_count': 'cvCount',
             'クリック数': 'clicks', 'click': 'clicks', 'clicks': 'clicks',
             'インプレッション': 'impressions', '表示回数': 'impressions', 'IMP': 'impressions', 'impressions': 'impressions',
             'CTR': 'ctr', 'クリック率': 'ctr', 'ctr': 'ctr',
             'CVR': 'cvr', 'コンバージョン率': 'cvr', 'cvr': 'cvr',
+            'CPM': 'cpm', 'CPC': 'cpc',
             'ROAS': 'roas', 'roas': 'roas',
             'LTV': 'ltv', '顧客生涯価値': 'ltv', 'ltv': 'ltv',
             '紹介数': 'referralCount', '紹介': 'referralCount',
             'リピート率': 'repeatRate', 'repeat_rate': 'repeatRate',
             '平均単価': 'avgPrice', '客単価': 'avgPrice', '単価': 'avgPrice',
-            '予約数': 'reservationCount', '問い合わせ数': 'inquiryCount',
+            '問い合わせ数': 'inquiryCount',
             '施術回数': 'treatmentCount', '回数券購入数': 'ticketPurchaseCount',
+            '口コミ数': 'reviewCount', '口コミ率': 'reviewRate',
+            '予算': 'budget',
         };
 
         // マーケティングデータを標準化
@@ -242,9 +250,10 @@
                 if (!normalized.enrollRate && normalized.enrollCount != null && normalized.newCount && normalized.newCount > 0) {
                     normalized.enrollRate = Math.round((normalized.enrollCount / normalized.newCount) * 100);
                 }
-                // キャンセル率が未設定の場合、キャンセル数÷新規数で自動計算
-                if (!normalized.cancelRate && normalized.cancelCount != null && normalized.newCount && normalized.newCount > 0) {
-                    normalized.cancelRate = Math.round((normalized.cancelCount / normalized.newCount) * 100);
+                // キャンセル率が未設定の場合、キャンセル数÷予約数で自動計算
+                if (!normalized.cancelRate && normalized.cancelCount != null) {
+                    const denom = normalized.reservationCount || normalized.newCount;
+                    if (denom > 0) normalized.cancelRate = Math.round((normalized.cancelCount / denom) * 100);
                 }
                 // CVRが未設定の場合
                 if (!normalized.cvr && normalized.cvCount && normalized.clicks && normalized.clicks > 0) {
@@ -747,7 +756,7 @@
 
             const mktAllBranches = useMemo(() => Array.from(new Set(mktData.map(d => d.branch).filter(Boolean))), [mktData]);
             const mktAllStaff = useMemo(() => Array.from(new Set(mktData.map(d => d.staff).filter(Boolean))), [mktData]);
-            const mktAllMedia = useMemo(() => Array.from(new Set(mktData.map(d => d.media).filter(Boolean))), [mktData]);
+            const mktAllMedia = useMemo(() => Array.from(new Set(mktData.map(d => d.media).filter(m => m && m !== '全媒体合計'))), [mktData]);
 
             // 選択月範囲内の月リスト
             const mktTargetMonths = useMemo(() => {
@@ -762,6 +771,8 @@
 
             const mktFiltered = useMemo(() => {
                 return mktData.filter(d => {
+                    // 全媒体合計レコードは集計で二重計上されるため除外
+                    if (d.media === '全媒体合計') return false;
                     const matchMonth = mktTargetMonths.length === 0 || mktTargetMonths.includes(d.month);
                     const matchBranch = mktSelectedBranches.length === 0 || mktSelectedBranches.includes(d.branch);
                     const matchStaff = mktSelectedStaff.length === 0 || mktSelectedStaff.includes(d.staff);
@@ -773,6 +784,7 @@
             // マーケティングKPI集計
             const mktStats = useMemo(() => {
                 const totalNew = mktFiltered.reduce((a, d) => a + (d.newCount || 0), 0);
+                const totalReservations = mktFiltered.reduce((a, d) => a + (d.reservationCount || 0), 0);
                 const totalEnroll = mktFiltered.reduce((a, d) => a + (d.enrollCount || 0), 0);
                 const totalCancel = mktFiltered.reduce((a, d) => a + (d.cancelCount || 0), 0);
                 const totalAdSpend = mktFiltered.reduce((a, d) => a + (d.adSpend || 0), 0);
@@ -781,16 +793,19 @@
                 const totalImpressions = mktFiltered.reduce((a, d) => a + (d.impressions || 0), 0);
                 const totalCv = mktFiltered.reduce((a, d) => a + (d.cvCount || 0), 0);
                 const totalReferrals = mktFiltered.reduce((a, d) => a + (d.referralCount || 0), 0);
+                const totalReviews = mktFiltered.reduce((a, d) => a + (d.reviewCount || 0), 0);
 
                 const avgCpa = totalNew > 0 ? Math.round(totalAdSpend / totalNew) : 0;
                 const enrollRate = totalNew > 0 ? Math.round((totalEnroll / totalNew) * 100) : 0;
-                const cancelRate = totalNew > 0 ? Math.round((totalCancel / totalNew) * 100) : 0;
+                // キャンセル率: 予約数ベースで計算（予約数がなければ来院数で代替）
+                const cancelDenom = totalReservations > 0 ? totalReservations : totalNew;
+                const cancelRate = cancelDenom > 0 ? Math.round((totalCancel / cancelDenom) * 100) : 0;
                 const cvr = totalClicks > 0 ? Math.round((totalCv / totalClicks) * 1000) / 10 : 0;
                 const ctr = totalImpressions > 0 ? Math.round((totalClicks / totalImpressions) * 1000) / 10 : 0;
                 const roas = totalAdSpend > 0 ? Math.round((totalRevenue / totalAdSpend) * 100) : 0;
                 const avgPrice = totalNew > 0 ? Math.round(totalRevenue / totalNew) : 0;
 
-                return { totalNew, totalEnroll, totalCancel, totalAdSpend, totalRevenue, totalClicks, totalImpressions, totalCv, totalReferrals, avgCpa, enrollRate, cancelRate, cvr, ctr, roas, avgPrice };
+                return { totalNew, totalReservations, totalEnroll, totalCancel, totalAdSpend, totalRevenue, totalClicks, totalImpressions, totalCv, totalReferrals, totalReviews, avgCpa, enrollRate, cancelRate, cvr, ctr, roas, avgPrice };
             }, [mktFiltered]);
 
             // 店舗別集計
@@ -798,21 +813,26 @@
                 const map = {};
                 mktFiltered.forEach(d => {
                     const key = d.branch || '不明';
-                    if (!map[key]) map[key] = { branch: key, newCount: 0, enrollCount: 0, cancelCount: 0, adSpend: 0, revenue: 0, records: 0 };
+                    if (!map[key]) map[key] = { branch: key, area: d.area || '', newCount: 0, reservationCount: 0, enrollCount: 0, cancelCount: 0, adSpend: 0, revenue: 0, reviewCount: 0, records: 0 };
                     map[key].newCount += d.newCount || 0;
+                    map[key].reservationCount += d.reservationCount || 0;
                     map[key].enrollCount += d.enrollCount || 0;
                     map[key].cancelCount += d.cancelCount || 0;
                     map[key].adSpend += d.adSpend || 0;
                     map[key].revenue += d.revenue || 0;
+                    map[key].reviewCount += d.reviewCount || 0;
                     map[key].records++;
                 });
-                return Object.values(map).map(b => ({
-                    ...b,
-                    cpa: b.newCount > 0 ? Math.round(b.adSpend / b.newCount) : 0,
-                    enrollRate: b.newCount > 0 ? Math.round((b.enrollCount / b.newCount) * 100) : 0,
-                    cancelRate: b.newCount > 0 ? Math.round((b.cancelCount / b.newCount) * 100) : 0,
-                    roas: b.adSpend > 0 ? Math.round((b.revenue / b.adSpend) * 100) : 0,
-                })).sort((a, b) => b.newCount - a.newCount);
+                return Object.values(map).map(b => {
+                    const cancelDenom = b.reservationCount > 0 ? b.reservationCount : b.newCount;
+                    return {
+                        ...b,
+                        cpa: b.newCount > 0 ? Math.round(b.adSpend / b.newCount) : 0,
+                        enrollRate: b.newCount > 0 ? Math.round((b.enrollCount / b.newCount) * 100) : 0,
+                        cancelRate: cancelDenom > 0 ? Math.round((b.cancelCount / cancelDenom) * 100) : 0,
+                        roas: b.adSpend > 0 ? Math.round((b.revenue / b.adSpend) * 100) : 0,
+                    };
+                }).sort((a, b) => b.newCount - a.newCount);
             }, [mktFiltered]);
 
             // スタッフ別集計
@@ -820,19 +840,23 @@
                 const map = {};
                 mktFiltered.forEach(d => {
                     const key = d.staff || '不明';
-                    if (!map[key]) map[key] = { staff: key, branch: d.branch || '', newCount: 0, enrollCount: 0, cancelCount: 0, adSpend: 0, revenue: 0 };
+                    if (!map[key]) map[key] = { staff: key, branch: d.branch || '', newCount: 0, reservationCount: 0, enrollCount: 0, cancelCount: 0, adSpend: 0, revenue: 0 };
                     map[key].newCount += d.newCount || 0;
+                    map[key].reservationCount += d.reservationCount || 0;
                     map[key].enrollCount += d.enrollCount || 0;
                     map[key].cancelCount += d.cancelCount || 0;
                     map[key].adSpend += d.adSpend || 0;
                     map[key].revenue += d.revenue || 0;
                 });
-                return Object.values(map).map(s => ({
-                    ...s,
-                    cpa: s.newCount > 0 ? Math.round(s.adSpend / s.newCount) : 0,
-                    enrollRate: s.newCount > 0 ? Math.round((s.enrollCount / s.newCount) * 100) : 0,
-                    cancelRate: s.newCount > 0 ? Math.round((s.cancelCount / s.newCount) * 100) : 0,
-                })).sort((a, b) => b.newCount - a.newCount);
+                return Object.values(map).map(s => {
+                    const cancelDenom = s.reservationCount > 0 ? s.reservationCount : s.newCount;
+                    return {
+                        ...s,
+                        cpa: s.newCount > 0 ? Math.round(s.adSpend / s.newCount) : 0,
+                        enrollRate: s.newCount > 0 ? Math.round((s.enrollCount / s.newCount) * 100) : 0,
+                        cancelRate: cancelDenom > 0 ? Math.round((s.cancelCount / cancelDenom) * 100) : 0,
+                    };
+                }).sort((a, b) => b.newCount - a.newCount);
             }, [mktFiltered]);
 
             // 媒体別集計
@@ -840,8 +864,9 @@
                 const map = {};
                 mktFiltered.forEach(d => {
                     const key = d.media || '不明';
-                    if (!map[key]) map[key] = { media: key, newCount: 0, enrollCount: 0, cancelCount: 0, adSpend: 0, revenue: 0, clicks: 0, impressions: 0, cvCount: 0 };
+                    if (!map[key]) map[key] = { media: key, newCount: 0, reservationCount: 0, enrollCount: 0, cancelCount: 0, adSpend: 0, revenue: 0, clicks: 0, impressions: 0, cvCount: 0, reviewCount: 0 };
                     map[key].newCount += d.newCount || 0;
+                    map[key].reservationCount += d.reservationCount || 0;
                     map[key].enrollCount += d.enrollCount || 0;
                     map[key].cancelCount += d.cancelCount || 0;
                     map[key].adSpend += d.adSpend || 0;
@@ -849,16 +874,20 @@
                     map[key].clicks += d.clicks || 0;
                     map[key].impressions += d.impressions || 0;
                     map[key].cvCount += d.cvCount || 0;
+                    map[key].reviewCount += d.reviewCount || 0;
                 });
-                return Object.values(map).map(m => ({
-                    ...m,
-                    cpa: m.newCount > 0 ? Math.round(m.adSpend / m.newCount) : 0,
-                    enrollRate: m.newCount > 0 ? Math.round((m.enrollCount / m.newCount) * 100) : 0,
-                    cancelRate: m.newCount > 0 ? Math.round((m.cancelCount / m.newCount) * 100) : 0,
-                    cvr: m.clicks > 0 ? Math.round((m.cvCount / m.clicks) * 1000) / 10 : 0,
-                    ctr: m.impressions > 0 ? Math.round((m.clicks / m.impressions) * 1000) / 10 : 0,
-                    roas: m.adSpend > 0 ? Math.round((m.revenue / m.adSpend) * 100) : 0,
-                })).sort((a, b) => b.adSpend - a.adSpend);
+                return Object.values(map).map(m => {
+                    const cancelDenom = m.reservationCount > 0 ? m.reservationCount : m.newCount;
+                    return {
+                        ...m,
+                        cpa: m.newCount > 0 ? Math.round(m.adSpend / m.newCount) : 0,
+                        enrollRate: m.newCount > 0 ? Math.round((m.enrollCount / m.newCount) * 100) : 0,
+                        cancelRate: cancelDenom > 0 ? Math.round((m.cancelCount / cancelDenom) * 100) : 0,
+                        cvr: m.clicks > 0 ? Math.round((m.cvCount / m.clicks) * 1000) / 10 : 0,
+                        ctr: m.impressions > 0 ? Math.round((m.clicks / m.impressions) * 1000) / 10 : 0,
+                        roas: m.adSpend > 0 ? Math.round((m.revenue / m.adSpend) * 100) : 0,
+                    };
+                }).sort((a, b) => b.newCount - a.newCount);
             }, [mktFiltered]);
 
             // 月別推移データ
@@ -866,19 +895,23 @@
                 const map = {};
                 mktFiltered.forEach(d => {
                     const key = d.month || '不明';
-                    if (!map[key]) map[key] = { month: key, newCount: 0, enrollCount: 0, cancelCount: 0, adSpend: 0, revenue: 0 };
+                    if (!map[key]) map[key] = { month: key, newCount: 0, reservationCount: 0, enrollCount: 0, cancelCount: 0, adSpend: 0, revenue: 0 };
                     map[key].newCount += d.newCount || 0;
+                    map[key].reservationCount += d.reservationCount || 0;
                     map[key].enrollCount += d.enrollCount || 0;
                     map[key].cancelCount += d.cancelCount || 0;
                     map[key].adSpend += d.adSpend || 0;
                     map[key].revenue += d.revenue || 0;
                 });
-                return Object.values(map).sort((a, b) => a.month.localeCompare(b.month)).map(m => ({
-                    ...m,
-                    cpa: m.newCount > 0 ? Math.round(m.adSpend / m.newCount) : 0,
-                    enrollRate: m.newCount > 0 ? Math.round((m.enrollCount / m.newCount) * 100) : 0,
-                    cancelRate: m.newCount > 0 ? Math.round((m.cancelCount / m.newCount) * 100) : 0,
-                }));
+                return Object.values(map).sort((a, b) => a.month.localeCompare(b.month)).map(m => {
+                    const cancelDenom = m.reservationCount > 0 ? m.reservationCount : m.newCount;
+                    return {
+                        ...m,
+                        cpa: m.newCount > 0 ? Math.round(m.adSpend / m.newCount) : 0,
+                        enrollRate: m.newCount > 0 ? Math.round((m.enrollCount / m.newCount) * 100) : 0,
+                        cancelRate: cancelDenom > 0 ? Math.round((m.cancelCount / cancelDenom) * 100) : 0,
+                    };
+                });
             }, [mktFiltered]);
 
             // AI分析: 課題のある店舗を抽出
@@ -929,10 +962,10 @@
                         }
                     }
 
-                    // 新規数が少ない
+                    // 来院数が少ない
                     const avgNew = mktByBranch.reduce((a, b) => a + b.newCount, 0) / mktByBranch.length;
                     if (avgNew > 0 && branch.newCount < avgNew * 0.5 && branch.newCount > 0) {
-                        issues.push({ type: 'warning', metric: '新規集客', message: `新規${branch.newCount}名は平均${Math.round(avgNew)}名の半分以下`, suggestion: 'エリアマーケティングの強化、MEO対策の見直し' });
+                        issues.push({ type: 'warning', metric: '集客数', message: `実来院${branch.newCount}名は平均${Math.round(avgNew)}名の半分以下`, suggestion: 'エリアマーケティングの強化、MEO対策の見直し' });
                         scores.severity += 2;
                     }
 
@@ -2190,7 +2223,7 @@
                                                 )}
 
                                                 <div className="text-xs text-slate-400 font-bold self-end pb-2">
-                                                    {mktFiltered.length} / {mktData.length} 件表示
+                                                    {mktFiltered.length}件表示（{mktByBranch.length}店舗 × {mktByMedia.length}媒体）
                                                 </div>
                                             </div>
                                         )}
@@ -2259,8 +2292,9 @@
                                                                 <div className="p-3 rounded-2xl bg-purple-600 text-white shadow-lg"><Users size={22} /></div>
                                                                 <span className="text-xs font-black text-slate-400 uppercase tracking-widest">集客</span>
                                                             </div>
-                                                            <h3 className="text-sm font-black text-slate-400 mb-1">総新規数</h3>
+                                                            <h3 className="text-sm font-black text-slate-400 mb-1">実来院数</h3>
                                                             <p className="text-3xl font-black text-slate-900">{mktStats.totalNew}<span className="text-lg text-slate-400 ml-1">名</span></p>
+                                                            {mktStats.totalReservations > 0 && <p className="text-xs text-slate-400 font-bold mt-1">予約 {mktStats.totalReservations}名</p>}
                                                         </div>
 
                                                         <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
@@ -2315,8 +2349,8 @@
                                                             <div className="text-xl font-black text-amber-700">¥{mktStats.avgPrice.toLocaleString()}</div>
                                                         </div>
                                                         <div className="bg-gradient-to-br from-slate-50 to-gray-50 p-5 rounded-2xl border border-slate-200">
-                                                            <div className="text-xs font-black text-slate-400 uppercase tracking-widest mb-1">紹介数</div>
-                                                            <div className="text-xl font-black text-slate-700">{mktStats.totalReferrals}<span className="text-sm">名</span></div>
+                                                            <div className="text-xs font-black text-slate-400 uppercase tracking-widest mb-1">口コミ数</div>
+                                                            <div className="text-xl font-black text-slate-700">{mktStats.totalReviews}<span className="text-sm">件</span></div>
                                                         </div>
                                                     </div>
 
@@ -2376,7 +2410,7 @@
                                                     {mktByMedia.length > 0 && (
                                                         <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-6">
                                                             <h2 className="text-xl font-black flex items-center gap-2 text-slate-800 italic mb-6">
-                                                                <BarChart3 className="text-purple-500" size={24} /> 媒体別 新規獲得構成比
+                                                                <BarChart3 className="text-purple-500" size={24} /> 媒体別 来院構成比
                                                             </h2>
                                                             <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-6">
                                                                 {mktByMedia.map((m, idx) => {
@@ -2418,11 +2452,12 @@
                                                                 <thead>
                                                                     <tr className="bg-slate-50 text-[10px] uppercase tracking-widest text-slate-400 font-black border-b border-slate-100">
                                                                         <th className="px-6 py-4">店舗名</th>
-                                                                        <th className="px-4 py-4 text-right">新規数</th>
+                                                                        <th className="px-4 py-4 text-right">予約数</th>
+                                                                        <th className="px-4 py-4 text-right">実来院</th>
                                                                         <th className="px-4 py-4 text-right">入会数</th>
                                                                         <th className="px-4 py-4 text-right">入会率</th>
-                                                                        <th className="px-4 py-4 text-right">キャンセル数</th>
-                                                                        <th className="px-4 py-4 text-right">キャンセル率</th>
+                                                                        <th className="px-4 py-4 text-right">C率</th>
+                                                                        <th className="px-4 py-4 text-right">口コミ</th>
                                                                         <th className="px-4 py-4 text-right">広告費</th>
                                                                         <th className="px-4 py-4 text-right">CPA</th>
                                                                         <th className="px-4 py-4 text-right">売上</th>
@@ -2435,14 +2470,18 @@
                                                                             <td className="px-6 py-4">
                                                                                 <div className="flex items-center gap-3">
                                                                                     <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black ${i === 0 ? 'bg-yellow-400 text-white' : i === 1 ? 'bg-slate-200 text-slate-600' : i === 2 ? 'bg-amber-100 text-amber-700' : 'bg-slate-50 text-slate-400'}`}>{i + 1}</div>
-                                                                                    <span className="font-black text-slate-800">{b.branch}</span>
+                                                                                    <div>
+                                                                                        <span className="font-black text-slate-800">{b.branch}</span>
+                                                                                        {b.area && <div className="text-[10px] text-slate-400 font-bold">{b.area}</div>}
+                                                                                    </div>
                                                                                 </div>
                                                                             </td>
+                                                                            <td className="px-4 py-4 text-right">{b.reservationCount}<span className="text-xs text-slate-400 ml-1">名</span></td>
                                                                             <td className="px-4 py-4 text-right text-lg font-black text-purple-600">{b.newCount}<span className="text-xs text-slate-400 ml-1">名</span></td>
                                                                             <td className="px-4 py-4 text-right">{b.enrollCount}<span className="text-xs text-slate-400 ml-1">名</span></td>
                                                                             <td className="px-4 py-4 text-right"><span className={`px-2 py-1 rounded-lg text-xs font-black ${b.enrollRate >= 50 ? 'bg-emerald-100 text-emerald-700' : b.enrollRate >= 30 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{b.enrollRate}%</span></td>
-                                                                            <td className="px-4 py-4 text-right">{b.cancelCount}<span className="text-xs text-slate-400 ml-1">名</span></td>
                                                                             <td className="px-4 py-4 text-right"><span className={`px-2 py-1 rounded-lg text-xs font-black ${b.cancelRate <= 10 ? 'bg-emerald-100 text-emerald-700' : b.cancelRate <= 20 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{b.cancelRate}%</span></td>
+                                                                            <td className="px-4 py-4 text-right">{b.reviewCount}<span className="text-xs text-slate-400 ml-1">件</span></td>
                                                                             <td className="px-4 py-4 text-right font-mono">¥{b.adSpend.toLocaleString()}</td>
                                                                             <td className="px-4 py-4 text-right font-mono font-black">¥{b.cpa.toLocaleString()}</td>
                                                                             <td className="px-4 py-4 text-right font-mono font-black text-emerald-700">¥{b.revenue.toLocaleString()}</td>
@@ -2454,11 +2493,12 @@
                                                                     <tfoot>
                                                                         <tr className="bg-slate-50 text-sm font-black border-t-2 border-slate-200">
                                                                             <td className="px-6 py-4 text-slate-600">合計 / 平均</td>
+                                                                            <td className="px-4 py-4 text-right">{mktStats.totalReservations}名</td>
                                                                             <td className="px-4 py-4 text-right text-lg text-purple-600">{mktStats.totalNew}名</td>
                                                                             <td className="px-4 py-4 text-right">{mktStats.totalEnroll}名</td>
                                                                             <td className="px-4 py-4 text-right">{mktStats.enrollRate}%</td>
-                                                                            <td className="px-4 py-4 text-right">{mktStats.totalCancel}名</td>
                                                                             <td className="px-4 py-4 text-right">{mktStats.cancelRate}%</td>
+                                                                            <td className="px-4 py-4 text-right">{mktStats.totalReviews}件</td>
                                                                             <td className="px-4 py-4 text-right font-mono">¥{mktStats.totalAdSpend.toLocaleString()}</td>
                                                                             <td className="px-4 py-4 text-right font-mono">¥{mktStats.avgCpa.toLocaleString()}</td>
                                                                             <td className="px-4 py-4 text-right font-mono text-emerald-700">¥{mktStats.totalRevenue.toLocaleString()}</td>
@@ -2478,13 +2518,13 @@
                                                                 <div key={b.branch} className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden hover:shadow-md transition-all">
                                                                     <div className={`bg-gradient-to-r ${colors[i % colors.length]} p-4 text-white`}>
                                                                         <div className="font-black text-lg">{b.branch}</div>
-                                                                        <div className="text-sm opacity-80">{b.records}レコード</div>
+                                                                        <div className="text-sm opacity-80">{b.area || `${b.records}媒体`}</div>
                                                                     </div>
                                                                     <div className="p-4 grid grid-cols-2 gap-3">
-                                                                        <div><div className="text-[10px] font-black text-slate-400 uppercase">新規数</div><div className="text-lg font-black text-slate-800">{b.newCount}名</div></div>
+                                                                        <div><div className="text-[10px] font-black text-slate-400 uppercase">実来院</div><div className="text-lg font-black text-slate-800">{b.newCount}名</div></div>
                                                                         <div><div className="text-[10px] font-black text-slate-400 uppercase">CPA</div><div className="text-lg font-black text-slate-800">¥{b.cpa.toLocaleString()}</div></div>
                                                                         <div><div className="text-[10px] font-black text-slate-400 uppercase">入会率</div><div className={`text-lg font-black ${b.enrollRate >= 50 ? 'text-emerald-600' : 'text-amber-600'}`}>{b.enrollRate}%</div></div>
-                                                                        <div><div className="text-[10px] font-black text-slate-400 uppercase">キャンセル率</div><div className={`text-lg font-black ${b.cancelRate <= 10 ? 'text-emerald-600' : 'text-rose-600'}`}>{b.cancelRate}%</div></div>
+                                                                        <div><div className="text-[10px] font-black text-slate-400 uppercase">C率</div><div className={`text-lg font-black ${b.cancelRate <= 10 ? 'text-emerald-600' : 'text-rose-600'}`}>{b.cancelRate}%</div></div>
                                                                     </div>
                                                                 </div>
                                                             );
@@ -2613,16 +2653,16 @@
                                                                     <thead>
                                                                         <tr className="bg-slate-50 text-[10px] uppercase tracking-widest text-slate-400 font-black border-b border-slate-100">
                                                                             <th className="px-6 py-4">媒体名</th>
-                                                                            <th className="px-4 py-4 text-right">新規数</th>
+                                                                            <th className="px-4 py-4 text-right">予約数</th>
+                                                                            <th className="px-4 py-4 text-right">実来院</th>
                                                                             <th className="px-4 py-4 text-right">入会数</th>
                                                                             <th className="px-4 py-4 text-right">入会率</th>
-                                                                            <th className="px-4 py-4 text-right">キャンセル数</th>
-                                                                            <th className="px-4 py-4 text-right">キャンセル率</th>
+                                                                            <th className="px-4 py-4 text-right">C率</th>
+                                                                            <th className="px-4 py-4 text-right">口コミ</th>
                                                                             <th className="px-4 py-4 text-right">広告費</th>
                                                                             <th className="px-4 py-4 text-right">CPA</th>
                                                                             <th className="px-4 py-4 text-right">売上</th>
                                                                             <th className="px-4 py-4 text-right">ROAS</th>
-                                                                            <th className="px-4 py-4 text-right">CVR</th>
                                                                         </tr>
                                                                     </thead>
                                                                     <tbody className="divide-y divide-slate-100">
@@ -2634,16 +2674,16 @@
                                                                                         <span className="font-black text-slate-800">{m.media}</span>
                                                                                     </div>
                                                                                 </td>
-                                                                                <td className="px-4 py-4 text-right text-lg font-black text-purple-600">{m.newCount}名</td>
-                                                                                <td className="px-4 py-4 text-right">{m.enrollCount}名</td>
+                                                                                <td className="px-4 py-4 text-right">{m.reservationCount}<span className="text-xs text-slate-400 ml-1">名</span></td>
+                                                                                <td className="px-4 py-4 text-right text-lg font-black text-purple-600">{m.newCount}<span className="text-xs text-slate-400 ml-1">名</span></td>
+                                                                                <td className="px-4 py-4 text-right">{m.enrollCount}<span className="text-xs text-slate-400 ml-1">名</span></td>
                                                                                 <td className="px-4 py-4 text-right"><span className={`px-2 py-1 rounded-lg text-xs font-black ${m.enrollRate >= 50 ? 'bg-emerald-100 text-emerald-700' : m.enrollRate >= 30 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{m.enrollRate}%</span></td>
-                                                                                <td className="px-4 py-4 text-right">{m.cancelCount}名</td>
                                                                                 <td className="px-4 py-4 text-right"><span className={`px-2 py-1 rounded-lg text-xs font-black ${m.cancelRate <= 10 ? 'bg-emerald-100 text-emerald-700' : m.cancelRate <= 20 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{m.cancelRate}%</span></td>
+                                                                                <td className="px-4 py-4 text-right">{m.reviewCount}<span className="text-xs text-slate-400 ml-1">件</span></td>
                                                                                 <td className="px-4 py-4 text-right font-mono">¥{m.adSpend.toLocaleString()}</td>
                                                                                 <td className="px-4 py-4 text-right font-mono font-black">¥{m.cpa.toLocaleString()}</td>
                                                                                 <td className="px-4 py-4 text-right font-mono font-black text-emerald-700">¥{m.revenue.toLocaleString()}</td>
                                                                                 <td className="px-4 py-4 text-right"><span className={`px-2 py-1 rounded-lg text-xs font-black ${m.roas >= 200 ? 'bg-emerald-100 text-emerald-700' : m.roas >= 100 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{m.roas}%</span></td>
-                                                                                <td className="px-4 py-4 text-right">{m.cvr > 0 ? `${m.cvr}%` : '-'}</td>
                                                                             </tr>
                                                                         ))}
                                                                     </tbody>
@@ -2651,16 +2691,16 @@
                                                                         <tfoot>
                                                                             <tr className="bg-slate-50 text-sm font-black border-t-2 border-slate-200">
                                                                                 <td className="px-6 py-4 text-slate-600">合計 / 平均</td>
+                                                                                <td className="px-4 py-4 text-right">{mktStats.totalReservations}名</td>
                                                                                 <td className="px-4 py-4 text-right text-lg text-purple-600">{mktStats.totalNew}名</td>
                                                                                 <td className="px-4 py-4 text-right">{mktStats.totalEnroll}名</td>
                                                                                 <td className="px-4 py-4 text-right">{mktStats.enrollRate}%</td>
-                                                                                <td className="px-4 py-4 text-right">{mktStats.totalCancel}名</td>
                                                                                 <td className="px-4 py-4 text-right">{mktStats.cancelRate}%</td>
+                                                                                <td className="px-4 py-4 text-right">{mktStats.totalReviews}件</td>
                                                                                 <td className="px-4 py-4 text-right font-mono">¥{mktStats.totalAdSpend.toLocaleString()}</td>
                                                                                 <td className="px-4 py-4 text-right font-mono">¥{mktStats.avgCpa.toLocaleString()}</td>
                                                                                 <td className="px-4 py-4 text-right font-mono text-emerald-700">¥{mktStats.totalRevenue.toLocaleString()}</td>
                                                                                 <td className="px-4 py-4 text-right">{mktStats.roas}%</td>
-                                                                                <td className="px-4 py-4 text-right">{mktStats.cvr > 0 ? `${mktStats.cvr}%` : '-'}</td>
                                                                             </tr>
                                                                         </tfoot>
                                                                     )}
@@ -2774,10 +2814,10 @@
                                                                             <div>
                                                                                 <h3 className="text-xl font-black text-slate-800">{branch.branch}</h3>
                                                                                 <div className="flex items-center gap-4 text-xs font-bold text-slate-500 mt-1">
-                                                                                    <span>新規 {branch.newCount}名</span>
+                                                                                    <span>実来院 {branch.newCount}名</span>
                                                                                     <span>CPA ¥{branch.cpa.toLocaleString()}</span>
                                                                                     <span>入会率 {branch.enrollRate}%</span>
-                                                                                    <span>キャンセル率 {branch.cancelRate}%</span>
+                                                                                    <span>C率 {branch.cancelRate}%</span>
                                                                                 </div>
                                                                             </div>
                                                                         </div>

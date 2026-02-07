@@ -433,6 +433,7 @@
             const [chatMessages, setChatMessages] = useState([]);
             const [chatInput, setChatInput] = useState('');
             const [chatLoading, setChatLoading] = useState(false);
+            const [chatContext, setChatContext] = useState({ branch: null, month: null }); // 会話の文脈を保持
             const chatContainerRef = useRef(null);
 
             // マーケティングデータ取得
@@ -1371,9 +1372,23 @@
             }, [filteredData]);
 
             // チャット分析機能
-            const analyzeChatQuestion = (question) => {
+            const analyzeChatQuestion = (question, currentContext) => {
                 const lowerQ = question.toLowerCase();
                 console.log('🤖 Chat question:', question);
+                console.log('📌 Current context:', currentContext);
+
+                // コンテキストリセットキーワード
+                const resetKeywords = ['リセット', 'クリア', '最初から', '新しい質問'];
+                const shouldReset = resetKeywords.some(keyword => lowerQ.includes(keyword));
+
+                if (shouldReset) {
+                    console.log('🔄 Context reset requested');
+                    return {
+                        success: true,
+                        message: '会話の文脈をリセットしました。新しい質問をどうぞ。',
+                        resetContext: true
+                    };
+                }
 
                 // 店舗名の抽出（より正確なマッチング）
                 let targetBranch = null;
@@ -1403,7 +1418,13 @@
                 const isAllBranches = lowerQ.includes('全店舗') || lowerQ.includes('全体') || lowerQ.includes('全院');
                 if (isAllBranches) {
                     targetBranch = null;
-                    console.log('✓ All branches mode');
+                    console.log('✓ All branches mode (explicit)');
+                }
+
+                // 店舗が指定されていない場合、前回の文脈を使用
+                if (targetBranch === null && !isAllBranches && currentContext.branch) {
+                    targetBranch = currentContext.branch;
+                    console.log('✓ Using context branch:', targetBranch);
                 }
 
                 // 月の抽出（より柔軟なパターンマッチング）
@@ -1442,6 +1463,12 @@
                         targetMonth = `${mostCommonYear}年${month}月`;
                         console.log('✓ Month matched (month only, inferred year):', targetMonth);
                     }
+                }
+
+                // 月が指定されていない場合、前回の文脈を使用
+                if (!targetMonth && currentContext.month) {
+                    targetMonth = currentContext.month;
+                    console.log('✓ Using context month:', targetMonth);
                 }
 
                 // マーケティングデータか経営データかを判定（より精密に）
@@ -1504,16 +1531,21 @@
 
                     return {
                         success: false,
-                        message: errorMsg
+                        message: errorMsg,
+                        newContext: { branch: targetBranch, month: targetMonth }
                     };
                 }
 
                 // 分析実行
-                if (useMktData) {
-                    return analyzeMarketingData(filteredAnalysisData, targetBranch, targetMonth);
-                } else {
-                    return analyzeOperationalData(filteredAnalysisData, targetBranch, targetMonth);
-                }
+                const result = useMktData
+                    ? analyzeMarketingData(filteredAnalysisData, targetBranch, targetMonth)
+                    : analyzeOperationalData(filteredAnalysisData, targetBranch, targetMonth);
+
+                // 新しい文脈を含めて返す
+                return {
+                    ...result,
+                    newContext: { branch: targetBranch, month: targetMonth }
+                };
             };
 
             // 経営データの分析
@@ -1824,11 +1856,34 @@
 
                 // 少し遅延を入れてリアルな感じに
                 setTimeout(() => {
-                    const result = analyzeChatQuestion(userMessage);
+                    // 現在の文脈を渡して分析
+                    const result = analyzeChatQuestion(userMessage, chatContext);
+
+                    // 文脈のリセットが要求された場合
+                    if (result.resetContext) {
+                        setChatContext({ branch: null, month: null });
+                        console.log('🔄 Context cleared');
+                    }
+                    // 新しい文脈がある場合、更新
+                    else if (result.newContext) {
+                        setChatContext(result.newContext);
+                        console.log('📌 Context updated:', result.newContext);
+                    }
+
+                    // メッセージに文脈情報を追加（デバッグ用）
+                    let displayMessage = result.message;
+                    if (result.newContext && !result.resetContext) {
+                        const contextInfo = [];
+                        if (result.newContext.branch) contextInfo.push(`店舗: ${result.newContext.branch}`);
+                        if (result.newContext.month) contextInfo.push(`期間: ${result.newContext.month}`);
+                        if (contextInfo.length > 0) {
+                            displayMessage += `\n\n---\n💡 次の質問でも同じ${contextInfo.join('、')}を使用します。変更する場合は明示してください。`;
+                        }
+                    }
 
                     setChatMessages(prev => [...prev, {
                         type: 'assistant',
-                        content: result.success ? result.message : result.message
+                        content: displayMessage
                     }]);
                     setChatLoading(false);
 

@@ -27,9 +27,10 @@
 // ============================================================
 const SPREADSHEET_ID = 'ここにスプレッドシートIDを貼り付け';
 // シート名の指定方法:
-//   '*'         → 全シートを対象（シート名が「月」列に自動セット）
-//   'シート1'   → 特定のシートのみ対象
-const SHEET_NAME = '*';
+//   '*'            → 全シートを対象（シート名が「月」列に自動セット）
+//   '数値まとめ'   → 名前に「数値まとめ」を含むシートのみ対象
+//   'シート1'      → 完全一致の特定シートのみ対象
+const SHEET_NAME = '数値まとめ';
 // ============================================================
 
 
@@ -67,36 +68,37 @@ function doGet(e) {
 function getMarketingData() {
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
 
+  const allSheets = ss.getSheets();
+  let targetSheets;
+
   if (SHEET_NAME === '*') {
-    // 全シートを対象
-    const allResults = [];
-    const sheets = ss.getSheets();
-    Logger.log('全シートモード: ' + sheets.length + 'シート検出');
-
-    sheets.forEach(function(sheet) {
-      try {
-        const sheetData = processSheet(sheet);
-        if (sheetData.length > 0) {
-          Logger.log('  ✅ ' + sheet.getName() + ': ' + sheetData.length + '件');
-          allResults.push.apply(allResults, sheetData);
-        } else {
-          Logger.log('  ⏭ ' + sheet.getName() + ': データなし（スキップ）');
-        }
-      } catch (e) {
-        Logger.log('  ⚠ ' + sheet.getName() + ': スキップ（' + e.message + '）');
-      }
-    });
-
-    return allResults;
+    targetSheets = allSheets;
+    Logger.log('全シートモード: ' + allSheets.length + 'シート');
   } else {
-    // 特定シートを対象
-    const sheet = ss.getSheetByName(SHEET_NAME);
-    if (!sheet) {
-      var available = ss.getSheets().map(function(s) { return s.getName(); }).join(', ');
-      throw new Error('シート "' + SHEET_NAME + '" が見つかりません。利用可能: ' + available);
+    // 完全一致 or 部分一致
+    const exact = allSheets.filter(function(s) { return s.getName() === SHEET_NAME; });
+    if (exact.length > 0) {
+      targetSheets = exact;
+    } else {
+      targetSheets = allSheets.filter(function(s) { return s.getName().indexOf(SHEET_NAME) >= 0; });
     }
-    return processSheet(sheet);
+    Logger.log('対象シート (' + SHEET_NAME + '): ' + targetSheets.length + '件');
   }
+
+  const allResults = [];
+  targetSheets.forEach(function(sheet) {
+    try {
+      const sheetData = processSheet(sheet);
+      if (sheetData.length > 0) {
+        Logger.log('  ✅ ' + sheet.getName() + ' → ' + parseSheetMonth(sheet.getName()) + ': ' + sheetData.length + '件');
+        allResults.push.apply(allResults, sheetData);
+      }
+    } catch (e) {
+      Logger.log('  ⚠ ' + sheet.getName() + ': スキップ（' + e.message + '）');
+    }
+  });
+
+  return allResults;
 }
 
 
@@ -105,7 +107,7 @@ function getMarketingData() {
  * 横展開のスプレッドシートを縦型の配列に変換
  */
 function processSheet(sheet) {
-  const sheetName = sheet.getName();
+  const sheetName = parseSheetMonth(sheet.getName());
   const lastRow = sheet.getLastRow();
   const lastCol = sheet.getLastColumn();
   if (lastRow < 3 || lastCol < 10) return [];
@@ -255,6 +257,32 @@ function processSheet(sheet) {
 
 
 // ===== ヘルパー関数群 =====
+
+/**
+ * シート名から月ラベルを生成
+ * "数値まとめ(R8.2)" → "26年2月"  (令和8年=2026年)
+ * "META API(202601)" → "26年1月"
+ * それ以外 → シート名そのまま
+ */
+function parseSheetMonth(name) {
+  // 令和パターン: R7.12, R8.2 など
+  var rMatch = name.match(/R(\d+)\.(\d+)/);
+  if (rMatch) {
+    var westernYear = 2018 + parseInt(rMatch[1]);
+    var month = parseInt(rMatch[2]);
+    return (westernYear % 100) + '年' + month + '月';
+  }
+  // 西暦パターン: 202601, 202512 など
+  var apiMatch = name.match(/(\d{4})(\d{2})/);
+  if (apiMatch) {
+    var year = parseInt(apiMatch[1]);
+    var month2 = parseInt(apiMatch[2]);
+    if (month2 >= 1 && month2 <= 12) {
+      return (year % 100) + '年' + month2 + '月';
+    }
+  }
+  return name;
+}
 
 /**
  * ヘッダー行から完全一致でカラムインデックスを取得

@@ -154,9 +154,130 @@
         console.log('✅ All icon components defined');
 
         const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbxZKLuzLmqELFQlJVHQj-F8yCBDzrgTfa7P4xNMnG5ZhPk3f4jWL0ACdFPNFpg3ZUpG/exec';
+        const MARKETING_API_URL = 'https://script.google.com/macros/s/AKfycbwAovr_4Hkqj5eB6pqnJ2pjXn-WfYPd5rhxw007q2bLyF4VCqyd3J1GQlD8j3f3OuWS/exec';
         const CACHE_KEY = 'dashboard_data_cache';
+        const MARKETING_CACHE_KEY = 'marketing_data_cache';
         const UI_STATE_KEY = 'dashboard_ui_state';
         const CACHE_EXPIRY_MS = 15 * 60 * 1000; // 15分
+
+        // マーケティングデータのカラムマッピング（スプレッドシートの日本語カラム名を標準キーに変換）
+        const MARKETING_COLUMN_MAP = {
+            '月': 'month', '年月': 'month', '期間': 'month', 'date': 'month', 'Date': 'month',
+            '店舗': 'branch', '院名': 'branch', '店舗名': 'branch', 'store': 'branch', 'Branch': 'branch',
+            'スタッフ': 'staff', '担当者': 'staff', '担当': 'staff', 'staff': 'staff', 'Staff': 'staff',
+            '媒体': 'media', '媒体名': 'media', '集客媒体': 'media', 'チャネル': 'media', 'channel': 'media', 'Media': 'media',
+            '新規数': 'newCount', '新規人数': 'newCount', '来店数': 'newCount', '反響数': 'newCount', 'new_count': 'newCount',
+            '広告費': 'adSpend', '広告コスト': 'adSpend', 'コスト': 'adSpend', '費用': 'adSpend', 'ad_spend': 'adSpend',
+            'CPA': 'cpa', '顧客獲得単価': 'cpa', 'cpa': 'cpa',
+            '入会数': 'enrollCount', '成約数': 'enrollCount', '契約数': 'enrollCount', 'enroll_count': 'enrollCount',
+            '入会率': 'enrollRate', '成約率': 'enrollRate', '契約率': 'enrollRate', 'enroll_rate': 'enrollRate',
+            'キャンセル数': 'cancelCount', 'cancel_count': 'cancelCount',
+            'キャンセル率': 'cancelRate', 'cancel_rate': 'cancelRate',
+            '売上': 'revenue', '売上金額': 'revenue', '新規売上': 'revenue', 'revenue': 'revenue',
+            'CV数': 'cvCount', 'CV': 'cvCount', 'コンバージョン': 'cvCount', 'cv_count': 'cvCount',
+            'クリック数': 'clicks', 'click': 'clicks', 'clicks': 'clicks',
+            'インプレッション': 'impressions', '表示回数': 'impressions', 'IMP': 'impressions', 'impressions': 'impressions',
+            'CTR': 'ctr', 'クリック率': 'ctr', 'ctr': 'ctr',
+            'CVR': 'cvr', 'コンバージョン率': 'cvr', 'cvr': 'cvr',
+            'ROAS': 'roas', 'roas': 'roas',
+            'LTV': 'ltv', '顧客生涯価値': 'ltv', 'ltv': 'ltv',
+            '紹介数': 'referralCount', '紹介': 'referralCount',
+            'リピート率': 'repeatRate', 'repeat_rate': 'repeatRate',
+            '平均単価': 'avgPrice', '客単価': 'avgPrice', '単価': 'avgPrice',
+            '予約数': 'reservationCount', '問い合わせ数': 'inquiryCount',
+            '施術回数': 'treatmentCount', '回数券購入数': 'ticketPurchaseCount',
+        };
+
+        // マーケティングデータを標準化
+        const normalizeMarketingData = (rawData) => {
+            if (!rawData || rawData.length === 0) return [];
+
+            // ヘッダー行のキーを取得
+            const sampleRow = rawData[0];
+            const originalKeys = Object.keys(sampleRow);
+
+            // カラムマッピングを構築
+            const keyMap = {};
+            originalKeys.forEach(key => {
+                const trimmedKey = key.trim();
+                if (MARKETING_COLUMN_MAP[trimmedKey]) {
+                    keyMap[key] = MARKETING_COLUMN_MAP[trimmedKey];
+                } else {
+                    // マッピングにない場合はそのまま使用
+                    keyMap[key] = trimmedKey;
+                }
+            });
+
+            console.log('📊 Marketing column mapping:', keyMap);
+
+            return rawData.map(row => {
+                const normalized = {};
+                Object.entries(row).forEach(([key, value]) => {
+                    const mappedKey = keyMap[key] || key;
+                    // 数値に変換できるものは変換
+                    if (typeof value === 'string' && value !== '' && !isNaN(value.replace(/[,%¥円]/g, ''))) {
+                        const cleaned = value.replace(/[,%¥円,]/g, '');
+                        normalized[mappedKey] = parseFloat(cleaned);
+                    } else {
+                        normalized[mappedKey] = value;
+                    }
+                });
+
+                // CPAが未設定の場合、広告費÷新規数で自動計算
+                if (!normalized.cpa && normalized.adSpend && normalized.newCount && normalized.newCount > 0) {
+                    normalized.cpa = Math.round(normalized.adSpend / normalized.newCount);
+                }
+                // 入会率が未設定の場合、入会数÷新規数で自動計算
+                if (!normalized.enrollRate && normalized.enrollCount != null && normalized.newCount && normalized.newCount > 0) {
+                    normalized.enrollRate = Math.round((normalized.enrollCount / normalized.newCount) * 100);
+                }
+                // キャンセル率が未設定の場合、キャンセル数÷新規数で自動計算
+                if (!normalized.cancelRate && normalized.cancelCount != null && normalized.newCount && normalized.newCount > 0) {
+                    normalized.cancelRate = Math.round((normalized.cancelCount / normalized.newCount) * 100);
+                }
+                // CVRが未設定の場合
+                if (!normalized.cvr && normalized.cvCount && normalized.clicks && normalized.clicks > 0) {
+                    normalized.cvr = Math.round((normalized.cvCount / normalized.clicks) * 1000) / 10;
+                }
+                // CTRが未設定の場合
+                if (!normalized.ctr && normalized.clicks && normalized.impressions && normalized.impressions > 0) {
+                    normalized.ctr = Math.round((normalized.clicks / normalized.impressions) * 1000) / 10;
+                }
+                // ROASが未設定の場合
+                if (!normalized.roas && normalized.revenue && normalized.adSpend && normalized.adSpend > 0) {
+                    normalized.roas = Math.round((normalized.revenue / normalized.adSpend) * 100);
+                }
+
+                return normalized;
+            });
+        };
+
+        // マーケティングキャッシュヘルパー
+        const getMarketingCachedData = () => {
+            try {
+                const cached = localStorage.getItem(MARKETING_CACHE_KEY);
+                if (!cached) return null;
+                const { data, timestamp } = JSON.parse(cached);
+                if (Date.now() - timestamp > CACHE_EXPIRY_MS) {
+                    localStorage.removeItem(MARKETING_CACHE_KEY);
+                    return null;
+                }
+                console.log('📦 Using cached marketing data');
+                return data;
+            } catch (e) {
+                console.error('❌ Marketing cache read error:', e);
+                return null;
+            }
+        };
+
+        const setMarketingCachedData = (data) => {
+            try {
+                localStorage.setItem(MARKETING_CACHE_KEY, JSON.stringify({ data, timestamp: Date.now() }));
+                console.log('💾 Marketing data cached');
+            } catch (e) {
+                console.error('❌ Marketing cache write error:', e);
+            }
+        };
 
         // キャッシュヘルパー関数
         const getCachedData = () => {
@@ -246,6 +367,87 @@
             const [uiStateLoaded, setUiStateLoaded] = useState(!!savedUIState);
             const branchMenuRef = useRef(null);
             const staffMenuRef = useRef(null);
+
+            // マーケティングダッシュボード用 State
+            const [mktData, setMktData] = useState([]);
+            const [mktLoading, setMktLoading] = useState(false);
+            const [mktError, setMktError] = useState(null);
+            const [mktLastFetch, setMktLastFetch] = useState(null);
+            const [mktSelectedBranches, setMktSelectedBranches] = useState([]);
+            const [mktSelectedStaff, setMktSelectedStaff] = useState([]);
+            const [mktSelectedMedia, setMktSelectedMedia] = useState([]);
+            const [mktSelectedMonth, setMktSelectedMonth] = useState('');
+            const [mktEndMonth, setMktEndMonth] = useState('');
+            const [mktBranchMenuOpen, setMktBranchMenuOpen] = useState(false);
+            const [mktStaffMenuOpen, setMktStaffMenuOpen] = useState(false);
+            const [mktMediaMenuOpen, setMktMediaMenuOpen] = useState(false);
+            const [mktActiveTab, setMktActiveTab] = useState('overview');
+            const [mktInitialized, setMktInitialized] = useState(false);
+            const mktBranchRef = useRef(null);
+            const mktStaffRef = useRef(null);
+            const mktMediaRef = useRef(null);
+
+            // マーケティングデータ取得
+            const fetchMarketingData = async (forceRefresh = false) => {
+                console.log('📡 Fetching marketing data...');
+                try {
+                    setMktLoading(true);
+                    setMktError(null);
+
+                    if (!forceRefresh) {
+                        const cached = getMarketingCachedData();
+                        if (cached && cached.length > 0) {
+                            console.log('💾 Using cached marketing data:', cached.length, 'records');
+                            setMktData(cached);
+                            if (!mktInitialized) {
+                                const branches = Array.from(new Set(cached.map(d => d.branch).filter(Boolean)));
+                                setMktSelectedBranches(branches);
+                                const months = Array.from(new Set(cached.map(d => d.month).filter(Boolean))).sort();
+                                if (months.length > 0) {
+                                    setMktSelectedMonth(months[0]);
+                                    setMktEndMonth(months[months.length - 1]);
+                                }
+                                setMktInitialized(true);
+                            }
+                            setMktLoading(false);
+                            setMktLastFetch(new Date());
+                            return;
+                        }
+                    }
+
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 30000);
+                    const response = await fetch(MARKETING_API_URL, { redirect: 'follow', signal: controller.signal });
+                    clearTimeout(timeoutId);
+
+                    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                    const result = await response.json();
+                    if (!result.success) throw new Error(result.error || 'マーケティングデータの取得に失敗');
+
+                    const normalized = normalizeMarketingData(result.data || []);
+                    console.log('✅ Marketing data normalized:', normalized.length, 'records');
+                    setMktData(normalized);
+                    if (normalized.length > 0) {
+                        setMarketingCachedData(normalized);
+                        if (!mktInitialized) {
+                            const branches = Array.from(new Set(normalized.map(d => d.branch).filter(Boolean)));
+                            setMktSelectedBranches(branches);
+                            const months = Array.from(new Set(normalized.map(d => d.month).filter(Boolean))).sort();
+                            if (months.length > 0) {
+                                setMktSelectedMonth(months[0]);
+                                setMktEndMonth(months[months.length - 1]);
+                            }
+                            setMktInitialized(true);
+                        }
+                    }
+                    setMktLastFetch(new Date());
+                } catch (err) {
+                    console.error('❌ Marketing fetch error:', err);
+                    setMktError(err.name === 'AbortError' ? 'タイムアウト: サーバーの応答に時間がかかりすぎています' : err.message || 'マーケティングデータの取得に失敗しました');
+                } finally {
+                    setMktLoading(false);
+                }
+            };
 
             console.log('✅ App state initialized', savedUIState ? '(from localStorage)' : '(default)');
 
@@ -392,6 +594,24 @@
                 };
             }, []);
 
+            // マーケティングページに遷移した時にデータ取得
+            useEffect(() => {
+                if (currentPage === 'marketing' && mktData.length === 0 && !mktLoading && !mktError) {
+                    fetchMarketingData();
+                }
+            }, [currentPage]);
+
+            // マーケティングドロップダウンのクリック外検知
+            useEffect(() => {
+                const handleMktClickOutside = (event) => {
+                    if (mktBranchRef.current && !mktBranchRef.current.contains(event.target)) setMktBranchMenuOpen(false);
+                    if (mktStaffRef.current && !mktStaffRef.current.contains(event.target)) setMktStaffMenuOpen(false);
+                    if (mktMediaRef.current && !mktMediaRef.current.contains(event.target)) setMktMediaMenuOpen(false);
+                };
+                document.addEventListener("mousedown", handleMktClickOutside);
+                return () => document.removeEventListener("mousedown", handleMktClickOutside);
+            }, []);
+
             // UI状態が変更されたらlocalStorageに保存
             useEffect(() => {
                 // 初回ロード時は保存しない（データ取得後に初期値が設定されるため）
@@ -491,6 +711,227 @@
                     return matchMonth && matchBranch && matchStaff && matchSearch;
                 });
             }, [rawData, targetMonths, selectedBranches, selectedStaffNames, searchTerm]);
+
+            // ===== マーケティング用 useMemo =====
+            const mktMonths = useMemo(() => {
+                return Array.from(new Set(mktData.map(d => d.month).filter(Boolean))).sort();
+            }, [mktData]);
+
+            const mktAllBranches = useMemo(() => Array.from(new Set(mktData.map(d => d.branch).filter(Boolean))), [mktData]);
+            const mktAllStaff = useMemo(() => Array.from(new Set(mktData.map(d => d.staff).filter(Boolean))), [mktData]);
+            const mktAllMedia = useMemo(() => Array.from(new Set(mktData.map(d => d.media).filter(Boolean))), [mktData]);
+
+            // 選択月範囲内の月リスト
+            const mktTargetMonths = useMemo(() => {
+                if (!mktSelectedMonth || !mktEndMonth) return mktMonths;
+                const startIdx = mktMonths.indexOf(mktSelectedMonth);
+                const endIdx = mktMonths.indexOf(mktEndMonth);
+                if (startIdx === -1 || endIdx === -1) return mktMonths;
+                const minIdx = Math.min(startIdx, endIdx);
+                const maxIdx = Math.max(startIdx, endIdx);
+                return mktMonths.slice(minIdx, maxIdx + 1);
+            }, [mktSelectedMonth, mktEndMonth, mktMonths]);
+
+            const mktFiltered = useMemo(() => {
+                return mktData.filter(d => {
+                    const matchMonth = mktTargetMonths.length === 0 || mktTargetMonths.includes(d.month);
+                    const matchBranch = mktSelectedBranches.length === 0 || mktSelectedBranches.includes(d.branch);
+                    const matchStaff = mktSelectedStaff.length === 0 || mktSelectedStaff.includes(d.staff);
+                    const matchMedia = mktSelectedMedia.length === 0 || mktSelectedMedia.includes(d.media);
+                    return matchMonth && matchBranch && matchStaff && matchMedia;
+                });
+            }, [mktData, mktTargetMonths, mktSelectedBranches, mktSelectedStaff, mktSelectedMedia]);
+
+            // マーケティングKPI集計
+            const mktStats = useMemo(() => {
+                const totalNew = mktFiltered.reduce((a, d) => a + (d.newCount || 0), 0);
+                const totalEnroll = mktFiltered.reduce((a, d) => a + (d.enrollCount || 0), 0);
+                const totalCancel = mktFiltered.reduce((a, d) => a + (d.cancelCount || 0), 0);
+                const totalAdSpend = mktFiltered.reduce((a, d) => a + (d.adSpend || 0), 0);
+                const totalRevenue = mktFiltered.reduce((a, d) => a + (d.revenue || 0), 0);
+                const totalClicks = mktFiltered.reduce((a, d) => a + (d.clicks || 0), 0);
+                const totalImpressions = mktFiltered.reduce((a, d) => a + (d.impressions || 0), 0);
+                const totalCv = mktFiltered.reduce((a, d) => a + (d.cvCount || 0), 0);
+                const totalReferrals = mktFiltered.reduce((a, d) => a + (d.referralCount || 0), 0);
+
+                const avgCpa = totalNew > 0 ? Math.round(totalAdSpend / totalNew) : 0;
+                const enrollRate = totalNew > 0 ? Math.round((totalEnroll / totalNew) * 100) : 0;
+                const cancelRate = totalNew > 0 ? Math.round((totalCancel / totalNew) * 100) : 0;
+                const cvr = totalClicks > 0 ? Math.round((totalCv / totalClicks) * 1000) / 10 : 0;
+                const ctr = totalImpressions > 0 ? Math.round((totalClicks / totalImpressions) * 1000) / 10 : 0;
+                const roas = totalAdSpend > 0 ? Math.round((totalRevenue / totalAdSpend) * 100) : 0;
+                const avgPrice = totalNew > 0 ? Math.round(totalRevenue / totalNew) : 0;
+
+                return { totalNew, totalEnroll, totalCancel, totalAdSpend, totalRevenue, totalClicks, totalImpressions, totalCv, totalReferrals, avgCpa, enrollRate, cancelRate, cvr, ctr, roas, avgPrice };
+            }, [mktFiltered]);
+
+            // 店舗別集計
+            const mktByBranch = useMemo(() => {
+                const map = {};
+                mktFiltered.forEach(d => {
+                    const key = d.branch || '不明';
+                    if (!map[key]) map[key] = { branch: key, newCount: 0, enrollCount: 0, cancelCount: 0, adSpend: 0, revenue: 0, records: 0 };
+                    map[key].newCount += d.newCount || 0;
+                    map[key].enrollCount += d.enrollCount || 0;
+                    map[key].cancelCount += d.cancelCount || 0;
+                    map[key].adSpend += d.adSpend || 0;
+                    map[key].revenue += d.revenue || 0;
+                    map[key].records++;
+                });
+                return Object.values(map).map(b => ({
+                    ...b,
+                    cpa: b.newCount > 0 ? Math.round(b.adSpend / b.newCount) : 0,
+                    enrollRate: b.newCount > 0 ? Math.round((b.enrollCount / b.newCount) * 100) : 0,
+                    cancelRate: b.newCount > 0 ? Math.round((b.cancelCount / b.newCount) * 100) : 0,
+                    roas: b.adSpend > 0 ? Math.round((b.revenue / b.adSpend) * 100) : 0,
+                })).sort((a, b) => b.newCount - a.newCount);
+            }, [mktFiltered]);
+
+            // スタッフ別集計
+            const mktByStaff = useMemo(() => {
+                const map = {};
+                mktFiltered.forEach(d => {
+                    const key = d.staff || '不明';
+                    if (!map[key]) map[key] = { staff: key, branch: d.branch || '', newCount: 0, enrollCount: 0, cancelCount: 0, adSpend: 0, revenue: 0 };
+                    map[key].newCount += d.newCount || 0;
+                    map[key].enrollCount += d.enrollCount || 0;
+                    map[key].cancelCount += d.cancelCount || 0;
+                    map[key].adSpend += d.adSpend || 0;
+                    map[key].revenue += d.revenue || 0;
+                });
+                return Object.values(map).map(s => ({
+                    ...s,
+                    cpa: s.newCount > 0 ? Math.round(s.adSpend / s.newCount) : 0,
+                    enrollRate: s.newCount > 0 ? Math.round((s.enrollCount / s.newCount) * 100) : 0,
+                    cancelRate: s.newCount > 0 ? Math.round((s.cancelCount / s.newCount) * 100) : 0,
+                })).sort((a, b) => b.newCount - a.newCount);
+            }, [mktFiltered]);
+
+            // 媒体別集計
+            const mktByMedia = useMemo(() => {
+                const map = {};
+                mktFiltered.forEach(d => {
+                    const key = d.media || '不明';
+                    if (!map[key]) map[key] = { media: key, newCount: 0, enrollCount: 0, cancelCount: 0, adSpend: 0, revenue: 0, clicks: 0, impressions: 0, cvCount: 0 };
+                    map[key].newCount += d.newCount || 0;
+                    map[key].enrollCount += d.enrollCount || 0;
+                    map[key].cancelCount += d.cancelCount || 0;
+                    map[key].adSpend += d.adSpend || 0;
+                    map[key].revenue += d.revenue || 0;
+                    map[key].clicks += d.clicks || 0;
+                    map[key].impressions += d.impressions || 0;
+                    map[key].cvCount += d.cvCount || 0;
+                });
+                return Object.values(map).map(m => ({
+                    ...m,
+                    cpa: m.newCount > 0 ? Math.round(m.adSpend / m.newCount) : 0,
+                    enrollRate: m.newCount > 0 ? Math.round((m.enrollCount / m.newCount) * 100) : 0,
+                    cancelRate: m.newCount > 0 ? Math.round((m.cancelCount / m.newCount) * 100) : 0,
+                    cvr: m.clicks > 0 ? Math.round((m.cvCount / m.clicks) * 1000) / 10 : 0,
+                    ctr: m.impressions > 0 ? Math.round((m.clicks / m.impressions) * 1000) / 10 : 0,
+                    roas: m.adSpend > 0 ? Math.round((m.revenue / m.adSpend) * 100) : 0,
+                })).sort((a, b) => b.adSpend - a.adSpend);
+            }, [mktFiltered]);
+
+            // 月別推移データ
+            const mktMonthlyTrend = useMemo(() => {
+                const map = {};
+                mktFiltered.forEach(d => {
+                    const key = d.month || '不明';
+                    if (!map[key]) map[key] = { month: key, newCount: 0, enrollCount: 0, cancelCount: 0, adSpend: 0, revenue: 0 };
+                    map[key].newCount += d.newCount || 0;
+                    map[key].enrollCount += d.enrollCount || 0;
+                    map[key].cancelCount += d.cancelCount || 0;
+                    map[key].adSpend += d.adSpend || 0;
+                    map[key].revenue += d.revenue || 0;
+                });
+                return Object.values(map).sort((a, b) => a.month.localeCompare(b.month)).map(m => ({
+                    ...m,
+                    cpa: m.newCount > 0 ? Math.round(m.adSpend / m.newCount) : 0,
+                    enrollRate: m.newCount > 0 ? Math.round((m.enrollCount / m.newCount) * 100) : 0,
+                    cancelRate: m.newCount > 0 ? Math.round((m.cancelCount / m.newCount) * 100) : 0,
+                }));
+            }, [mktFiltered]);
+
+            // AI分析: 課題のある店舗を抽出
+            const mktAiAnalysis = useMemo(() => {
+                if (mktByBranch.length === 0) return [];
+
+                const avgCpa = mktStats.avgCpa;
+                const avgEnroll = mktStats.enrollRate;
+                const avgCancel = mktStats.cancelRate;
+
+                return mktByBranch.map(branch => {
+                    const issues = [];
+                    const scores = { severity: 0 };
+
+                    // CPA分析
+                    if (branch.cpa > 0 && avgCpa > 0) {
+                        const cpaRatio = branch.cpa / avgCpa;
+                        if (cpaRatio > 1.5) {
+                            issues.push({ type: 'danger', metric: 'CPA', message: `CPA ¥${branch.cpa.toLocaleString()} は全体平均の${Math.round(cpaRatio * 100)}%（平均: ¥${avgCpa.toLocaleString()}）`, suggestion: '広告クリエイティブの見直し、ターゲティングの精度向上を検討' });
+                            scores.severity += 3;
+                        } else if (cpaRatio > 1.2) {
+                            issues.push({ type: 'warning', metric: 'CPA', message: `CPA ¥${branch.cpa.toLocaleString()} はやや高め（平均: ¥${avgCpa.toLocaleString()}）`, suggestion: 'LP改善やキーワード最適化で改善可能' });
+                            scores.severity += 1;
+                        }
+                    }
+
+                    // 入会率分析
+                    if (avgEnroll > 0 && branch.newCount >= 3) {
+                        const enrollDiff = avgEnroll - branch.enrollRate;
+                        if (enrollDiff > 20) {
+                            issues.push({ type: 'danger', metric: '入会率', message: `入会率${branch.enrollRate}%は全体平均${avgEnroll}%を大きく下回る`, suggestion: 'カウンセリングトークの改善、初回体験メニューの見直しを推奨' });
+                            scores.severity += 3;
+                        } else if (enrollDiff > 10) {
+                            issues.push({ type: 'warning', metric: '入会率', message: `入会率${branch.enrollRate}%は平均${avgEnroll}%を下回る`, suggestion: 'スタッフ研修の実施やトークスクリプトの標準化を検討' });
+                            scores.severity += 2;
+                        }
+                    }
+
+                    // キャンセル率分析
+                    if (avgCancel > 0 && branch.newCount >= 3) {
+                        const cancelDiff = branch.cancelRate - avgCancel;
+                        if (cancelDiff > 15) {
+                            issues.push({ type: 'danger', metric: 'キャンセル率', message: `キャンセル率${branch.cancelRate}%は全体平均${avgCancel}%を大きく上回る`, suggestion: 'リマインド連絡の強化、予約確認フローの見直し' });
+                            scores.severity += 3;
+                        } else if (cancelDiff > 8) {
+                            issues.push({ type: 'warning', metric: 'キャンセル率', message: `キャンセル率${branch.cancelRate}%は平均${avgCancel}%を上回る`, suggestion: 'LINE予約リマインドの導入を検討' });
+                            scores.severity += 1;
+                        }
+                    }
+
+                    // 新規数が少ない
+                    const avgNew = mktByBranch.reduce((a, b) => a + b.newCount, 0) / mktByBranch.length;
+                    if (avgNew > 0 && branch.newCount < avgNew * 0.5 && branch.newCount > 0) {
+                        issues.push({ type: 'warning', metric: '新規集客', message: `新規${branch.newCount}名は平均${Math.round(avgNew)}名の半分以下`, suggestion: 'エリアマーケティングの強化、MEO対策の見直し' });
+                        scores.severity += 2;
+                    }
+
+                    // ROAS分析
+                    if (branch.roas > 0 && branch.roas < 100) {
+                        issues.push({ type: 'danger', metric: 'ROAS', message: `ROAS ${branch.roas}%で広告費が売上を上回っている`, suggestion: '費用対効果の低い媒体の停止・予算配分の見直し' });
+                        scores.severity += 3;
+                    } else if (branch.roas > 0 && branch.roas < 200) {
+                        issues.push({ type: 'warning', metric: 'ROAS', message: `ROAS ${branch.roas}%で改善の余地あり`, suggestion: '高LTV顧客の獲得チャネルに予算をシフト' });
+                        scores.severity += 1;
+                    }
+
+                    // 良い点の抽出
+                    const strengths = [];
+                    if (branch.cpa > 0 && avgCpa > 0 && branch.cpa < avgCpa * 0.8) {
+                        strengths.push(`CPA ¥${branch.cpa.toLocaleString()} が優秀（平均比${Math.round((branch.cpa / avgCpa) * 100)}%）`);
+                    }
+                    if (branch.enrollRate > avgEnroll + 10 && branch.newCount >= 3) {
+                        strengths.push(`入会率${branch.enrollRate}%が高水準`);
+                    }
+                    if (branch.roas > 300) {
+                        strengths.push(`ROAS ${branch.roas}%で高い投資効率`);
+                    }
+
+                    return { ...branch, issues, scores, strengths };
+                }).filter(b => b.issues.length > 0 || b.strengths.length > 0).sort((a, b) => b.scores.severity - a.scores.severity);
+            }, [mktByBranch, mktStats]);
 
             const stats = useMemo(() => {
                 const totalSales = filteredData.reduce((acc, curr) => acc + (curr.individualSales || 0), 0);
@@ -1588,146 +2029,819 @@
                         {/* マーケティング */}
                         {currentPage === 'marketing' && (
                             <div className="p-4 lg:p-6 font-sans text-slate-900">
-                                <div className="max-w-[1600px] mx-auto space-y-6">
-                                    <header className="bg-white rounded-3xl shadow-sm border border-slate-200 p-6 mb-6">
-                                        <div className="flex items-center gap-4 mb-4">
-                                            <div className="p-3 bg-gradient-to-br from-purple-500 to-pink-500 rounded-2xl text-white shadow-lg">
-                                                <Megaphone size={28} />
-                                            </div>
-                                            <div>
-                                                <div className="inline-flex items-center gap-2 px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-xs font-black uppercase tracking-widest mb-2">
-                                                    <Megaphone size={14} /> Marketing Dashboard
+                                <div className="max-w-[1800px] mx-auto space-y-6">
+
+                                    {/* Header */}
+                                    <header className="flex flex-col gap-4 bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                                        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+                                            <div className="flex items-center gap-4">
+                                                <div className="p-3 bg-gradient-to-br from-purple-500 to-pink-500 rounded-2xl text-white shadow-lg">
+                                                    <Megaphone size={28} />
                                                 </div>
-                                                <h1 className="text-3xl font-black tracking-tight text-slate-900 italic">マーケティングダッシュボード</h1>
+                                                <div>
+                                                    <div className="inline-flex items-center gap-2 px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-xs font-black uppercase tracking-widest mb-1">
+                                                        <Megaphone size={14} /> Marketing Dashboard
+                                                    </div>
+                                                    <h1 className="text-3xl font-black tracking-tight text-slate-900 italic">マーケティングダッシュボード</h1>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-3">
+                                                <button
+                                                    onClick={() => fetchMarketingData(true)}
+                                                    className="p-3 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-all shadow-lg flex items-center gap-2 font-black text-sm uppercase tracking-tighter disabled:opacity-50"
+                                                    disabled={mktLoading}
+                                                >
+                                                    <RefreshCw size={18} className={mktLoading ? 'animate-spin' : ''} /> Sync
+                                                </button>
+                                                {mktLastFetch && (
+                                                    <span className="text-xs text-slate-400">
+                                                        最終: {mktLastFetch.toLocaleTimeString('ja-JP')}
+                                                    </span>
+                                                )}
                                             </div>
                                         </div>
-                                        <p className="text-slate-600 font-bold">
-                                            別のスプレッドシートからマーケティングデータを取得してダッシュボード化できます。
-                                        </p>
+
+                                        {/* Filters Row */}
+                                        {mktData.length > 0 && (
+                                            <div className="flex flex-wrap items-end gap-3 pt-2 border-t border-slate-100">
+                                                {/* 期間選択 */}
+                                                {mktMonths.length > 0 && (
+                                                    <div className="flex flex-col gap-1">
+                                                        <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">期間</span>
+                                                        <div className="flex items-center gap-2">
+                                                            <select value={mktSelectedMonth} onChange={e => setMktSelectedMonth(e.target.value)} className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm font-bold focus:ring-2 focus:ring-purple-500 outline-none">
+                                                                {mktMonths.map(m => <option key={m} value={m}>{m}</option>)}
+                                                            </select>
+                                                            <span className="text-slate-400 font-bold">〜</span>
+                                                            <select value={mktEndMonth} onChange={e => setMktEndMonth(e.target.value)} className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm font-bold focus:ring-2 focus:ring-purple-500 outline-none">
+                                                                {mktMonths.map(m => <option key={m} value={m}>{m}</option>)}
+                                                            </select>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* 店舗選択 */}
+                                                {mktAllBranches.length > 0 && (
+                                                    <div className="flex flex-col gap-1 min-w-[180px] relative" ref={mktBranchRef}>
+                                                        <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">店舗</span>
+                                                        <button onClick={() => setMktBranchMenuOpen(!mktBranchMenuOpen)} className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-bold flex items-center justify-between gap-2 hover:bg-slate-100 transition-colors">
+                                                            <span className="truncate">{mktSelectedBranches.length === mktAllBranches.length ? '全店舗' : mktSelectedBranches.length === 0 ? '未選択' : `${mktSelectedBranches[0]}${mktSelectedBranches.length > 1 ? ` 他${mktSelectedBranches.length - 1}件` : ''}`}</span>
+                                                            <ChevronDown size={16} className={`transition-transform ${mktBranchMenuOpen ? 'rotate-180' : ''}`} />
+                                                        </button>
+                                                        {mktBranchMenuOpen && (
+                                                            <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 p-3 max-h-[300px] overflow-y-auto">
+                                                                <div className="flex items-center justify-between p-2 border-b border-slate-100 mb-2">
+                                                                    <button onClick={() => setMktSelectedBranches(mktAllBranches)} className="text-xs font-black text-purple-600 hover:bg-purple-50 px-2 py-1 rounded">全選択</button>
+                                                                    <button onClick={() => setMktSelectedBranches([])} className="text-xs font-black text-slate-400 hover:bg-slate-50 px-2 py-1 rounded">解除</button>
+                                                                </div>
+                                                                {mktAllBranches.map(b => (
+                                                                    <div key={b} onClick={() => setMktSelectedBranches(prev => prev.includes(b) ? prev.filter(x => x !== b) : [...prev, b])} className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-purple-50 cursor-pointer">
+                                                                        <div className={`w-5 h-5 rounded border flex items-center justify-center ${mktSelectedBranches.includes(b) ? 'bg-purple-600 border-purple-600' : 'border-slate-300'}`}>
+                                                                            {mktSelectedBranches.includes(b) && <Check size={14} className="text-white" />}
+                                                                        </div>
+                                                                        <span className="text-sm font-bold">{b}</span>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
+
+                                                {/* スタッフ選択 */}
+                                                {mktAllStaff.length > 0 && (
+                                                    <div className="flex flex-col gap-1 min-w-[180px] relative" ref={mktStaffRef}>
+                                                        <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">スタッフ</span>
+                                                        <button onClick={() => setMktStaffMenuOpen(!mktStaffMenuOpen)} className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-bold flex items-center justify-between gap-2 hover:bg-slate-100 transition-colors">
+                                                            <span className="truncate">{mktSelectedStaff.length === 0 ? '全スタッフ' : `${mktSelectedStaff[0]}${mktSelectedStaff.length > 1 ? ` 他${mktSelectedStaff.length - 1}名` : ''}`}</span>
+                                                            <ChevronDown size={16} className={`transition-transform ${mktStaffMenuOpen ? 'rotate-180' : ''}`} />
+                                                        </button>
+                                                        {mktStaffMenuOpen && (
+                                                            <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 p-3 max-h-[300px] overflow-y-auto">
+                                                                <div className="flex items-center justify-between p-2 border-b border-slate-100 mb-2">
+                                                                    <button onClick={() => setMktSelectedStaff([])} className="text-xs font-black text-purple-600 hover:bg-purple-50 px-2 py-1 rounded">全選択</button>
+                                                                    <button onClick={() => setMktSelectedStaff(mktAllStaff)} className="text-xs font-black text-slate-400 hover:bg-slate-50 px-2 py-1 rounded">全解除</button>
+                                                                </div>
+                                                                {mktAllStaff.map(s => (
+                                                                    <div key={s} onClick={() => setMktSelectedStaff(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s])} className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-purple-50 cursor-pointer">
+                                                                        <div className={`w-5 h-5 rounded border flex items-center justify-center ${mktSelectedStaff.includes(s) ? 'bg-purple-600 border-purple-600' : 'border-slate-300'}`}>
+                                                                            {mktSelectedStaff.includes(s) && <Check size={14} className="text-white" />}
+                                                                        </div>
+                                                                        <span className="text-sm font-bold">{s}</span>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
+
+                                                {/* 媒体選択 */}
+                                                {mktAllMedia.length > 0 && (
+                                                    <div className="flex flex-col gap-1 min-w-[180px] relative" ref={mktMediaRef}>
+                                                        <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">媒体</span>
+                                                        <button onClick={() => setMktMediaMenuOpen(!mktMediaMenuOpen)} className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-bold flex items-center justify-between gap-2 hover:bg-slate-100 transition-colors">
+                                                            <span className="truncate">{mktSelectedMedia.length === 0 ? '全媒体' : `${mktSelectedMedia[0]}${mktSelectedMedia.length > 1 ? ` 他${mktSelectedMedia.length - 1}件` : ''}`}</span>
+                                                            <ChevronDown size={16} className={`transition-transform ${mktMediaMenuOpen ? 'rotate-180' : ''}`} />
+                                                        </button>
+                                                        {mktMediaMenuOpen && (
+                                                            <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 p-3 max-h-[300px] overflow-y-auto">
+                                                                <div className="flex items-center justify-between p-2 border-b border-slate-100 mb-2">
+                                                                    <button onClick={() => setMktSelectedMedia([])} className="text-xs font-black text-purple-600 hover:bg-purple-50 px-2 py-1 rounded">全媒体</button>
+                                                                    <button onClick={() => setMktSelectedMedia(mktAllMedia)} className="text-xs font-black text-slate-400 hover:bg-slate-50 px-2 py-1 rounded">全解除</button>
+                                                                </div>
+                                                                {mktAllMedia.map(m => (
+                                                                    <div key={m} onClick={() => setMktSelectedMedia(prev => prev.includes(m) ? prev.filter(x => x !== m) : [...prev, m])} className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-purple-50 cursor-pointer">
+                                                                        <div className={`w-5 h-5 rounded border flex items-center justify-center ${mktSelectedMedia.includes(m) ? 'bg-purple-600 border-purple-600' : 'border-slate-300'}`}>
+                                                                            {mktSelectedMedia.includes(m) && <Check size={14} className="text-white" />}
+                                                                        </div>
+                                                                        <span className="text-sm font-bold">{m}</span>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
+
+                                                <div className="text-xs text-slate-400 font-bold self-end pb-2">
+                                                    {mktFiltered.length} / {mktData.length} 件表示
+                                                </div>
+                                            </div>
+                                        )}
                                     </header>
 
-                                    {/* セットアップ手順 */}
-                                    <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-8">
-                                        <h2 className="text-2xl font-black text-slate-900 mb-6 flex items-center gap-3">
-                                            <Info size={24} className="text-indigo-500" />
-                                            GASセットアップ手順
-                                        </h2>
-
-                                        <div className="space-y-6">
-                                            {/* Step 1 */}
-                                            <div className="flex gap-4">
-                                                <div className="flex-shrink-0 w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-black text-lg">1</div>
-                                                <div className="flex-1">
-                                                    <h3 className="text-lg font-black text-slate-900 mb-2">スプレッドシートを準備</h3>
-                                                    <p className="text-slate-600 font-bold mb-3">マーケティングデータが入力されたGoogleスプレッドシートを用意します。</p>
-                                                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                                                        <p className="text-sm text-slate-600 font-bold">例：列構成</p>
-                                                        <code className="text-xs text-indigo-600 bg-indigo-50 px-2 py-1 rounded">日付 | 媒体名 | 広告費 | クリック数 | CV数 | CPA</code>
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            {/* Step 2 */}
-                                            <div className="flex gap-4">
-                                                <div className="flex-shrink-0 w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-black text-lg">2</div>
-                                                <div className="flex-1">
-                                                    <h3 className="text-lg font-black text-slate-900 mb-2">Apps Scriptエディタを開く</h3>
-                                                    <p className="text-slate-600 font-bold mb-3">スプレッドシートのメニューから「拡張機能」→「Apps Script」を選択します。</p>
-                                                </div>
-                                            </div>
-
-                                            {/* Step 3 */}
-                                            <div className="flex gap-4">
-                                                <div className="flex-shrink-0 w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-black text-lg">3</div>
-                                                <div className="flex-1">
-                                                    <h3 className="text-lg font-black text-slate-900 mb-2">GASコードを作成</h3>
-                                                    <p className="text-slate-600 font-bold mb-3">以下のようなコードをコピーして貼り付けます：</p>
-                                                    <div className="bg-slate-900 p-4 rounded-xl text-green-400 font-mono text-xs overflow-x-auto">
-                                                        <pre>{`// スプレッドシートIDを設定
-const SPREADSHEET_ID = 'あなたのスプレッドシートID';
-const SHEET_NAME = 'シート名';
-
-function doGet(e) {
-  try {
-    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-    const sheet = ss.getSheetByName(SHEET_NAME);
-    const data = sheet.getDataRange().getValues();
-
-    // ヘッダー行を取得
-    const headers = data[0];
-
-    // データを整形
-    const formattedData = data.slice(1).map(row => {
-      const obj = {};
-      headers.forEach((header, i) => {
-        obj[header] = row[i];
-      });
-      return obj;
-    });
-
-    return ContentService
-      .createTextOutput(JSON.stringify({
-        success: true,
-        data: formattedData
-      }))
-      .setMimeType(ContentService.MimeType.JSON);
-  } catch (error) {
-    return ContentService
-      .createTextOutput(JSON.stringify({
-        success: false,
-        error: error.toString()
-      }))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
-}`}</pre>
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            {/* Step 4 */}
-                                            <div className="flex gap-4">
-                                                <div className="flex-shrink-0 w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-black text-lg">4</div>
-                                                <div className="flex-1">
-                                                    <h3 className="text-lg font-black text-slate-900 mb-2">ウェブアプリとしてデプロイ</h3>
-                                                    <ol className="list-decimal list-inside text-slate-600 font-bold space-y-2">
-                                                        <li>「デプロイ」→「新しいデプロイ」をクリック</li>
-                                                        <li>種類で「ウェブアプリ」を選択</li>
-                                                        <li>「次のユーザーとして実行」: 自分</li>
-                                                        <li>「アクセスできるユーザー」: 全員</li>
-                                                        <li>「デプロイ」をクリック</li>
-                                                        <li>表示されるURLをコピー</li>
-                                                    </ol>
-                                                </div>
-                                            </div>
-
-                                            {/* Step 5 */}
-                                            <div className="flex gap-4">
-                                                <div className="flex-shrink-0 w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-black text-lg">5</div>
-                                                <div className="flex-1">
-                                                    <h3 className="text-lg font-black text-slate-900 mb-2">ダッシュボードに統合</h3>
-                                                    <p className="text-slate-600 font-bold mb-3">取得したURLを使用してデータをフェッチし、このダッシュボードに表示できます。</p>
-                                                    <div className="bg-amber-50 p-4 rounded-xl border border-amber-200">
-                                                        <p className="text-sm text-amber-800 font-bold flex items-center gap-2">
-                                                            <AlertCircle size={16} />
-                                                            ヒント: 既存のgas-code.gsを参考にして、マーケティング用のデータフォーマットを定義してください。
-                                                        </p>
-                                                    </div>
-                                                </div>
-                                            </div>
+                                    {/* Loading / Error States */}
+                                    {mktLoading && (
+                                        <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-16 text-center">
+                                            <Loader2 className="w-12 h-12 text-purple-600 animate-spin mx-auto mb-4" />
+                                            <div className="text-slate-600 font-bold">マーケティングデータを読み込み中...</div>
                                         </div>
-                                    </div>
+                                    )}
 
-                                    {/* 開発中メッセージ */}
-                                    <div className="bg-gradient-to-br from-purple-50 to-pink-50 rounded-3xl shadow-sm border-2 border-purple-200 p-8 text-center">
-                                        <Megaphone size={64} className="mx-auto text-purple-400 mb-4" />
-                                        <h2 className="text-2xl font-black text-slate-900 mb-2">マーケティングダッシュボード</h2>
-                                        <p className="text-slate-500 font-bold mb-4">
-                                            上記の手順でGASを設定した後、このページにマーケティングデータを表示できるようになります。
-                                        </p>
-                                        <p className="text-sm text-purple-600 font-bold">
-                                            広告費、CVR、CPA、ROASなどの指標を可視化予定
-                                        </p>
-                                    </div>
+                                    {mktError && (
+                                        <div className="bg-white rounded-3xl shadow-sm border border-rose-200 p-8 text-center">
+                                            <AlertCircle className="w-12 h-12 text-rose-500 mx-auto mb-4" />
+                                            <h3 className="text-lg font-bold text-slate-800 mb-2">データ取得エラー</h3>
+                                            <p className="text-slate-600 mb-4 text-sm">{mktError}</p>
+                                            <button onClick={() => fetchMarketingData(true)} className="px-6 py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors font-bold text-sm">再試行</button>
+                                        </div>
+                                    )}
+
+                                    {!mktLoading && !mktError && mktData.length === 0 && (
+                                        <div className="bg-gradient-to-br from-purple-50 to-pink-50 rounded-3xl shadow-sm border-2 border-purple-200 p-12 text-center">
+                                            <Megaphone size={64} className="mx-auto text-purple-400 mb-4" />
+                                            <h2 className="text-2xl font-black text-slate-900 mb-2">データを取得できません</h2>
+                                            <p className="text-slate-500 font-bold mb-4">GASのウェブアプリが正しくデプロイされているか確認してください。</p>
+                                            <button onClick={() => fetchMarketingData(true)} className="px-6 py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors font-bold text-sm">データを取得</button>
+                                        </div>
+                                    )}
+
+                                    {/* Main Dashboard Content */}
+                                    {!mktLoading && !mktError && mktData.length > 0 && (
+                                        <>
+                                            {/* Tab Navigation */}
+                                            <div className="flex gap-2 bg-white p-2 rounded-2xl shadow-sm border border-slate-200">
+                                                {[
+                                                    { id: 'overview', label: '概要', icon: <Home size={16} /> },
+                                                    { id: 'branch', label: '店舗別分析', icon: <MapPin size={16} /> },
+                                                    { id: 'staff', label: 'スタッフ別', icon: <Users size={16} /> },
+                                                    { id: 'media', label: '媒体別分析', icon: <BarChart3 size={16} /> },
+                                                    { id: 'ai', label: 'AI分析', icon: <Activity size={16} /> },
+                                                ].map(tab => (
+                                                    <button
+                                                        key={tab.id}
+                                                        onClick={() => setMktActiveTab(tab.id)}
+                                                        className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-sm transition-all ${
+                                                            mktActiveTab === tab.id
+                                                                ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-md'
+                                                                : 'text-slate-500 hover:bg-slate-100'
+                                                        }`}
+                                                    >
+                                                        {tab.icon} {tab.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+
+                                            {/* === Overview Tab === */}
+                                            {mktActiveTab === 'overview' && (
+                                                <div className="space-y-6">
+                                                    {/* KPI Cards */}
+                                                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                                                        <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
+                                                            <div className="absolute top-0 right-0 w-20 h-20 bg-purple-600 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
+                                                            <div className="flex items-start justify-between mb-3">
+                                                                <div className="p-3 rounded-2xl bg-purple-600 text-white shadow-lg"><Users size={22} /></div>
+                                                                <span className="text-xs font-black text-slate-400 uppercase tracking-widest">集客</span>
+                                                            </div>
+                                                            <h3 className="text-sm font-black text-slate-400 mb-1">総新規数</h3>
+                                                            <p className="text-3xl font-black text-slate-900">{mktStats.totalNew}<span className="text-lg text-slate-400 ml-1">名</span></p>
+                                                        </div>
+
+                                                        <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
+                                                            <div className="absolute top-0 right-0 w-20 h-20 bg-emerald-600 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
+                                                            <div className="flex items-start justify-between mb-3">
+                                                                <div className="p-3 rounded-2xl bg-emerald-600 text-white shadow-lg"><DollarSign size={22} /></div>
+                                                                <span className="text-xs font-black text-slate-400 uppercase tracking-widest">CPA</span>
+                                                            </div>
+                                                            <h3 className="text-sm font-black text-slate-400 mb-1">平均CPA</h3>
+                                                            <p className="text-3xl font-black text-slate-900">¥{mktStats.avgCpa.toLocaleString()}</p>
+                                                        </div>
+
+                                                        <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
+                                                            <div className="absolute top-0 right-0 w-20 h-20 bg-blue-600 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
+                                                            <div className="flex items-start justify-between mb-3">
+                                                                <div className="p-3 rounded-2xl bg-blue-600 text-white shadow-lg"><Target size={22} /></div>
+                                                                <span className="text-xs font-black text-slate-400 uppercase tracking-widest">成約</span>
+                                                            </div>
+                                                            <h3 className="text-sm font-black text-slate-400 mb-1">入会率</h3>
+                                                            <p className="text-3xl font-black text-slate-900">{mktStats.enrollRate}<span className="text-lg text-slate-400 ml-1">%</span></p>
+                                                            <p className="text-xs text-slate-400 font-bold mt-1">{mktStats.totalEnroll}名入会</p>
+                                                        </div>
+
+                                                        <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
+                                                            <div className="absolute top-0 right-0 w-20 h-20 bg-rose-500 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
+                                                            <div className="flex items-start justify-between mb-3">
+                                                                <div className="p-3 rounded-2xl bg-rose-500 text-white shadow-lg"><AlertCircle size={22} /></div>
+                                                                <span className="text-xs font-black text-slate-400 uppercase tracking-widest">注意</span>
+                                                            </div>
+                                                            <h3 className="text-sm font-black text-slate-400 mb-1">キャンセル率</h3>
+                                                            <p className="text-3xl font-black text-slate-900">{mktStats.cancelRate}<span className="text-lg text-slate-400 ml-1">%</span></p>
+                                                            <p className="text-xs text-slate-400 font-bold mt-1">{mktStats.totalCancel}名キャンセル</p>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Secondary KPIs */}
+                                                    <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+                                                        <div className="bg-gradient-to-br from-purple-50 to-pink-50 p-5 rounded-2xl border border-purple-100">
+                                                            <div className="text-xs font-black text-purple-400 uppercase tracking-widest mb-1">広告費合計</div>
+                                                            <div className="text-xl font-black text-purple-700">¥{mktStats.totalAdSpend.toLocaleString()}</div>
+                                                        </div>
+                                                        <div className="bg-gradient-to-br from-emerald-50 to-teal-50 p-5 rounded-2xl border border-emerald-100">
+                                                            <div className="text-xs font-black text-emerald-400 uppercase tracking-widest mb-1">売上合計</div>
+                                                            <div className="text-xl font-black text-emerald-700">¥{mktStats.totalRevenue.toLocaleString()}</div>
+                                                        </div>
+                                                        <div className="bg-gradient-to-br from-blue-50 to-indigo-50 p-5 rounded-2xl border border-blue-100">
+                                                            <div className="text-xs font-black text-blue-400 uppercase tracking-widest mb-1">ROAS</div>
+                                                            <div className="text-xl font-black text-blue-700">{mktStats.roas}<span className="text-sm">%</span></div>
+                                                        </div>
+                                                        <div className="bg-gradient-to-br from-amber-50 to-yellow-50 p-5 rounded-2xl border border-amber-100">
+                                                            <div className="text-xs font-black text-amber-400 uppercase tracking-widest mb-1">平均客単価</div>
+                                                            <div className="text-xl font-black text-amber-700">¥{mktStats.avgPrice.toLocaleString()}</div>
+                                                        </div>
+                                                        <div className="bg-gradient-to-br from-slate-50 to-gray-50 p-5 rounded-2xl border border-slate-200">
+                                                            <div className="text-xs font-black text-slate-400 uppercase tracking-widest mb-1">紹介数</div>
+                                                            <div className="text-xl font-black text-slate-700">{mktStats.totalReferrals}<span className="text-sm">名</span></div>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Monthly Trend Table */}
+                                                    {mktMonthlyTrend.length > 1 && (
+                                                        <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                                                            <div className="p-6 border-b border-slate-100">
+                                                                <h2 className="text-xl font-black flex items-center gap-2 text-slate-800 italic">
+                                                                    <TrendingUp className="text-purple-500" size={24} /> 月別推移
+                                                                </h2>
+                                                            </div>
+                                                            <div className="overflow-x-auto scrollbar-thin">
+                                                                <table className="w-full text-left border-collapse">
+                                                                    <thead>
+                                                                        <tr className="bg-slate-50 text-[10px] uppercase tracking-widest text-slate-400 font-black border-b border-slate-100">
+                                                                            <th className="px-6 py-4">月</th>
+                                                                            <th className="px-4 py-4 text-right">新規数</th>
+                                                                            <th className="px-4 py-4 text-right">入会数</th>
+                                                                            <th className="px-4 py-4 text-right">入会率</th>
+                                                                            <th className="px-4 py-4 text-right">キャンセル数</th>
+                                                                            <th className="px-4 py-4 text-right">キャンセル率</th>
+                                                                            <th className="px-4 py-4 text-right">広告費</th>
+                                                                            <th className="px-4 py-4 text-right">CPA</th>
+                                                                            <th className="px-4 py-4 text-right">売上</th>
+                                                                            <th className="px-4 py-4 text-right">ROAS</th>
+                                                                        </tr>
+                                                                    </thead>
+                                                                    <tbody className="divide-y divide-slate-100">
+                                                                        {mktMonthlyTrend.map((m, i) => {
+                                                                            const prev = i > 0 ? mktMonthlyTrend[i - 1] : null;
+                                                                            const newDiff = prev ? m.newCount - prev.newCount : 0;
+                                                                            return (
+                                                                                <tr key={m.month} className="hover:bg-slate-50 transition-colors text-sm font-bold">
+                                                                                    <td className="px-6 py-4 font-black text-slate-800">{m.month}</td>
+                                                                                    <td className="px-4 py-4 text-right">
+                                                                                        {m.newCount}名
+                                                                                        {prev && <span className={`ml-2 text-xs ${newDiff >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>{newDiff >= 0 ? '+' : ''}{newDiff}</span>}
+                                                                                    </td>
+                                                                                    <td className="px-4 py-4 text-right">{m.enrollCount}名</td>
+                                                                                    <td className="px-4 py-4 text-right"><span className={`${m.enrollRate >= 50 ? 'text-emerald-600' : m.enrollRate >= 30 ? 'text-amber-600' : 'text-rose-600'}`}>{m.enrollRate}%</span></td>
+                                                                                    <td className="px-4 py-4 text-right">{m.cancelCount}名</td>
+                                                                                    <td className="px-4 py-4 text-right"><span className={`${m.cancelRate <= 10 ? 'text-emerald-600' : m.cancelRate <= 20 ? 'text-amber-600' : 'text-rose-600'}`}>{m.cancelRate}%</span></td>
+                                                                                    <td className="px-4 py-4 text-right font-mono">¥{m.adSpend.toLocaleString()}</td>
+                                                                                    <td className="px-4 py-4 text-right font-mono">¥{m.cpa.toLocaleString()}</td>
+                                                                                    <td className="px-4 py-4 text-right font-mono font-black">¥{m.revenue.toLocaleString()}</td>
+                                                                                    <td className="px-4 py-4 text-right"><span className={`px-2 py-1 rounded-lg text-xs font-black ${m.adSpend > 0 ? (Math.round((m.revenue / m.adSpend) * 100) >= 200 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700') : 'bg-slate-100 text-slate-400'}`}>{m.adSpend > 0 ? Math.round((m.revenue / m.adSpend) * 100) : '-'}%</span></td>
+                                                                                </tr>
+                                                                            );
+                                                                        })}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Media Mix Overview */}
+                                                    {mktByMedia.length > 0 && (
+                                                        <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-6">
+                                                            <h2 className="text-xl font-black flex items-center gap-2 text-slate-800 italic mb-6">
+                                                                <BarChart3 className="text-purple-500" size={24} /> 媒体別 新規獲得構成比
+                                                            </h2>
+                                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-6">
+                                                                {mktByMedia.map((m, idx) => {
+                                                                    const maxNew = Math.max(...mktByMedia.map(x => x.newCount), 1);
+                                                                    const colors = ['bg-purple-500', 'bg-pink-500', 'bg-blue-500', 'bg-emerald-500', 'bg-amber-500', 'bg-indigo-500', 'bg-rose-500', 'bg-teal-500'];
+                                                                    return (
+                                                                        <div key={m.media} className="group">
+                                                                            <div className="flex justify-between items-end mb-2">
+                                                                                <span className="text-sm font-black text-slate-600">{m.media}</span>
+                                                                                <div className="flex items-center gap-3 text-xs font-mono font-bold text-slate-400">
+                                                                                    <span>{m.newCount}名</span>
+                                                                                    <span>CPA ¥{m.cpa.toLocaleString()}</span>
+                                                                                    <span>入会率 {m.enrollRate}%</span>
+                                                                                </div>
+                                                                            </div>
+                                                                            <div className="h-3 w-full bg-slate-100 rounded-full overflow-hidden shadow-inner">
+                                                                                <div className={`h-full transition-all duration-1000 ${colors[idx % colors.length]}`} style={{ width: `${(m.newCount / maxNew) * 100}%` }} />
+                                                                            </div>
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+
+                                            {/* === Branch Analysis Tab === */}
+                                            {mktActiveTab === 'branch' && (
+                                                <div className="space-y-6">
+                                                    <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                                                        <div className="p-6 border-b border-slate-100">
+                                                            <h2 className="text-xl font-black flex items-center gap-2 text-slate-800 italic">
+                                                                <MapPin className="text-purple-500" size={24} /> 店舗別パフォーマンス
+                                                            </h2>
+                                                        </div>
+                                                        <div className="overflow-x-auto scrollbar-thin">
+                                                            <table className="w-full text-left border-collapse">
+                                                                <thead>
+                                                                    <tr className="bg-slate-50 text-[10px] uppercase tracking-widest text-slate-400 font-black border-b border-slate-100">
+                                                                        <th className="px-6 py-4">店舗名</th>
+                                                                        <th className="px-4 py-4 text-right">新規数</th>
+                                                                        <th className="px-4 py-4 text-right">入会数</th>
+                                                                        <th className="px-4 py-4 text-right">入会率</th>
+                                                                        <th className="px-4 py-4 text-right">キャンセル数</th>
+                                                                        <th className="px-4 py-4 text-right">キャンセル率</th>
+                                                                        <th className="px-4 py-4 text-right">広告費</th>
+                                                                        <th className="px-4 py-4 text-right">CPA</th>
+                                                                        <th className="px-4 py-4 text-right">売上</th>
+                                                                        <th className="px-4 py-4 text-right">ROAS</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody className="divide-y divide-slate-100">
+                                                                    {mktByBranch.map((b, i) => (
+                                                                        <tr key={b.branch} className="hover:bg-slate-50 transition-colors text-sm font-bold">
+                                                                            <td className="px-6 py-4">
+                                                                                <div className="flex items-center gap-3">
+                                                                                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black ${i === 0 ? 'bg-yellow-400 text-white' : i === 1 ? 'bg-slate-200 text-slate-600' : i === 2 ? 'bg-amber-100 text-amber-700' : 'bg-slate-50 text-slate-400'}`}>{i + 1}</div>
+                                                                                    <span className="font-black text-slate-800">{b.branch}</span>
+                                                                                </div>
+                                                                            </td>
+                                                                            <td className="px-4 py-4 text-right text-lg font-black text-purple-600">{b.newCount}<span className="text-xs text-slate-400 ml-1">名</span></td>
+                                                                            <td className="px-4 py-4 text-right">{b.enrollCount}<span className="text-xs text-slate-400 ml-1">名</span></td>
+                                                                            <td className="px-4 py-4 text-right"><span className={`px-2 py-1 rounded-lg text-xs font-black ${b.enrollRate >= 50 ? 'bg-emerald-100 text-emerald-700' : b.enrollRate >= 30 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{b.enrollRate}%</span></td>
+                                                                            <td className="px-4 py-4 text-right">{b.cancelCount}<span className="text-xs text-slate-400 ml-1">名</span></td>
+                                                                            <td className="px-4 py-4 text-right"><span className={`px-2 py-1 rounded-lg text-xs font-black ${b.cancelRate <= 10 ? 'bg-emerald-100 text-emerald-700' : b.cancelRate <= 20 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{b.cancelRate}%</span></td>
+                                                                            <td className="px-4 py-4 text-right font-mono">¥{b.adSpend.toLocaleString()}</td>
+                                                                            <td className="px-4 py-4 text-right font-mono font-black">¥{b.cpa.toLocaleString()}</td>
+                                                                            <td className="px-4 py-4 text-right font-mono font-black text-emerald-700">¥{b.revenue.toLocaleString()}</td>
+                                                                            <td className="px-4 py-4 text-right"><span className={`px-2 py-1 rounded-lg text-xs font-black ${b.roas >= 200 ? 'bg-emerald-100 text-emerald-700' : b.roas >= 100 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{b.roas}%</span></td>
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                                {mktByBranch.length > 1 && (
+                                                                    <tfoot>
+                                                                        <tr className="bg-slate-50 text-sm font-black border-t-2 border-slate-200">
+                                                                            <td className="px-6 py-4 text-slate-600">合計 / 平均</td>
+                                                                            <td className="px-4 py-4 text-right text-lg text-purple-600">{mktStats.totalNew}名</td>
+                                                                            <td className="px-4 py-4 text-right">{mktStats.totalEnroll}名</td>
+                                                                            <td className="px-4 py-4 text-right">{mktStats.enrollRate}%</td>
+                                                                            <td className="px-4 py-4 text-right">{mktStats.totalCancel}名</td>
+                                                                            <td className="px-4 py-4 text-right">{mktStats.cancelRate}%</td>
+                                                                            <td className="px-4 py-4 text-right font-mono">¥{mktStats.totalAdSpend.toLocaleString()}</td>
+                                                                            <td className="px-4 py-4 text-right font-mono">¥{mktStats.avgCpa.toLocaleString()}</td>
+                                                                            <td className="px-4 py-4 text-right font-mono text-emerald-700">¥{mktStats.totalRevenue.toLocaleString()}</td>
+                                                                            <td className="px-4 py-4 text-right">{mktStats.roas}%</td>
+                                                                        </tr>
+                                                                    </tfoot>
+                                                                )}
+                                                            </table>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Branch Comparison Cards */}
+                                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                                        {mktByBranch.map((b, i) => {
+                                                            const colors = ['from-purple-500 to-pink-500', 'from-blue-500 to-indigo-500', 'from-emerald-500 to-teal-500', 'from-amber-500 to-orange-500', 'from-rose-500 to-red-500', 'from-slate-600 to-slate-800'];
+                                                            return (
+                                                                <div key={b.branch} className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden hover:shadow-md transition-all">
+                                                                    <div className={`bg-gradient-to-r ${colors[i % colors.length]} p-4 text-white`}>
+                                                                        <div className="font-black text-lg">{b.branch}</div>
+                                                                        <div className="text-sm opacity-80">{b.records}レコード</div>
+                                                                    </div>
+                                                                    <div className="p-4 grid grid-cols-2 gap-3">
+                                                                        <div><div className="text-[10px] font-black text-slate-400 uppercase">新規数</div><div className="text-lg font-black text-slate-800">{b.newCount}名</div></div>
+                                                                        <div><div className="text-[10px] font-black text-slate-400 uppercase">CPA</div><div className="text-lg font-black text-slate-800">¥{b.cpa.toLocaleString()}</div></div>
+                                                                        <div><div className="text-[10px] font-black text-slate-400 uppercase">入会率</div><div className={`text-lg font-black ${b.enrollRate >= 50 ? 'text-emerald-600' : 'text-amber-600'}`}>{b.enrollRate}%</div></div>
+                                                                        <div><div className="text-[10px] font-black text-slate-400 uppercase">キャンセル率</div><div className={`text-lg font-black ${b.cancelRate <= 10 ? 'text-emerald-600' : 'text-rose-600'}`}>{b.cancelRate}%</div></div>
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* === Staff Analysis Tab === */}
+                                            {mktActiveTab === 'staff' && (
+                                                <div className="space-y-6">
+                                                    <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                                                        <div className="p-6 border-b border-slate-100">
+                                                            <h2 className="text-xl font-black flex items-center gap-2 text-slate-800 italic">
+                                                                <Users className="text-purple-500" size={24} /> スタッフ別パフォーマンス
+                                                            </h2>
+                                                        </div>
+                                                        {mktByStaff.length > 0 ? (
+                                                            <div className="overflow-x-auto scrollbar-thin">
+                                                                <table className="w-full text-left border-collapse">
+                                                                    <thead>
+                                                                        <tr className="bg-slate-50 text-[10px] uppercase tracking-widest text-slate-400 font-black border-b border-slate-100">
+                                                                            <th className="px-6 py-4">スタッフ</th>
+                                                                            <th className="px-4 py-4">店舗</th>
+                                                                            <th className="px-4 py-4 text-right">新規数</th>
+                                                                            <th className="px-4 py-4 text-right">入会数</th>
+                                                                            <th className="px-4 py-4 text-right">入会率</th>
+                                                                            <th className="px-4 py-4 text-right">キャンセル数</th>
+                                                                            <th className="px-4 py-4 text-right">キャンセル率</th>
+                                                                            <th className="px-4 py-4 text-right">CPA</th>
+                                                                            <th className="px-4 py-4 text-right">売上貢献</th>
+                                                                        </tr>
+                                                                    </thead>
+                                                                    <tbody className="divide-y divide-slate-100">
+                                                                        {mktByStaff.map((s, i) => (
+                                                                            <tr key={s.staff} className="hover:bg-slate-50 transition-colors text-sm font-bold">
+                                                                                <td className="px-6 py-4">
+                                                                                    <div className="flex items-center gap-3">
+                                                                                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black ${i === 0 ? 'bg-yellow-400 text-white' : i === 1 ? 'bg-slate-200 text-slate-600' : i === 2 ? 'bg-amber-100 text-amber-700' : 'bg-slate-50 text-slate-400'}`}>{i + 1}</div>
+                                                                                        <span className="font-black text-slate-800">{s.staff}</span>
+                                                                                    </div>
+                                                                                </td>
+                                                                                <td className="px-4 py-4 text-xs font-bold text-slate-400 uppercase">{s.branch}</td>
+                                                                                <td className="px-4 py-4 text-right text-lg font-black text-purple-600">{s.newCount}名</td>
+                                                                                <td className="px-4 py-4 text-right">{s.enrollCount}名</td>
+                                                                                <td className="px-4 py-4 text-right"><span className={`px-2 py-1 rounded-lg text-xs font-black ${s.enrollRate >= 50 ? 'bg-emerald-100 text-emerald-700' : s.enrollRate >= 30 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{s.enrollRate}%</span></td>
+                                                                                <td className="px-4 py-4 text-right">{s.cancelCount}名</td>
+                                                                                <td className="px-4 py-4 text-right"><span className={`px-2 py-1 rounded-lg text-xs font-black ${s.cancelRate <= 10 ? 'bg-emerald-100 text-emerald-700' : s.cancelRate <= 20 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{s.cancelRate}%</span></td>
+                                                                                <td className="px-4 py-4 text-right font-mono">¥{s.cpa.toLocaleString()}</td>
+                                                                                <td className="px-4 py-4 text-right font-mono font-black text-emerald-700">¥{s.revenue.toLocaleString()}</td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        ) : (
+                                                            <div className="p-12 text-center text-slate-400 font-bold">
+                                                                <Users size={48} className="mx-auto mb-4 opacity-30" />
+                                                                スタッフデータがありません。スプレッドシートに「スタッフ」列を追加してください。
+                                                            </div>
+                                                        )}
+                                                    </div>
+
+                                                    {/* Staff Ranking Cards */}
+                                                    {mktByStaff.length > 0 && (
+                                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                                            <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                                                                <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-5 flex items-center gap-2"><Target size={14} /> 入会率 TOP5</h3>
+                                                                <div className="space-y-4">
+                                                                    {[...mktByStaff].filter(s => s.newCount >= 3).sort((a, b) => b.enrollRate - a.enrollRate).slice(0, 5).map((s, idx) => (
+                                                                        <div key={s.staff} className="flex items-center justify-between">
+                                                                            <div className="flex items-center gap-3">
+                                                                                <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-black ${idx === 0 ? 'bg-yellow-400 text-white' : idx === 1 ? 'bg-slate-200 text-slate-600' : idx === 2 ? 'bg-amber-100 text-amber-700' : 'bg-slate-50 text-slate-400'}`}>{idx + 1}</div>
+                                                                                <div><div className="text-sm font-black text-slate-700">{s.staff}</div><div className="text-xs text-slate-400">{s.branch}</div></div>
+                                                                            </div>
+                                                                            <div className="text-base font-black text-emerald-600">{s.enrollRate}%<span className="text-xs text-slate-400 ml-1">({s.newCount}名)</span></div>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                            <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                                                                <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-5 flex items-center gap-2"><Users size={14} /> 新規獲得 TOP5</h3>
+                                                                <div className="space-y-4">
+                                                                    {[...mktByStaff].sort((a, b) => b.newCount - a.newCount).slice(0, 5).map((s, idx) => (
+                                                                        <div key={s.staff} className="flex items-center justify-between">
+                                                                            <div className="flex items-center gap-3">
+                                                                                <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-black ${idx === 0 ? 'bg-yellow-400 text-white' : idx === 1 ? 'bg-slate-200 text-slate-600' : idx === 2 ? 'bg-amber-100 text-amber-700' : 'bg-slate-50 text-slate-400'}`}>{idx + 1}</div>
+                                                                                <div><div className="text-sm font-black text-slate-700">{s.staff}</div><div className="text-xs text-slate-400">{s.branch}</div></div>
+                                                                            </div>
+                                                                            <div className="text-base font-black text-purple-600">{s.newCount}名</div>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                            <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                                                                <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-5 flex items-center gap-2"><DollarSign size={14} /> 低CPA TOP5</h3>
+                                                                <div className="space-y-4">
+                                                                    {[...mktByStaff].filter(s => s.cpa > 0).sort((a, b) => a.cpa - b.cpa).slice(0, 5).map((s, idx) => (
+                                                                        <div key={s.staff} className="flex items-center justify-between">
+                                                                            <div className="flex items-center gap-3">
+                                                                                <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-black ${idx === 0 ? 'bg-yellow-400 text-white' : idx === 1 ? 'bg-slate-200 text-slate-600' : idx === 2 ? 'bg-amber-100 text-amber-700' : 'bg-slate-50 text-slate-400'}`}>{idx + 1}</div>
+                                                                                <div><div className="text-sm font-black text-slate-700">{s.staff}</div><div className="text-xs text-slate-400">{s.branch}</div></div>
+                                                                            </div>
+                                                                            <div className="text-base font-black text-blue-600">¥{s.cpa.toLocaleString()}</div>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+
+                                            {/* === Media Analysis Tab === */}
+                                            {mktActiveTab === 'media' && (
+                                                <div className="space-y-6">
+                                                    <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                                                        <div className="p-6 border-b border-slate-100">
+                                                            <h2 className="text-xl font-black flex items-center gap-2 text-slate-800 italic">
+                                                                <BarChart3 className="text-purple-500" size={24} /> 媒体別パフォーマンス
+                                                            </h2>
+                                                        </div>
+                                                        {mktByMedia.length > 0 ? (
+                                                            <div className="overflow-x-auto scrollbar-thin">
+                                                                <table className="w-full text-left border-collapse">
+                                                                    <thead>
+                                                                        <tr className="bg-slate-50 text-[10px] uppercase tracking-widest text-slate-400 font-black border-b border-slate-100">
+                                                                            <th className="px-6 py-4">媒体名</th>
+                                                                            <th className="px-4 py-4 text-right">新規数</th>
+                                                                            <th className="px-4 py-4 text-right">入会数</th>
+                                                                            <th className="px-4 py-4 text-right">入会率</th>
+                                                                            <th className="px-4 py-4 text-right">キャンセル数</th>
+                                                                            <th className="px-4 py-4 text-right">キャンセル率</th>
+                                                                            <th className="px-4 py-4 text-right">広告費</th>
+                                                                            <th className="px-4 py-4 text-right">CPA</th>
+                                                                            <th className="px-4 py-4 text-right">売上</th>
+                                                                            <th className="px-4 py-4 text-right">ROAS</th>
+                                                                            <th className="px-4 py-4 text-right">CVR</th>
+                                                                        </tr>
+                                                                    </thead>
+                                                                    <tbody className="divide-y divide-slate-100">
+                                                                        {mktByMedia.map((m, i) => (
+                                                                            <tr key={m.media} className="hover:bg-slate-50 transition-colors text-sm font-bold">
+                                                                                <td className="px-6 py-4">
+                                                                                    <div className="flex items-center gap-3">
+                                                                                        <div className={`w-3 h-3 rounded-full ${['bg-purple-500', 'bg-pink-500', 'bg-blue-500', 'bg-emerald-500', 'bg-amber-500', 'bg-indigo-500'][i % 6]}`} />
+                                                                                        <span className="font-black text-slate-800">{m.media}</span>
+                                                                                    </div>
+                                                                                </td>
+                                                                                <td className="px-4 py-4 text-right text-lg font-black text-purple-600">{m.newCount}名</td>
+                                                                                <td className="px-4 py-4 text-right">{m.enrollCount}名</td>
+                                                                                <td className="px-4 py-4 text-right"><span className={`px-2 py-1 rounded-lg text-xs font-black ${m.enrollRate >= 50 ? 'bg-emerald-100 text-emerald-700' : m.enrollRate >= 30 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{m.enrollRate}%</span></td>
+                                                                                <td className="px-4 py-4 text-right">{m.cancelCount}名</td>
+                                                                                <td className="px-4 py-4 text-right"><span className={`px-2 py-1 rounded-lg text-xs font-black ${m.cancelRate <= 10 ? 'bg-emerald-100 text-emerald-700' : m.cancelRate <= 20 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{m.cancelRate}%</span></td>
+                                                                                <td className="px-4 py-4 text-right font-mono">¥{m.adSpend.toLocaleString()}</td>
+                                                                                <td className="px-4 py-4 text-right font-mono font-black">¥{m.cpa.toLocaleString()}</td>
+                                                                                <td className="px-4 py-4 text-right font-mono font-black text-emerald-700">¥{m.revenue.toLocaleString()}</td>
+                                                                                <td className="px-4 py-4 text-right"><span className={`px-2 py-1 rounded-lg text-xs font-black ${m.roas >= 200 ? 'bg-emerald-100 text-emerald-700' : m.roas >= 100 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{m.roas}%</span></td>
+                                                                                <td className="px-4 py-4 text-right">{m.cvr > 0 ? `${m.cvr}%` : '-'}</td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                    {mktByMedia.length > 1 && (
+                                                                        <tfoot>
+                                                                            <tr className="bg-slate-50 text-sm font-black border-t-2 border-slate-200">
+                                                                                <td className="px-6 py-4 text-slate-600">合計 / 平均</td>
+                                                                                <td className="px-4 py-4 text-right text-lg text-purple-600">{mktStats.totalNew}名</td>
+                                                                                <td className="px-4 py-4 text-right">{mktStats.totalEnroll}名</td>
+                                                                                <td className="px-4 py-4 text-right">{mktStats.enrollRate}%</td>
+                                                                                <td className="px-4 py-4 text-right">{mktStats.totalCancel}名</td>
+                                                                                <td className="px-4 py-4 text-right">{mktStats.cancelRate}%</td>
+                                                                                <td className="px-4 py-4 text-right font-mono">¥{mktStats.totalAdSpend.toLocaleString()}</td>
+                                                                                <td className="px-4 py-4 text-right font-mono">¥{mktStats.avgCpa.toLocaleString()}</td>
+                                                                                <td className="px-4 py-4 text-right font-mono text-emerald-700">¥{mktStats.totalRevenue.toLocaleString()}</td>
+                                                                                <td className="px-4 py-4 text-right">{mktStats.roas}%</td>
+                                                                                <td className="px-4 py-4 text-right">{mktStats.cvr > 0 ? `${mktStats.cvr}%` : '-'}</td>
+                                                                            </tr>
+                                                                        </tfoot>
+                                                                    )}
+                                                                </table>
+                                                            </div>
+                                                        ) : (
+                                                            <div className="p-12 text-center text-slate-400 font-bold">
+                                                                <BarChart3 size={48} className="mx-auto mb-4 opacity-30" />
+                                                                媒体データがありません。スプレッドシートに「媒体」列を追加してください。
+                                                            </div>
+                                                        )}
+                                                    </div>
+
+                                                    {/* Media Efficiency Cards */}
+                                                    {mktByMedia.length > 0 && (
+                                                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                                            {mktByMedia.map((m, i) => {
+                                                                const colors = ['from-purple-500 to-pink-500', 'from-blue-500 to-cyan-500', 'from-emerald-500 to-teal-500', 'from-amber-500 to-orange-500', 'from-rose-500 to-red-500', 'from-indigo-500 to-violet-500'];
+                                                                const sharePercent = mktStats.totalNew > 0 ? Math.round((m.newCount / mktStats.totalNew) * 100) : 0;
+                                                                return (
+                                                                    <div key={m.media} className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden hover:shadow-md transition-all">
+                                                                        <div className={`bg-gradient-to-r ${colors[i % colors.length]} p-4 text-white`}>
+                                                                            <div className="flex justify-between items-center">
+                                                                                <div className="font-black text-lg">{m.media}</div>
+                                                                                <div className="text-2xl font-black">{sharePercent}%</div>
+                                                                            </div>
+                                                                            <div className="text-sm opacity-80">新規構成比</div>
+                                                                        </div>
+                                                                        <div className="p-4 space-y-3">
+                                                                            <div className="flex justify-between items-center">
+                                                                                <span className="text-xs font-bold text-slate-400">新規数</span>
+                                                                                <span className="font-black text-slate-800">{m.newCount}名</span>
+                                                                            </div>
+                                                                            <div className="flex justify-between items-center">
+                                                                                <span className="text-xs font-bold text-slate-400">CPA</span>
+                                                                                <span className="font-black text-slate-800">¥{m.cpa.toLocaleString()}</span>
+                                                                            </div>
+                                                                            <div className="flex justify-between items-center">
+                                                                                <span className="text-xs font-bold text-slate-400">入会率</span>
+                                                                                <span className={`font-black ${m.enrollRate >= 50 ? 'text-emerald-600' : 'text-amber-600'}`}>{m.enrollRate}%</span>
+                                                                            </div>
+                                                                            <div className="flex justify-between items-center">
+                                                                                <span className="text-xs font-bold text-slate-400">ROAS</span>
+                                                                                <span className={`font-black ${m.roas >= 200 ? 'text-emerald-600' : 'text-amber-600'}`}>{m.roas}%</span>
+                                                                            </div>
+                                                                            <div className="pt-2 border-t border-slate-100">
+                                                                                <div className="flex justify-between items-center">
+                                                                                    <span className="text-xs font-bold text-slate-400">広告費</span>
+                                                                                    <span className="font-mono text-sm font-bold text-slate-600">¥{m.adSpend.toLocaleString()}</span>
+                                                                                </div>
+                                                                                <div className="flex justify-between items-center mt-1">
+                                                                                    <span className="text-xs font-bold text-slate-400">売上</span>
+                                                                                    <span className="font-mono text-sm font-bold text-emerald-600">¥{m.revenue.toLocaleString()}</span>
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+
+                                            {/* === AI Analysis Tab === */}
+                                            {mktActiveTab === 'ai' && (
+                                                <div className="space-y-6">
+                                                    <div className="bg-gradient-to-r from-purple-600 to-pink-600 rounded-3xl p-6 text-white">
+                                                        <div className="flex items-center gap-3 mb-2">
+                                                            <Activity size={28} />
+                                                            <h2 className="text-2xl font-black italic">AI マーケティング分析</h2>
+                                                        </div>
+                                                        <p className="text-purple-100 font-bold">各店舗のマーケティングデータをAIが分析し、課題と改善ポイントを自動抽出します。</p>
+                                                    </div>
+
+                                                    {/* Summary Stats */}
+                                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                                        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 text-center">
+                                                            <div className="text-4xl font-black text-rose-500 mb-1">{mktAiAnalysis.filter(b => b.scores.severity >= 5).length}</div>
+                                                            <div className="text-sm font-bold text-slate-500">要改善店舗</div>
+                                                            <div className="text-xs text-slate-400 mt-1">深刻な課題あり</div>
+                                                        </div>
+                                                        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 text-center">
+                                                            <div className="text-4xl font-black text-amber-500 mb-1">{mktAiAnalysis.filter(b => b.scores.severity >= 1 && b.scores.severity < 5).length}</div>
+                                                            <div className="text-sm font-bold text-slate-500">注意店舗</div>
+                                                            <div className="text-xs text-slate-400 mt-1">軽微な課題あり</div>
+                                                        </div>
+                                                        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 text-center">
+                                                            <div className="text-4xl font-black text-emerald-500 mb-1">{mktByBranch.length - mktAiAnalysis.filter(b => b.issues.length > 0).length}</div>
+                                                            <div className="text-sm font-bold text-slate-500">良好店舗</div>
+                                                            <div className="text-xs text-slate-400 mt-1">目立つ課題なし</div>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Issue Cards */}
+                                                    {mktAiAnalysis.length === 0 ? (
+                                                        <div className="bg-white rounded-3xl shadow-sm border border-emerald-200 p-12 text-center">
+                                                            <CheckCircle size={64} className="mx-auto text-emerald-400 mb-4" />
+                                                            <h3 className="text-2xl font-black text-slate-800 mb-2">全店舗良好</h3>
+                                                            <p className="text-slate-500 font-bold">現在のデータでは、特に大きな課題は検出されませんでした。</p>
+                                                        </div>
+                                                    ) : (
+                                                        <div className="space-y-4">
+                                                            {mktAiAnalysis.map((branch, i) => (
+                                                                <div key={branch.branch} className={`bg-white rounded-3xl shadow-sm border ${branch.scores.severity >= 5 ? 'border-rose-200' : 'border-amber-200'} overflow-hidden`}>
+                                                                    <div className={`px-6 py-4 flex items-center justify-between ${branch.scores.severity >= 5 ? 'bg-rose-50' : 'bg-amber-50'}`}>
+                                                                        <div className="flex items-center gap-4">
+                                                                            <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-black text-white shadow-lg ${branch.scores.severity >= 5 ? 'bg-rose-500' : 'bg-amber-500'}`}>
+                                                                                {branch.scores.severity >= 5 ? <AlertCircle size={24} /> : <Info size={24} />}
+                                                                            </div>
+                                                                            <div>
+                                                                                <h3 className="text-xl font-black text-slate-800">{branch.branch}</h3>
+                                                                                <div className="flex items-center gap-4 text-xs font-bold text-slate-500 mt-1">
+                                                                                    <span>新規 {branch.newCount}名</span>
+                                                                                    <span>CPA ¥{branch.cpa.toLocaleString()}</span>
+                                                                                    <span>入会率 {branch.enrollRate}%</span>
+                                                                                    <span>キャンセル率 {branch.cancelRate}%</span>
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                        <div className={`px-4 py-2 rounded-xl font-black text-sm ${branch.scores.severity >= 5 ? 'bg-rose-500 text-white' : 'bg-amber-500 text-white'}`}>
+                                                                            重要度 {branch.scores.severity}
+                                                                        </div>
+                                                                    </div>
+
+                                                                    <div className="p-6 space-y-4">
+                                                                        {/* Issues */}
+                                                                        {branch.issues.length > 0 && (
+                                                                            <div>
+                                                                                <h4 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-3">検出された課題</h4>
+                                                                                <div className="space-y-3">
+                                                                                    {branch.issues.map((issue, j) => (
+                                                                                        <div key={j} className={`p-4 rounded-2xl border ${issue.type === 'danger' ? 'bg-rose-50 border-rose-100' : 'bg-amber-50 border-amber-100'}`}>
+                                                                                            <div className="flex items-start gap-3">
+                                                                                                <div className={`px-2 py-1 rounded-lg text-[10px] font-black uppercase ${issue.type === 'danger' ? 'bg-rose-500 text-white' : 'bg-amber-500 text-white'}`}>{issue.metric}</div>
+                                                                                                <div className="flex-1">
+                                                                                                    <p className="text-sm font-bold text-slate-700 mb-1">{issue.message}</p>
+                                                                                                    <p className="text-xs font-bold text-slate-500 flex items-center gap-1">
+                                                                                                        <ChevronRight size={12} className="text-purple-500" />
+                                                                                                        <span className="text-purple-600">{issue.suggestion}</span>
+                                                                                                    </p>
+                                                                                                </div>
+                                                                                            </div>
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            </div>
+                                                                        )}
+
+                                                                        {/* Strengths */}
+                                                                        {branch.strengths.length > 0 && (
+                                                                            <div>
+                                                                                <h4 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-3">強み</h4>
+                                                                                <div className="space-y-2">
+                                                                                    {branch.strengths.map((s, j) => (
+                                                                                        <div key={j} className="p-3 bg-emerald-50 rounded-xl border border-emerald-100 flex items-center gap-3">
+                                                                                            <CheckCircle size={16} className="text-emerald-500 flex-shrink-0" />
+                                                                                            <span className="text-sm font-bold text-emerald-700">{s}</span>
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+
+                                            {/* Raw Data Table (at bottom of every tab) */}
+                                            <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                                                <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                                                    <h2 className="text-lg font-black flex items-center gap-2 text-slate-800">
+                                                        <Hash className="text-slate-400" size={20} /> 詳細データ ({mktFiltered.length}件)
+                                                    </h2>
+                                                </div>
+                                                <div className="overflow-x-auto scrollbar-thin" style={{ maxHeight: '500px' }}>
+                                                    <table className="w-full text-left border-collapse text-sm">
+                                                        <thead className="sticky top-0 z-10">
+                                                            <tr className="bg-slate-50 text-[10px] uppercase tracking-widest text-slate-400 font-black border-b border-slate-100">
+                                                                {mktFiltered.length > 0 && Object.keys(mktFiltered[0]).map(key => (
+                                                                    <th key={key} className="px-4 py-3 whitespace-nowrap">{key}</th>
+                                                                ))}
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody className="divide-y divide-slate-100">
+                                                            {mktFiltered.slice(0, 100).map((row, i) => (
+                                                                <tr key={i} className="hover:bg-slate-50 transition-colors font-bold">
+                                                                    {Object.values(row).map((val, j) => (
+                                                                        <td key={j} className="px-4 py-3 whitespace-nowrap text-slate-600">
+                                                                            {typeof val === 'number' ? val.toLocaleString() : String(val || '')}
+                                                                        </td>
+                                                                    ))}
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                                {mktFiltered.length > 100 && (
+                                                    <div className="p-4 text-center text-xs text-slate-400 font-bold border-t border-slate-100">
+                                                        {mktFiltered.length}件中100件を表示
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </>
+                                    )}
+
                                 </div>
                             </div>
                         )}

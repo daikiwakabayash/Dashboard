@@ -196,6 +196,15 @@
             '予算': 'budget',
         };
 
+        // 整体院業界ベンチマーク（市場平均値）
+        const SEITAI_BENCHMARKS = {
+            cpa: { excellent: 5000, good: 8000, average: 12000, poor: 18000, label: 'CPA（来院単価）' },
+            enrollRate: { excellent: 60, good: 45, average: 35, poor: 20, label: '入会率' },
+            cancelRate: { excellent: 5, good: 10, average: 15, poor: 25, label: 'キャンセル率' },
+            reviewRate: { excellent: 50, good: 35, average: 20, poor: 10, label: '口コミ獲得率' },
+            roas: { excellent: 400, good: 300, average: 200, poor: 100, label: 'ROAS' },
+        };
+
         // マーケティングデータを標準化
         const normalizeMarketingData = (rawData) => {
             try {
@@ -904,85 +913,167 @@
                 });
             }, [mktFiltered]);
 
-            // AI分析: 課題のある店舗を抽出
+            // 業界ベンチマーク評価関数
+            const benchmarkGrade = (metric, value, isLowerBetter) => {
+                const bm = SEITAI_BENCHMARKS[metric];
+                if (!bm || !value) return { grade: '-', color: 'slate', label: '' };
+                if (isLowerBetter) {
+                    if (value <= bm.excellent) return { grade: 'S', color: 'emerald', label: '業界トップ' };
+                    if (value <= bm.good) return { grade: 'A', color: 'blue', label: '良好' };
+                    if (value <= bm.average) return { grade: 'B', color: 'amber', label: '平均的' };
+                    if (value <= bm.poor) return { grade: 'C', color: 'orange', label: '要改善' };
+                    return { grade: 'D', color: 'rose', label: '要対策' };
+                } else {
+                    if (value >= bm.excellent) return { grade: 'S', color: 'emerald', label: '業界トップ' };
+                    if (value >= bm.good) return { grade: 'A', color: 'blue', label: '良好' };
+                    if (value >= bm.average) return { grade: 'B', color: 'amber', label: '平均的' };
+                    if (value >= bm.poor) return { grade: 'C', color: 'orange', label: '要改善' };
+                    return { grade: 'D', color: 'rose', label: '要対策' };
+                }
+            };
+
+            // AI分析: 総合スコア・詳細アドバイス・改善インパクト
             const mktAiAnalysis = useMemo(() => {
                 if (mktByBranch.length === 0) return [];
 
                 const avgCpa = mktStats.avgCpa;
                 const avgEnroll = mktStats.enrollRate;
                 const avgCancel = mktStats.cancelRate;
+                const avgNew = mktByBranch.reduce((a, b) => a + b.newCount, 0) / mktByBranch.length;
+                const avgReview = mktByBranch.reduce((a, b) => a + (b.reviewCount || 0), 0) / mktByBranch.length;
 
                 return mktByBranch.map(branch => {
                     const issues = [];
                     const scores = { severity: 0 };
+                    const strengths = [];
+                    const actions = []; // 具体的アクションプラン
 
-                    // CPA分析
+                    // === 総合ヘルススコア（100点満点）===
+                    let healthScore = 50; // ベーススコア
+
+                    // --- CPA分析 ---
+                    const cpaGrade = benchmarkGrade('cpa', branch.cpa, true);
                     if (branch.cpa > 0 && avgCpa > 0) {
                         const cpaRatio = branch.cpa / avgCpa;
                         if (cpaRatio > 1.5) {
-                            issues.push({ type: 'danger', metric: 'CPA', message: `CPA ¥${branch.cpa.toLocaleString()} は全体平均の${Math.round(cpaRatio * 100)}%（平均: ¥${avgCpa.toLocaleString()}）`, suggestion: '広告クリエイティブの見直し、ターゲティングの精度向上を検討' });
-                            scores.severity += 3;
+                            const savingPotential = Math.round((branch.cpa - avgCpa) * branch.newCount);
+                            issues.push({ type: 'danger', metric: 'CPA', message: `CPA ¥${branch.cpa.toLocaleString()} は全体平均の${Math.round(cpaRatio * 100)}%`, suggestion: '広告クリエイティブの見直し、ターゲティングの精度向上を検討' });
+                            actions.push({ priority: 1, action: 'CPA改善', detail: `CPAを平均水準まで下げれば月間約¥${savingPotential.toLocaleString()}の広告費削減が見込める`, impact: '高', category: '広告費' });
+                            scores.severity += 3; healthScore -= 15;
                         } else if (cpaRatio > 1.2) {
                             issues.push({ type: 'warning', metric: 'CPA', message: `CPA ¥${branch.cpa.toLocaleString()} はやや高め（平均: ¥${avgCpa.toLocaleString()}）`, suggestion: 'LP改善やキーワード最適化で改善可能' });
-                            scores.severity += 1;
+                            scores.severity += 1; healthScore -= 5;
+                        } else if (cpaRatio < 0.8) {
+                            strengths.push(`CPA ¥${branch.cpa.toLocaleString()} が優秀（平均比${Math.round(cpaRatio * 100)}%）`);
+                            healthScore += 10;
                         }
                     }
 
-                    // 入会率分析
+                    // --- 入会率分析 ---
+                    const enrollGrade = benchmarkGrade('enrollRate', branch.enrollRate, false);
                     if (avgEnroll > 0 && branch.newCount >= 3) {
                         const enrollDiff = avgEnroll - branch.enrollRate;
                         if (enrollDiff > 20) {
-                            issues.push({ type: 'danger', metric: '入会率', message: `入会率${branch.enrollRate}%は全体平均${avgEnroll}%を大きく下回る`, suggestion: 'カウンセリングトークの改善、初回体験メニューの見直しを推奨' });
-                            scores.severity += 3;
+                            const potentialEnroll = Math.round(branch.newCount * (avgEnroll / 100)) - branch.enrollCount;
+                            issues.push({ type: 'danger', metric: '入会率', message: `入会率${branch.enrollRate}%は全体平均${avgEnroll}%を大きく下回る`, suggestion: 'カウンセリングトークの改善、初回体験メニューの見直し' });
+                            actions.push({ priority: 1, action: '入会率改善', detail: `平均水準に改善すれば月${potentialEnroll > 0 ? potentialEnroll : 1}名の追加入会が見込める`, impact: '高', category: '成約力' });
+                            scores.severity += 3; healthScore -= 15;
                         } else if (enrollDiff > 10) {
-                            issues.push({ type: 'warning', metric: '入会率', message: `入会率${branch.enrollRate}%は平均${avgEnroll}%を下回る`, suggestion: 'スタッフ研修の実施やトークスクリプトの標準化を検討' });
-                            scores.severity += 2;
+                            issues.push({ type: 'warning', metric: '入会率', message: `入会率${branch.enrollRate}%は平均${avgEnroll}%を下回る`, suggestion: 'スタッフ研修の実施やトークスクリプトの標準化' });
+                            actions.push({ priority: 2, action: '接客研修', detail: 'カウンセリング力を強化し入会率を5%改善する', impact: '中', category: '成約力' });
+                            scores.severity += 2; healthScore -= 8;
+                        } else if (branch.enrollRate > avgEnroll + 10) {
+                            strengths.push(`入会率${branch.enrollRate}%が高水準（+${branch.enrollRate - avgEnroll}pt）`);
+                            healthScore += 10;
                         }
                     }
 
-                    // キャンセル率分析
-                    if (avgCancel > 0 && branch.newCount >= 3) {
-                        const cancelDiff = branch.cancelRate - avgCancel;
-                        if (cancelDiff > 15) {
-                            issues.push({ type: 'danger', metric: 'キャンセル率', message: `キャンセル率${branch.cancelRate}%は全体平均${avgCancel}%を大きく上回る`, suggestion: 'リマインド連絡の強化、予約確認フローの見直し' });
-                            scores.severity += 3;
-                        } else if (cancelDiff > 8) {
+                    // --- キャンセル率分析 ---
+                    const cancelGrade = benchmarkGrade('cancelRate', branch.cancelRate, true);
+                    if (branch.reservationCount >= 3) {
+                        if (branch.cancelRate > 25) {
+                            const lostPatients = Math.round(branch.reservationCount * (branch.cancelRate - avgCancel) / 100);
+                            issues.push({ type: 'danger', metric: 'キャンセル率', message: `キャンセル率${branch.cancelRate}%は深刻なレベル`, suggestion: 'リマインド連絡の強化、予約確認フローの見直し' });
+                            actions.push({ priority: 1, action: 'キャンセル対策', detail: `キャンセル率を平均に改善すれば月${lostPatients > 0 ? lostPatients : 1}名の来院増`, impact: '高', category: '来院率' });
+                            scores.severity += 3; healthScore -= 12;
+                        } else if (branch.cancelRate > avgCancel + 8) {
                             issues.push({ type: 'warning', metric: 'キャンセル率', message: `キャンセル率${branch.cancelRate}%は平均${avgCancel}%を上回る`, suggestion: 'LINE予約リマインドの導入を検討' });
-                            scores.severity += 1;
+                            actions.push({ priority: 2, action: 'リマインド導入', detail: '予約前日のLINE通知でキャンセル率5%改善を目指す', impact: '中', category: '来院率' });
+                            scores.severity += 1; healthScore -= 5;
+                        } else if (branch.cancelRate <= 5) {
+                            strengths.push(`キャンセル率${branch.cancelRate}%が非常に低い`);
+                            healthScore += 8;
                         }
                     }
 
-                    // 来院数が少ない
-                    const avgNew = mktByBranch.reduce((a, b) => a + b.newCount, 0) / mktByBranch.length;
-                    if (avgNew > 0 && branch.newCount < avgNew * 0.5 && branch.newCount > 0) {
-                        issues.push({ type: 'warning', metric: '集客数', message: `実来院${branch.newCount}名は平均${Math.round(avgNew)}名の半分以下`, suggestion: 'エリアマーケティングの強化、MEO対策の見直し' });
-                        scores.severity += 2;
+                    // --- 集客数分析 ---
+                    if (avgNew > 0 && branch.newCount > 0) {
+                        if (branch.newCount < avgNew * 0.5) {
+                            issues.push({ type: 'warning', metric: '集客数', message: `実来院${branch.newCount}名は平均${Math.round(avgNew)}名の半分以下`, suggestion: 'エリアマーケティング・MEO・チラシの強化' });
+                            actions.push({ priority: 2, action: '集客強化', detail: `来院数を平均に近づけるため、広告予算の増額やMEO対策を検討`, impact: '中', category: '集客' });
+                            scores.severity += 2; healthScore -= 10;
+                        } else if (branch.newCount > avgNew * 1.5) {
+                            strengths.push(`来院数${branch.newCount}名が平均の${Math.round(branch.newCount / avgNew * 100)}%で好調`);
+                            healthScore += 8;
+                        }
                     }
 
-                    // ROAS分析
+                    // --- ROAS分析 ---
+                    const roasGrade = benchmarkGrade('roas', branch.roas, false);
                     if (branch.roas > 0 && branch.roas < 100) {
                         issues.push({ type: 'danger', metric: 'ROAS', message: `ROAS ${branch.roas}%で広告費が売上を上回っている`, suggestion: '費用対効果の低い媒体の停止・予算配分の見直し' });
-                        scores.severity += 3;
+                        actions.push({ priority: 1, action: '媒体見直し', detail: '低ROASの媒体を停止し、高ROAS媒体に予算を集中', impact: '高', category: '広告費' });
+                        scores.severity += 3; healthScore -= 15;
                     } else if (branch.roas > 0 && branch.roas < 200) {
                         issues.push({ type: 'warning', metric: 'ROAS', message: `ROAS ${branch.roas}%で改善の余地あり`, suggestion: '高LTV顧客の獲得チャネルに予算をシフト' });
-                        scores.severity += 1;
-                    }
-
-                    // 良い点の抽出
-                    const strengths = [];
-                    if (branch.cpa > 0 && avgCpa > 0 && branch.cpa < avgCpa * 0.8) {
-                        strengths.push(`CPA ¥${branch.cpa.toLocaleString()} が優秀（平均比${Math.round((branch.cpa / avgCpa) * 100)}%）`);
-                    }
-                    if (branch.enrollRate > avgEnroll + 10 && branch.newCount >= 3) {
-                        strengths.push(`入会率${branch.enrollRate}%が高水準`);
-                    }
-                    if (branch.roas > 300) {
+                        scores.severity += 1; healthScore -= 5;
+                    } else if (branch.roas > 300) {
                         strengths.push(`ROAS ${branch.roas}%で高い投資効率`);
+                        healthScore += 10;
                     }
 
-                    return { ...branch, issues, scores, strengths };
-                }).filter(b => b.issues.length > 0 || b.strengths.length > 0).sort((a, b) => b.scores.severity - a.scores.severity);
+                    // --- 口コミ分析 ---
+                    const reviewGrade = benchmarkGrade('reviewRate', branch.reviewCount > 0 && branch.newCount > 0 ? Math.round(branch.reviewCount / branch.newCount * 100) : 0, false);
+                    if (branch.reviewCount === 0 && branch.newCount >= 3) {
+                        issues.push({ type: 'warning', metric: '口コミ', message: '口コミ獲得がゼロ', suggestion: '来院後のフォローで口コミ依頼を組み込む' });
+                        actions.push({ priority: 3, action: '口コミ獲得', detail: '施術後の満足確認→口コミ依頼フローを構築', impact: '中', category: '集客' });
+                        scores.severity += 1; healthScore -= 5;
+                    } else if (branch.reviewCount > avgReview * 1.5 && branch.reviewCount > 0) {
+                        strengths.push(`口コミ${branch.reviewCount}件で集客に好影響`);
+                        healthScore += 5;
+                    }
+
+                    // スコアをクランプ
+                    healthScore = Math.max(0, Math.min(100, healthScore));
+
+                    // 業界評価
+                    const grades = { cpa: cpaGrade, enrollRate: enrollGrade, cancelRate: cancelGrade, roas: roasGrade, review: reviewGrade };
+
+                    return { ...branch, issues, scores, strengths, actions, healthScore, grades };
+                }).sort((a, b) => b.scores.severity - a.scores.severity);
             }, [mktByBranch, mktStats]);
+
+            // エリア別競合分析
+            const mktAreaAnalysis = useMemo(() => {
+                if (mktByBranch.length === 0) return [];
+                const areaMap = {};
+                mktByBranch.forEach(b => {
+                    const area = b.area || '不明';
+                    if (!areaMap[area]) areaMap[area] = [];
+                    areaMap[area].push(b);
+                });
+                return Object.entries(areaMap).map(([area, stores]) => {
+                    const totalNew = stores.reduce((a, s) => a + s.newCount, 0);
+                    const totalAdSpend = stores.reduce((a, s) => a + s.adSpend, 0);
+                    const totalRevenue = stores.reduce((a, s) => a + s.revenue, 0);
+                    const totalEnroll = stores.reduce((a, s) => a + s.enrollCount, 0);
+                    const avgCpa = totalNew > 0 ? Math.round(totalAdSpend / totalNew) : 0;
+                    const avgEnrollRate = totalNew > 0 ? Math.round(totalEnroll / totalNew * 100) : 0;
+                    const bestStore = stores.reduce((best, s) => (!best || s.enrollRate > best.enrollRate) ? s : best, null);
+                    const worstCpa = stores.reduce((worst, s) => (!worst || (s.cpa > worst.cpa && s.cpa > 0)) ? s : worst, null);
+                    return { area, stores, totalNew, totalAdSpend, totalRevenue, avgCpa, avgEnrollRate, bestStore, worstCpa, storeCount: stores.length };
+                }).sort((a, b) => b.totalNew - a.totalNew);
+            }, [mktByBranch]);
 
             const stats = useMemo(() => {
                 const totalSales = filteredData.reduce((acc, curr) => acc + (curr.individualSales || 0), 0);
@@ -2253,9 +2344,9 @@
                                                 {[
                                                     { id: 'overview', label: '概要', icon: <Home size={16} /> },
                                                     { id: 'branch', label: '店舗別分析', icon: <MapPin size={16} /> },
-                                                    { id: 'staff', label: 'スタッフ別', icon: <Users size={16} /> },
                                                     { id: 'media', label: '媒体別分析', icon: <BarChart3 size={16} /> },
                                                     { id: 'ai', label: 'AI分析', icon: <Activity size={16} /> },
+                                                    { id: 'market', label: '市場・競合分析', icon: <Target size={16} /> },
                                                 ].map(tab => (
                                                     <button
                                                         key={tab.id}
@@ -2763,102 +2854,335 @@
                                                             <Activity size={28} />
                                                             <h2 className="text-2xl font-black italic">AI マーケティング分析</h2>
                                                         </div>
-                                                        <p className="text-purple-100 font-bold">各店舗のマーケティングデータをAIが分析し、課題と改善ポイントを自動抽出します。</p>
+                                                        <p className="text-purple-100 font-bold">各店舗のKPIを業界ベンチマークと比較し、改善インパクトと具体的なアクションプランを提示します。</p>
                                                     </div>
 
                                                     {/* Summary Stats */}
-                                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                                        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 text-center">
-                                                            <div className="text-4xl font-black text-rose-500 mb-1">{mktAiAnalysis.filter(b => b.scores.severity >= 5).length}</div>
-                                                            <div className="text-sm font-bold text-slate-500">要改善店舗</div>
-                                                            <div className="text-xs text-slate-400 mt-1">深刻な課題あり</div>
+                                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                                        <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 text-center">
+                                                            <div className="text-3xl font-black text-rose-500 mb-1">{mktAiAnalysis.filter(b => b.scores.severity >= 5).length}</div>
+                                                            <div className="text-xs font-bold text-slate-500">要改善店舗</div>
                                                         </div>
-                                                        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 text-center">
-                                                            <div className="text-4xl font-black text-amber-500 mb-1">{mktAiAnalysis.filter(b => b.scores.severity >= 1 && b.scores.severity < 5).length}</div>
-                                                            <div className="text-sm font-bold text-slate-500">注意店舗</div>
-                                                            <div className="text-xs text-slate-400 mt-1">軽微な課題あり</div>
+                                                        <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 text-center">
+                                                            <div className="text-3xl font-black text-amber-500 mb-1">{mktAiAnalysis.filter(b => b.scores.severity >= 1 && b.scores.severity < 5).length}</div>
+                                                            <div className="text-xs font-bold text-slate-500">注意店舗</div>
                                                         </div>
-                                                        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 text-center">
-                                                            <div className="text-4xl font-black text-emerald-500 mb-1">{mktByBranch.length - mktAiAnalysis.filter(b => b.issues.length > 0).length}</div>
-                                                            <div className="text-sm font-bold text-slate-500">良好店舗</div>
-                                                            <div className="text-xs text-slate-400 mt-1">目立つ課題なし</div>
+                                                        <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 text-center">
+                                                            <div className="text-3xl font-black text-emerald-500 mb-1">{mktAiAnalysis.filter(b => b.issues.length === 0).length}</div>
+                                                            <div className="text-xs font-bold text-slate-500">良好店舗</div>
+                                                        </div>
+                                                        <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 text-center">
+                                                            <div className="text-3xl font-black text-purple-500 mb-1">{Math.round(mktAiAnalysis.reduce((a, b) => a + b.healthScore, 0) / (mktAiAnalysis.length || 1))}</div>
+                                                            <div className="text-xs font-bold text-slate-500">平均ヘルススコア</div>
                                                         </div>
                                                     </div>
 
-                                                    {/* Issue Cards */}
-                                                    {mktAiAnalysis.length === 0 ? (
-                                                        <div className="bg-white rounded-3xl shadow-sm border border-emerald-200 p-12 text-center">
-                                                            <CheckCircle size={64} className="mx-auto text-emerald-400 mb-4" />
-                                                            <h3 className="text-2xl font-black text-slate-800 mb-2">全店舗良好</h3>
-                                                            <p className="text-slate-500 font-bold">現在のデータでは、特に大きな課題は検出されませんでした。</p>
-                                                        </div>
-                                                    ) : (
-                                                        <div className="space-y-4">
-                                                            {mktAiAnalysis.map((branch, i) => (
-                                                                <div key={branch.branch} className={`bg-white rounded-3xl shadow-sm border ${branch.scores.severity >= 5 ? 'border-rose-200' : 'border-amber-200'} overflow-hidden`}>
-                                                                    <div className={`px-6 py-4 flex items-center justify-between ${branch.scores.severity >= 5 ? 'bg-rose-50' : 'bg-amber-50'}`}>
-                                                                        <div className="flex items-center gap-4">
-                                                                            <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-black text-white shadow-lg ${branch.scores.severity >= 5 ? 'bg-rose-500' : 'bg-amber-500'}`}>
-                                                                                {branch.scores.severity >= 5 ? <AlertCircle size={24} /> : <Info size={24} />}
-                                                                            </div>
-                                                                            <div>
-                                                                                <h3 className="text-xl font-black text-slate-800">{branch.branch}</h3>
-                                                                                <div className="flex items-center gap-4 text-xs font-bold text-slate-500 mt-1">
-                                                                                    <span>実来院 {branch.newCount}名</span>
-                                                                                    <span>CPA ¥{branch.cpa.toLocaleString()}</span>
-                                                                                    <span>入会率 {branch.enrollRate}%</span>
-                                                                                    <span>C率 {branch.cancelRate}%</span>
-                                                                                </div>
-                                                                            </div>
+                                                    {/* Store Cards with Health Score */}
+                                                    {mktAiAnalysis.map((branch, i) => (
+                                                        <div key={branch.branch} className={`bg-white rounded-3xl shadow-sm border overflow-hidden ${branch.scores.severity >= 5 ? 'border-rose-200' : branch.scores.severity >= 1 ? 'border-amber-200' : 'border-emerald-200'}`}>
+                                                            {/* Header */}
+                                                            <div className={`px-6 py-4 flex items-center justify-between ${branch.scores.severity >= 5 ? 'bg-rose-50' : branch.scores.severity >= 1 ? 'bg-amber-50' : 'bg-emerald-50'}`}>
+                                                                <div className="flex items-center gap-4">
+                                                                    <div className="relative">
+                                                                        <div className={`w-14 h-14 rounded-2xl flex items-center justify-center text-lg font-black text-white shadow-lg ${branch.healthScore >= 60 ? 'bg-emerald-500' : branch.healthScore >= 40 ? 'bg-amber-500' : 'bg-rose-500'}`}>
+                                                                            {branch.healthScore}
                                                                         </div>
-                                                                        <div className={`px-4 py-2 rounded-xl font-black text-sm ${branch.scores.severity >= 5 ? 'bg-rose-500 text-white' : 'bg-amber-500 text-white'}`}>
-                                                                            重要度 {branch.scores.severity}
-                                                                        </div>
+                                                                        <div className="absolute -bottom-1 -right-1 text-[8px] font-black bg-white rounded px-1 shadow">pts</div>
                                                                     </div>
-
-                                                                    <div className="p-6 space-y-4">
-                                                                        {/* Issues */}
-                                                                        {branch.issues.length > 0 && (
-                                                                            <div>
-                                                                                <h4 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-3">検出された課題</h4>
-                                                                                <div className="space-y-3">
-                                                                                    {branch.issues.map((issue, j) => (
-                                                                                        <div key={j} className={`p-4 rounded-2xl border ${issue.type === 'danger' ? 'bg-rose-50 border-rose-100' : 'bg-amber-50 border-amber-100'}`}>
-                                                                                            <div className="flex items-start gap-3">
-                                                                                                <div className={`px-2 py-1 rounded-lg text-[10px] font-black uppercase ${issue.type === 'danger' ? 'bg-rose-500 text-white' : 'bg-amber-500 text-white'}`}>{issue.metric}</div>
-                                                                                                <div className="flex-1">
-                                                                                                    <p className="text-sm font-bold text-slate-700 mb-1">{issue.message}</p>
-                                                                                                    <p className="text-xs font-bold text-slate-500 flex items-center gap-1">
-                                                                                                        <ChevronRight size={12} className="text-purple-500" />
-                                                                                                        <span className="text-purple-600">{issue.suggestion}</span>
-                                                                                                    </p>
-                                                                                                </div>
-                                                                                            </div>
-                                                                                        </div>
-                                                                                    ))}
-                                                                                </div>
-                                                                            </div>
-                                                                        )}
-
-                                                                        {/* Strengths */}
-                                                                        {branch.strengths.length > 0 && (
-                                                                            <div>
-                                                                                <h4 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-3">強み</h4>
-                                                                                <div className="space-y-2">
-                                                                                    {branch.strengths.map((s, j) => (
-                                                                                        <div key={j} className="p-3 bg-emerald-50 rounded-xl border border-emerald-100 flex items-center gap-3">
-                                                                                            <CheckCircle size={16} className="text-emerald-500 flex-shrink-0" />
-                                                                                            <span className="text-sm font-bold text-emerald-700">{s}</span>
-                                                                                        </div>
-                                                                                    ))}
-                                                                                </div>
-                                                                            </div>
-                                                                        )}
+                                                                    <div>
+                                                                        <h3 className="text-xl font-black text-slate-800">{branch.branch}</h3>
+                                                                        <div className="flex items-center gap-3 text-xs font-bold text-slate-500 mt-1">
+                                                                            {branch.area && <span className="bg-slate-200 px-2 py-0.5 rounded">{branch.area}</span>}
+                                                                            <span>来院{branch.newCount}名</span>
+                                                                            <span>CPA ¥{branch.cpa.toLocaleString()}</span>
+                                                                            <span>入会率{branch.enrollRate}%</span>
+                                                                        </div>
                                                                     </div>
                                                                 </div>
-                                                            ))}
+                                                            </div>
+
+                                                            <div className="p-6 space-y-5">
+                                                                {/* Grade Badges */}
+                                                                <div className="flex flex-wrap gap-2">
+                                                                    {Object.entries(branch.grades).map(([key, g]) => g.grade !== '-' && (
+                                                                        <div key={key} className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border bg-${g.color}-50 border-${g.color}-200`}>
+                                                                            <span className={`text-xs font-black text-${g.color}-600`}>{SEITAI_BENCHMARKS[key]?.label || key}</span>
+                                                                            <span className={`px-2 py-0.5 rounded-lg text-xs font-black bg-${g.color}-500 text-white`}>{g.grade}</span>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+
+                                                                {/* Issues */}
+                                                                {branch.issues.length > 0 && (
+                                                                    <div>
+                                                                        <h4 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-3">検出された課題</h4>
+                                                                        <div className="space-y-3">
+                                                                            {branch.issues.map((issue, j) => (
+                                                                                <div key={j} className={`p-4 rounded-2xl border ${issue.type === 'danger' ? 'bg-rose-50 border-rose-100' : 'bg-amber-50 border-amber-100'}`}>
+                                                                                    <div className="flex items-start gap-3">
+                                                                                        <div className={`px-2 py-1 rounded-lg text-[10px] font-black uppercase ${issue.type === 'danger' ? 'bg-rose-500 text-white' : 'bg-amber-500 text-white'}`}>{issue.metric}</div>
+                                                                                        <div className="flex-1">
+                                                                                            <p className="text-sm font-bold text-slate-700 mb-1">{issue.message}</p>
+                                                                                            <p className="text-xs font-bold flex items-center gap-1">
+                                                                                                <ChevronRight size={12} className="text-purple-500" />
+                                                                                                <span className="text-purple-600">{issue.suggestion}</span>
+                                                                                            </p>
+                                                                                        </div>
+                                                                                    </div>
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+
+                                                                {/* Action Plans */}
+                                                                {branch.actions.length > 0 && (
+                                                                    <div>
+                                                                        <h4 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-3">改善アクションプラン（インパクト順）</h4>
+                                                                        <div className="space-y-2">
+                                                                            {branch.actions.sort((a, b) => a.priority - b.priority).map((act, j) => (
+                                                                                <div key={j} className="p-4 bg-purple-50 rounded-2xl border border-purple-100">
+                                                                                    <div className="flex items-start gap-3">
+                                                                                        <div className={`px-2 py-1 rounded-lg text-[10px] font-black ${act.impact === '高' ? 'bg-purple-600 text-white' : 'bg-purple-300 text-purple-800'}`}>
+                                                                                            {act.impact}
+                                                                                        </div>
+                                                                                        <div className="flex-1">
+                                                                                            <p className="text-sm font-black text-purple-800">{act.action}</p>
+                                                                                            <p className="text-xs font-bold text-purple-600 mt-0.5">{act.detail}</p>
+                                                                                        </div>
+                                                                                        <span className="text-[10px] font-bold text-purple-400 bg-purple-100 px-2 py-1 rounded">{act.category}</span>
+                                                                                    </div>
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+
+                                                                {/* Strengths */}
+                                                                {branch.strengths.length > 0 && (
+                                                                    <div>
+                                                                        <h4 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-3">強み</h4>
+                                                                        <div className="flex flex-wrap gap-2">
+                                                                            {branch.strengths.map((s, j) => (
+                                                                                <div key={j} className="px-3 py-2 bg-emerald-50 rounded-xl border border-emerald-100 flex items-center gap-2">
+                                                                                    <CheckCircle size={14} className="text-emerald-500 flex-shrink-0" />
+                                                                                    <span className="text-xs font-bold text-emerald-700">{s}</span>
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+
+                                            {/* === Market & Competitor Analysis Tab === */}
+                                            {mktActiveTab === 'market' && (
+                                                <div className="space-y-6">
+                                                    <div className="bg-gradient-to-r from-indigo-600 to-blue-600 rounded-3xl p-6 text-white">
+                                                        <div className="flex items-center gap-3 mb-2">
+                                                            <Target size={28} />
+                                                            <h2 className="text-2xl font-black italic">市場・競合ポジション分析</h2>
+                                                        </div>
+                                                        <p className="text-indigo-100 font-bold">整体院業界の平均値と比較し、各店舗の市場ポジションを可視化します。</p>
+                                                    </div>
+
+                                                    {/* Industry Benchmark Table */}
+                                                    <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                                                        <div className="p-6 border-b border-slate-100">
+                                                            <h2 className="text-lg font-black text-slate-800">業界ベンチマーク vs 自社実績</h2>
+                                                            <p className="text-xs text-slate-400 font-bold mt-1">整体院・接骨院業界の平均的な広告効率と比較</p>
+                                                        </div>
+                                                        <div className="overflow-x-auto">
+                                                            <table className="w-full text-left border-collapse">
+                                                                <thead>
+                                                                    <tr className="bg-slate-50 text-[10px] uppercase tracking-widest text-slate-400 font-black border-b border-slate-100">
+                                                                        <th className="px-6 py-3">指標</th>
+                                                                        <th className="px-4 py-3 text-center bg-rose-50 text-rose-400">D 要対策</th>
+                                                                        <th className="px-4 py-3 text-center bg-orange-50 text-orange-400">C 要改善</th>
+                                                                        <th className="px-4 py-3 text-center bg-amber-50 text-amber-400">B 平均的</th>
+                                                                        <th className="px-4 py-3 text-center bg-blue-50 text-blue-400">A 良好</th>
+                                                                        <th className="px-4 py-3 text-center bg-emerald-50 text-emerald-400">S トップ</th>
+                                                                        <th className="px-4 py-3 text-center bg-purple-50 text-purple-500">自社平均</th>
+                                                                        <th className="px-4 py-3 text-center">評価</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody className="divide-y divide-slate-100">
+                                                                    {[
+                                                                        { key: 'cpa', value: mktStats.avgCpa, fmt: v => `¥${v.toLocaleString()}`, lower: true },
+                                                                        { key: 'enrollRate', value: mktStats.enrollRate, fmt: v => `${v}%`, lower: false },
+                                                                        { key: 'cancelRate', value: mktStats.cancelRate, fmt: v => `${v}%`, lower: true },
+                                                                        { key: 'roas', value: mktStats.roas, fmt: v => `${v}%`, lower: false },
+                                                                    ].map(row => {
+                                                                        const bm = SEITAI_BENCHMARKS[row.key];
+                                                                        const g = benchmarkGrade(row.key, row.value, row.lower);
+                                                                        return (
+                                                                            <tr key={row.key} className="text-sm font-bold">
+                                                                                <td className="px-6 py-4 font-black text-slate-700">{bm.label}</td>
+                                                                                <td className="px-4 py-4 text-center text-slate-400">{row.lower ? `>${bm.poor.toLocaleString()}` : `<${bm.poor}`}{row.key === 'cpa' ? '' : '%'}</td>
+                                                                                <td className="px-4 py-4 text-center text-slate-400">{row.lower ? `〜${bm.poor.toLocaleString()}` : `〜${bm.poor}`}{row.key === 'cpa' ? '' : '%'}</td>
+                                                                                <td className="px-4 py-4 text-center text-slate-400">{row.lower ? `〜${bm.average.toLocaleString()}` : `〜${bm.average}`}{row.key === 'cpa' ? '' : '%'}</td>
+                                                                                <td className="px-4 py-4 text-center text-slate-400">{row.lower ? `〜${bm.good.toLocaleString()}` : `〜${bm.good}`}{row.key === 'cpa' ? '' : '%'}</td>
+                                                                                <td className="px-4 py-4 text-center text-slate-400">{row.lower ? `<¥${bm.excellent.toLocaleString()}` : `>${bm.excellent}`}{row.key === 'cpa' ? '' : '%'}</td>
+                                                                                <td className="px-4 py-4 text-center font-black text-purple-700 text-lg">{row.fmt(row.value)}</td>
+                                                                                <td className="px-4 py-4 text-center"><span className={`px-3 py-1 rounded-lg text-xs font-black bg-${g.color}-100 text-${g.color}-700`}>{g.grade} {g.label}</span></td>
+                                                                            </tr>
+                                                                        );
+                                                                    })}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Store Position Map */}
+                                                    <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                                                        <div className="p-6 border-b border-slate-100">
+                                                            <h2 className="text-lg font-black text-slate-800">店舗別 業界ポジション</h2>
+                                                            <p className="text-xs text-slate-400 font-bold mt-1">各店舗のKPIを業界水準（S/A/B/C/D）で評価</p>
+                                                        </div>
+                                                        <div className="overflow-x-auto">
+                                                            <table className="w-full text-left border-collapse">
+                                                                <thead>
+                                                                    <tr className="bg-slate-50 text-[10px] uppercase tracking-widest text-slate-400 font-black border-b border-slate-100">
+                                                                        <th className="px-6 py-3">店舗</th>
+                                                                        <th className="px-4 py-3 text-center">ヘルス</th>
+                                                                        <th className="px-4 py-3 text-center">CPA</th>
+                                                                        <th className="px-4 py-3 text-center">入会率</th>
+                                                                        <th className="px-4 py-3 text-center">C率</th>
+                                                                        <th className="px-4 py-3 text-center">ROAS</th>
+                                                                        <th className="px-4 py-3 text-center">総合</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody className="divide-y divide-slate-100">
+                                                                    {mktAiAnalysis.sort((a, b) => b.healthScore - a.healthScore).map((b, i) => {
+                                                                        const gradeColors = { S: 'bg-emerald-500 text-white', A: 'bg-blue-500 text-white', B: 'bg-amber-400 text-white', C: 'bg-orange-500 text-white', D: 'bg-rose-500 text-white', '-': 'bg-slate-200 text-slate-500' };
+                                                                        return (
+                                                                            <tr key={b.branch} className="hover:bg-slate-50 text-sm font-bold">
+                                                                                <td className="px-6 py-4">
+                                                                                    <div className="font-black text-slate-800">{b.branch}</div>
+                                                                                    {b.area && <div className="text-[10px] text-slate-400">{b.area}</div>}
+                                                                                </td>
+                                                                                <td className="px-4 py-4 text-center">
+                                                                                    <span className={`inline-block w-10 h-10 rounded-xl leading-10 text-center font-black text-white ${b.healthScore >= 60 ? 'bg-emerald-500' : b.healthScore >= 40 ? 'bg-amber-500' : 'bg-rose-500'}`}>{b.healthScore}</span>
+                                                                                </td>
+                                                                                {['cpa', 'enrollRate', 'cancelRate', 'roas'].map(key => (
+                                                                                    <td key={key} className="px-4 py-4 text-center">
+                                                                                        <span className={`px-2.5 py-1 rounded-lg text-xs font-black ${gradeColors[b.grades[key]?.grade] || gradeColors['-']}`}>{b.grades[key]?.grade || '-'}</span>
+                                                                                    </td>
+                                                                                ))}
+                                                                                <td className="px-4 py-4 text-center">
+                                                                                    <span className="text-xs font-bold text-slate-500">{b.issues.length === 0 ? '良好' : `課題${b.issues.length}件`}</span>
+                                                                                </td>
+                                                                            </tr>
+                                                                        );
+                                                                    })}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Area Comparison */}
+                                                    {mktAreaAnalysis.filter(a => a.area !== '不明').length > 0 && (
+                                                        <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                                                            <div className="p-6 border-b border-slate-100">
+                                                                <h2 className="text-lg font-black text-slate-800">エリア別 競合ポジション</h2>
+                                                                <p className="text-xs text-slate-400 font-bold mt-1">同一エリア内の店舗パフォーマンスを比較</p>
+                                                            </div>
+                                                            <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                                {mktAreaAnalysis.filter(a => a.area !== '不明').map((area, i) => {
+                                                                    const colors = ['from-indigo-500 to-blue-500', 'from-emerald-500 to-teal-500', 'from-purple-500 to-pink-500', 'from-amber-500 to-orange-500'];
+                                                                    return (
+                                                                        <div key={area.area} className="border border-slate-200 rounded-2xl overflow-hidden">
+                                                                            <div className={`bg-gradient-to-r ${colors[i % colors.length]} p-4 text-white`}>
+                                                                                <div className="font-black text-lg">{area.area}エリア</div>
+                                                                                <div className="text-sm opacity-80">{area.storeCount}店舗 / 来院{area.totalNew}名 / 広告費¥{area.totalAdSpend.toLocaleString()}</div>
+                                                                            </div>
+                                                                            <div className="p-4 space-y-3">
+                                                                                <div className="grid grid-cols-2 gap-3">
+                                                                                    <div><div className="text-[10px] font-black text-slate-400">エリア平均CPA</div><div className="text-base font-black">¥{area.avgCpa.toLocaleString()}</div></div>
+                                                                                    <div><div className="text-[10px] font-black text-slate-400">エリア入会率</div><div className="text-base font-black">{area.avgEnrollRate}%</div></div>
+                                                                                </div>
+                                                                                {area.bestStore && (
+                                                                                    <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-100">
+                                                                                        <div className="text-[10px] font-black text-emerald-600 mb-1">エリア内トップ</div>
+                                                                                        <div className="text-sm font-black text-emerald-700">{area.bestStore.branch}（入会率{area.bestStore.enrollRate}%）</div>
+                                                                                    </div>
+                                                                                )}
+                                                                                {area.stores.length > 1 && area.worstCpa && area.worstCpa.cpa > area.avgCpa * 1.2 && (
+                                                                                    <div className="p-3 bg-amber-50 rounded-xl border border-amber-100">
+                                                                                        <div className="text-[10px] font-black text-amber-600 mb-1">CPA改善余地</div>
+                                                                                        <div className="text-sm font-black text-amber-700">{area.worstCpa.branch}（CPA ¥{area.worstCpa.cpa.toLocaleString()}）→ エリア平均¥{area.avgCpa.toLocaleString()}に近づけると広告費削減</div>
+                                                                                    </div>
+                                                                                )}
+                                                                                <div className="text-[10px] text-slate-400 font-bold pt-2 border-t border-slate-100">
+                                                                                    店舗: {area.stores.map(s => s.branch).join('、')}
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
                                                         </div>
                                                     )}
+
+                                                    {/* Improvement Priority Matrix */}
+                                                    <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                                                        <div className="p-6 border-b border-slate-100">
+                                                            <h2 className="text-lg font-black text-slate-800">改善優先度マトリクス</h2>
+                                                            <p className="text-xs text-slate-400 font-bold mt-1">全店舗のアクションを優先度順に一覧表示</p>
+                                                        </div>
+                                                        <div className="p-6">
+                                                            {(() => {
+                                                                const allActions = mktAiAnalysis.flatMap(b => b.actions.map(a => ({ ...a, branch: b.branch })));
+                                                                const highPriority = allActions.filter(a => a.impact === '高');
+                                                                const medPriority = allActions.filter(a => a.impact === '中');
+                                                                return (
+                                                                    <div className="space-y-4">
+                                                                        {highPriority.length > 0 && (
+                                                                            <div>
+                                                                                <div className="flex items-center gap-2 mb-3">
+                                                                                    <div className="w-3 h-3 rounded-full bg-rose-500" />
+                                                                                    <span className="text-xs font-black uppercase tracking-widest text-slate-400">高インパクト（今すぐ実施）</span>
+                                                                                </div>
+                                                                                <div className="space-y-2">
+                                                                                    {highPriority.map((a, i) => (
+                                                                                        <div key={i} className="flex items-center gap-4 p-3 bg-rose-50 rounded-xl border border-rose-100">
+                                                                                            <span className="text-sm font-black text-slate-700 min-w-[100px]">{a.branch}</span>
+                                                                                            <span className="text-sm font-bold text-rose-700 flex-1">{a.action}: {a.detail}</span>
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            </div>
+                                                                        )}
+                                                                        {medPriority.length > 0 && (
+                                                                            <div>
+                                                                                <div className="flex items-center gap-2 mb-3">
+                                                                                    <div className="w-3 h-3 rounded-full bg-amber-500" />
+                                                                                    <span className="text-xs font-black uppercase tracking-widest text-slate-400">中インパクト（計画的に実施）</span>
+                                                                                </div>
+                                                                                <div className="space-y-2">
+                                                                                    {medPriority.map((a, i) => (
+                                                                                        <div key={i} className="flex items-center gap-4 p-3 bg-amber-50 rounded-xl border border-amber-100">
+                                                                                            <span className="text-sm font-black text-slate-700 min-w-[100px]">{a.branch}</span>
+                                                                                            <span className="text-sm font-bold text-amber-700 flex-1">{a.action}: {a.detail}</span>
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            </div>
+                                                                        )}
+                                                                        {allActions.length === 0 && (
+                                                                            <div className="text-center p-8 text-slate-400 font-bold">
+                                                                                <CheckCircle size={48} className="mx-auto mb-3 text-emerald-400" />
+                                                                                全店舗が良好な状態です。現在の施策を継続してください。
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                );
+                                                            })()}
+                                                        </div>
+                                                    </div>
                                                 </div>
                                             )}
 

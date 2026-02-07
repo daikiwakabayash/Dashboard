@@ -1373,41 +1373,99 @@
             // チャット分析機能
             const analyzeChatQuestion = (question) => {
                 const lowerQ = question.toLowerCase();
+                console.log('🤖 Chat question:', question);
 
-                // 店舗名の抽出
+                // 店舗名の抽出（より正確なマッチング）
                 let targetBranch = null;
+
+                // まず完全一致を試みる
                 for (const branch of allBranches) {
-                    if (lowerQ.includes(branch.toLowerCase()) || lowerQ.includes(branch.replace('院', '').toLowerCase())) {
+                    if (lowerQ.includes(branch.toLowerCase())) {
                         targetBranch = branch;
+                        console.log('✓ Branch matched (exact):', branch);
                         break;
                     }
                 }
 
-                // 月の抽出（例: 26年1月, 2026年1月, 1月）
-                let targetMonth = null;
-                const monthMatch = lowerQ.match(/(\d{2,4})年(\d{1,2})月/) || lowerQ.match(/(\d{1,2})月/);
-                if (monthMatch) {
-                    let year, month;
-                    if (monthMatch[2]) {
-                        year = monthMatch[1].length === 2 ? `20${monthMatch[1]}` : monthMatch[1];
-                        month = monthMatch[2];
-                    } else {
-                        const now = new Date();
-                        year = now.getFullYear().toString();
-                        month = monthMatch[1];
+                // 次に「院」を除いた部分一致を試みる
+                if (!targetBranch) {
+                    for (const branch of allBranches) {
+                        const branchBase = branch.replace(/院$/, '');
+                        if (branchBase && lowerQ.includes(branchBase.toLowerCase())) {
+                            targetBranch = branch;
+                            console.log('✓ Branch matched (partial):', branch);
+                            break;
+                        }
                     }
-                    targetMonth = `${year}年${parseInt(month)}月`;
                 }
 
-                // マーケティングデータと通常データの両方をチェック
+                // 「全店舗」「全体」などのキーワード検出
+                const isAllBranches = lowerQ.includes('全店舗') || lowerQ.includes('全体') || lowerQ.includes('全院');
+                if (isAllBranches) {
+                    targetBranch = null;
+                    console.log('✓ All branches mode');
+                }
+
+                // 月の抽出（より柔軟なパターンマッチング）
+                let targetMonth = null;
+
+                // パターン1: 2026年1月、26年1月
+                let monthMatch = lowerQ.match(/(\d{2,4})年(\d{1,2})月/);
+                if (monthMatch) {
+                    let year = monthMatch[1];
+                    if (year.length === 2) {
+                        year = `20${year}`;
+                    }
+                    const month = parseInt(monthMatch[2]);
+                    targetMonth = `${year}年${month}月`;
+                    console.log('✓ Month matched (year-month):', targetMonth);
+                }
+
+                // パターン2: 1月（現在年または最新データの年を使用）
+                if (!targetMonth) {
+                    monthMatch = lowerQ.match(/(\d{1,2})月/);
+                    if (monthMatch) {
+                        const month = parseInt(monthMatch[1]);
+
+                        // データから年を推測（最も頻出する年を使用）
+                        const yearCounts = {};
+                        rawData.forEach(d => {
+                            if (d.month) {
+                                const yearMatch = d.month.match(/(\d{4})年/);
+                                if (yearMatch) {
+                                    yearCounts[yearMatch[1]] = (yearCounts[yearMatch[1]] || 0) + 1;
+                                }
+                            }
+                        });
+
+                        const mostCommonYear = Object.keys(yearCounts).sort((a, b) => yearCounts[b] - yearCounts[a])[0] || new Date().getFullYear().toString();
+                        targetMonth = `${mostCommonYear}年${month}月`;
+                        console.log('✓ Month matched (month only, inferred year):', targetMonth);
+                    }
+                }
+
+                // マーケティングデータか経営データかを判定（より精密に）
                 let data = [];
                 let useMktData = false;
 
-                if (lowerQ.includes('媒体') || lowerQ.includes('広告') || lowerQ.includes('マーケ') || lowerQ.includes('cpa') || lowerQ.includes('cvr')) {
+                // マーケティング関連キーワード
+                const mktKeywords = ['媒体', '広告', 'マーケ', 'cpa', 'cvr', 'ctr', 'roas', 'クリック', 'インプレッション',
+                                     '予約', 'キャンセル', 'meta', 'google', 'line', 'hpb'];
+
+                if (mktKeywords.some(keyword => lowerQ.includes(keyword))) {
                     data = mktData;
                     useMktData = true;
+                    console.log('✓ Using marketing data');
                 } else {
                     data = rawData;
+                    console.log('✓ Using operational data');
+                }
+
+                // データが空の場合、もう一方のデータソースを試す
+                if (data.length === 0) {
+                    data = useMktData ? rawData : mktData;
+                    useMktData = !useMktData;
+                    console.log(`⚠️ Switching to ${useMktData ? 'marketing' : 'operational'} data (original was empty)`);
                 }
 
                 // データフィルタリング
@@ -1417,10 +1475,36 @@
                     return branchMatch && monthMatch;
                 });
 
+                console.log(`📊 Filtered data: ${filteredAnalysisData.length} records (from ${data.length} total)`);
+                if (filteredAnalysisData.length > 0) {
+                    console.log('Sample record:', JSON.stringify(filteredAnalysisData[0]));
+                }
+
+                // データが見つからない場合、より詳細なエラーメッセージ
                 if (filteredAnalysisData.length === 0) {
+                    const availableBranches = Array.from(new Set(data.map(d => d.branch).filter(Boolean))).slice(0, 5);
+                    const availableMonths = Array.from(new Set(data.map(d => d.month).filter(Boolean))).slice(0, 5);
+
+                    let errorMsg = `${targetBranch || ''}${targetMonth || ''}のデータが見つかりませんでした。\n\n`;
+
+                    if (targetBranch && !availableBranches.includes(targetBranch)) {
+                        errorMsg += `店舗「${targetBranch}」が見つかりません。\n`;
+                        errorMsg += `利用可能な店舗: ${availableBranches.join('、')}${availableBranches.length < data.length ? '...' : ''}\n\n`;
+                    }
+
+                    if (targetMonth && !availableMonths.includes(targetMonth)) {
+                        errorMsg += `月「${targetMonth}」のデータがありません。\n`;
+                        errorMsg += `利用可能な月: ${availableMonths.join('、')}${availableMonths.length < data.length ? '...' : ''}\n\n`;
+                    }
+
+                    errorMsg += `質問の表記を確認してください。例:\n`;
+                    errorMsg += `・「池袋院の2026年1月の売上は？」\n`;
+                    errorMsg += `・「全店舗の1月を分析して」\n`;
+                    errorMsg += `・「千葉駅院の広告効率は？」`;
+
                     return {
                         success: false,
-                        message: `${targetBranch || ''}${targetMonth || ''}のデータが見つかりませんでした。`
+                        message: errorMsg
                     };
                 }
 
@@ -1434,52 +1518,131 @@
 
             // 経営データの分析
             const analyzeOperationalData = (data, branch, month) => {
-                const totalSales = data.reduce((sum, d) => sum + (d.totalSales || 0), 0);
-                const avgNewCount = data.reduce((sum, d) => sum + (d.newCount || 0), 0) / data.length;
-                const avgEnrollmentRate = data.reduce((sum, d) => sum + (d.enrollmentRate || 0), 0) / data.length;
-                const avgChurnRate = data.reduce((sum, d) => sum + (d.churnRate || 0), 0) / data.length;
-                const avgProductivity = data.reduce((sum, d) => sum + (d.productivity || 0), 0) / data.length;
+                if (data.length === 0) {
+                    return {
+                        success: false,
+                        message: `${branch || '指定された条件'}の${month || '期間'}のデータが見つかりませんでした。店舗名や月の表記を確認してください。`
+                    };
+                }
+
+                // 集計（正しいフィールド名を使用）
+                const totalIndividualSales = data.reduce((sum, d) => sum + (d.individualSales || 0), 0);
+                const totalRecurringSales = data.reduce((sum, d) => sum + (d.recurringSales || 0), 0);
+                const totalSales = totalIndividualSales + totalRecurringSales;
+                const totalNewCount = data.reduce((sum, d) => sum + (d.newCount || 0), 0);
+                const totalNewEnroll = data.reduce((sum, d) => sum + (d.newEnroll || 0), 0);
+                const totalChurnCount = data.reduce((sum, d) => sum + (d.churnCount || 0), 0);
+                const totalPrevMembers = data.reduce((sum, d) => sum + (d.prevMembers || 0), 0);
+                const totalProductivity = data.reduce((sum, d) => sum + (d.productivity || 0), 0);
+                const totalGReviews = data.reduce((sum, d) => sum + (d.gReviews || 0), 0);
+                const totalHReviews = data.reduce((sum, d) => sum + (d.hReviews || 0), 0);
+                const totalReferrals = data.reduce((sum, d) => sum + (d.referrals || 0), 0);
+
+                // 平均値計算
+                const avgNewCount = totalNewCount / data.length;
+                const avgEnrollRate = totalNewCount > 0 ? (totalNewEnroll / totalNewCount) * 100 : 0;
+                const avgChurnRate = totalPrevMembers > 0 ? (totalChurnCount / totalPrevMembers) * 100 : 0;
+                const avgProductivity = totalProductivity / data.length;
+                const avgNewPrice = totalNewCount > 0 ? data.reduce((sum, d) => sum + (d.newAvgPrice || 0), 0) / data.length : 0;
+
+                // スタッフ別分析
+                const staffMap = {};
+                data.forEach(d => {
+                    const key = d.name || '不明';
+                    if (!staffMap[key]) {
+                        staffMap[key] = {
+                            name: key,
+                            sales: 0,
+                            newCount: 0,
+                            newEnroll: 0,
+                            productivity: 0,
+                            records: 0
+                        };
+                    }
+                    staffMap[key].sales += (d.individualSales || 0);
+                    staffMap[key].newCount += (d.newCount || 0);
+                    staffMap[key].newEnroll += (d.newEnroll || 0);
+                    staffMap[key].productivity += (d.productivity || 0);
+                    staffMap[key].records++;
+                });
+
+                const staffList = Object.values(staffMap).sort((a, b) => b.sales - a.sales);
+                const topStaff = staffList[0];
+                const lowStaff = staffList[staffList.length - 1];
 
                 const issues = [];
                 const strengths = [];
                 const recommendations = [];
 
-                // 売上分析
-                if (totalSales < 1000000) {
-                    issues.push('売上が100万円を下回っています');
-                    recommendations.push('新規顧客獲得の強化と会員継続率の改善が必要です');
-                } else if (totalSales >= 2000000) {
-                    strengths.push('売上目標を大きく達成しています');
+                // 売上分析（より詳細に）
+                const avgSalesPerRecord = totalSales / data.length;
+                if (avgSalesPerRecord < 800000) {
+                    issues.push(`平均売上が${Math.round(avgSalesPerRecord / 10000)}万円と目標を下回っています`);
+                    recommendations.push('新規顧客獲得数の増加と継続会員の維持に注力してください');
+                } else if (avgSalesPerRecord >= 1200000) {
+                    strengths.push(`平均売上${Math.round(avgSalesPerRecord / 10000)}万円と優秀な業績です`);
                 }
 
-                // 入会率分析
-                if (avgEnrollmentRate < 30) {
-                    issues.push(`入会率が${avgEnrollmentRate.toFixed(1)}%と低い水準です`);
+                // 新規数分析
+                if (avgNewCount < 10) {
+                    issues.push(`新規顧客数が月平均${avgNewCount.toFixed(1)}人と少ない状態です`);
+                    recommendations.push('広告投資の拡大とSNSマーケティングの強化が必要です');
+                } else if (avgNewCount >= 20) {
+                    strengths.push(`新規顧客数が月平均${avgNewCount.toFixed(1)}人と好調です`);
+                }
+
+                // 入会率分析（正しいフィールド名を使用）
+                if (avgEnrollRate < 40) {
+                    issues.push(`入会率が${avgEnrollRate.toFixed(1)}%と低い水準です`);
                     recommendations.push('カウンセリング技術の向上とトライアル体験の質を改善してください');
-                } else if (avgEnrollmentRate >= 50) {
-                    strengths.push(`入会率${avgEnrollmentRate.toFixed(1)}%と高い成約率を維持しています`);
+                } else if (avgEnrollRate >= 60) {
+                    strengths.push(`入会率${avgEnrollRate.toFixed(1)}%と高い成約率を維持しています`);
                 }
 
                 // 退会率分析
-                if (avgChurnRate > 20) {
+                if (avgChurnRate > 15) {
                     issues.push(`退会率が${avgChurnRate.toFixed(1)}%と高い状態です`);
                     recommendations.push('顧客満足度調査とフォローアップ体制の強化を実施してください');
-                } else if (avgChurnRate <= 10) {
+                } else if (avgChurnRate <= 8) {
                     strengths.push(`退会率${avgChurnRate.toFixed(1)}%と優秀な継続率です`);
                 }
 
                 // 生産性分析
-                if (avgProductivity < 50000) {
-                    issues.push('スタッフ一人当たりの生産性が低い状態です');
+                if (avgProductivity < 80000) {
+                    issues.push(`スタッフ生産性が${Math.round(avgProductivity / 10000)}万円と低い状態です`);
                     recommendations.push('施術効率の改善と高単価メニューの提案力を強化してください');
+                } else if (avgProductivity >= 120000) {
+                    strengths.push(`スタッフ生産性${Math.round(avgProductivity / 10000)}万円と高効率を実現しています`);
+                }
+
+                // 口コミ分析
+                const reviewRate = totalNewCount > 0 ? ((totalGReviews + totalHReviews) / totalNewCount) * 100 : 0;
+                if (reviewRate < 30) {
+                    issues.push(`口コミ獲得率が${reviewRate.toFixed(1)}%と低い状態です`);
+                    recommendations.push('施術後の口コミ依頼フローを強化してください');
+                }
+
+                // スタッフ間格差分析
+                if (staffList.length > 1 && topStaff && lowStaff) {
+                    const salesGap = topStaff.sales / lowStaff.sales;
+                    if (salesGap > 2.5) {
+                        issues.push(`スタッフ間の売上格差が大きい状態です（最大${salesGap.toFixed(1)}倍）`);
+                        recommendations.push(`${lowStaff.name}さんへのトレーニング強化と${topStaff.name}さんのノウハウ共有を実施してください`);
+                    }
                 }
 
                 const summary = `${branch || '全店舗'}の${month || '該当期間'}について分析しました。\n\n` +
                     `【主要指標】\n` +
-                    `・総売上: ¥${totalSales.toLocaleString()}\n` +
-                    `・平均新規数: ${avgNewCount.toFixed(1)}人\n` +
-                    `・平均入会率: ${avgEnrollmentRate.toFixed(1)}%\n` +
-                    `・平均退会率: ${avgChurnRate.toFixed(1)}%\n\n` +
+                    `・総売上: ¥${totalSales.toLocaleString()}（個別: ¥${totalIndividualSales.toLocaleString()} / 継続: ¥${totalRecurringSales.toLocaleString()}）\n` +
+                    `・新規顧客数: ${totalNewCount}人（平均${avgNewCount.toFixed(1)}人/月）\n` +
+                    `・入会率: ${avgEnrollRate.toFixed(1)}%（${totalNewEnroll}/${totalNewCount}人）\n` +
+                    `・退会率: ${avgChurnRate.toFixed(1)}%（${totalChurnCount}人退会）\n` +
+                    `・平均生産性: ¥${Math.round(avgProductivity).toLocaleString()}/人\n` +
+                    `・口コミ獲得: ${totalGReviews + totalHReviews}件（G:${totalGReviews} / H:${totalHReviews}）\n` +
+                    `・紹介数: ${totalReferrals}件\n\n` +
+                    (staffList.length > 0 ? `【スタッフパフォーマンス】\n` +
+                        `🏆 トップ: ${topStaff.name}（売上¥${Math.round(topStaff.sales / 10000)}万円、新規${topStaff.newCount}人）\n` +
+                        (staffList.length > 1 ? `📉 要支援: ${lowStaff.name}（売上¥${Math.round(lowStaff.sales / 10000)}万円、新規${lowStaff.newCount}人）\n\n` : '\n') : '') +
                     (issues.length > 0 ? `【改善が必要な点】\n${issues.map(i => '⚠️ ' + i).join('\n')}\n\n` : '') +
                     (strengths.length > 0 ? `【強み】\n${strengths.map(s => '✅ ' + s).join('\n')}\n\n` : '') +
                     (recommendations.length > 0 ? `【推奨アクション】\n${recommendations.map((r, i) => `${i + 1}. ${r}`).join('\n')}` : '');
@@ -1492,87 +1655,154 @@
 
             // マーケティングデータの分析
             const analyzeMarketingData = (data, branch, month) => {
-                const avgCPA = data.reduce((sum, d) => sum + (d.cpa || 0), 0) / data.length;
-                const totalReservations = data.reduce((sum, d) => sum + (d.reservations || 0), 0);
-                const totalVisits = data.reduce((sum, d) => sum + (d.actualVisits || 0), 0);
-                const totalEnrollments = data.reduce((sum, d) => sum + (d.enrollments || 0), 0);
+                if (data.length === 0) {
+                    return {
+                        success: false,
+                        message: `${branch || '指定された条件'}の${month || '期間'}のマーケティングデータが見つかりませんでした。`
+                    };
+                }
+
+                // 正しいフィールド名で集計
+                const totalNewCount = data.reduce((sum, d) => sum + (d.newCount || 0), 0);
+                const totalReservations = data.reduce((sum, d) => sum + (d.reservationCount || 0), 0);
+                const totalEnrollCount = data.reduce((sum, d) => sum + (d.enrollCount || 0), 0);
+                const totalCancelCount = data.reduce((sum, d) => sum + (d.cancelCount || 0), 0);
                 const totalAdSpend = data.reduce((sum, d) => sum + (d.adSpend || 0), 0);
-                const totalRevenue = data.reduce((sum, d) => sum + (d.monthlySales || 0), 0);
-                const avgCancellationRate = data.reduce((sum, d) => sum + (d.cancellationRate || 0), 0) / data.length;
+                const totalRevenue = data.reduce((sum, d) => sum + (d.revenue || 0), 0);
+                const totalClicks = data.reduce((sum, d) => sum + (d.clicks || 0), 0);
+                const totalImpressions = data.reduce((sum, d) => sum + (d.impressions || 0), 0);
+                const totalCvCount = data.reduce((sum, d) => sum + (d.cvCount || 0), 0);
+                const totalReviews = data.reduce((sum, d) => sum + (d.reviewCount || 0), 0);
+
+                // 指標計算
+                const avgCPA = totalNewCount > 0 ? Math.round(totalAdSpend / totalNewCount) : 0;
+                const enrollRate = totalNewCount > 0 ? Math.round((totalEnrollCount / totalNewCount) * 100) : 0;
+                const cancelDenom = totalReservations > 0 ? totalReservations : totalNewCount;
+                const cancelRate = cancelDenom > 0 ? Math.round((totalCancelCount / cancelDenom) * 100) : 0;
+                const cvr = totalClicks > 0 ? Math.round((totalCvCount / totalClicks) * 1000) / 10 : 0;
+                const ctr = totalImpressions > 0 ? Math.round((totalClicks / totalImpressions) * 1000) / 10 : 0;
+                const roas = totalAdSpend > 0 ? Math.round((totalRevenue / totalAdSpend) * 100) : 0;
+                const avgPrice = totalNewCount > 0 ? Math.round(totalRevenue / totalNewCount) : 0;
 
                 const issues = [];
                 const strengths = [];
                 const recommendations = [];
 
-                // CPA分析
-                if (avgCPA > 30000) {
-                    issues.push(`CPA（顧客獲得単価）が¥${avgCPA.toLocaleString()}と高い水準です`);
+                // CPA分析（正確な閾値）
+                if (avgCPA > 18000) {
+                    issues.push(`CPA（顧客獲得単価）が¥${avgCPA.toLocaleString()}と高い水準です（業界平均: ¥12,000）`);
                     recommendations.push('広告クリエイティブの改善とターゲティングの最適化を実施してください');
-                } else if (avgCPA < 20000) {
-                    strengths.push(`CPA¥${avgCPA.toLocaleString()}と効率的な顧客獲得ができています`);
+                } else if (avgCPA < 8000) {
+                    strengths.push(`CPA¥${avgCPA.toLocaleString()}と非常に効率的な顧客獲得ができています`);
+                } else if (avgCPA <= 12000) {
+                    strengths.push(`CPA¥${avgCPA.toLocaleString()}と業界平均以下で運用できています`);
+                }
+
+                // 入会率分析
+                if (enrollRate < 35) {
+                    issues.push(`入会率が${enrollRate}%と低い水準です（業界平均: 35%）`);
+                    recommendations.push('カウンセリング品質の向上と初回体験の改善が必要です');
+                } else if (enrollRate >= 60) {
+                    strengths.push(`入会率${enrollRate}%と優秀な成約率です`);
                 }
 
                 // キャンセル率分析
-                if (avgCancellationRate > 30) {
-                    issues.push(`キャンセル率が${avgCancellationRate.toFixed(1)}%と高い状態です`);
+                if (cancelRate > 15) {
+                    issues.push(`キャンセル率が${cancelRate}%と高い状態です（業界平均: 15%）`);
                     recommendations.push('リマインド施策の強化と予約時のコミュニケーション改善が必要です');
-                } else if (avgCancellationRate < 15) {
-                    strengths.push(`キャンセル率${avgCancellationRate.toFixed(1)}%と低く抑えられています`);
+                } else if (cancelRate < 10) {
+                    strengths.push(`キャンセル率${cancelRate}%と低く抑えられています`);
                 }
 
                 // ROAS分析
-                const roas = totalAdSpend > 0 ? (totalRevenue / totalAdSpend) * 100 : 0;
                 if (roas < 200) {
-                    issues.push(`ROAS（広告費用対効果）が${roas.toFixed(0)}%と低い水準です`);
+                    issues.push(`ROAS（広告費用対効果）が${roas}%と低い水準です（目標: 300%以上）`);
                     recommendations.push('広告配信の見直しと、入会率向上施策の実施が必要です');
                 } else if (roas >= 300) {
-                    strengths.push(`ROAS${roas.toFixed(0)}%と高い広告効果を実現しています`);
+                    strengths.push(`ROAS${roas}%と高い広告効果を実現しています`);
                 }
 
-                // 媒体別の推奨
+                // CVR分析
+                if (cvr > 0 && cvr < 1.5) {
+                    issues.push(`CVR（コンバージョン率）が${cvr}%と低い状態です`);
+                    recommendations.push('ランディングページの改善と訴求内容の見直しを実施してください');
+                }
+
+                // 媒体別分析
                 const mediaPerformance = {};
                 data.forEach(d => {
+                    if (!d.media || d.media === '全媒体合計') return;
                     if (!mediaPerformance[d.media]) {
-                        mediaPerformance[d.media] = { cpa: [], enrollments: 0 };
+                        mediaPerformance[d.media] = {
+                            newCount: 0,
+                            enrollCount: 0,
+                            adSpend: 0,
+                            revenue: 0,
+                            records: 0
+                        };
                     }
-                    if (d.cpa) mediaPerformance[d.media].cpa.push(d.cpa);
-                    mediaPerformance[d.media].enrollments += (d.enrollments || 0);
+                    mediaPerformance[d.media].newCount += (d.newCount || 0);
+                    mediaPerformance[d.media].enrollCount += (d.enrollCount || 0);
+                    mediaPerformance[d.media].adSpend += (d.adSpend || 0);
+                    mediaPerformance[d.media].revenue += (d.revenue || 0);
+                    mediaPerformance[d.media].records++;
                 });
 
                 let bestMedia = null;
                 let worstMedia = null;
                 let bestCPA = Infinity;
                 let worstCPA = 0;
+                let bestEnrollRate = 0;
 
                 Object.entries(mediaPerformance).forEach(([media, perf]) => {
-                    if (perf.cpa.length > 0 && perf.enrollments > 0) {
-                        const avgMediaCPA = perf.cpa.reduce((a, b) => a + b, 0) / perf.cpa.length;
-                        if (avgMediaCPA < bestCPA) {
-                            bestCPA = avgMediaCPA;
+                    if (perf.newCount > 0) {
+                        const mediaCPA = Math.round(perf.adSpend / perf.newCount);
+                        const mediaEnrollRate = Math.round((perf.enrollCount / perf.newCount) * 100);
+
+                        if (mediaCPA < bestCPA && mediaCPA > 0) {
+                            bestCPA = mediaCPA;
                             bestMedia = media;
+                            bestEnrollRate = mediaEnrollRate;
                         }
-                        if (avgMediaCPA > worstCPA) {
-                            worstCPA = avgMediaCPA;
+                        if (mediaCPA > worstCPA) {
+                            worstCPA = mediaCPA;
                             worstMedia = media;
                         }
                     }
                 });
 
                 if (bestMedia) {
-                    recommendations.push(`${bestMedia}が最も効率的（CPA¥${bestCPA.toLocaleString()}）なので、予算を増額してください`);
+                    recommendations.push(`${bestMedia}が最も効率的（CPA¥${bestCPA.toLocaleString()}、入会率${bestEnrollRate}%）なので、予算配分を増やしてください`);
                 }
-                if (worstMedia && Object.keys(mediaPerformance).length > 1) {
-                    recommendations.push(`${worstMedia}のパフォーマンスが低い（CPA¥${worstCPA.toLocaleString()}）ため、配信内容の見直しを検討してください`);
+                if (worstMedia && Object.keys(mediaPerformance).length > 1 && worstCPA > avgCPA * 1.5) {
+                    recommendations.push(`${worstMedia}のCPAが¥${worstCPA.toLocaleString()}と高いため、配信内容の見直しまたは停止を検討してください`);
+                }
+
+                // 口コミ分析
+                if (totalReviews > 0 && totalNewCount > 0) {
+                    const reviewRate = Math.round((totalReviews / totalNewCount) * 100);
+                    if (reviewRate >= 50) {
+                        strengths.push(`口コミ獲得率${reviewRate}%と高い水準です`);
+                    }
                 }
 
                 const summary = `${branch || '全店舗'}の${month || '該当期間'}のマーケティング分析結果です。\n\n` +
                     `【主要指標】\n` +
-                    `・予約数: ${totalReservations}件\n` +
-                    `・来店数: ${totalVisits}件\n` +
-                    `・入会数: ${totalEnrollments}件\n` +
-                    `・平均CPA: ¥${avgCPA.toLocaleString()}\n` +
-                    `・ROAS: ${roas.toFixed(0)}%\n` +
-                    `・キャンセル率: ${avgCancellationRate.toFixed(1)}%\n\n` +
+                    `・新規来店: ${totalNewCount}人${totalReservations > 0 ? `（予約${totalReservations}件）` : ''}\n` +
+                    `・入会数: ${totalEnrollCount}人（入会率${enrollRate}%）\n` +
+                    `・キャンセル: ${totalCancelCount}件（キャンセル率${cancelRate}%）\n` +
+                    `・広告費: ¥${totalAdSpend.toLocaleString()}\n` +
+                    `・売上: ¥${totalRevenue.toLocaleString()}\n` +
+                    `・CPA: ¥${avgCPA.toLocaleString()}\n` +
+                    `・ROAS: ${roas}%\n` +
+                    (totalClicks > 0 ? `・クリック数: ${totalClicks}件（CTR: ${ctr}%、CVR: ${cvr}%）\n` : '') +
+                    (totalReviews > 0 ? `・口コミ獲得: ${totalReviews}件\n` : '') +
+                    `\n` +
+                    (Object.keys(mediaPerformance).length > 0 ? `【媒体別実績】\n${Object.entries(mediaPerformance).sort((a, b) => b[1].newCount - a[1].newCount).map(([media, perf]) => {
+                        const mCPA = perf.newCount > 0 ? Math.round(perf.adSpend / perf.newCount) : 0;
+                        const mEnrollRate = perf.newCount > 0 ? Math.round((perf.enrollCount / perf.newCount) * 100) : 0;
+                        return `${media}: ${perf.newCount}人、CPA¥${mCPA.toLocaleString()}、入会率${mEnrollRate}%`;
+                    }).slice(0, 5).join('\n')}\n\n` : '') +
                     (issues.length > 0 ? `【改善が必要な点】\n${issues.map(i => '⚠️ ' + i).join('\n')}\n\n` : '') +
                     (strengths.length > 0 ? `【強み】\n${strengths.map(s => '✅ ' + s).join('\n')}\n\n` : '') +
                     (recommendations.length > 0 ? `【推奨アクション】\n${recommendations.map((r, i) => `${i + 1}. ${r}`).join('\n')}` : '');

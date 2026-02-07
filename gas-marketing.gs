@@ -26,7 +26,10 @@
 // ★ ここを自分のスプレッドシートに合わせて変更してください ★
 // ============================================================
 const SPREADSHEET_ID = 'ここにスプレッドシートIDを貼り付け';
-const SHEET_NAME = 'シート1';
+// シート名の指定方法:
+//   '*'         → 全シートを対象（シート名が「月」列に自動セット）
+//   'シート1'   → 特定のシートのみ対象
+const SHEET_NAME = '*';
 // ============================================================
 
 
@@ -59,17 +62,50 @@ function doGet(e) {
 
 /**
  * メインのデータ取得・変換関数
- * 横展開のスプレッドシートを縦型の配列に変換
+ * SHEET_NAME='*' の場合は全シートをループ処理
  */
 function getMarketingData() {
   const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  const sheet = ss.getSheetByName(SHEET_NAME);
 
-  if (!sheet) {
-    const available = ss.getSheets().map(s => s.getName()).join(', ');
-    throw new Error('シート "' + SHEET_NAME + '" が見つかりません。利用可能: ' + available);
+  if (SHEET_NAME === '*') {
+    // 全シートを対象
+    const allResults = [];
+    const sheets = ss.getSheets();
+    Logger.log('全シートモード: ' + sheets.length + 'シート検出');
+
+    sheets.forEach(function(sheet) {
+      try {
+        const sheetData = processSheet(sheet);
+        if (sheetData.length > 0) {
+          Logger.log('  ✅ ' + sheet.getName() + ': ' + sheetData.length + '件');
+          allResults.push.apply(allResults, sheetData);
+        } else {
+          Logger.log('  ⏭ ' + sheet.getName() + ': データなし（スキップ）');
+        }
+      } catch (e) {
+        Logger.log('  ⚠ ' + sheet.getName() + ': スキップ（' + e.message + '）');
+      }
+    });
+
+    return allResults;
+  } else {
+    // 特定シートを対象
+    const sheet = ss.getSheetByName(SHEET_NAME);
+    if (!sheet) {
+      var available = ss.getSheets().map(function(s) { return s.getName(); }).join(', ');
+      throw new Error('シート "' + SHEET_NAME + '" が見つかりません。利用可能: ' + available);
+    }
+    return processSheet(sheet);
   }
+}
 
+
+/**
+ * 1シート分のデータを処理
+ * 横展開のスプレッドシートを縦型の配列に変換
+ */
+function processSheet(sheet) {
+  const sheetName = sheet.getName();
   const lastRow = sheet.getLastRow();
   const lastCol = sheet.getLastColumn();
   if (lastRow < 3 || lastCol < 10) return [];
@@ -89,13 +125,11 @@ function getMarketingData() {
     }
   }
 
-  if (headerRowIdx === -1) {
-    throw new Error('ヘッダー行（"No"と"店舗"を含む行）が見つかりません。シート構造を確認してください。');
-  }
+  // ヘッダーが見つからない場合はこのシートをスキップ
+  if (headerRowIdx === -1) return [];
 
   const headers = allData[headerRowIdx].map(h => String(h).trim());
-  Logger.log('ヘッダー行: ' + (headerRowIdx + 1) + '行目');
-  Logger.log('列数: ' + headers.length);
+  Logger.log('シート "' + sheetName + '": ヘッダー行=' + (headerRowIdx + 1) + ', 列数=' + headers.length);
 
   // ===== メイン列（Meta広告の集計列）のインデックスを取得 =====
   const mainCols = {
@@ -150,6 +184,7 @@ function getMarketingData() {
 
     // 1) Meta広告の合計レコード
     const metaRecord = {
+      月: sheetName,
       店舗: storeName,
       エリア: area,
       媒体: 'Meta広告',
@@ -176,7 +211,7 @@ function getMarketingData() {
 
     // 2) 各媒体セクションのレコード
     for (const section of mediaSections) {
-      const record = extractMediaRecord(row, section, storeName, area);
+      const record = extractMediaRecord(row, section, storeName, area, sheetName);
       if (record && (record.予約数 > 0 || record.実来院 > 0 || record.入会数 > 0)) {
         results.push(record);
       }
@@ -188,7 +223,7 @@ function getMarketingData() {
   results.forEach(r => {
     if (!storeMap[r.店舗]) {
       storeMap[r.店舗] = {
-        店舗: r.店舗, エリア: r.エリア, 媒体: '全媒体合計',
+        月: r.月, 店舗: r.店舗, エリア: r.エリア, 媒体: '全媒体合計',
         予約数: 0, 実来院: 0, キャンセル数: 0, 入会数: 0, 口コミ数: 0,
         広告費: 0, 当月売上: 0, 見込売上: 0, 予算: 0,
       };
@@ -416,9 +451,10 @@ function findInRangeExact(rangeHeaders, keyword, offset) {
 /**
  * 媒体セクションからレコードを抽出
  */
-function extractMediaRecord(row, section, storeName, area) {
+function extractMediaRecord(row, section, storeName, area, sheetName) {
   const c = section.cols;
   return {
+    月: sheetName,
     店舗: storeName,
     エリア: area,
     媒体: section.name,

@@ -439,24 +439,14 @@
                         }
                     }
 
-                    const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 30000);
-                    let response;
-                    try {
-                        response = await fetch(MARKETING_API_URL, { redirect: 'follow', signal: controller.signal });
-                    } catch (fetchErr) {
-                        clearTimeout(timeoutId);
-                        throw new Error('ネットワークエラー: GAS APIに接続できません。CORS設定またはデプロイ設定を確認してください。');
-                    }
-                    clearTimeout(timeoutId);
-
-                    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-
                     let result;
                     try {
-                        result = await response.json();
-                    } catch (jsonErr) {
-                        throw new Error('レスポンスのJSON解析に失敗しました。GASが正しいJSON形式で返していることを確認してください。');
+                        const response = await fetch(MARKETING_API_URL);
+                        const text = await response.text();
+                        result = JSON.parse(text);
+                    } catch (fetchErr) {
+                        console.error('Fetch error details:', fetchErr);
+                        throw new Error('データ取得エラー: ' + (fetchErr.message || 'GAS APIに接続できません'));
                     }
 
                     if (!result.success) throw new Error(result.error || 'マーケティングデータの取得に失敗');

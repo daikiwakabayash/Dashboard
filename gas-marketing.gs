@@ -25,7 +25,7 @@
 // ============================================================
 // 注意: 他のGASファイルに既にSPREADSHEET_IDがある場合は
 // この2行を削除してそちらのIDを使ってください
-var MARKETING_SS_ID = 'ここにスプレッドシートIDを貼り付け';
+var MARKETING_SS_ID = '1t1aHo0VSlDkJd6Nr42Iq2QJY9d8X7fhgh7gTxMz5EYs';
 // シート名の指定方法:
 //   '*'            → 全シートを対象（シート名が「月」列に自動セット）
 //   '数値まとめ'   → 名前に「数値まとめ」を含むシートのみ対象
@@ -608,9 +608,12 @@ function getMenuAnalysisData() {
         var row = allData[r];
         var menuName = String(row[menuCol]).trim();
 
-        // 空行やヘッダーのような行をスキップ
-        if (!menuName || menuName === '' || menuName === 'undefined' || menuName === '要望') continue;
+        // 空行やヘッダー・無効データをスキップ
+        if (!menuName || menuName === '' || menuName === 'undefined') continue;
+        if (menuName === '要望' || menuName === '未入力' || menuName === '-') continue;
         if (menuName.length < 3) continue;
+        // フィルタ警告メッセージをスキップ
+        if (menuName.indexOf('フィルタ作成') >= 0) continue;
 
         var storeName = storeCol >= 0 ? String(row[storeCol]).trim() : '';
         var status = statusCol >= 0 ? String(row[statusCol]).trim() : '';
@@ -693,39 +696,37 @@ function findMenuColExact(headers, keyword) {
 }
 
 
-// メニュー列（J列）を検出
-// ヘッダー名「要望」「メニュー」「コース」で探し、
-// 見つからない場合は実データから円・コースを含む列を推定
+// メニュー列（J列=インデックス9）を検出
+// J列のヘッダーは警告メッセージの場合があるため、
+// まずJ列の実データを確認し、メニュー名（《》や円を含む）があればJ列を使用
 function findMenuColJ(headers, allData, headerRowIdx) {
-  // まずヘッダー名で探す
-  var byHeader = findMenuCol(headers, ['要望', 'メニュー', 'コース名']);
-  if (byHeader >= 0) return byHeader;
-
-  // ヘッダーで見つからない場合、実データからメニュー名っぽい列を探す
-  // （「円」「コース」「整体」「限定」を含む文字列が多い列）
+  // J列（インデックス9）の実データを確認
   var sampleRows = allData.slice(headerRowIdx + 1, Math.min(headerRowIdx + 20, allData.length));
-  var bestCol = -1;
-  var bestScore = 0;
 
-  for (var c = 0; c < Math.min(40, headers.length); c++) {
-    var score = 0;
-    for (var r = 0; r < sampleRows.length; r++) {
-      var val = String(sampleRows[r][c]).trim();
-      if (val.indexOf('円') >= 0) score += 2;
-      if (val.indexOf('コース') >= 0) score += 2;
-      if (val.indexOf('整体') >= 0) score += 2;
-      if (val.indexOf('限定') >= 0) score += 1;
-      if (val.indexOf('新規') >= 0) score += 1;
-    }
-    if (score > bestScore) {
-      bestScore = score;
-      bestCol = c;
-    }
+  // J列のデータがメニュー名らしいかチェック
+  var jColScore = 0;
+  for (var r = 0; r < sampleRows.length; r++) {
+    var val = String(sampleRows[r][9] || '').trim();
+    if (val.indexOf('《') >= 0) jColScore += 3;
+    if (val.indexOf('円') >= 0) jColScore += 2;
+    if (val.indexOf('コース') >= 0) jColScore += 2;
+    if (val.indexOf('整体') >= 0) jColScore += 2;
+    if (val.indexOf('Massage') >= 0) jColScore += 2;
+    if (val.indexOf('限定') >= 0) jColScore += 1;
+    if (val.indexOf('$') >= 0) jColScore += 1;
   }
 
-  if (bestScore >= 5) return bestCol;
+  // J列にメニューデータがあればJ列を使用
+  if (jColScore >= 3) {
+    Logger.log('  メニュー列: J列（インデックス9）スコア=' + jColScore);
+    return 9;
+  }
 
-  // フォールバック: J列（インデックス9）
+  // フォールバック: ヘッダー名で探す（要望は除外 - K列の可能性が高い）
+  var byHeader = findMenuCol(headers, ['メニュー', 'コース名']);
+  if (byHeader >= 0) return byHeader;
+
+  // 最終フォールバック: J列
   return 9;
 }
 

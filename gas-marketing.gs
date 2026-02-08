@@ -1,42 +1,40 @@
-/**
- * マーケティングダッシュボード用 Google Apps Script
- *
- * 整体院の広告媒体別・店舗別マーケティングデータを
- * ダッシュボードで表示できるJSON形式に変換します。
- *
- * スプレッドシートの横展開（媒体が横に並ぶ）構造を
- * 縦型（1行=1店舗×1媒体）に自動変換します。
- *
- * ===== セットアップ手順 =====
- * 1. マーケティングデータのスプレッドシートを開く
- * 2. メニュー「拡張機能」→「Apps Script」を開く
- * 3. エディタ内のコードを全て削除し、このコードを貼り付ける
- * 4. 下の SPREADSHEET_ID と SHEET_NAME を自分のものに書き換える
- * 5. 上部のセレクターで「testGetData」を選択 → ▶実行
- *    → 権限の承認ダイアログが出るので「許可」する
- * 6. 「デプロイ」→「新しいデプロイ」
- *    → 種類: ウェブアプリ
- *    → 次のユーザーとして実行: 自分
- *    → アクセスできるユーザー: 全員
- *    → 「デプロイ」をクリック
- * 7. URLをコピー（ダッシュボードに設定済み）
- */
+// マーケティングダッシュボード用 Google Apps Script
+//
+// 整体院の広告媒体別・店舗別マーケティングデータを
+// ダッシュボードで表示できるJSON形式に変換します。
+//
+// スプレッドシートの横展開（媒体が横に並ぶ）構造を
+// 縦型（1行=1店舗×1媒体）に自動変換します。
+//
+// ===== セットアップ手順 =====
+// 1. マーケティングデータのスプレッドシートを開く
+// 2. メニュー「拡張機能」→「Apps Script」を開く
+// 3. エディタ内のコードを全て削除し、このコードを貼り付ける
+// 4. 下の SPREADSHEET_ID と SHEET_NAME を自分のものに書き換える
+// 5. 上部のセレクターで「testGetData」を選択 → 実行
+//    → 権限の承認ダイアログが出るので「許可」する
+// 6. 「デプロイ」→「新しいデプロイ」
+//    → 種類: ウェブアプリ
+//    → 次のユーザーとして実行: 自分
+//    → アクセスできるユーザー: 全員
+//    → 「デプロイ」をクリック
+// 7. URLをコピー（ダッシュボードに設定済み）
 
 // ============================================================
-// ★ ここを自分のスプレッドシートに合わせて変更してください ★
+// ここを自分のスプレッドシートに合わせて変更してください
 // ============================================================
-const SPREADSHEET_ID = 'ここにスプレッドシートIDを貼り付け';
+// 注意: 他のGASファイルに既にSPREADSHEET_IDがある場合は
+// この2行を削除してそちらのIDを使ってください
+var MARKETING_SS_ID = 'ここにスプレッドシートIDを貼り付け';
 // シート名の指定方法:
 //   '*'            → 全シートを対象（シート名が「月」列に自動セット）
 //   '数値まとめ'   → 名前に「数値まとめ」を含むシートのみ対象
 //   'シート1'      → 完全一致の特定シートのみ対象
-const SHEET_NAME = '数値まとめ';
+var MARKETING_SHEET_NAME = '数値まとめ';
 // ============================================================
 
 
-/**
- * GETリクエストを処理（ダッシュボードからのAPI呼び出し）
- */
+// GETリクエストを処理（ダッシュボードからのAPI呼び出し）
 function doGet(e) {
   try {
     const data = getMarketingData();
@@ -63,28 +61,28 @@ function doGet(e) {
 }
 
 
-/**
- * メインのデータ取得・変換関数
- * SHEET_NAME='*' の場合は全シートをループ処理
- */
+// メインのデータ取得・変換関数
+// SHEET_NAME='*' の場合は全シートをループ処理
 function getMarketingData() {
-  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  var ssId = (typeof SPREADSHEET_ID !== 'undefined') ? SPREADSHEET_ID : MARKETING_SS_ID;
+  var sheetNameFilter = (typeof SHEET_NAME !== 'undefined') ? SHEET_NAME : MARKETING_SHEET_NAME;
+  const ss = SpreadsheetApp.openById(ssId);
 
   const allSheets = ss.getSheets();
   let targetSheets;
 
-  if (SHEET_NAME === '*') {
+  if (sheetNameFilter === '*') {
     targetSheets = allSheets;
     Logger.log('全シートモード: ' + allSheets.length + 'シート');
   } else {
     // 完全一致 or 部分一致
-    const exact = allSheets.filter(function(s) { return s.getName() === SHEET_NAME; });
+    const exact = allSheets.filter(function(s) { return s.getName() === sheetNameFilter; });
     if (exact.length > 0) {
       targetSheets = exact;
     } else {
-      targetSheets = allSheets.filter(function(s) { return s.getName().indexOf(SHEET_NAME) >= 0; });
+      targetSheets = allSheets.filter(function(s) { return s.getName().indexOf(sheetNameFilter) >= 0; });
     }
-    Logger.log('対象シート (' + SHEET_NAME + '): ' + targetSheets.length + '件');
+    Logger.log('対象シート (' + sheetNameFilter + '): ' + targetSheets.length + '件');
   }
 
   const allResults = [];
@@ -104,10 +102,8 @@ function getMarketingData() {
 }
 
 
-/**
- * 1シート分のデータを処理
- * 横展開のスプレッドシートを縦型の配列に変換
- */
+// 1シート分のデータを処理
+// 横展開のスプレッドシートを縦型の配列に変換
 function processSheet(sheet) {
   const sheetName = parseSheetMonth(sheet.getName());
   const lastRow = sheet.getLastRow();
@@ -260,12 +256,10 @@ function processSheet(sheet) {
 
 // ===== ヘルパー関数群 =====
 
-/**
- * シート名から月ラベルを生成
- * "数値まとめ(R8.2)" → "26年2月"  (令和8年=2026年)
- * "META API(202601)" → "26年1月"
- * それ以外 → シート名そのまま
- */
+// シート名から月ラベルを生成
+// "数値まとめ(R8.2)" → "26年2月"  (令和8年=2026年)
+// "META API(202601)" → "26年1月"
+// それ以外 → シート名そのまま
 function parseSheetMonth(name) {
   // 令和パターン: R7.12, R8.2 など
   var rMatch = name.match(/R(\d+)\.(\d+)/);
@@ -286,17 +280,13 @@ function parseSheetMonth(name) {
   return name;
 }
 
-/**
- * ヘッダー行から完全一致でカラムインデックスを取得
- */
+// ヘッダー行から完全一致でカラムインデックスを取得
 function findCol(headers, name) {
   const idx = headers.indexOf(name);
   return idx;
 }
 
-/**
- * ヘッダー行から部分一致でカラムインデックスを取得（複数キーワードAND）
- */
+// ヘッダー行から部分一致でカラムインデックスを取得（複数キーワードAND）
 function findColContains(headers, keyword1, keyword2) {
   for (let i = 0; i < headers.length; i++) {
     const h = headers[i];
@@ -305,10 +295,8 @@ function findColContains(headers, keyword1, keyword2) {
   return -1;
 }
 
-/**
- * 指定位置以降で最初に見つかるカラムを取得
- * exactMatch=trueの場合は完全一致のみ
- */
+// 指定位置以降で最初に見つかるカラムを取得
+// exactMatch=trueの場合は完全一致のみ
 function findColAfter(headers, name, afterIdx, exactMatch) {
   for (let i = afterIdx; i < headers.length; i++) {
     if (exactMatch ? headers[i] === name : headers[i].includes(name)) return i;
@@ -316,9 +304,7 @@ function findColAfter(headers, name, afterIdx, exactMatch) {
   return -1;
 }
 
-/**
- * セルから数値を取得（通貨記号・カンマを除去）
- */
+// セルから数値を取得（通貨記号・カンマを除去）
 function getNum(row, colIdx) {
   if (colIdx < 0 || colIdx >= row.length) return 0;
   const val = row[colIdx];
@@ -330,9 +316,7 @@ function getNum(row, colIdx) {
   return isNaN(num) ? 0 : num;
 }
 
-/**
- * セルからパーセント値を取得（0-100のスケール）
- */
+// セルからパーセント値を取得（0-100のスケール）
 function getPercent(row, colIdx) {
   if (colIdx < 0 || colIdx >= row.length) return 0;
   const val = row[colIdx];
@@ -349,10 +333,8 @@ function getPercent(row, colIdx) {
 }
 
 
-/**
- * 媒体セクションを自動検出
- * ヘッダー行の上の行（セクション行）を調べて「X経由」パターンを見つける
- */
+// 媒体セクションを自動検出
+// ヘッダー行の上の行（セクション行）を調べて「X経由」パターンを見つける
 function detectMediaSections(allData, headerRowIdx, headers) {
   const sections = [];
 
@@ -401,10 +383,8 @@ function detectMediaSections(allData, headerRowIdx, headers) {
 }
 
 
-/**
- * セクション内のカラムをマッピング
- * セクション開始位置から右に向かって、次のセクションまでのカラムを特定
- */
+// セクション内のカラムをマッピング
+// セクション開始位置から右に向かって、次のセクションまでのカラムを特定
 function mapSectionColumns(headers, startCol, sectionRow) {
   // セクション開始位置から次のセクション（or 空でない次のセクションヘッダー）までの範囲を特定
   let endCol = headers.length;
@@ -478,9 +458,7 @@ function findInRangeExact(rangeHeaders, keyword, offset) {
 }
 
 
-/**
- * 媒体セクションからレコードを抽出
- */
+// 媒体セクションからレコードを抽出
 function extractMediaRecord(row, section, storeName, area, sheetName) {
   const c = section.cols;
   return {
@@ -504,9 +482,7 @@ function extractMediaRecord(row, section, storeName, area, sheetName) {
 }
 
 
-/**
- * テスト用関数（★初回は必ずこれを実行して権限を承認★）
- */
+// テスト用関数（★初回は必ずこれを実行して権限を承認★）
 function testGetData() {
   try {
     const data = getMarketingData();
@@ -559,13 +535,12 @@ function testGetData() {
 }
 
 
-/**
- * 予約進捗管理シートからメニュー別分析データを取得
- * J列のメニュー名を基に、予約・来院・キャンセル・入会・口コミを集計
- */
+// 予約進捗管理シートからメニュー別分析データを取得
+// J列のメニュー名を基に、予約・来院・キャンセル・入会・口コミを集計
 function getMenuAnalysisData() {
   try {
-    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var ssId = (typeof SPREADSHEET_ID !== 'undefined') ? SPREADSHEET_ID : MARKETING_SS_ID;
+    const ss = SpreadsheetApp.openById(ssId);
     const allSheets = ss.getSheets();
 
     // 「予約進捗管理」を含むシート名を対象
@@ -687,9 +662,7 @@ function getMenuAnalysisData() {
 }
 
 
-/**
- * ヘッダー行から列を検出（複数キーワード候補対応）
- */
+// ヘッダー行から列を検出（複数キーワード候補対応）
 function findMenuCol(headers, keywords) {
   for (var i = 0; i < headers.length; i++) {
     for (var k = 0; k < keywords.length; k++) {
@@ -700,9 +673,7 @@ function findMenuCol(headers, keywords) {
 }
 
 
-/**
- * ヘッダー行から完全一致で列を検出
- */
+// ヘッダー行から完全一致で列を検出
 function findMenuColExact(headers, keyword) {
   for (var i = 0; i < headers.length; i++) {
     if (headers[i] === keyword) return i;
@@ -715,11 +686,9 @@ function findMenuColExact(headers, keyword) {
 }
 
 
-/**
- * メニュー列（J列）を検出
- * ヘッダー名「要望」「メニュー」「コース」で探し、
- * 見つからない場合は実データから円・コースを含む列を推定
- */
+// メニュー列（J列）を検出
+// ヘッダー名「要望」「メニュー」「コース」で探し、
+// 見つからない場合は実データから円・コースを含む列を推定
 function findMenuColJ(headers, allData, headerRowIdx) {
   // まずヘッダー名で探す
   var byHeader = findMenuCol(headers, ['要望', 'メニュー', 'コース名']);
@@ -754,20 +723,20 @@ function findMenuColJ(headers, allData, headerRowIdx) {
 }
 
 
-/**
- * スプレッドシート構造の確認（デバッグ用）
- */
+// スプレッドシート構造の確認（デバッグ用）
 function checkStructure() {
   try {
-    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-    Logger.log('📋 スプレッドシート: ' + ss.getName());
+    var ssId = (typeof SPREADSHEET_ID !== 'undefined') ? SPREADSHEET_ID : MARKETING_SS_ID;
+    var sheetNameFilter = (typeof SHEET_NAME !== 'undefined') ? SHEET_NAME : MARKETING_SHEET_NAME;
+    const ss = SpreadsheetApp.openById(ssId);
+    Logger.log('スプレッドシート: ' + ss.getName());
 
     ss.getSheets().forEach(function(sheet, i) {
       Logger.log('  シート' + (i + 1) + ': ' + sheet.getName() +
                  ' (' + sheet.getLastRow() + '行 × ' + sheet.getLastColumn() + '列)');
     });
 
-    const sheet = ss.getSheetByName(SHEET_NAME);
+    const sheet = ss.getSheetByName(sheetNameFilter);
     if (sheet) {
       Logger.log('\n【先頭5行の内容】');
       const preview = sheet.getRange(1, 1, Math.min(5, sheet.getLastRow()), Math.min(40, sheet.getLastColumn())).getValues();

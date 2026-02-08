@@ -579,44 +579,55 @@ function getMenuFromSummarySheets() {
       var month = parseSheetMonth(sheetName);
       var lastRow = sheet.getLastRow();
       var lastCol = sheet.getLastColumn();
-      if (lastRow < 3 || lastCol < 35) return;
+      if (lastRow < 3 || lastCol < 10) return;
 
       var allData = sheet.getRange(1, 1, lastRow, lastCol).getValues();
 
-      // AG列付近でメニュー分析ブロックのヘッダーを探す
-      // 「予約」の隣に「実来院」がある行を検出（列30以降）
+      // メニュー分析ブロックのヘッダーを探す
+      // 改行を含む場合があるので正規化して検索
       var menuCol = -1;
       var statsCol = -1;
       var headerRow = -1;
 
-      for (var r = 0; r < Math.min(15, allData.length); r++) {
-        for (var c = 30; c < Math.min(lastCol - 1, 55); c++) {
-          var v1 = String(allData[r][c]).trim();
-          var v2 = String(allData[r][c + 1]).trim();
+      // 全行・全列を検索（制限なし）
+      for (var r = 0; r < allData.length; r++) {
+        for (var c = 1; c < lastCol - 1; c++) {
+          var v1 = String(allData[r][c]).replace(/\n/g, '').trim();
+          var v2 = String(allData[r][c + 1]).replace(/\n/g, '').trim();
+          // 「予約」の隣に「実来院」がある = メニュー分析のヘッダー行
           if ((v1 === '予約' || v1 === '予約数') && (v2 === '実来院' || v2.indexOf('来院') >= 0)) {
-            headerRow = r;
-            statsCol = c;
-            menuCol = c - 1;
-            break;
+            // 左隣がメニュー名列（空でない行があるか確認）
+            var hasMenuData = false;
+            for (var checkR = r + 1; checkR < Math.min(r + 10, allData.length); checkR++) {
+              var checkVal = String(allData[checkR][c - 1]).trim();
+              if (checkVal.length >= 2 && checkVal !== '予約' && checkVal !== '予約数') {
+                hasMenuData = true;
+                break;
+              }
+            }
+            if (hasMenuData) {
+              headerRow = r;
+              statsCol = c;
+              menuCol = c - 1;
+              break;
+            }
           }
         }
         if (headerRow >= 0) break;
       }
 
-      // ヘッダーが見つからない場合、別パターンで探す
+      // パターン2: 「事前」「当日」が並ぶ行を探す
       if (headerRow < 0) {
         for (var r = 0; r < allData.length; r++) {
-          for (var c = 30; c < Math.min(lastCol - 1, 55); c++) {
-            var v1 = String(allData[r][c]).trim();
-            if (v1 === '予約' || v1 === '予約数') {
-              // 隣に来院系の文字があるか確認
-              var v2 = c + 1 < lastCol ? String(allData[r][c + 1]).trim() : '';
-              if (v2.indexOf('来院') >= 0 || v2 === '実来院') {
-                headerRow = r;
-                statsCol = c;
-                menuCol = c - 1;
-                break;
-              }
+          for (var c = 1; c < lastCol - 3; c++) {
+            var v1 = String(allData[r][c]).replace(/\n/g, '').trim();
+            var v2 = String(allData[r][c + 1]).replace(/\n/g, '').trim();
+            var v3 = String(allData[r][c + 2]).replace(/\n/g, '').trim();
+            if (v1.indexOf('実来院') >= 0 && v2.indexOf('事前') >= 0 && v3.indexOf('当日') >= 0) {
+              headerRow = r;
+              statsCol = c - 1;
+              menuCol = c - 2;
+              break;
             }
           }
           if (headerRow >= 0) break;
@@ -624,16 +635,23 @@ function getMenuFromSummarySheets() {
       }
 
       if (headerRow < 0 || menuCol < 0) {
-        Logger.log('  ⚠ メニュー分析ブロック未検出: ' + sheetName);
+        Logger.log('  ⚠ メニュー分析ブロック未検出: ' + sheetName + ' (lastCol=' + lastCol + ', lastRow=' + lastRow + ')');
+        // デバッグ: 先頭5行の30列以降を出力
+        for (var dr = 0; dr < Math.min(5, allData.length); dr++) {
+          var debugCells = [];
+          for (var dc = 25; dc < Math.min(lastCol, 50); dc++) {
+            var dv = String(allData[dr][dc]).replace(/\n/g, ' ').trim();
+            if (dv) debugCells.push(String.fromCharCode(65 + dc) + ':' + dv.substring(0, 20));
+          }
+          if (debugCells.length > 0) Logger.log('    行' + (dr + 1) + ': ' + debugCells.join(' | '));
+        }
         return;
       }
 
-      Logger.log('  ' + sheetName + ' → ' + month + ': menuCol=' + menuCol + '(' + String.fromCharCode(65 + menuCol) + '), statsCol=' + statsCol + ', headerRow=' + (headerRow + 1));
+      Logger.log('  ' + sheetName + ' → ' + month + ': menuCol=' + menuCol + '(' + (menuCol < 26 ? String.fromCharCode(65 + menuCol) : 'A' + String.fromCharCode(65 + menuCol - 26)) + '), statsCol=' + statsCol + ', headerRow=' + (headerRow + 1));
 
-      // 全行をスキャン（ヘッダー行の上下両方）
-      for (var r = 0; r < allData.length; r++) {
-        if (r === headerRow) continue;
-
+      // ヘッダー行の下をスキャン
+      for (var r = headerRow + 1; r < allData.length; r++) {
         var name = String(allData[r][menuCol]).trim();
         if (!name || name.length < 2) continue;
         if (name === '予約' || name === '予約数' || name === 'メニュー名') continue;
@@ -720,8 +738,35 @@ function getMenuFromJColumn() {
 
       var headers = allData[headerRowIdx].map(function(h) { return String(h).trim(); });
 
-      // J列=インデックス9をメニュー列として使用
-      var menuCol = 9;
+      // メニュー列を内容ベースで検出（《》コース整体円のパターンがある列を探す）
+      var menuCol = -1;
+      for (var c = 5; c < Math.min(15, lastCol); c++) {
+        var menuScore = 0;
+        var sampleCount = 0;
+        for (var r2 = headerRowIdx + 1; r2 < Math.min(headerRowIdx + 50, allData.length); r2++) {
+          var val = String(allData[r2][c] || '').trim();
+          if (!val || val.length < 3) continue;
+          sampleCount++;
+          if (val.indexOf('《') >= 0 || val.indexOf('》') >= 0) menuScore += 3;
+          if (val.indexOf('コース') >= 0) menuScore += 2;
+          if (val.indexOf('整体') >= 0) menuScore += 2;
+          if (val.indexOf('円') >= 0 && (val.indexOf('分') >= 0 || val.indexOf('(') >= 0)) menuScore += 2;
+          if (val.indexOf('限定') >= 0) menuScore += 1;
+          if (val.indexOf('新規') >= 0) menuScore += 1;
+          if (val.indexOf('チラシ') >= 0 || val.indexOf('HPB') >= 0) menuScore += 1;
+        }
+        Logger.log('    col' + c + ' menuScore=' + menuScore + ' samples=' + sampleCount);
+        if (menuScore >= 8) {
+          menuCol = c;
+          Logger.log('  ✅ メニュー列検出: col=' + c + ' score=' + menuScore);
+          break;
+        }
+      }
+      // メニューパターンが見つからない場合はインデックス9を使用
+      if (menuCol < 0) {
+        menuCol = 9;
+        Logger.log('  ⚠ メニュー列パターン未検出 → デフォルト col=9');
+      }
 
       // 来店・キャンセル列を検出
       var statusCol = -1;

@@ -738,34 +738,90 @@ function getMenuFromJColumn() {
 
       var headers = allData[headerRowIdx].map(function(h) { return String(h).trim(); });
 
-      // メニュー列を内容ベースで検出（《》コース整体円のパターンがある列を探す）
+      // === メニュー列を複数の方法で検出 ===
       var menuCol = -1;
+
+      // 方法1: ヘッダーに「メニュー」「コース」を含む列
       for (var c = 5; c < Math.min(15, lastCol); c++) {
-        var menuScore = 0;
-        var sampleCount = 0;
-        for (var r2 = headerRowIdx + 1; r2 < Math.min(headerRowIdx + 50, allData.length); r2++) {
-          var val = String(allData[r2][c] || '').trim();
-          if (!val || val.length < 3) continue;
-          sampleCount++;
-          if (val.indexOf('《') >= 0 || val.indexOf('》') >= 0) menuScore += 3;
-          if (val.indexOf('コース') >= 0) menuScore += 2;
-          if (val.indexOf('整体') >= 0) menuScore += 2;
-          if (val.indexOf('円') >= 0 && (val.indexOf('分') >= 0 || val.indexOf('(') >= 0)) menuScore += 2;
-          if (val.indexOf('限定') >= 0) menuScore += 1;
-          if (val.indexOf('新規') >= 0) menuScore += 1;
-          if (val.indexOf('チラシ') >= 0 || val.indexOf('HPB') >= 0) menuScore += 1;
-        }
-        Logger.log('    col' + c + ' menuScore=' + menuScore + ' samples=' + sampleCount);
-        if (menuScore >= 8) {
+        var h = headers[c].replace(/\n/g, '');
+        if (h.indexOf('メニュー') >= 0 || h.indexOf('コース名') >= 0) {
           menuCol = c;
-          Logger.log('  ✅ メニュー列検出: col=' + c + ' score=' + menuScore);
+          Logger.log('  ✅ ヘッダー「メニュー」検出: col=' + c);
           break;
         }
       }
-      // メニューパターンが見つからない場合はインデックス9を使用
+
+      // 方法2: 「要望」ヘッダーの1つ左 = メニュー列
+      if (menuCol < 0) {
+        for (var c = 1; c < Math.min(15, lastCol); c++) {
+          var h = headers[c].replace(/\n/g, '');
+          if (h === '要望' || h.indexOf('要望') >= 0) {
+            menuCol = c - 1;
+            Logger.log('  ✅ 「要望」列の左: col=' + (c - 1));
+            break;
+          }
+        }
+      }
+
+      // 方法3: ヘッダーに「フィルタ」を含む列（J列特有のヘッダー）
+      if (menuCol < 0) {
+        for (var c = 5; c < Math.min(15, lastCol); c++) {
+          var h = headers[c].replace(/\n/g, '');
+          if (h.indexOf('フィルタ') >= 0) {
+            menuCol = c;
+            Logger.log('  ✅ 「フィルタ」ヘッダー検出: col=' + c);
+            break;
+          }
+        }
+      }
+
+      // 方法4: 日本語メニューパターンのスコアリング
+      if (menuCol < 0) {
+        for (var c = 5; c < Math.min(15, lastCol); c++) {
+          var menuScore = 0;
+          for (var r2 = headerRowIdx + 1; r2 < Math.min(headerRowIdx + 50, allData.length); r2++) {
+            var val = String(allData[r2][c] || '').trim();
+            if (!val || val.length < 3) continue;
+            if (val.indexOf('《') >= 0 || val.indexOf('》') >= 0) menuScore += 3;
+            if (val.indexOf('コース') >= 0) menuScore += 2;
+            if (val.indexOf('整体') >= 0) menuScore += 2;
+            if (val.indexOf('円') >= 0 && (val.indexOf('分') >= 0 || val.indexOf('(') >= 0)) menuScore += 2;
+            if (val.indexOf('限定') >= 0) menuScore += 1;
+            if (val.indexOf('新規') >= 0) menuScore += 1;
+          }
+          if (menuScore >= 8) {
+            menuCol = c;
+            Logger.log('  ✅ パターンスコア検出: col=' + c + ' score=' + menuScore);
+            break;
+          }
+        }
+      }
+
+      // 方法5: 文字列長で判定（メニュー名は平均30文字以上、要望は短い）
+      if (menuCol < 0) {
+        var maxAvgLen = 0;
+        var maxLenCol = -1;
+        for (var c = 7; c < Math.min(13, lastCol); c++) {
+          if (headers[c] === '要望') continue;
+          var totalLen = 0;
+          var cnt = 0;
+          for (var r2 = headerRowIdx + 1; r2 < Math.min(headerRowIdx + 100, allData.length); r2++) {
+            var val = String(allData[r2][c] || '').trim();
+            if (val && val.length >= 3 && val !== '未入力') { totalLen += val.length; cnt++; }
+          }
+          var avgLen = cnt > 0 ? totalLen / cnt : 0;
+          if (avgLen > maxAvgLen) { maxAvgLen = avgLen; maxLenCol = c; }
+        }
+        if (maxAvgLen >= 20 && maxLenCol >= 0) {
+          menuCol = maxLenCol;
+          Logger.log('  ✅ 文字列長検出: col=' + maxLenCol + ' avgLen=' + Math.round(maxAvgLen));
+        }
+      }
+
+      // 最終フォールバック
       if (menuCol < 0) {
         menuCol = 9;
-        Logger.log('  ⚠ メニュー列パターン未検出 → デフォルト col=9');
+        Logger.log('  ⚠ 全方法失敗 → デフォルト col=9');
       }
 
       // 来店・キャンセル列を検出

@@ -414,16 +414,16 @@
             const [mktLoading, setMktLoading] = useState(false);
             const [mktError, setMktError] = useState(null);
             const [mktLastFetch, setMktLastFetch] = useState(null);
-            const [mktSelectedBranches, setMktSelectedBranches] = useState([]);
-            const [mktSelectedStaff, setMktSelectedStaff] = useState([]);
-            const [mktSelectedMedia, setMktSelectedMedia] = useState([]);
-            const [mktSelectedMonth, setMktSelectedMonth] = useState('');
-            const [mktEndMonth, setMktEndMonth] = useState('');
+            const [mktSelectedBranches, setMktSelectedBranches] = useState(savedUIState?.mktSelectedBranches || []);
+            const [mktSelectedStaff, setMktSelectedStaff] = useState(savedUIState?.mktSelectedStaff || []);
+            const [mktSelectedMedia, setMktSelectedMedia] = useState(savedUIState?.mktSelectedMedia || []);
+            const [mktSelectedMonth, setMktSelectedMonth] = useState(savedUIState?.mktSelectedMonth || '');
+            const [mktEndMonth, setMktEndMonth] = useState(savedUIState?.mktEndMonth || '');
             const [mktBranchMenuOpen, setMktBranchMenuOpen] = useState(false);
             const [mktStaffMenuOpen, setMktStaffMenuOpen] = useState(false);
             const [mktMediaMenuOpen, setMktMediaMenuOpen] = useState(false);
-            const [mktActiveTab, setMktActiveTab] = useState('overview');
-            const [mktInitialized, setMktInitialized] = useState(false);
+            const [mktActiveTab, setMktActiveTab] = useState(savedUIState?.mktActiveTab || 'overview');
+            const [mktInitialized, setMktInitialized] = useState(!!savedUIState?.mktSelectedMonth);
             const mktBranchRef = useRef(null);
             const mktStaffRef = useRef(null);
             const mktMediaRef = useRef(null);
@@ -448,7 +448,7 @@
                         if (cached && cached.length > 0) {
                             console.log('💾 Using cached marketing data:', cached.length, 'records');
                             setMktData(cached);
-                            if (!mktInitialized) {
+                            if (!mktInitialized && !savedUIState?.mktSelectedMonth) {
                                 const branches = Array.from(new Set(cached.map(d => d.branch).filter(Boolean)));
                                 setMktSelectedBranches(branches);
                                 const months = sortMonths(Array.from(new Set(cached.map(d => d.month).filter(Boolean))));
@@ -481,7 +481,7 @@
                     setMktData(normalized);
                     if (normalized.length > 0) {
                         setMarketingCachedData(normalized);
-                        if (!mktInitialized) {
+                        if (!mktInitialized && !savedUIState?.mktSelectedMonth) {
                             const branches = Array.from(new Set(normalized.map(d => d.branch).filter(Boolean)));
                             setMktSelectedBranches(branches);
                             const months = sortMonths(Array.from(new Set(normalized.map(d => d.month).filter(Boolean))));
@@ -778,11 +778,18 @@
                     endDate: endDate ? endDate.toISOString() : null,
                     selectedBranches,
                     selectedStaffNames,
-                    selectedMetrics
+                    selectedMetrics,
+                    // マーケティングダッシュボード状態
+                    mktSelectedBranches,
+                    mktSelectedStaff,
+                    mktSelectedMedia,
+                    mktSelectedMonth,
+                    mktEndMonth,
+                    mktActiveTab
                 };
                 saveUIState(uiState);
                 setUiStateLoaded(true);
-            }, [currentPage, startMonth, endMonth, startDate, endDate, selectedBranches, selectedStaffNames, selectedMetrics]);
+            }, [currentPage, startMonth, endMonth, startDate, endDate, selectedBranches, selectedStaffNames, selectedMetrics, mktSelectedBranches, mktSelectedStaff, mktSelectedMedia, mktSelectedMonth, mktEndMonth, mktActiveTab]);
 
             const months = useMemo(() => {
                 return Array.from(new Set(rawData.map(d => d.month))).sort((a, b) => {
@@ -1477,7 +1484,7 @@
                 const lowerQ = question.toLowerCase();
 
                 // スタッフリスト要求
-                if (lowerQ.includes('スタッフ') && (lowerQ.includes('教えて') || lowerQ.includes('誰') || lowerQ.includes('一覧') || lowerQ.includes('リスト'))) {
+                if (lowerQ.includes('スタッフ') && (lowerQ.includes('教えて') || lowerQ.includes('誰') || lowerQ.includes('一覧') || lowerQ.includes('リスト') || lowerQ.includes('は？') || lowerQ.includes('は?') || lowerQ.match(/スタッフ[はを]/) || lowerQ.endsWith('スタッフ？') || lowerQ.endsWith('スタッフ?'))) {
                     return 'staff_list';
                 }
 
@@ -4112,17 +4119,23 @@
                                                                 </div>
                                                                 <div className="grid md:grid-cols-2 gap-4">
                                                                     {(() => {
-                                                                        const bestPrice = [...analyzeMenuData.byPrice].sort((a, b) => {
-                                                                            const aEnroll = a.reservations > 0 ? (a.enrollments / a.reservations) : 0;
-                                                                            const bEnroll = b.reservations > 0 ? (b.enrollments / b.reservations) : 0;
-                                                                            return bEnroll - aEnroll;
-                                                                        })[0];
-                                                                        const bestBodyPart = [...analyzeMenuData.byBodyPart].sort((a, b) => {
-                                                                            const aEnroll = a.reservations > 0 ? (a.enrollments / a.reservations) : 0;
-                                                                            const bEnroll = b.reservations > 0 ? (b.enrollments / b.reservations) : 0;
-                                                                            return bEnroll - aEnroll;
-                                                                        })[0];
-                                                                        const worstCancel = [...analyzeMenuData.menuList].sort((a, b) => b.cancelRate - a.cancelRate)[0];
+                                                                        const bestPrice = analyzeMenuData.byPrice && analyzeMenuData.byPrice.length > 0
+                                                                            ? [...analyzeMenuData.byPrice].sort((a, b) => {
+                                                                                const aEnroll = a.reservations > 0 ? (a.enrollments / a.reservations) : 0;
+                                                                                const bEnroll = b.reservations > 0 ? (b.enrollments / b.reservations) : 0;
+                                                                                return bEnroll - aEnroll;
+                                                                            })[0]
+                                                                            : null;
+                                                                        const bestBodyPart = analyzeMenuData.byBodyPart && analyzeMenuData.byBodyPart.length > 0
+                                                                            ? [...analyzeMenuData.byBodyPart].sort((a, b) => {
+                                                                                const aEnroll = a.reservations > 0 ? (a.enrollments / a.reservations) : 0;
+                                                                                const bEnroll = b.reservations > 0 ? (b.enrollments / b.reservations) : 0;
+                                                                                return bEnroll - aEnroll;
+                                                                            })[0]
+                                                                            : null;
+                                                                        const worstCancel = analyzeMenuData.menuList && analyzeMenuData.menuList.length > 0
+                                                                            ? [...analyzeMenuData.menuList].sort((a, b) => b.cancelRate - a.cancelRate)[0]
+                                                                            : null;
 
                                                                         return (
                                                                             <>
@@ -4169,7 +4182,7 @@
                                                                                     </div>
                                                                                     <div className="bg-white/20 rounded-xl p-3 mb-2">
                                                                                         <div className="text-xl font-black mb-1">¥{bestPrice?.price?.toLocaleString() || '---'} × {bestBodyPart?.bodyPart || '---'}</div>
-                                                                                        <div className="text-sm opacity-90">予測品質スコア: {bestPrice && bestBodyPart ? Math.round((bestPrice.enrollments / bestPrice.reservations) * 50 + (100 - (bestPrice.cancels / bestPrice.reservations) * 100) * 50) : 0}</div>
+                                                                                        <div className="text-sm opacity-90">予測品質スコア: {bestPrice && bestBodyPart && bestPrice.reservations > 0 ? Math.round((bestPrice.enrollments / bestPrice.reservations) * 50 + (100 - (bestPrice.cancels / bestPrice.reservations) * 100) * 50) : '---'}</div>
                                                                                     </div>
                                                                                     <p className="text-sm opacity-90">この組み合わせで新メニューを作成することで、最大のROIが期待できます。</p>
                                                                                 </div>

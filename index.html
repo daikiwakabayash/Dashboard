@@ -449,7 +449,7 @@
 
                     if (!forceRefresh) {
                         const cached = getMarketingCachedData();
-                        if (cached && cached.length > 0) {
+                        if (cached && cached.length > 0 && menuRawData.length > 0) {
                             console.log('💾 Using cached marketing data:', cached.length, 'records');
                             setMktData(cached);
                             if (!mktInitialized && !savedUIState?.mktSelectedMonth) {
@@ -729,96 +729,6 @@
                 return calcMenuMetrics(agg);
             };
 
-            // メニューデータを解析（予約進捗管理シートのJ列ベース）
-            const analyzeMenuData = useMemo(() => {
-                try {
-                    // menuRawDataがある場合はそちらを使用（GASから直接取得したメニューデータ）
-                    const sourceData = menuRawData && menuRawData.length > 0 ? menuRawData : null;
-
-                    if (!sourceData) {
-                        console.log('📊 Menu analysis: No menu data available');
-                        return null;
-                    }
-
-                    // 各メニューにメトリクスを計算
-                    const menuList = sourceData
-                        .filter(m => m.reservations > 0)
-                        .map(m => ({
-                            ...calcMenuMetrics(m),
-                            price: extractPriceFromMenu(m.menuName),
-                            bodyPart: extractBodyPartFromMenu(m.menuName),
-                            source: extractSourceFromMenu(m.menuName)
-                        }))
-                        .sort((a, b) => b.reservations - a.reservations);
-
-                    // 価格帯別集計（¥1,000訴求, ¥2,000訴求, ¥3,500訴求など）
-                    const priceGroups = {};
-                    menuList.forEach(m => {
-                        if (m.price > 0) {
-                            if (!priceGroups[m.price]) priceGroups[m.price] = [];
-                            priceGroups[m.price].push(m);
-                        }
-                    });
-                    const byPrice = Object.entries(priceGroups)
-                        .map(([price, menus]) => ({
-                            label: `¥${Number(price).toLocaleString()}円訴求 整体`,
-                            price: Number(price),
-                            ...aggregateMenus(menus)
-                        }))
-                        .sort((a, b) => a.price - b.price);
-
-                    // 症状・部位別集計（肩こり訴求, 股関節訴求, 自律神経訴求など）
-                    const bodyPartGroups = {};
-                    menuList.forEach(m => {
-                        if (m.bodyPart !== 'その他') {
-                            if (!bodyPartGroups[m.bodyPart]) bodyPartGroups[m.bodyPart] = [];
-                            bodyPartGroups[m.bodyPart].push(m);
-                        }
-                    });
-                    const byBodyPart = Object.entries(bodyPartGroups)
-                        .map(([part, menus]) => ({
-                            label: `${part} 訴求`,
-                            bodyPart: part,
-                            ...aggregateMenus(menus)
-                        }))
-                        .sort((a, b) => b.reservations - a.reservations);
-
-                    // 集客媒体別集計（チラシ, 看板, WEB, SNS, HPBなど）
-                    const sourceGroups = {};
-                    menuList.forEach(m => {
-                        if (!sourceGroups[m.source]) sourceGroups[m.source] = [];
-                        sourceGroups[m.source].push(m);
-                    });
-                    const bySource = Object.entries(sourceGroups)
-                        .map(([source, menus]) => ({
-                            label: `${source}経由`,
-                            source,
-                            menus: menus.sort((a, b) => b.reservations - a.reservations),
-                            ...aggregateMenus(menus)
-                        }))
-                        .sort((a, b) => b.reservations - a.reservations);
-
-                    const result = {
-                        menuList,
-                        byPrice,
-                        byBodyPart,
-                        bySource
-                    };
-
-                    console.log('✅ Menu analysis complete:', {
-                        totalMenus: result.menuList.length,
-                        pricePoints: result.byPrice.length,
-                        bodyParts: result.byBodyPart.length,
-                        sources: result.bySource.length
-                    });
-
-                    return result;
-                } catch (error) {
-                    console.error('❌ Menu analysis error:', error);
-                    return null;
-                }
-            }, [menuRawData]);
-
             // マーケティングページに遷移した時にデータ取得
             useEffect(() => {
                 if (currentPage === 'marketing' && mktData.length === 0 && !mktLoading && !mktError) {
@@ -963,6 +873,122 @@
                 const maxIdx = Math.max(startIdx, endIdx);
                 return mktMonths.slice(minIdx, maxIdx + 1);
             }, [mktSelectedMonth, mktEndMonth, mktMonths]);
+
+            // メニューデータを解析（予約進捗管理シートのJ列ベース、期間フィルター対応、HPB除外）
+            const analyzeMenuData = useMemo(() => {
+                try {
+                    const sourceData = menuRawData && menuRawData.length > 0 ? menuRawData : null;
+
+                    if (!sourceData) {
+                        console.log('📊 Menu analysis: No menu data available');
+                        return null;
+                    }
+
+                    // 期間フィルターを適用（mktTargetMonthsで絞り込み）
+                    const filteredByPeriod = mktTargetMonths.length > 0
+                        ? sourceData.filter(m => m.month && mktTargetMonths.includes(m.month))
+                        : sourceData;
+
+                    console.log('📊 Menu filter: total=' + sourceData.length + ', period filtered=' + filteredByPeriod.length + ', months=' + mktTargetMonths.join(','));
+
+                    if (filteredByPeriod.length === 0) {
+                        console.log('📊 Menu analysis: No data after period filter');
+                        return null;
+                    }
+
+                    // 同じメニュー名の月別データを統合
+                    const mergedMap = {};
+                    filteredByPeriod.forEach(m => {
+                        if (!mergedMap[m.menuName]) {
+                            mergedMap[m.menuName] = {
+                                menuName: m.menuName,
+                                reservations: 0, actualVisits: 0,
+                                advanceCancels: 0, sameDayCancels: 0,
+                                enrollments: 0, reviews: 0
+                            };
+                        }
+                        const t = mergedMap[m.menuName];
+                        t.reservations += m.reservations || 0;
+                        t.actualVisits += m.actualVisits || 0;
+                        t.advanceCancels += m.advanceCancels || 0;
+                        t.sameDayCancels += m.sameDayCancels || 0;
+                        t.enrollments += m.enrollments || 0;
+                        t.reviews += m.reviews || 0;
+                    });
+
+                    // 各メニューにメトリクスを計算
+                    const menuList = Object.values(mergedMap)
+                        .filter(m => m.reservations > 0)
+                        .map(m => ({
+                            ...calcMenuMetrics(m),
+                            price: extractPriceFromMenu(m.menuName),
+                            bodyPart: extractBodyPartFromMenu(m.menuName),
+                            source: extractSourceFromMenu(m.menuName)
+                        }))
+                        .sort((a, b) => b.reservations - a.reservations);
+
+                    // 価格帯別集計
+                    const priceGroups = {};
+                    menuList.forEach(m => {
+                        if (m.price > 0) {
+                            if (!priceGroups[m.price]) priceGroups[m.price] = [];
+                            priceGroups[m.price].push(m);
+                        }
+                    });
+                    const byPrice = Object.entries(priceGroups)
+                        .map(([price, menus]) => ({
+                            label: `¥${Number(price).toLocaleString()}円訴求 整体`,
+                            price: Number(price),
+                            ...aggregateMenus(menus)
+                        }))
+                        .sort((a, b) => a.price - b.price);
+
+                    // 症状・部位別集計
+                    const bodyPartGroups = {};
+                    menuList.forEach(m => {
+                        if (m.bodyPart !== 'その他') {
+                            if (!bodyPartGroups[m.bodyPart]) bodyPartGroups[m.bodyPart] = [];
+                            bodyPartGroups[m.bodyPart].push(m);
+                        }
+                    });
+                    const byBodyPart = Object.entries(bodyPartGroups)
+                        .map(([part, menus]) => ({
+                            label: `${part} 訴求`,
+                            bodyPart: part,
+                            ...aggregateMenus(menus)
+                        }))
+                        .sort((a, b) => b.reservations - a.reservations);
+
+                    // 集客媒体別集計
+                    const sourceGroups = {};
+                    menuList.forEach(m => {
+                        if (!sourceGroups[m.source]) sourceGroups[m.source] = [];
+                        sourceGroups[m.source].push(m);
+                    });
+                    const bySource = Object.entries(sourceGroups)
+                        .map(([source, menus]) => ({
+                            label: `${source}経由`,
+                            source,
+                            menus: menus.sort((a, b) => b.reservations - a.reservations),
+                            ...aggregateMenus(menus)
+                        }))
+                        .sort((a, b) => b.reservations - a.reservations);
+
+                    const result = { menuList, byPrice, byBodyPart, bySource };
+
+                    console.log('✅ Menu analysis complete:', {
+                        totalMenus: result.menuList.length,
+                        pricePoints: result.byPrice.length,
+                        bodyParts: result.byBodyPart.length,
+                        sources: result.bySource.length
+                    });
+
+                    return result;
+                } catch (error) {
+                    console.error('❌ Menu analysis error:', error);
+                    return null;
+                }
+            }, [menuRawData, mktTargetMonths]);
 
             const mktFiltered = useMemo(() => {
                 return mktData.filter(d => {

@@ -536,25 +536,31 @@ function testGetData() {
 
 
 // 予約進捗管理シートからメニュー別分析データを取得
-// J列のメニュー名を基に、予約・来院・キャンセル・入会・口コミを集計
+// J列のメニュー名を基に、月ごとに予約・来院・キャンセル・入会・口コミを集計
+// HPBシートは除外（HPBのメニュー名は種類が多すぎるため）
 function getMenuAnalysisData() {
   try {
     var ssId = (typeof SPREADSHEET_ID !== 'undefined') ? SPREADSHEET_ID : MARKETING_SS_ID;
     const ss = SpreadsheetApp.openById(ssId);
     const allSheets = ss.getSheets();
 
-    // 「予約進捗管理」を含むシート名を対象
+    // 「予約進捗管理」を含むシート名を対象（HPBを除外）
     const reservationSheets = allSheets.filter(function(s) {
-      return s.getName().indexOf('予約進捗管理') >= 0;
+      var name = s.getName();
+      if (name.indexOf('予約進捗管理') < 0) return false;
+      // HPBシートを除外
+      if (name.indexOf('HPB') >= 0 || name.indexOf('hpb') >= 0 || name.indexOf('ホットペッパー') >= 0) return false;
+      return true;
     });
 
     if (reservationSheets.length === 0) {
-      Logger.log('⚠ 予約進捗管理シートが見つかりません');
+      Logger.log('⚠ 予約進捗管理シートが見つかりません（HPB除外後）');
       return [];
     }
 
-    Logger.log('📋 予約進捗管理シート: ' + reservationSheets.length + '件');
+    Logger.log('📋 予約進捗管理シート（HPB除外）: ' + reservationSheets.length + '件');
 
+    // 月×メニュー名ごとに集計
     const menuMap = {};
 
     reservationSheets.forEach(function(sheet) {
@@ -578,7 +584,6 @@ function getMenuAnalysisData() {
       }
 
       if (headerRowIdx === -1) {
-        // ヘッダーが見つからない場合はデフォルト位置を試す
         headerRowIdx = 0;
       }
 
@@ -591,7 +596,7 @@ function getMenuAnalysisData() {
       var enrollCol = findMenuColExact(headers, '入会');
       var reviewCol = findMenuColExact(headers, '口コミ');
 
-      Logger.log('  ' + sheetName + ': store=' + storeCol + ', menu=' + menuCol + ', status=' + statusCol + ', enroll=' + enrollCol + ', review=' + reviewCol);
+      Logger.log('  ' + sheetName + ' → ' + month + ': store=' + storeCol + ', menu=' + menuCol + ', status=' + statusCol + ', enroll=' + enrollCol + ', review=' + reviewCol);
 
       if (menuCol < 0) {
         Logger.log('  ⚠ メニュー列が見つかりません: ' + sheetName);
@@ -605,7 +610,6 @@ function getMenuAnalysisData() {
 
         // 空行やヘッダーのような行をスキップ
         if (!menuName || menuName === '' || menuName === 'undefined' || menuName === '要望') continue;
-        // メニュー名っぽくないものをスキップ（短すぎるor数字のみ）
         if (menuName.length < 3) continue;
 
         var storeName = storeCol >= 0 ? String(row[storeCol]).trim() : '';
@@ -613,9 +617,12 @@ function getMenuAnalysisData() {
         var enrollVal = enrollCol >= 0 ? String(row[enrollCol]).trim() : '';
         var reviewVal = reviewCol >= 0 ? String(row[reviewCol]).trim() : '';
 
-        if (!menuMap[menuName]) {
-          menuMap[menuName] = {
+        // 月×メニュー名でキーを作成
+        var key = month + '|||' + menuName;
+        if (!menuMap[key]) {
+          menuMap[key] = {
             menuName: menuName,
+            month: month,
             reservations: 0,
             actualVisits: 0,
             advanceCancels: 0,
@@ -625,7 +632,7 @@ function getMenuAnalysisData() {
           };
         }
 
-        var m = menuMap[menuName];
+        var m = menuMap[key];
         m.reservations++;
 
         // 来店・キャンセル判定
@@ -636,7 +643,7 @@ function getMenuAnalysisData() {
         } else if (status.indexOf('当日') >= 0) {
           m.sameDayCancels++;
         } else if (status.indexOf('振替') >= 0) {
-          m.advanceCancels++; // 振替もキャンセル扱い
+          m.advanceCancels++;
         }
 
         // 入会判定
@@ -653,7 +660,7 @@ function getMenuAnalysisData() {
 
     var result = Object.values(menuMap).filter(function(m) { return m.reservations > 0; });
 
-    Logger.log('✅ メニュー分析完了: ' + result.length + '種類のメニュー');
+    Logger.log('✅ メニュー分析完了: ' + result.length + '件（月×メニュー、HPB除外）');
     return result;
   } catch (error) {
     Logger.log('❌ メニュー分析エラー: ' + error.toString());

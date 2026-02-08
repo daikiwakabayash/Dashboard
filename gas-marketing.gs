@@ -882,31 +882,56 @@ function getMenuFromJColumn() {
 
 
 
-// スプレッドシート構造の確認（デバッグ用）
-function checkStructure() {
-  try {
-    var ssId = (typeof SPREADSHEET_ID !== 'undefined') ? SPREADSHEET_ID : MARKETING_SS_ID;
-    var sheetNameFilter = (typeof SHEET_NAME !== 'undefined') ? SHEET_NAME : MARKETING_SHEET_NAME;
-    const ss = SpreadsheetApp.openById(ssId);
-    Logger.log('スプレッドシート: ' + ss.getName());
+// ★★★ 診断用: 予約進捗管理シートのヘッダーとデータを調査 ★★★
+// GASエディタでこれを選択して実行 → ログを確認
+function debugMenuColumns() {
+  var ssId = (typeof SPREADSHEET_ID !== 'undefined') ? SPREADSHEET_ID : MARKETING_SS_ID;
+  var ss = SpreadsheetApp.openById(ssId);
+  var allSheets = ss.getSheets();
 
-    ss.getSheets().forEach(function(sheet, i) {
-      Logger.log('  シート' + (i + 1) + ': ' + sheet.getName() +
-                 ' (' + sheet.getLastRow() + '行 × ' + sheet.getLastColumn() + '列)');
-    });
+  var reservationSheets = allSheets.filter(function(s) {
+    var name = s.getName();
+    return name.indexOf('予約進捗管理') >= 0 && name.indexOf('HPB') < 0;
+  });
 
-    const sheet = ss.getSheetByName(sheetNameFilter);
-    if (sheet) {
-      Logger.log('\n【先頭5行の内容】');
-      const preview = sheet.getRange(1, 1, Math.min(5, sheet.getLastRow()), Math.min(40, sheet.getLastColumn())).getValues();
-      preview.forEach(function(row, r) {
-        const cells = row.map(function(c, i) {
-          return c ? (String.fromCharCode(65 + i) + ':' + String(c).substring(0, 15)) : '';
-        }).filter(Boolean);
-        Logger.log('行' + (r + 1) + ': ' + cells.join(' | '));
+  Logger.log('=== 予約進捗管理シート一覧 (' + reservationSheets.length + '件) ===');
+
+  reservationSheets.forEach(function(sheet) {
+    var name = sheet.getName();
+    var lastRow = sheet.getLastRow();
+    var lastCol = sheet.getLastColumn();
+    Logger.log('\n📋 ' + name + ' (' + lastRow + '行 × ' + lastCol + '列)');
+
+    if (lastRow < 2 || lastCol < 5) return;
+
+    var data = sheet.getRange(1, 1, Math.min(3, lastRow), Math.min(15, lastCol)).getValues();
+
+    // ヘッダー行を表示
+    for (var r = 0; r < data.length; r++) {
+      var cells = [];
+      for (var c = 0; c < data[r].length; c++) {
+        var v = String(data[r][c]).replace(/\n/g, ' ').trim();
+        if (v) {
+          var colLetter = c < 26 ? String.fromCharCode(65 + c) : 'A' + String.fromCharCode(65 + c - 26);
+          cells.push(colLetter + '(' + c + '):' + v.substring(0, 25));
+        }
+      }
+      Logger.log('  行' + (r + 1) + ': ' + cells.join(' | '));
+    }
+
+    // データ行のサンプル（列7-12の内容を表示）
+    if (lastRow > 3) {
+      var sampleData = sheet.getRange(4, 8, Math.min(5, lastRow - 3), 6).getValues();
+      Logger.log('  --- データサンプル(H-M列) ---');
+      sampleData.forEach(function(row, i) {
+        var cells = [];
+        for (var c = 0; c < row.length; c++) {
+          var v = String(row[c]).replace(/\n/g, ' ').trim();
+          var colLetter = String.fromCharCode(72 + c); // H=72
+          cells.push(colLetter + ':' + (v || '(空)').substring(0, 30));
+        }
+        Logger.log('    ' + cells.join(' | '));
       });
     }
-  } catch (error) {
-    Logger.log('❌ エラー: ' + error.toString());
-  }
+  });
 }

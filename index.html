@@ -1558,17 +1558,49 @@
                 }
 
                 // 集計（正しいフィールド名を使用）
-                const totalIndividualSales = data.reduce((sum, d) => sum + (d.individualSales || 0), 0);
-                const totalRecurringSales = data.reduce((sum, d) => sum + (d.recurringSales || 0), 0);
-                const totalSales = totalIndividualSales + totalRecurringSales;
-                const totalNewCount = data.reduce((sum, d) => sum + (d.newCount || 0), 0);
-                const totalNewEnroll = data.reduce((sum, d) => sum + (d.newEnroll || 0), 0);
-                const totalChurnCount = data.reduce((sum, d) => sum + (d.churnCount || 0), 0);
-                const totalPrevMembers = data.reduce((sum, d) => sum + (d.prevMembers || 0), 0);
-                const totalProductivity = data.reduce((sum, d) => sum + (d.productivity || 0), 0);
-                const totalGReviews = data.reduce((sum, d) => sum + (d.gReviews || 0), 0);
-                const totalHReviews = data.reduce((sum, d) => sum + (d.hReviews || 0), 0);
-                const totalReferrals = data.reduce((sum, d) => sum + (d.referrals || 0), 0);
+                console.log('===== ANALYSIS DEBUG START =====');
+                console.log(`Analyzing ${data.length} records for branch: ${branch}, month: ${month}`);
+
+                // データのサンプルを表示
+                if (data.length > 0) {
+                    console.log('Sample data records:');
+                    data.slice(0, Math.min(5, data.length)).forEach((d, i) => {
+                        console.log(`Record ${i + 1}:`, {
+                            name: d.name,
+                            branch: d.branch,
+                            month: d.month,
+                            individualSales: d.individualSales,
+                            recurringSales: d.recurringSales
+                        });
+                    });
+                }
+
+                // 数値のバリデーション関数
+                const validateNumber = (num) => {
+                    if (num === null || num === undefined || isNaN(num) || !isFinite(num)) return 0;
+                    return Math.round(num); // 小数点以下を丸める
+                };
+
+                const totalIndividualSales = validateNumber(data.reduce((sum, d) => sum + validateNumber(d.individualSales), 0));
+                const totalRecurringSales = validateNumber(data.reduce((sum, d) => sum + validateNumber(d.recurringSales), 0));
+
+                console.log('Aggregation results:');
+                console.log(`- Individual Sales: ¥${totalIndividualSales.toLocaleString()}`);
+                console.log(`- Recurring Sales: ¥${totalRecurringSales.toLocaleString()}`);
+                console.log(`- Total: ¥${(totalIndividualSales + totalRecurringSales).toLocaleString()}`);
+                console.log('===== ANALYSIS DEBUG END =====');
+
+                // 総売上は個別売上のみ（ユーザーの定義に合わせる）
+                const totalSales = totalIndividualSales;
+
+                const totalNewCount = validateNumber(data.reduce((sum, d) => sum + validateNumber(d.newCount), 0));
+                const totalNewEnroll = validateNumber(data.reduce((sum, d) => sum + validateNumber(d.newEnroll), 0));
+                const totalChurnCount = validateNumber(data.reduce((sum, d) => sum + validateNumber(d.churnCount), 0));
+                const totalPrevMembers = validateNumber(data.reduce((sum, d) => sum + validateNumber(d.prevMembers), 0));
+                const totalProductivity = validateNumber(data.reduce((sum, d) => sum + validateNumber(d.productivity), 0));
+                const totalGReviews = validateNumber(data.reduce((sum, d) => sum + validateNumber(d.gReviews), 0));
+                const totalHReviews = validateNumber(data.reduce((sum, d) => sum + validateNumber(d.hReviews), 0));
+                const totalReferrals = validateNumber(data.reduce((sum, d) => sum + validateNumber(d.referrals), 0));
 
                 // 平均値計算
                 const avgNewCount = totalNewCount / data.length;
@@ -1591,10 +1623,10 @@
                             records: 0
                         };
                     }
-                    staffMap[key].sales += (d.individualSales || 0);
-                    staffMap[key].newCount += (d.newCount || 0);
-                    staffMap[key].newEnroll += (d.newEnroll || 0);
-                    staffMap[key].productivity += (d.productivity || 0);
+                    staffMap[key].sales += validateNumber(d.individualSales);
+                    staffMap[key].newCount += validateNumber(d.newCount);
+                    staffMap[key].newEnroll += validateNumber(d.newEnroll);
+                    staffMap[key].productivity += validateNumber(d.productivity);
                     staffMap[key].records++;
                 });
 
@@ -1665,7 +1697,9 @@
 
                 const summary = `${branch || '全店舗'}の${month || '該当期間'}について分析しました。\n\n` +
                     `【主要指標】\n` +
-                    `・総売上: ¥${totalSales.toLocaleString()}（個別: ¥${totalIndividualSales.toLocaleString()} / 継続: ¥${totalRecurringSales.toLocaleString()}）\n` +
+                    `・個別売上（総売上）: ¥${totalIndividualSales.toLocaleString()}\n` +
+                    `・継続売上: ¥${totalRecurringSales.toLocaleString()}\n` +
+                    `・合計: ¥${(totalIndividualSales + totalRecurringSales).toLocaleString()}\n` +
                     `・新規顧客数: ${totalNewCount}人（平均${avgNewCount.toFixed(1)}人/月）\n` +
                     `・入会率: ${avgEnrollRate.toFixed(1)}%（${totalNewEnroll}/${totalNewCount}人）\n` +
                     `・退会率: ${avgChurnRate.toFixed(1)}%（${totalChurnCount}人退会）\n` +
@@ -1673,8 +1707,8 @@
                     `・口コミ獲得: ${totalGReviews + totalHReviews}件（G:${totalGReviews} / H:${totalHReviews}）\n` +
                     `・紹介数: ${totalReferrals}件\n\n` +
                     (staffList.length > 0 ? `【スタッフパフォーマンス】\n` +
-                        `🏆 トップ: ${topStaff.name}（売上¥${Math.round(topStaff.sales / 10000)}万円、新規${topStaff.newCount}人）\n` +
-                        (staffList.length > 1 ? `📉 要支援: ${lowStaff.name}（売上¥${Math.round(lowStaff.sales / 10000)}万円、新規${lowStaff.newCount}人）\n\n` : '\n') : '') +
+                        `🏆 トップ: ${topStaff.name}（個別売上¥${Math.round(topStaff.sales / 10000)}万円、新規${topStaff.newCount}人）\n` +
+                        (staffList.length > 1 ? `📉 要支援: ${lowStaff.name}（個別売上¥${Math.round(lowStaff.sales / 10000)}万円、新規${lowStaff.newCount}人）\n\n` : '\n') : '') +
                     (issues.length > 0 ? `【改善が必要な点】\n${issues.map(i => '⚠️ ' + i).join('\n')}\n\n` : '') +
                     (strengths.length > 0 ? `【強み】\n${strengths.map(s => '✅ ' + s).join('\n')}\n\n` : '') +
                     (recommendations.length > 0 ? `【推奨アクション】\n${recommendations.map((r, i) => `${i + 1}. ${r}`).join('\n')}` : '');

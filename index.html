@@ -431,6 +431,10 @@
 
             // メニュー分析用 State（予約進捗管理シートから取得）
             const [menuRawData, setMenuRawData] = useState([]);
+            const [selectedMenuNames, setSelectedMenuNames] = useState([]);
+            const [menuSearchText, setMenuSearchText] = useState('');
+            const [menuDropdownOpen, setMenuDropdownOpen] = useState(false);
+            const menuDropdownRef = useRef(null);
 
             // チャット機能用 State
             const [chatOpen, setChatOpen] = useState(false);
@@ -645,6 +649,9 @@
                     }
                     if (staffMenuRef.current && !staffMenuRef.current.contains(event.target)) {
                         setIsStaffMenuOpen(false);
+                    }
+                    if (menuDropdownRef.current && !menuDropdownRef.current.contains(event.target)) {
+                        setMenuDropdownOpen(false);
                     }
                 };
 
@@ -4090,224 +4097,175 @@
                                                         <p className="text-indigo-100 font-bold">J列のメニュー名から価格帯・症状訴求・集客媒体別にキャンセル率・入会率・口コミ率を分析します。</p>
                                                     </div>
 
+                                                    {/* メニュー名フィルター */}
+                                                    {analyzeMenuData && analyzeMenuData.menuList && analyzeMenuData.menuList.length > 0 && (
+                                                        <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-200">
+                                                            <div className="flex items-center gap-3 flex-wrap">
+                                                                <span className="text-sm font-black text-slate-700 whitespace-nowrap">メニュー絞込:</span>
+                                                                <div className="relative flex-1 min-w-[300px]" ref={menuDropdownRef}>
+                                                                    <div
+                                                                        className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm cursor-pointer flex items-center justify-between hover:border-indigo-400 transition-colors"
+                                                                        onClick={() => setMenuDropdownOpen(!menuDropdownOpen)}
+                                                                    >
+                                                                        <span className="text-slate-600 font-bold truncate">
+                                                                            {selectedMenuNames.length === 0
+                                                                                ? '全メニュー表示中（クリックで選択）'
+                                                                                : `${selectedMenuNames.length}件のメニューを選択中`}
+                                                                        </span>
+                                                                        <ChevronDown size={16} className={`text-slate-400 transition-transform ${menuDropdownOpen ? 'rotate-180' : ''}`} />
+                                                                    </div>
+                                                                    {menuDropdownOpen && (
+                                                                        <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-[400px] overflow-hidden">
+                                                                            <div className="p-2 border-b border-slate-100">
+                                                                                <input
+                                                                                    type="text"
+                                                                                    value={menuSearchText}
+                                                                                    onChange={e => setMenuSearchText(e.target.value)}
+                                                                                    placeholder="メニュー名で検索..."
+                                                                                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+                                                                                />
+                                                                            </div>
+                                                                            <div className="p-2 border-b border-slate-100 flex gap-2">
+                                                                                <button onClick={() => { setSelectedMenuNames(analyzeMenuData.menuList.map(m => m.menuName)); }} className="text-xs font-bold text-indigo-600 hover:text-indigo-800 px-2 py-1 rounded hover:bg-indigo-50">全選択</button>
+                                                                                <button onClick={() => { setSelectedMenuNames([]); }} className="text-xs font-bold text-slate-500 hover:text-slate-700 px-2 py-1 rounded hover:bg-slate-50">全解除</button>
+                                                                            </div>
+                                                                            <div className="overflow-y-auto max-h-[300px]">
+                                                                                {analyzeMenuData.menuList
+                                                                                    .filter(m => !menuSearchText || m.menuName.toLowerCase().includes(menuSearchText.toLowerCase()))
+                                                                                    .map(menu => (
+                                                                                        <label key={menu.menuName} className="flex items-center gap-2 px-3 py-2 hover:bg-indigo-50 cursor-pointer text-xs">
+                                                                                            <input
+                                                                                                type="checkbox"
+                                                                                                checked={selectedMenuNames.includes(menu.menuName)}
+                                                                                                onChange={e => {
+                                                                                                    if (e.target.checked) {
+                                                                                                        setSelectedMenuNames(prev => [...prev, menu.menuName]);
+                                                                                                    } else {
+                                                                                                        setSelectedMenuNames(prev => prev.filter(n => n !== menu.menuName));
+                                                                                                    }
+                                                                                                }}
+                                                                                                className="rounded text-indigo-600"
+                                                                                            />
+                                                                                            <span className="font-bold text-slate-700 truncate flex-1">{menu.menuName}</span>
+                                                                                            <span className="text-slate-400 whitespace-nowrap">({menu.reservations}件)</span>
+                                                                                        </label>
+                                                                                    ))}
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                                {selectedMenuNames.length > 0 && (
+                                                                    <button onClick={() => setSelectedMenuNames([])} className="text-xs font-bold text-rose-500 hover:text-rose-700 px-3 py-2 rounded-lg hover:bg-rose-50 whitespace-nowrap">
+                                                                        フィルター解除
+                                                                    </button>
+                                                                )}
+                                                            </div>
+                                                            {selectedMenuNames.length > 0 && (
+                                                                <div className="flex flex-wrap gap-1.5 mt-3">
+                                                                    {selectedMenuNames.map(name => (
+                                                                        <span key={name} className="inline-flex items-center gap-1 bg-indigo-100 text-indigo-700 px-2 py-1 rounded-lg text-xs font-bold">
+                                                                            <span className="truncate max-w-[200px]">{name}</span>
+                                                                            <button onClick={() => setSelectedMenuNames(prev => prev.filter(n => n !== name))} className="text-indigo-400 hover:text-indigo-700 ml-0.5">x</button>
+                                                                        </span>
+                                                                    ))}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
+
                                                     {/* Menu Analysis Content */}
                                                     {analyzeMenuData && analyzeMenuData.menuList && analyzeMenuData.menuList.length > 0 ? (
                                                         <div className="space-y-6">
-                                                            {/* Summary Stats */}
-                                                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                                                                <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 text-center">
-                                                                    <div className="text-3xl font-black text-indigo-600 mb-1">{analyzeMenuData.menuList.length}</div>
-                                                                    <div className="text-xs font-bold text-slate-500">メニュー数</div>
-                                                                </div>
-                                                                <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 text-center">
-                                                                    <div className="text-3xl font-black text-purple-600 mb-1">{analyzeMenuData.menuList.reduce((s, m) => s + m.reservations, 0)}</div>
-                                                                    <div className="text-xs font-bold text-slate-500">総予約数</div>
-                                                                </div>
-                                                                <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 text-center">
-                                                                    <div className="text-3xl font-black text-pink-600 mb-1">{analyzeMenuData.byBodyPart.length}</div>
-                                                                    <div className="text-xs font-bold text-slate-500">症状訴求数</div>
-                                                                </div>
-                                                                <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 text-center">
-                                                                    <div className="text-3xl font-black text-emerald-600 mb-1">{analyzeMenuData.byPrice.length}</div>
-                                                                    <div className="text-xs font-bold text-slate-500">価格帯数</div>
-                                                                </div>
-                                                            </div>
+                                                            {(() => {
+                                                                // フィルタリング適用
+                                                                const displayMenus = selectedMenuNames.length > 0
+                                                                    ? analyzeMenuData.menuList.filter(m => selectedMenuNames.includes(m.menuName))
+                                                                    : analyzeMenuData.menuList;
+                                                                const totalRes = displayMenus.reduce((s, m) => s + m.reservations, 0);
+                                                                const totalVisits = displayMenus.reduce((s, m) => s + m.actualVisits, 0);
+                                                                const totalAdvCancel = displayMenus.reduce((s, m) => s + m.advanceCancels, 0);
+                                                                const totalDayCancel = displayMenus.reduce((s, m) => s + m.sameDayCancels, 0);
+                                                                const totalEnroll = displayMenus.reduce((s, m) => s + m.enrollments, 0);
+                                                                const totalReview = displayMenus.reduce((s, m) => s + m.reviews, 0);
 
-                                                            {/* ===== メニュー別詳細テーブル（スプレッドシート形式） ===== */}
-                                                            <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
-                                                                <div className="flex items-center gap-3 mb-6">
-                                                                    <BarChart3 className="text-indigo-600" size={28} />
-                                                                    <h3 className="text-xl font-black text-slate-800">メニュー別分析（J列ベース）</h3>
-                                                                </div>
-                                                                <div className="overflow-x-auto">
-                                                                    <table className="w-full text-sm border-collapse">
-                                                                        <thead className="bg-teal-700 text-white sticky top-0">
-                                                                            <tr className="text-xs font-bold">
-                                                                                <th className="px-3 py-2 text-left border border-teal-600 min-w-[300px]">メニュー名</th>
-                                                                                <th className="px-3 py-2 text-right border border-teal-600">予約</th>
-                                                                                <th className="px-3 py-2 text-right border border-teal-600">実来院</th>
-                                                                                <th className="px-3 py-2 text-right border border-teal-600">事前</th>
-                                                                                <th className="px-3 py-2 text-right border border-teal-600">当日</th>
-                                                                                <th className="px-3 py-2 text-right border border-teal-600">キャン%</th>
-                                                                                <th className="px-3 py-2 text-right border border-teal-600">入会</th>
-                                                                                <th className="px-3 py-2 text-right border border-teal-600">入会%</th>
-                                                                                <th className="px-3 py-2 text-right border border-teal-600">口コミ</th>
-                                                                                <th className="px-3 py-2 text-right border border-teal-600">口コミ%</th>
-                                                                            </tr>
-                                                                        </thead>
-                                                                        <tbody>
-                                                                            {/* 個別メニュー行 */}
-                                                                            {analyzeMenuData.menuList.map((menu, idx) => (
-                                                                                <tr key={menu.menuName} className={`${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50'} hover:bg-blue-50 transition-colors`}>
-                                                                                    <td className="px-3 py-2 border border-slate-200 font-bold text-slate-800 text-xs">{menu.menuName}</td>
-                                                                                    <td className="px-3 py-2 border border-slate-200 text-right font-bold">{menu.reservations}</td>
-                                                                                    <td className="px-3 py-2 border border-slate-200 text-right font-bold">{menu.actualVisits}</td>
-                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{menu.advanceCancels}</td>
-                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{menu.sameDayCancels}</td>
-                                                                                    <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.cancelRate > 25 ? 'text-rose-600 bg-rose-50' : menu.cancelRate > 15 ? 'text-amber-600' : 'text-slate-700'}`}>
-                                                                                        {menu.reservations > 0 ? Math.round(menu.cancelRate) + '%' : '-'}
-                                                                                    </td>
-                                                                                    <td className="px-3 py-2 border border-slate-200 text-right font-bold">{menu.enrollments}</td>
-                                                                                    <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.enrollRate >= 30 ? 'text-emerald-600 bg-emerald-50' : menu.enrollRate >= 15 ? 'text-amber-600' : 'text-slate-700'}`}>
-                                                                                        {menu.actualVisits > 0 ? Math.round(menu.enrollRate) + '%' : '-'}
-                                                                                    </td>
-                                                                                    <td className="px-3 py-2 border border-slate-200 text-right font-bold">{menu.reviews}</td>
-                                                                                    <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.reviewRate >= 30 ? 'text-emerald-600 bg-emerald-50' : 'text-slate-700'}`}>
-                                                                                        {menu.actualVisits > 0 ? Math.round(menu.reviewRate) + '%' : '-'}
-                                                                                    </td>
-                                                                                </tr>
-                                                                            ))}
-                                                                        </tbody>
-                                                                    </table>
-                                                                </div>
-                                                            </div>
-
-                                                            {/* ===== 価格帯別サマリー ===== */}
-                                                            {analyzeMenuData.byPrice.length > 0 && (
-                                                                <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
-                                                                    <div className="flex items-center gap-3 mb-6">
-                                                                        <DollarSign className="text-blue-600" size={28} />
-                                                                        <h3 className="text-xl font-black text-slate-800">価格帯別サマリー</h3>
-                                                                    </div>
-                                                                    <div className="overflow-x-auto">
-                                                                        <table className="w-full text-sm border-collapse">
-                                                                            <thead className="bg-blue-700 text-white">
-                                                                                <tr className="text-xs font-bold">
-                                                                                    <th className="px-3 py-2 text-left border border-blue-600 min-w-[200px]">価格帯</th>
-                                                                                    <th className="px-3 py-2 text-right border border-blue-600">予約</th>
-                                                                                    <th className="px-3 py-2 text-right border border-blue-600">実来院</th>
-                                                                                    <th className="px-3 py-2 text-right border border-blue-600">事前</th>
-                                                                                    <th className="px-3 py-2 text-right border border-blue-600">当日</th>
-                                                                                    <th className="px-3 py-2 text-right border border-blue-600">キャン%</th>
-                                                                                    <th className="px-3 py-2 text-right border border-blue-600">入会</th>
-                                                                                    <th className="px-3 py-2 text-right border border-blue-600">入会%</th>
-                                                                                    <th className="px-3 py-2 text-right border border-blue-600">口コミ</th>
-                                                                                    <th className="px-3 py-2 text-right border border-blue-600">口コミ%</th>
-                                                                                </tr>
-                                                                            </thead>
-                                                                            <tbody>
-                                                                                {analyzeMenuData.byPrice.map((row, idx) => (
-                                                                                    <tr key={row.price} className={`${idx % 2 === 0 ? 'bg-blue-50' : 'bg-white'} font-bold hover:bg-blue-100 transition-colors`}>
-                                                                                        <td className="px-3 py-2 border border-slate-200 text-blue-800">{row.label}</td>
-                                                                                        <td className="px-3 py-2 border border-slate-200 text-right">{row.reservations}</td>
-                                                                                        <td className="px-3 py-2 border border-slate-200 text-right">{row.actualVisits}</td>
-                                                                                        <td className="px-3 py-2 border border-slate-200 text-right">{row.advanceCancels}</td>
-                                                                                        <td className="px-3 py-2 border border-slate-200 text-right">{row.sameDayCancels}</td>
-                                                                                        <td className={`px-3 py-2 border border-slate-200 text-right ${row.cancelRate > 25 ? 'text-rose-600 bg-rose-50' : row.cancelRate > 15 ? 'text-amber-600' : ''}`}>
-                                                                                            {row.reservations > 0 ? Math.round(row.cancelRate) + '%' : '-'}
-                                                                                        </td>
-                                                                                        <td className="px-3 py-2 border border-slate-200 text-right">{row.enrollments}</td>
-                                                                                        <td className={`px-3 py-2 border border-slate-200 text-right ${row.enrollRate >= 30 ? 'text-emerald-600 bg-emerald-50' : row.enrollRate >= 15 ? 'text-amber-600' : ''}`}>
-                                                                                            {row.actualVisits > 0 ? Math.round(row.enrollRate) + '%' : '-'}
-                                                                                        </td>
-                                                                                        <td className="px-3 py-2 border border-slate-200 text-right">{row.reviews}</td>
-                                                                                        <td className={`px-3 py-2 border border-slate-200 text-right ${row.reviewRate >= 30 ? 'text-emerald-600 bg-emerald-50' : ''}`}>
-                                                                                            {row.actualVisits > 0 ? Math.round(row.reviewRate) + '%' : '-'}
-                                                                                        </td>
-                                                                                    </tr>
-                                                                                ))}
-                                                                            </tbody>
-                                                                        </table>
-                                                                    </div>
-                                                                </div>
-                                                            )}
-
-                                                            {/* ===== 症状訴求別サマリー ===== */}
-                                                            {analyzeMenuData.byBodyPart.length > 0 && (
-                                                                <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
-                                                                    <div className="flex items-center gap-3 mb-6">
-                                                                        <Heart className="text-purple-600" size={28} />
-                                                                        <h3 className="text-xl font-black text-slate-800">症状訴求別サマリー</h3>
-                                                                    </div>
-                                                                    <div className="overflow-x-auto">
-                                                                        <table className="w-full text-sm border-collapse">
-                                                                            <thead className="bg-purple-700 text-white">
-                                                                                <tr className="text-xs font-bold">
-                                                                                    <th className="px-3 py-2 text-left border border-purple-600 min-w-[200px]">症状訴求</th>
-                                                                                    <th className="px-3 py-2 text-right border border-purple-600">予約</th>
-                                                                                    <th className="px-3 py-2 text-right border border-purple-600">実来院</th>
-                                                                                    <th className="px-3 py-2 text-right border border-purple-600">事前</th>
-                                                                                    <th className="px-3 py-2 text-right border border-purple-600">当日</th>
-                                                                                    <th className="px-3 py-2 text-right border border-purple-600">キャン%</th>
-                                                                                    <th className="px-3 py-2 text-right border border-purple-600">入会</th>
-                                                                                    <th className="px-3 py-2 text-right border border-purple-600">入会%</th>
-                                                                                    <th className="px-3 py-2 text-right border border-purple-600">口コミ</th>
-                                                                                    <th className="px-3 py-2 text-right border border-purple-600">口コミ%</th>
-                                                                                </tr>
-                                                                            </thead>
-                                                                            <tbody>
-                                                                                {analyzeMenuData.byBodyPart.map((row, idx) => (
-                                                                                    <tr key={row.bodyPart} className={`${idx % 2 === 0 ? 'bg-purple-50' : 'bg-white'} font-bold hover:bg-purple-100 transition-colors`}>
-                                                                                        <td className="px-3 py-2 border border-slate-200 text-purple-800">{row.label}</td>
-                                                                                        <td className="px-3 py-2 border border-slate-200 text-right">{row.reservations}</td>
-                                                                                        <td className="px-3 py-2 border border-slate-200 text-right">{row.actualVisits}</td>
-                                                                                        <td className="px-3 py-2 border border-slate-200 text-right">{row.advanceCancels}</td>
-                                                                                        <td className="px-3 py-2 border border-slate-200 text-right">{row.sameDayCancels}</td>
-                                                                                        <td className={`px-3 py-2 border border-slate-200 text-right ${row.cancelRate > 25 ? 'text-rose-600 bg-rose-50' : row.cancelRate > 15 ? 'text-amber-600' : ''}`}>
-                                                                                            {row.reservations > 0 ? Math.round(row.cancelRate) + '%' : '-'}
-                                                                                        </td>
-                                                                                        <td className="px-3 py-2 border border-slate-200 text-right">{row.enrollments}</td>
-                                                                                        <td className={`px-3 py-2 border border-slate-200 text-right ${row.enrollRate >= 30 ? 'text-emerald-600 bg-emerald-50' : row.enrollRate >= 15 ? 'text-amber-600' : ''}`}>
-                                                                                            {row.actualVisits > 0 ? Math.round(row.enrollRate) + '%' : '-'}
-                                                                                        </td>
-                                                                                        <td className="px-3 py-2 border border-slate-200 text-right">{row.reviews}</td>
-                                                                                        <td className={`px-3 py-2 border border-slate-200 text-right ${row.reviewRate >= 30 ? 'text-emerald-600 bg-emerald-50' : ''}`}>
-                                                                                            {row.actualVisits > 0 ? Math.round(row.reviewRate) + '%' : '-'}
-                                                                                        </td>
-                                                                                    </tr>
-                                                                                ))}
-                                                                            </tbody>
-                                                                        </table>
-                                                                    </div>
-                                                                </div>
-                                                            )}
-
-                                                            {/* ===== 集客媒体別メニュー分析 ===== */}
-                                                            {analyzeMenuData.bySource.length > 0 && (
-                                                                <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
-                                                                    <div className="flex items-center gap-3 mb-6">
-                                                                        <Target className="text-emerald-600" size={28} />
-                                                                        <h3 className="text-xl font-black text-slate-800">集客媒体別メニュー分析</h3>
-                                                                    </div>
-                                                                    {analyzeMenuData.bySource.map((sourceGroup) => (
-                                                                        <div key={sourceGroup.source} className="mb-6 last:mb-0">
-                                                                            <div className="flex items-center gap-2 mb-3 px-2">
-                                                                                <span className="px-3 py-1 rounded-lg text-sm font-black bg-emerald-100 text-emerald-700">{sourceGroup.label}</span>
-                                                                                <span className="text-xs text-slate-500">（{sourceGroup.menus.length}メニュー / 予約{sourceGroup.reservations}件）</span>
+                                                                return (
+                                                                    <>
+                                                                        {/* Summary Stats */}
+                                                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                                                            <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 text-center">
+                                                                                <div className="text-3xl font-black text-indigo-600 mb-1">{displayMenus.length}</div>
+                                                                                <div className="text-xs font-bold text-slate-500">メニュー数</div>
                                                                             </div>
-                                                                            <div className="overflow-x-auto">
+                                                                            <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 text-center">
+                                                                                <div className="text-3xl font-black text-purple-600 mb-1">{totalRes.toLocaleString()}</div>
+                                                                                <div className="text-xs font-bold text-slate-500">総予約数</div>
+                                                                            </div>
+                                                                            <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 text-center">
+                                                                                <div className="text-3xl font-black text-emerald-600 mb-1">{totalVisits.toLocaleString()}</div>
+                                                                                <div className="text-xs font-bold text-slate-500">実来院数</div>
+                                                                            </div>
+                                                                            <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 text-center">
+                                                                                <div className="text-3xl font-black text-pink-600 mb-1">{totalRes > 0 ? Math.round((totalAdvCancel + totalDayCancel) / totalRes * 100) : 0}%</div>
+                                                                                <div className="text-xs font-bold text-slate-500">全体キャンセル率</div>
+                                                                            </div>
+                                                                        </div>
+
+                                                                        {/* ===== メニュー別詳細テーブル ===== */}
+                                                                        <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
+                                                                            <div className="flex items-center justify-between mb-6">
+                                                                                <div className="flex items-center gap-3">
+                                                                                    <BarChart3 className="text-indigo-600" size={28} />
+                                                                                    <h3 className="text-xl font-black text-slate-800">メニュー別分析（J列ベース）</h3>
+                                                                                </div>
+                                                                                <span className="text-xs text-slate-400 font-bold">{displayMenus.length}件表示</span>
+                                                                            </div>
+                                                                            <div className="overflow-x-auto" style={{maxHeight: '600px', overflowY: 'auto'}}>
                                                                                 <table className="w-full text-sm border-collapse">
-                                                                                    <thead className="bg-emerald-700 text-white">
+                                                                                    <thead className="bg-teal-700 text-white sticky top-0 z-10">
                                                                                         <tr className="text-xs font-bold">
-                                                                                            <th className="px-3 py-2 text-left border border-emerald-600 min-w-[300px]">メニュー名</th>
-                                                                                            <th className="px-3 py-2 text-right border border-emerald-600">予約</th>
-                                                                                            <th className="px-3 py-2 text-right border border-emerald-600">実来院</th>
-                                                                                            <th className="px-3 py-2 text-right border border-emerald-600">事前</th>
-                                                                                            <th className="px-3 py-2 text-right border border-emerald-600">当日</th>
-                                                                                            <th className="px-3 py-2 text-right border border-emerald-600">キャン%</th>
-                                                                                            <th className="px-3 py-2 text-right border border-emerald-600">入会</th>
-                                                                                            <th className="px-3 py-2 text-right border border-emerald-600">入会%</th>
-                                                                                            <th className="px-3 py-2 text-right border border-emerald-600">口コミ</th>
-                                                                                            <th className="px-3 py-2 text-right border border-emerald-600">口コミ%</th>
+                                                                                            <th className="px-3 py-2 text-left border border-teal-600 min-w-[350px]">メニュー名</th>
+                                                                                            <th className="px-3 py-2 text-right border border-teal-600">予約</th>
+                                                                                            <th className="px-3 py-2 text-right border border-teal-600">実来院</th>
+                                                                                            <th className="px-3 py-2 text-right border border-teal-600">事前</th>
+                                                                                            <th className="px-3 py-2 text-right border border-teal-600">当日</th>
+                                                                                            <th className="px-3 py-2 text-right border border-teal-600">キャン%</th>
+                                                                                            <th className="px-3 py-2 text-right border border-teal-600">入会</th>
+                                                                                            <th className="px-3 py-2 text-right border border-teal-600">入会%</th>
+                                                                                            <th className="px-3 py-2 text-right border border-teal-600">口コミ</th>
+                                                                                            <th className="px-3 py-2 text-right border border-teal-600">口コミ%</th>
                                                                                         </tr>
                                                                                     </thead>
                                                                                     <tbody>
-                                                                                        {sourceGroup.menus.map((menu, idx) => (
-                                                                                            <tr key={menu.menuName} className={`${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50'} hover:bg-emerald-50 transition-colors`}>
+                                                                                        {/* 合計行 */}
+                                                                                        <tr className="bg-teal-50 font-black border-b-2 border-teal-300">
+                                                                                            <td className="px-3 py-2 border border-slate-200 text-teal-800">合計（{displayMenus.length}メニュー）</td>
+                                                                                            <td className="px-3 py-2 border border-slate-200 text-right">{totalRes.toLocaleString()}</td>
+                                                                                            <td className="px-3 py-2 border border-slate-200 text-right">{totalVisits.toLocaleString()}</td>
+                                                                                            <td className="px-3 py-2 border border-slate-200 text-right">{totalAdvCancel.toLocaleString()}</td>
+                                                                                            <td className="px-3 py-2 border border-slate-200 text-right">{totalDayCancel.toLocaleString()}</td>
+                                                                                            <td className="px-3 py-2 border border-slate-200 text-right">{totalRes > 0 ? Math.round((totalAdvCancel + totalDayCancel) / totalRes * 100) + '%' : '-'}</td>
+                                                                                            <td className="px-3 py-2 border border-slate-200 text-right">{totalEnroll.toLocaleString()}</td>
+                                                                                            <td className="px-3 py-2 border border-slate-200 text-right">{totalVisits > 0 ? Math.round(totalEnroll / totalVisits * 100) + '%' : '-'}</td>
+                                                                                            <td className="px-3 py-2 border border-slate-200 text-right">{totalReview.toLocaleString()}</td>
+                                                                                            <td className="px-3 py-2 border border-slate-200 text-right">{totalVisits > 0 ? Math.round(totalReview / totalVisits * 100) + '%' : '-'}</td>
+                                                                                        </tr>
+                                                                                        {/* 個別メニュー行 */}
+                                                                                        {displayMenus.map((menu, idx) => (
+                                                                                            <tr key={menu.menuName} className={`${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50'} hover:bg-blue-50 transition-colors`}>
                                                                                                 <td className="px-3 py-2 border border-slate-200 font-bold text-slate-800 text-xs">{menu.menuName}</td>
                                                                                                 <td className="px-3 py-2 border border-slate-200 text-right font-bold">{menu.reservations}</td>
                                                                                                 <td className="px-3 py-2 border border-slate-200 text-right font-bold">{menu.actualVisits}</td>
                                                                                                 <td className="px-3 py-2 border border-slate-200 text-right">{menu.advanceCancels}</td>
                                                                                                 <td className="px-3 py-2 border border-slate-200 text-right">{menu.sameDayCancels}</td>
-                                                                                                <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.cancelRate > 25 ? 'text-rose-600 bg-rose-50' : menu.cancelRate > 15 ? 'text-amber-600' : ''}`}>
+                                                                                                <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.cancelRate > 25 ? 'text-rose-600 bg-rose-50' : menu.cancelRate > 15 ? 'text-amber-600' : 'text-slate-700'}`}>
                                                                                                     {menu.reservations > 0 ? Math.round(menu.cancelRate) + '%' : '-'}
                                                                                                 </td>
                                                                                                 <td className="px-3 py-2 border border-slate-200 text-right font-bold">{menu.enrollments}</td>
-                                                                                                <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.enrollRate >= 30 ? 'text-emerald-600 bg-emerald-50' : menu.enrollRate >= 15 ? 'text-amber-600' : ''}`}>
+                                                                                                <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.enrollRate >= 30 ? 'text-emerald-600 bg-emerald-50' : menu.enrollRate >= 15 ? 'text-amber-600' : 'text-slate-700'}`}>
                                                                                                     {menu.actualVisits > 0 ? Math.round(menu.enrollRate) + '%' : '-'}
                                                                                                 </td>
                                                                                                 <td className="px-3 py-2 border border-slate-200 text-right font-bold">{menu.reviews}</td>
-                                                                                                <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.reviewRate >= 30 ? 'text-emerald-600 bg-emerald-50' : ''}`}>
+                                                                                                <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.reviewRate >= 30 ? 'text-emerald-600 bg-emerald-50' : 'text-slate-700'}`}>
                                                                                                     {menu.actualVisits > 0 ? Math.round(menu.reviewRate) + '%' : '-'}
                                                                                                 </td>
                                                                                             </tr>
@@ -4316,85 +4274,167 @@
                                                                                 </table>
                                                                             </div>
                                                                         </div>
-                                                                    ))}
-                                                                </div>
-                                                            )}
 
-                                                            {/* ===== 最適化提案 ===== */}
-                                                            <div className="bg-gradient-to-br from-indigo-600 to-purple-600 rounded-3xl p-6 text-white shadow-lg">
-                                                                <div className="flex items-center gap-3 mb-6">
-                                                                    <Activity size={28} />
-                                                                    <h3 className="text-xl font-black">最適化提案</h3>
-                                                                </div>
-                                                                <div className="grid md:grid-cols-2 gap-4">
-                                                                    {(() => {
-                                                                        const bestPrice = analyzeMenuData.byPrice.length > 0
-                                                                            ? [...analyzeMenuData.byPrice].sort((a, b) => b.enrollRate - a.enrollRate)[0]
-                                                                            : null;
-                                                                        const bestBodyPart = analyzeMenuData.byBodyPart.length > 0
-                                                                            ? [...analyzeMenuData.byBodyPart].sort((a, b) => b.enrollRate - a.enrollRate)[0]
-                                                                            : null;
-                                                                        const worstCancel = analyzeMenuData.menuList.length > 0
-                                                                            ? [...analyzeMenuData.menuList].filter(m => m.reservations >= 5).sort((a, b) => b.cancelRate - a.cancelRate)[0]
-                                                                            : null;
-                                                                        const bestEnroll = analyzeMenuData.menuList.length > 0
-                                                                            ? [...analyzeMenuData.menuList].filter(m => m.actualVisits >= 5).sort((a, b) => b.enrollRate - a.enrollRate)[0]
-                                                                            : null;
-
-                                                                        return (
-                                                                            <>
-                                                                                <div className="bg-white/10 backdrop-blur rounded-2xl p-4">
-                                                                                    <div className="flex items-center gap-2 mb-3">
-                                                                                        <DollarSign size={20} />
-                                                                                        <h4 className="font-black">推奨価格帯</h4>
-                                                                                    </div>
-                                                                                    <div className="bg-white/20 rounded-xl p-3 mb-2">
-                                                                                        <div className="text-2xl font-black mb-1">{bestPrice?.label || '---'}</div>
-                                                                                        <div className="text-sm opacity-90">入会率: {bestPrice ? Math.round(bestPrice.enrollRate) : 0}% / キャンセル率: {bestPrice ? Math.round(bestPrice.cancelRate) : 0}%</div>
-                                                                                    </div>
-                                                                                    <p className="text-sm opacity-90">この価格帯は最も高い入会率を記録しています。</p>
+                                                                        {/* ===== 価格帯別サマリー ===== */}
+                                                                        {analyzeMenuData.byPrice.length > 0 && (
+                                                                            <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
+                                                                                <div className="flex items-center gap-3 mb-6">
+                                                                                    <DollarSign className="text-blue-600" size={28} />
+                                                                                    <h3 className="text-xl font-black text-slate-800">価格帯別サマリー</h3>
                                                                                 </div>
-
-                                                                                <div className="bg-white/10 backdrop-blur rounded-2xl p-4">
-                                                                                    <div className="flex items-center gap-2 mb-3">
-                                                                                        <Heart size={20} />
-                                                                                        <h4 className="font-black">推奨症状訴求</h4>
-                                                                                    </div>
-                                                                                    <div className="bg-white/20 rounded-xl p-3 mb-2">
-                                                                                        <div className="text-2xl font-black mb-1">{bestBodyPart?.label || '---'}</div>
-                                                                                        <div className="text-sm opacity-90">入会率: {bestBodyPart ? Math.round(bestBodyPart.enrollRate) : 0}% / キャンセル率: {bestBodyPart ? Math.round(bestBodyPart.cancelRate) : 0}%</div>
-                                                                                    </div>
-                                                                                    <p className="text-sm opacity-90">この症状訴求は最も高い入会率を実現しています。</p>
+                                                                                <div className="overflow-x-auto">
+                                                                                    <table className="w-full text-sm border-collapse">
+                                                                                        <thead className="bg-blue-700 text-white">
+                                                                                            <tr className="text-xs font-bold">
+                                                                                                <th className="px-3 py-2 text-left border border-blue-600 min-w-[200px]">価格帯</th>
+                                                                                                <th className="px-3 py-2 text-right border border-blue-600">予約</th>
+                                                                                                <th className="px-3 py-2 text-right border border-blue-600">実来院</th>
+                                                                                                <th className="px-3 py-2 text-right border border-blue-600">事前</th>
+                                                                                                <th className="px-3 py-2 text-right border border-blue-600">当日</th>
+                                                                                                <th className="px-3 py-2 text-right border border-blue-600">キャン%</th>
+                                                                                                <th className="px-3 py-2 text-right border border-blue-600">入会</th>
+                                                                                                <th className="px-3 py-2 text-right border border-blue-600">入会%</th>
+                                                                                                <th className="px-3 py-2 text-right border border-blue-600">口コミ</th>
+                                                                                                <th className="px-3 py-2 text-right border border-blue-600">口コミ%</th>
+                                                                                            </tr>
+                                                                                        </thead>
+                                                                                        <tbody>
+                                                                                            {analyzeMenuData.byPrice.map((row, idx) => (
+                                                                                                <tr key={row.price} className={`${idx % 2 === 0 ? 'bg-blue-50' : 'bg-white'} font-bold hover:bg-blue-100 transition-colors`}>
+                                                                                                    <td className="px-3 py-2 border border-slate-200 text-blue-800">{row.label}</td>
+                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.reservations}</td>
+                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.actualVisits}</td>
+                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.advanceCancels}</td>
+                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.sameDayCancels}</td>
+                                                                                                    <td className={`px-3 py-2 border border-slate-200 text-right ${row.cancelRate > 25 ? 'text-rose-600 bg-rose-50' : row.cancelRate > 15 ? 'text-amber-600' : ''}`}>
+                                                                                                        {row.reservations > 0 ? Math.round(row.cancelRate) + '%' : '-'}
+                                                                                                    </td>
+                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.enrollments}</td>
+                                                                                                    <td className={`px-3 py-2 border border-slate-200 text-right ${row.enrollRate >= 30 ? 'text-emerald-600 bg-emerald-50' : row.enrollRate >= 15 ? 'text-amber-600' : ''}`}>
+                                                                                                        {row.actualVisits > 0 ? Math.round(row.enrollRate) + '%' : '-'}
+                                                                                                    </td>
+                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.reviews}</td>
+                                                                                                    <td className={`px-3 py-2 border border-slate-200 text-right ${row.reviewRate >= 30 ? 'text-emerald-600 bg-emerald-50' : ''}`}>
+                                                                                                        {row.actualVisits > 0 ? Math.round(row.reviewRate) + '%' : '-'}
+                                                                                                    </td>
+                                                                                                </tr>
+                                                                                            ))}
+                                                                                        </tbody>
+                                                                                    </table>
                                                                                 </div>
+                                                                            </div>
+                                                                        )}
 
-                                                                                <div className="bg-white/10 backdrop-blur rounded-2xl p-4">
-                                                                                    <div className="flex items-center gap-2 mb-3">
-                                                                                        <AlertTriangle size={20} />
-                                                                                        <h4 className="font-black">改善推奨メニュー</h4>
-                                                                                    </div>
-                                                                                    <div className="bg-white/20 rounded-xl p-3 mb-2">
-                                                                                        <div className="text-base font-black mb-1 truncate">{worstCancel?.menuName || '---'}</div>
-                                                                                        <div className="text-sm opacity-90">キャンセル率: {worstCancel ? Math.round(worstCancel.cancelRate) : 0}%（予約{worstCancel?.reservations || 0}件中）</div>
-                                                                                    </div>
-                                                                                    <p className="text-sm opacity-90">キャンセル率が高いメニュー。訴求文・価格の見直しを推奨します。</p>
+                                                                        {/* ===== 症状訴求別サマリー ===== */}
+                                                                        {analyzeMenuData.byBodyPart.length > 0 && (
+                                                                            <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
+                                                                                <div className="flex items-center gap-3 mb-6">
+                                                                                    <Heart className="text-purple-600" size={28} />
+                                                                                    <h3 className="text-xl font-black text-slate-800">症状訴求別サマリー</h3>
                                                                                 </div>
+                                                                                <div className="overflow-x-auto">
+                                                                                    <table className="w-full text-sm border-collapse">
+                                                                                        <thead className="bg-purple-700 text-white">
+                                                                                            <tr className="text-xs font-bold">
+                                                                                                <th className="px-3 py-2 text-left border border-purple-600 min-w-[200px]">症状訴求</th>
+                                                                                                <th className="px-3 py-2 text-right border border-purple-600">予約</th>
+                                                                                                <th className="px-3 py-2 text-right border border-purple-600">実来院</th>
+                                                                                                <th className="px-3 py-2 text-right border border-purple-600">事前</th>
+                                                                                                <th className="px-3 py-2 text-right border border-purple-600">当日</th>
+                                                                                                <th className="px-3 py-2 text-right border border-purple-600">キャン%</th>
+                                                                                                <th className="px-3 py-2 text-right border border-purple-600">入会</th>
+                                                                                                <th className="px-3 py-2 text-right border border-purple-600">入会%</th>
+                                                                                                <th className="px-3 py-2 text-right border border-purple-600">口コミ</th>
+                                                                                                <th className="px-3 py-2 text-right border border-purple-600">口コミ%</th>
+                                                                                            </tr>
+                                                                                        </thead>
+                                                                                        <tbody>
+                                                                                            {analyzeMenuData.byBodyPart.map((row, idx) => (
+                                                                                                <tr key={row.bodyPart} className={`${idx % 2 === 0 ? 'bg-purple-50' : 'bg-white'} font-bold hover:bg-purple-100 transition-colors`}>
+                                                                                                    <td className="px-3 py-2 border border-slate-200 text-purple-800">{row.label}</td>
+                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.reservations}</td>
+                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.actualVisits}</td>
+                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.advanceCancels}</td>
+                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.sameDayCancels}</td>
+                                                                                                    <td className={`px-3 py-2 border border-slate-200 text-right ${row.cancelRate > 25 ? 'text-rose-600 bg-rose-50' : row.cancelRate > 15 ? 'text-amber-600' : ''}`}>
+                                                                                                        {row.reservations > 0 ? Math.round(row.cancelRate) + '%' : '-'}
+                                                                                                    </td>
+                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.enrollments}</td>
+                                                                                                    <td className={`px-3 py-2 border border-slate-200 text-right ${row.enrollRate >= 30 ? 'text-emerald-600 bg-emerald-50' : row.enrollRate >= 15 ? 'text-amber-600' : ''}`}>
+                                                                                                        {row.actualVisits > 0 ? Math.round(row.enrollRate) + '%' : '-'}
+                                                                                                    </td>
+                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.reviews}</td>
+                                                                                                    <td className={`px-3 py-2 border border-slate-200 text-right ${row.reviewRate >= 30 ? 'text-emerald-600 bg-emerald-50' : ''}`}>
+                                                                                                        {row.actualVisits > 0 ? Math.round(row.reviewRate) + '%' : '-'}
+                                                                                                    </td>
+                                                                                                </tr>
+                                                                                            ))}
+                                                                                        </tbody>
+                                                                                    </table>
+                                                                                </div>
+                                                                            </div>
+                                                                        )}
 
-                                                                                <div className="bg-white/10 backdrop-blur rounded-2xl p-4">
-                                                                                    <div className="flex items-center gap-2 mb-3">
-                                                                                        <Target size={20} />
-                                                                                        <h4 className="font-black">最高入会率メニュー</h4>
-                                                                                    </div>
-                                                                                    <div className="bg-white/20 rounded-xl p-3 mb-2">
-                                                                                        <div className="text-base font-black mb-1 truncate">{bestEnroll?.menuName || '---'}</div>
-                                                                                        <div className="text-sm opacity-90">入会率: {bestEnroll ? Math.round(bestEnroll.enrollRate) : 0}%（実来院{bestEnroll?.actualVisits || 0}件中）</div>
-                                                                                    </div>
-                                                                                    <p className="text-sm opacity-90">このメニューは最も高い入会率を記録。集客強化を推奨します。</p>
+                                                                        {/* ===== 集客媒体別メニュー分析 ===== */}
+                                                                        {analyzeMenuData.bySource.length > 0 && (
+                                                                            <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
+                                                                                <div className="flex items-center gap-3 mb-6">
+                                                                                    <Target className="text-emerald-600" size={28} />
+                                                                                    <h3 className="text-xl font-black text-slate-800">集客媒体別メニュー分析</h3>
                                                                                 </div>
-                                                                            </>
-                                                                        );
-                                                                    })()}
-                                                                </div>
-                                                            </div>
+                                                                                {analyzeMenuData.bySource.map((sourceGroup) => (
+                                                                                    <div key={sourceGroup.source} className="mb-6 last:mb-0">
+                                                                                        <div className="flex items-center gap-2 mb-3 px-2">
+                                                                                            <span className="px-3 py-1 rounded-lg text-sm font-black bg-emerald-100 text-emerald-700">{sourceGroup.label}</span>
+                                                                                            <span className="text-xs text-slate-500">({sourceGroup.menus.length}メニュー / 予約{sourceGroup.reservations}件)</span>
+                                                                                        </div>
+                                                                                        <div className="overflow-x-auto">
+                                                                                            <table className="w-full text-sm border-collapse">
+                                                                                                <thead className="bg-emerald-700 text-white">
+                                                                                                    <tr className="text-xs font-bold">
+                                                                                                        <th className="px-3 py-2 text-left border border-emerald-600 min-w-[350px]">メニュー名</th>
+                                                                                                        <th className="px-3 py-2 text-right border border-emerald-600">予約</th>
+                                                                                                        <th className="px-3 py-2 text-right border border-emerald-600">実来院</th>
+                                                                                                        <th className="px-3 py-2 text-right border border-emerald-600">事前</th>
+                                                                                                        <th className="px-3 py-2 text-right border border-emerald-600">当日</th>
+                                                                                                        <th className="px-3 py-2 text-right border border-emerald-600">キャン%</th>
+                                                                                                        <th className="px-3 py-2 text-right border border-emerald-600">入会</th>
+                                                                                                        <th className="px-3 py-2 text-right border border-emerald-600">入会%</th>
+                                                                                                        <th className="px-3 py-2 text-right border border-emerald-600">口コミ</th>
+                                                                                                        <th className="px-3 py-2 text-right border border-emerald-600">口コミ%</th>
+                                                                                                    </tr>
+                                                                                                </thead>
+                                                                                                <tbody>
+                                                                                                    {sourceGroup.menus.map((menu, idx) => (
+                                                                                                        <tr key={menu.menuName} className={`${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50'} hover:bg-emerald-50 transition-colors`}>
+                                                                                                            <td className="px-3 py-2 border border-slate-200 font-bold text-slate-800 text-xs">{menu.menuName}</td>
+                                                                                                            <td className="px-3 py-2 border border-slate-200 text-right font-bold">{menu.reservations}</td>
+                                                                                                            <td className="px-3 py-2 border border-slate-200 text-right font-bold">{menu.actualVisits}</td>
+                                                                                                            <td className="px-3 py-2 border border-slate-200 text-right">{menu.advanceCancels}</td>
+                                                                                                            <td className="px-3 py-2 border border-slate-200 text-right">{menu.sameDayCancels}</td>
+                                                                                                            <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.cancelRate > 25 ? 'text-rose-600 bg-rose-50' : menu.cancelRate > 15 ? 'text-amber-600' : ''}`}>
+                                                                                                                {menu.reservations > 0 ? Math.round(menu.cancelRate) + '%' : '-'}
+                                                                                                            </td>
+                                                                                                            <td className="px-3 py-2 border border-slate-200 text-right font-bold">{menu.enrollments}</td>
+                                                                                                            <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.enrollRate >= 30 ? 'text-emerald-600 bg-emerald-50' : menu.enrollRate >= 15 ? 'text-amber-600' : ''}`}>
+                                                                                                                {menu.actualVisits > 0 ? Math.round(menu.enrollRate) + '%' : '-'}
+                                                                                                            </td>
+                                                                                                            <td className="px-3 py-2 border border-slate-200 text-right font-bold">{menu.reviews}</td>
+                                                                                                            <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.reviewRate >= 30 ? 'text-emerald-600 bg-emerald-50' : ''}`}>
+                                                                                                                {menu.actualVisits > 0 ? Math.round(menu.reviewRate) + '%' : '-'}
+                                                                                                            </td>
+                                                                                                        </tr>
+                                                                                                    ))}
+                                                                                                </tbody>
+                                                                                            </table>
+                                                                                        </div>
+                                                                                    </div>
+                                                                                ))}
+                                                                            </div>
+                                                                        )}
+                                                                    </>
+                                                                );
+                                                            })()}
                                                         </div>
                                                     ) : (
                                                         <div className="bg-white rounded-3xl p-12 text-center border-2 border-dashed border-slate-300">

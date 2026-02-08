@@ -1371,6 +1371,51 @@
                 };
             }, [filteredData]);
 
+            // 質問の種類を分類する関数
+            const classifyQuestion = (question) => {
+                const lowerQ = question.toLowerCase();
+
+                // スタッフリスト要求
+                if (lowerQ.includes('スタッフ') && (lowerQ.includes('教えて') || lowerQ.includes('誰') || lowerQ.includes('一覧') || lowerQ.includes('リスト'))) {
+                    return 'staff_list';
+                }
+
+                // 特定の指標要求
+                if (lowerQ.includes('売上は') || lowerQ.includes('売上を') || lowerQ.match(/いくら|金額/)) {
+                    return 'sales_query';
+                }
+                if (lowerQ.includes('新規') && (lowerQ.includes('何人') || lowerQ.includes('数'))) {
+                    return 'new_customer_query';
+                }
+                if (lowerQ.includes('入会率')) {
+                    return 'enrollment_rate_query';
+                }
+                if (lowerQ.includes('退会率')) {
+                    return 'churn_rate_query';
+                }
+                if (lowerQ.includes('マーク') || lowerQ.includes('成績') || lowerQ.includes('実績') || lowerQ.includes('パフォーマンス')) {
+                    return 'performance_summary';
+                }
+
+                // 比較要求
+                if (lowerQ.includes('比較') || lowerQ.includes('どっち') || lowerQ.includes('vs')) {
+                    return 'comparison';
+                }
+
+                // ランキング要求
+                if (lowerQ.includes('ランキング') || lowerQ.includes('トップ') || lowerQ.includes('一番')) {
+                    return 'ranking';
+                }
+
+                // 推奨・アドバイス要求
+                if (lowerQ.includes('改善') || lowerQ.includes('アドバイス') || lowerQ.includes('提案') || lowerQ.includes('どうしたら')) {
+                    return 'advice';
+                }
+
+                // 詳細分析（デフォルト）
+                return 'detailed_analysis';
+            };
+
             // チャット分析機能
             const analyzeChatQuestion = (question, currentContext) => {
                 const lowerQ = question.toLowerCase();
@@ -1390,7 +1435,11 @@
                     };
                 }
 
-                // 店舗名の抽出（より正確なマッチング）
+                // 質問の種類を分類
+                const questionType = classifyQuestion(question);
+                console.log('🔍 Question type:', questionType);
+
+                // 店舗名の抽出（より柔軟なマッチング）
                 let targetBranch = null;
 
                 // まず完全一致を試みる
@@ -1402,14 +1451,30 @@
                     }
                 }
 
-                // 次に「院」を除いた部分一致を試みる
+                // 次に部分一致を試みる（「千葉」→「千葉駅院」など）
                 if (!targetBranch) {
                     for (const branch of allBranches) {
-                        const branchBase = branch.replace(/院$/, '');
-                        if (branchBase && lowerQ.includes(branchBase.toLowerCase())) {
+                        // 「院」「駅」などを除いた基本名
+                        const branchBase = branch.replace(/駅?院$/, '');
+                        if (branchBase.length >= 2 && lowerQ.includes(branchBase.toLowerCase())) {
                             targetBranch = branch;
-                            console.log('✓ Branch matched (partial):', branch);
+                            console.log('✓ Branch matched (base name):', branch, 'from', branchBase);
                             break;
+                        }
+                    }
+                }
+
+                // さらに柔軟なマッチング（エリア名など）
+                if (!targetBranch) {
+                    for (const branch of allBranches) {
+                        // 最初の2文字でマッチング（「千葉」「池袋」など）
+                        if (branch.length >= 2) {
+                            const firstTwo = branch.substring(0, 2);
+                            if (lowerQ.includes(firstTwo.toLowerCase())) {
+                                targetBranch = branch;
+                                console.log('✓ Branch matched (first chars):', branch, 'from', firstTwo);
+                                break;
+                            }
                         }
                     }
                 }
@@ -1536,10 +1601,24 @@
                     };
                 }
 
-                // 分析実行
-                const result = useMktData
-                    ? analyzeMarketingData(filteredAnalysisData, targetBranch, targetMonth)
-                    : analyzeOperationalData(filteredAnalysisData, targetBranch, targetMonth);
+                // 質問タイプに応じた分析実行
+                let result;
+
+                if (questionType === 'staff_list') {
+                    // スタッフリストを返す（経営データのみ）
+                    result = generateStaffListResponse(filteredAnalysisData, targetBranch, targetMonth);
+                } else if (questionType === 'sales_query') {
+                    // 売上情報を返す（経営データのみ）
+                    result = generateSalesQueryResponse(filteredAnalysisData, targetBranch, targetMonth);
+                } else if (questionType === 'performance_summary') {
+                    // パフォーマンスサマリーを返す（経営データのみ）
+                    result = generatePerformanceSummaryResponse(filteredAnalysisData, targetBranch, targetMonth);
+                } else {
+                    // 詳細分析を返す（データソースに応じて）
+                    result = useMktData
+                        ? analyzeMarketingData(filteredAnalysisData, targetBranch, targetMonth)
+                        : analyzeOperationalData(filteredAnalysisData, targetBranch, targetMonth);
+                }
 
                 // 新しい文脈を含めて返す
                 return {
@@ -1876,6 +1955,93 @@
                 return {
                     success: true,
                     message: summary
+                };
+            };
+
+            // 質問タイプ別の回答生成関数
+            const generateStaffListResponse = (data, branch, month) => {
+                const staffMap = {};
+                data.forEach(d => {
+                    const key = d.name || '不明';
+                    if (!staffMap[key]) {
+                        staffMap[key] = {
+                            name: key,
+                            branch: d.branch,
+                            sales: 0,
+                            newCount: 0,
+                            records: 0
+                        };
+                    }
+                    staffMap[key].sales += validateNumber(d.individualSales);
+                    staffMap[key].newCount += validateNumber(d.newCount);
+                    staffMap[key].records++;
+                });
+
+                const staffList = Object.values(staffMap).sort((a, b) => b.sales - a.sales);
+
+                if (staffList.length === 0) {
+                    return {
+                        success: false,
+                        message: `${branch || '該当条件'}のスタッフ情報が見つかりませんでした。`
+                    };
+                }
+
+                let response = `${branch || '該当店舗'}のスタッフは${staffList.length}名です。\n\n`;
+                response += '【スタッフ一覧】\n';
+
+                staffList.forEach((staff, index) => {
+                    const emoji = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '👤';
+                    response += `${emoji} ${staff.name}\n`;
+                    response += `   ・売上: ¥${Math.round(staff.sales / 10000)}万円\n`;
+                    response += `   ・新規顧客: ${staff.newCount}人\n`;
+                    if (index < staffList.length - 1) response += '\n';
+                });
+
+                return {
+                    success: true,
+                    message: response
+                };
+            };
+
+            const generateSalesQueryResponse = (data, branch, month) => {
+                const totalSales = validateNumber(data.reduce((sum, d) => sum + validateNumber(d.individualSales), 0));
+                const totalRecurring = validateNumber(data.reduce((sum, d) => sum + validateNumber(d.recurringSales), 0));
+
+                const response = `${branch || '該当条件'}の${month || '期間'}の売上は:\n\n` +
+                    `💰 個別売上: ¥${totalSales.toLocaleString()}\n` +
+                    `🔄 継続売上: ¥${totalRecurring.toLocaleString()}\n` +
+                    `📊 合計: ¥${(totalSales + totalRecurring).toLocaleString()}`;
+
+                return {
+                    success: true,
+                    message: response
+                };
+            };
+
+            const generatePerformanceSummaryResponse = (data, branch, month) => {
+                const totalSales = validateNumber(data.reduce((sum, d) => sum + validateNumber(d.individualSales), 0));
+                const totalNewCount = validateNumber(data.reduce((sum, d) => sum + validateNumber(d.newCount), 0));
+                const totalNewEnroll = validateNumber(data.reduce((sum, d) => sum + validateNumber(d.newEnroll), 0));
+                const enrollRate = totalNewCount > 0 ? Math.round((totalNewEnroll / totalNewCount) * 100) : 0;
+
+                let grade = '⭐⭐⭐⭐⭐';
+                if (enrollRate < 30) grade = '⭐⭐';
+                else if (enrollRate < 40) grade = '⭐⭐⭐';
+                else if (enrollRate < 50) grade = '⭐⭐⭐⭐';
+
+                const response = `${branch || '該当条件'}の${month || '期間'}のマークは:\n\n` +
+                    `${grade}\n\n` +
+                    `💰 売上: ¥${Math.round(totalSales / 10000)}万円\n` +
+                    `👥 新規: ${totalNewCount}人\n` +
+                    `✅ 入会率: ${enrollRate}%\n\n` +
+                    (enrollRate >= 50 ? '🎉 優秀な成績です！' :
+                     enrollRate >= 40 ? '👍 良好な成績です。' :
+                     enrollRate >= 30 ? '📈 もう少し頑張りましょう。' :
+                     '⚠️ 改善が必要です。');
+
+                return {
+                    success: true,
+                    message: response
                 };
             };
 

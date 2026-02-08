@@ -535,136 +535,18 @@ function testGetData() {
 }
 
 
-// 予約進捗管理シートからメニュー別分析データを取得
-// J列のメニュー名を基に、月ごとに予約・来院・キャンセル・入会・口コミを集計
-// HPBシートは除外（HPBのメニュー名は種類が多すぎるため）
+// メニュー分析データ取得（メイン）
+// 1. 数値まとめシートのAG-AP列（集計済みデータ + 価格帯/症状サマリー）を優先
+// 2. 見つからない場合は予約進捗管理シートのJ列から直接集計
 function getMenuAnalysisData() {
   try {
-    var ssId = (typeof SPREADSHEET_ID !== 'undefined') ? SPREADSHEET_ID : MARKETING_SS_ID;
-    const ss = SpreadsheetApp.openById(ssId);
-    const allSheets = ss.getSheets();
-
-    // 「予約進捗管理」を含むシート名を対象（HPBを除外）
-    const reservationSheets = allSheets.filter(function(s) {
-      var name = s.getName();
-      if (name.indexOf('予約進捗管理') < 0) return false;
-      // HPBシートを除外
-      if (name.indexOf('HPB') >= 0 || name.indexOf('hpb') >= 0 || name.indexOf('ホットペッパー') >= 0) return false;
-      return true;
-    });
-
-    if (reservationSheets.length === 0) {
-      Logger.log('⚠ 予約進捗管理シートが見つかりません（HPB除外後）');
-      return [];
+    var agData = getMenuFromSummarySheets();
+    if (agData.length > 0) {
+      Logger.log('✅ 数値まとめAG列から取得: ' + agData.length + '件');
+      return agData;
     }
-
-    Logger.log('📋 予約進捗管理シート（HPB除外）: ' + reservationSheets.length + '件');
-
-    // 月×メニュー名ごとに集計
-    const menuMap = {};
-
-    reservationSheets.forEach(function(sheet) {
-      var sheetName = sheet.getName();
-      var month = parseSheetMonth(sheetName);
-      var lastRow = sheet.getLastRow();
-      var lastCol = sheet.getLastColumn();
-      if (lastRow < 3 || lastCol < 10) return;
-
-      var allData = sheet.getRange(1, 1, lastRow, lastCol).getValues();
-
-      // ヘッダー行を検出（「メール受信日」「店舗」「名前」などが含まれる行）
-      var headerRowIdx = -1;
-      for (var r = 0; r < Math.min(5, allData.length); r++) {
-        var rowStr = allData[r].map(function(c) { return String(c).trim(); });
-        if (rowStr.some(function(c) { return c === '店舗' || c === '院名'; }) &&
-            rowStr.some(function(c) { return c === '名前' || c.indexOf('メール') >= 0; })) {
-          headerRowIdx = r;
-          break;
-        }
-      }
-
-      if (headerRowIdx === -1) {
-        headerRowIdx = 0;
-      }
-
-      var headers = allData[headerRowIdx].map(function(h) { return String(h).trim(); });
-
-      // 各列のインデックスを検出
-      var storeCol = findMenuCol(headers, ['店舗', '院名']);
-      var menuCol = findMenuColJ(headers, allData, headerRowIdx);
-      var statusCol = findMenuCol(headers, ['来店・キャン', '来店', 'キャン']);
-      var enrollCol = findMenuColExact(headers, '入会');
-      var reviewCol = findMenuColExact(headers, '口コミ');
-
-      Logger.log('  ' + sheetName + ' → ' + month + ': store=' + storeCol + ', menu=' + menuCol + ', status=' + statusCol + ', enroll=' + enrollCol + ', review=' + reviewCol);
-
-      if (menuCol < 0) {
-        Logger.log('  ⚠ メニュー列が見つかりません: ' + sheetName);
-        return;
-      }
-
-      // データ行を処理
-      for (var r = headerRowIdx + 1; r < allData.length; r++) {
-        var row = allData[r];
-        var menuName = String(row[menuCol]).trim();
-
-        // 空行やヘッダー・無効データをスキップ
-        if (!menuName || menuName === '' || menuName === 'undefined') continue;
-        if (menuName === '要望' || menuName === '未入力' || menuName === '-') continue;
-        if (menuName.length < 3) continue;
-        // フィルタ警告メッセージをスキップ
-        if (menuName.indexOf('フィルタ作成') >= 0) continue;
-
-        var storeName = storeCol >= 0 ? String(row[storeCol]).trim() : '';
-        var status = statusCol >= 0 ? String(row[statusCol]).trim() : '';
-        var enrollVal = enrollCol >= 0 ? String(row[enrollCol]).trim() : '';
-        var reviewVal = reviewCol >= 0 ? String(row[reviewCol]).trim() : '';
-
-        // 月×メニュー名でキーを作成
-        var key = month + '|||' + menuName;
-        if (!menuMap[key]) {
-          menuMap[key] = {
-            menuName: menuName,
-            month: month,
-            reservations: 0,
-            actualVisits: 0,
-            advanceCancels: 0,
-            sameDayCancels: 0,
-            enrollments: 0,
-            reviews: 0
-          };
-        }
-
-        var m = menuMap[key];
-        m.reservations++;
-
-        // 来店・キャンセル判定
-        if (status.indexOf('実来院') >= 0 || status === '来店') {
-          m.actualVisits++;
-        } else if (status.indexOf('事前') >= 0) {
-          m.advanceCancels++;
-        } else if (status.indexOf('当日') >= 0) {
-          m.sameDayCancels++;
-        } else if (status.indexOf('振替') >= 0) {
-          m.advanceCancels++;
-        }
-
-        // 入会判定
-        if (enrollVal === '入会' || (enrollVal.indexOf('入会') >= 0 && enrollVal.indexOf('未入会') < 0 && enrollVal.indexOf('未') < 0)) {
-          m.enrollments++;
-        }
-
-        // 口コミ判定
-        if (reviewVal && reviewVal !== '' && reviewVal !== '-' && reviewVal !== '0' && reviewVal !== 'undefined') {
-          m.reviews++;
-        }
-      }
-    });
-
-    var result = Object.values(menuMap).filter(function(m) { return m.reservations > 0; });
-
-    Logger.log('✅ メニュー分析完了: ' + result.length + '件（月×メニュー、HPB除外）');
-    return result;
+    Logger.log('⚠ AG列データなし → J列フォールバック');
+    return getMenuFromJColumn();
   } catch (error) {
     Logger.log('❌ メニュー分析エラー: ' + error.toString());
     return [];
@@ -672,63 +554,231 @@ function getMenuAnalysisData() {
 }
 
 
-// ヘッダー行から列を検出（複数キーワード候補対応）
-function findMenuCol(headers, keywords) {
-  for (var i = 0; i < headers.length; i++) {
-    for (var k = 0; k < keywords.length; k++) {
-      if (headers[i].indexOf(keywords[k]) >= 0) return i;
+// 方法1: 数値まとめシートのAG-AP列から取得
+function getMenuFromSummarySheets() {
+  try {
+    var ssId = (typeof SPREADSHEET_ID !== 'undefined') ? SPREADSHEET_ID : MARKETING_SS_ID;
+    var ss = SpreadsheetApp.openById(ssId);
+    var allSheets = ss.getSheets();
+
+    // 数値まとめシートを対象
+    var summarySheets = allSheets.filter(function(s) {
+      return s.getName().indexOf('数値まとめ') >= 0;
+    });
+
+    if (summarySheets.length === 0) {
+      Logger.log('⚠ 数値まとめシートが見つかりません');
+      return [];
     }
+
+    Logger.log('📋 数値まとめシート: ' + summarySheets.length + '件');
+    var results = [];
+
+    summarySheets.forEach(function(sheet) {
+      var sheetName = sheet.getName();
+      var month = parseSheetMonth(sheetName);
+      var lastRow = sheet.getLastRow();
+      var lastCol = sheet.getLastColumn();
+      if (lastRow < 3 || lastCol < 35) return;
+
+      var allData = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+
+      // AG列付近でメニュー分析ブロックのヘッダーを探す
+      // 「予約」の隣に「実来院」がある行を検出（列30以降）
+      var menuCol = -1;
+      var statsCol = -1;
+      var headerRow = -1;
+
+      for (var r = 0; r < Math.min(15, allData.length); r++) {
+        for (var c = 30; c < Math.min(lastCol - 1, 55); c++) {
+          var v1 = String(allData[r][c]).trim();
+          var v2 = String(allData[r][c + 1]).trim();
+          if ((v1 === '予約' || v1 === '予約数') && (v2 === '実来院' || v2.indexOf('来院') >= 0)) {
+            headerRow = r;
+            statsCol = c;
+            menuCol = c - 1;
+            break;
+          }
+        }
+        if (headerRow >= 0) break;
+      }
+
+      // ヘッダーが見つからない場合、別パターンで探す
+      if (headerRow < 0) {
+        for (var r = 0; r < allData.length; r++) {
+          for (var c = 30; c < Math.min(lastCol - 1, 55); c++) {
+            var v1 = String(allData[r][c]).trim();
+            if (v1 === '予約' || v1 === '予約数') {
+              // 隣に来院系の文字があるか確認
+              var v2 = c + 1 < lastCol ? String(allData[r][c + 1]).trim() : '';
+              if (v2.indexOf('来院') >= 0 || v2 === '実来院') {
+                headerRow = r;
+                statsCol = c;
+                menuCol = c - 1;
+                break;
+              }
+            }
+          }
+          if (headerRow >= 0) break;
+        }
+      }
+
+      if (headerRow < 0 || menuCol < 0) {
+        Logger.log('  ⚠ メニュー分析ブロック未検出: ' + sheetName);
+        return;
+      }
+
+      Logger.log('  ' + sheetName + ' → ' + month + ': menuCol=' + menuCol + '(' + String.fromCharCode(65 + menuCol) + '), statsCol=' + statsCol + ', headerRow=' + (headerRow + 1));
+
+      // 全行をスキャン（ヘッダー行の上下両方）
+      for (var r = 0; r < allData.length; r++) {
+        if (r === headerRow) continue;
+
+        var name = String(allData[r][menuCol]).trim();
+        if (!name || name.length < 2) continue;
+        if (name === '予約' || name === '予約数' || name === 'メニュー名') continue;
+
+        // statsCol列: 予約, +1: 実来院, +2: 事前, +3: 当日, +4: キャン%, +5: 入会, +6: 入会%, +7: 口コミ, +8: 口コミ%
+        var reservations = getNum(allData[r], statsCol);
+        var actualVisits = getNum(allData[r], statsCol + 1);
+        var advanceCancels = getNum(allData[r], statsCol + 2);
+        var sameDayCancels = getNum(allData[r], statsCol + 3);
+        var enrollments = getNum(allData[r], statsCol + 5);
+        var reviews = getNum(allData[r], statsCol + 7);
+
+        if (reservations === 0 && actualVisits === 0 && enrollments === 0) continue;
+
+        // 行の種別判定
+        var type = 'menu';
+        if (name.indexOf('訴求') >= 0) {
+          if (name.indexOf('¥') >= 0 || name.indexOf('円訴求') >= 0) {
+            type = 'priceTier';
+          } else {
+            type = 'symptom';
+          }
+        }
+
+        results.push({
+          menuName: name,
+          month: month,
+          type: type,
+          reservations: reservations,
+          actualVisits: actualVisits,
+          advanceCancels: advanceCancels,
+          sameDayCancels: sameDayCancels,
+          enrollments: enrollments,
+          reviews: reviews
+        });
+      }
+    });
+
+    Logger.log('✅ 数値まとめAG列: ' + results.length + '件');
+    return results;
+  } catch (error) {
+    Logger.log('❌ 数値まとめ読取エラー: ' + error.toString());
+    return [];
   }
-  return -1;
 }
 
 
-// ヘッダー行から完全一致で列を検出
-function findMenuColExact(headers, keyword) {
-  for (var i = 0; i < headers.length; i++) {
-    if (headers[i] === keyword) return i;
+// 方法2: 予約進捗管理シートのJ列（インデックス9）から直接集計
+// J列にはメニュー名が入っている（ヘッダーはフィルタ警告の場合あり）
+function getMenuFromJColumn() {
+  try {
+    var ssId = (typeof SPREADSHEET_ID !== 'undefined') ? SPREADSHEET_ID : MARKETING_SS_ID;
+    var ss = SpreadsheetApp.openById(ssId);
+    var allSheets = ss.getSheets();
+
+    var reservationSheets = allSheets.filter(function(s) {
+      var name = s.getName();
+      return name.indexOf('予約進捗管理') >= 0 && name.indexOf('HPB') < 0;
+    });
+
+    if (reservationSheets.length === 0) return [];
+
+    var menuMap = {};
+
+    reservationSheets.forEach(function(sheet) {
+      var sheetName = sheet.getName();
+      var month = parseSheetMonth(sheetName);
+      var lastRow = sheet.getLastRow();
+      var lastCol = sheet.getLastColumn();
+      if (lastRow < 3 || lastCol < 12) return;
+
+      var allData = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+
+      // ヘッダー行検出
+      var headerRowIdx = -1;
+      for (var r = 0; r < Math.min(5, allData.length); r++) {
+        var rowStr = allData[r].map(function(c) { return String(c).trim(); });
+        if (rowStr.some(function(c) { return c === '店舗' || c === '院名'; })) {
+          headerRowIdx = r;
+          break;
+        }
+      }
+      if (headerRowIdx < 0) headerRowIdx = 0;
+
+      var headers = allData[headerRowIdx].map(function(h) { return String(h).trim(); });
+
+      // J列=インデックス9をメニュー列として使用
+      var menuCol = 9;
+
+      // 来店・キャンセル列を検出
+      var statusCol = -1;
+      for (var i = 0; i < headers.length; i++) {
+        if (headers[i].indexOf('来店') >= 0 || headers[i].indexOf('キャン') >= 0) { statusCol = i; break; }
+      }
+      // 入会列
+      var enrollCol = -1;
+      for (var i = 0; i < headers.length; i++) {
+        if (headers[i] === '入会') { enrollCol = i; break; }
+      }
+      // 口コミ列
+      var reviewCol = -1;
+      for (var i = 0; i < headers.length; i++) {
+        if (headers[i] === '口コミ') { reviewCol = i; break; }
+      }
+
+      for (var r = headerRowIdx + 1; r < allData.length; r++) {
+        var row = allData[r];
+        var menuName = String(row[menuCol] || '').trim();
+        if (!menuName || menuName.length < 3) continue;
+        if (menuName.indexOf('フィルタ') >= 0 || menuName === '未入力' || menuName === '要望') continue;
+
+        var status = statusCol >= 0 ? String(row[statusCol]).trim() : '';
+        var enrollVal = enrollCol >= 0 ? String(row[enrollCol]).trim() : '';
+        var reviewVal = reviewCol >= 0 ? String(row[reviewCol]).trim() : '';
+
+        var key = month + '|||' + menuName;
+        if (!menuMap[key]) {
+          menuMap[key] = {
+            menuName: menuName, month: month, type: 'menu',
+            reservations: 0, actualVisits: 0, advanceCancels: 0,
+            sameDayCancels: 0, enrollments: 0, reviews: 0
+          };
+        }
+        var m = menuMap[key];
+        m.reservations++;
+        if (status.indexOf('実来院') >= 0 || status === '来店') m.actualVisits++;
+        else if (status.indexOf('事前') >= 0) m.advanceCancels++;
+        else if (status.indexOf('当日') >= 0) m.sameDayCancels++;
+        else if (status.indexOf('振替') >= 0) m.advanceCancels++;
+
+        if (enrollVal === '入会' || (enrollVal.indexOf('入会') >= 0 && enrollVal.indexOf('未') < 0)) m.enrollments++;
+        if (reviewVal && reviewVal !== '' && reviewVal !== '-' && reviewVal !== '0' && reviewVal !== 'undefined') m.reviews++;
+      }
+    });
+
+    var result = Object.values(menuMap).filter(function(m) { return m.reservations > 0; });
+    Logger.log('✅ J列フォールバック: ' + result.length + '件');
+    return result;
+  } catch (error) {
+    Logger.log('❌ J列読取エラー: ' + error.toString());
+    return [];
   }
-  // 完全一致が見つからない場合は部分一致
-  for (var i = 0; i < headers.length; i++) {
-    if (headers[i].indexOf(keyword) >= 0) return i;
-  }
-  return -1;
 }
 
 
-// メニュー列（J列=インデックス9）を検出
-// J列のヘッダーは警告メッセージの場合があるため、
-// まずJ列の実データを確認し、メニュー名（《》や円を含む）があればJ列を使用
-function findMenuColJ(headers, allData, headerRowIdx) {
-  // J列（インデックス9）の実データを確認
-  var sampleRows = allData.slice(headerRowIdx + 1, Math.min(headerRowIdx + 20, allData.length));
-
-  // J列のデータがメニュー名らしいかチェック
-  var jColScore = 0;
-  for (var r = 0; r < sampleRows.length; r++) {
-    var val = String(sampleRows[r][9] || '').trim();
-    if (val.indexOf('《') >= 0) jColScore += 3;
-    if (val.indexOf('円') >= 0) jColScore += 2;
-    if (val.indexOf('コース') >= 0) jColScore += 2;
-    if (val.indexOf('整体') >= 0) jColScore += 2;
-    if (val.indexOf('Massage') >= 0) jColScore += 2;
-    if (val.indexOf('限定') >= 0) jColScore += 1;
-    if (val.indexOf('$') >= 0) jColScore += 1;
-  }
-
-  // J列にメニューデータがあればJ列を使用
-  if (jColScore >= 3) {
-    Logger.log('  メニュー列: J列（インデックス9）スコア=' + jColScore);
-    return 9;
-  }
-
-  // フォールバック: ヘッダー名で探す（要望は除外 - K列の可能性が高い）
-  var byHeader = findMenuCol(headers, ['メニュー', 'コース名']);
-  if (byHeader >= 0) return byHeader;
-
-  // 最終フォールバック: J列
-  return 9;
-}
 
 
 // スプレッドシート構造の確認（デバッグ用）

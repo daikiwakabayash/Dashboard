@@ -679,72 +679,93 @@
 
             // メニューデータを解析
             const analyzeMenuData = useMemo(() => {
-                if (!mktData || mktData.length === 0) return null;
-
-                const menuMap = {};
-
-                mktData.forEach(d => {
-                    const menuName = d.media || '不明';
-                    if (!menuMap[menuName]) {
-                        menuMap[menuName] = {
-                            menuName,
-                            price: extractPriceFromMenu(menuName),
-                            bodyPart: extractBodyPartFromMenu(menuName),
-                            reservations: 0,
-                            actualVisits: 0,
-                            enrollments: 0,
-                            cancels: 0,
-                            reviews: 0,
-                            adSpend: 0,
-                            revenue: 0
-                        };
+                try {
+                    if (!mktData || mktData.length === 0) {
+                        console.log('📊 Menu analysis: No marketing data available');
+                        return null;
                     }
 
-                    menuMap[menuName].reservations += (d.reservationCount || 0);
-                    menuMap[menuName].actualVisits += (d.newCount || 0);
-                    menuMap[menuName].enrollments += (d.enrollCount || 0);
-                    menuMap[menuName].cancels += (d.cancelCount || 0);
-                    menuMap[menuName].reviews += (d.reviewCount || 0);
-                    menuMap[menuName].adSpend += (d.adSpend || 0);
-                    menuMap[menuName].revenue += (d.revenue || 0);
-                });
+                    const menuMap = {};
 
-                const menuList = Object.values(menuMap).map(menu => {
-                    const cancelRate = menu.reservations > 0 ? (menu.cancels / menu.reservations) * 100 : 0;
-                    const enrollmentRate = menu.actualVisits > 0 ? (menu.enrollments / menu.actualVisits) * 100 : 0;
-                    const cpa = menu.actualVisits > 0 ? menu.adSpend / menu.actualVisits : 0;
-                    const trueCPA = (menu.reservations - menu.cancels) > 0 ? menu.adSpend / (menu.reservations - menu.cancels) : 0;
-                    const qualityScore = (enrollmentRate * 0.5) + ((100 - cancelRate) * 0.5);
+                    mktData.forEach(d => {
+                        const menuName = d.media || '不明';
+                        if (!menuMap[menuName]) {
+                            menuMap[menuName] = {
+                                menuName,
+                                price: extractPriceFromMenu(menuName),
+                                bodyPart: extractBodyPartFromMenu(menuName),
+                                reservations: 0,
+                                actualVisits: 0,
+                                enrollments: 0,
+                                cancels: 0,
+                                reviews: 0,
+                                adSpend: 0,
+                                revenue: 0
+                            };
+                        }
 
-                    return { ...menu, cancelRate, enrollmentRate, cpa, trueCPA, qualityScore };
-                }).filter(m => m.reservations > 0);
+                        menuMap[menuName].reservations += (d.reservationCount || 0);
+                        menuMap[menuName].actualVisits += (d.newCount || 0);
+                        menuMap[menuName].enrollments += (d.enrollCount || 0);
+                        menuMap[menuName].cancels += (d.cancelCount || 0);
+                        menuMap[menuName].reviews += (d.reviewCount || 0);
+                        menuMap[menuName].adSpend += (d.adSpend || 0);
+                        menuMap[menuName].revenue += (d.revenue || 0);
+                    });
 
-                // 価格帯別集計
-                const byPrice = {};
-                menuList.forEach(m => {
-                    if (!byPrice[m.price]) byPrice[m.price] = { price: m.price, reservations: 0, enrollments: 0, cancels: 0, adSpend: 0 };
-                    byPrice[m.price].reservations += m.reservations;
-                    byPrice[m.price].enrollments += m.enrollments;
-                    byPrice[m.price].cancels += m.cancels;
-                    byPrice[m.price].adSpend += m.adSpend;
-                });
+                    const menuList = Object.values(menuMap).map(menu => {
+                        const cancelRate = menu.reservations > 0 ? (menu.cancels / menu.reservations) * 100 : 0;
+                        const enrollmentRate = menu.actualVisits > 0 ? (menu.enrollments / menu.actualVisits) * 100 : 0;
+                        const cpa = menu.actualVisits > 0 ? menu.adSpend / menu.actualVisits : 0;
+                        const trueCPA = (menu.reservations - menu.cancels) > 0 ? menu.adSpend / (menu.reservations - menu.cancels) : 0;
+                        const qualityScore = (enrollmentRate * 0.5) + ((100 - cancelRate) * 0.5);
 
-                // 部位別集計
-                const byBodyPart = {};
-                menuList.forEach(m => {
-                    if (!byBodyPart[m.bodyPart]) byBodyPart[m.bodyPart] = { bodyPart: m.bodyPart, reservations: 0, enrollments: 0, cancels: 0, adSpend: 0 };
-                    byBodyPart[m.bodyPart].reservations += m.reservations;
-                    byBodyPart[m.bodyPart].enrollments += m.enrollments;
-                    byBodyPart[m.bodyPart].cancels += m.cancels;
-                    byBodyPart[m.bodyPart].adSpend += m.adSpend;
-                });
+                        return { ...menu, cancelRate, enrollmentRate, cpa, trueCPA, qualityScore };
+                    }).filter(m => m.reservations > 0);
 
-                return {
-                    menuList,
-                    byPrice: Object.values(byPrice).sort((a, b) => a.price - b.price),
-                    byBodyPart: Object.values(byBodyPart).sort((a, b) => b.reservations - a.reservations),
-                    topMenus: [...menuList].sort((a, b) => b.qualityScore - a.qualityScore).slice(0, 5)
-                };
+                    // 価格帯別集計（価格が0のものは除外）
+                    const byPrice = {};
+                    menuList.forEach(m => {
+                        if (m.price > 0) {
+                            if (!byPrice[m.price]) byPrice[m.price] = { price: m.price, reservations: 0, enrollments: 0, cancels: 0, adSpend: 0, actualVisits: 0 };
+                            byPrice[m.price].reservations += m.reservations;
+                            byPrice[m.price].enrollments += m.enrollments;
+                            byPrice[m.price].cancels += m.cancels;
+                            byPrice[m.price].adSpend += m.adSpend;
+                            byPrice[m.price].actualVisits += m.actualVisits;
+                        }
+                    });
+
+                    // 部位別集計
+                    const byBodyPart = {};
+                    menuList.forEach(m => {
+                        if (!byBodyPart[m.bodyPart]) byBodyPart[m.bodyPart] = { bodyPart: m.bodyPart, reservations: 0, enrollments: 0, cancels: 0, adSpend: 0, actualVisits: 0 };
+                        byBodyPart[m.bodyPart].reservations += m.reservations;
+                        byBodyPart[m.bodyPart].enrollments += m.enrollments;
+                        byBodyPart[m.bodyPart].cancels += m.cancels;
+                        byBodyPart[m.bodyPart].adSpend += m.adSpend;
+                        byBodyPart[m.bodyPart].actualVisits += m.actualVisits;
+                    });
+
+                    const result = {
+                        menuList,
+                        byPrice: Object.values(byPrice).sort((a, b) => a.price - b.price),
+                        byBodyPart: Object.values(byBodyPart).sort((a, b) => b.reservations - a.reservations),
+                        topMenus: [...menuList].sort((a, b) => b.qualityScore - a.qualityScore).slice(0, 5)
+                    };
+
+                    console.log('✅ Menu analysis complete:', {
+                        totalMenus: result.menuList.length,
+                        pricePoints: result.byPrice.length,
+                        bodyParts: result.byBodyPart.length,
+                        topMenus: result.topMenus.length
+                    });
+
+                    return result;
+                } catch (error) {
+                    console.error('❌ Menu analysis error:', error);
+                    return null;
+                }
             }, [mktData]);
 
             // マーケティングページに遷移した時にデータ取得
@@ -1595,13 +1616,15 @@
                 }
 
                 // 店舗が指定されていない場合、前回の文脈を使用
-                if (targetBranch === null && !isAllBranches && currentContext.branch) {
+                const usingContextBranch = (targetBranch === null && !isAllBranches && currentContext.branch);
+                if (usingContextBranch) {
                     targetBranch = currentContext.branch;
                     console.log('✓ Using context branch:', targetBranch);
                 }
 
                 // 月の抽出（より柔軟なパターンマッチング）
                 let targetMonth = null;
+                let usingContextMonth = false;
 
                 // パターン1: 2026年1月、26年1月
                 let monthMatch = lowerQ.match(/(\d{2,4})年(\d{1,2})月/);
@@ -1641,6 +1664,7 @@
                 // 月が指定されていない場合、前回の文脈を使用
                 if (!targetMonth && currentContext.month) {
                     targetMonth = currentContext.month;
+                    usingContextMonth = true;
                     console.log('✓ Using context month:', targetMonth);
                 }
 
@@ -1680,21 +1704,52 @@
                     console.log('Sample record:', JSON.stringify(filteredAnalysisData[0]));
                 }
 
-                // データが見つからない場合、より詳細なエラーメッセージ
+                // データが見つからない場合、明確化のための質問またはエラーメッセージ
                 if (filteredAnalysisData.length === 0) {
-                    const availableBranches = Array.from(new Set(data.map(d => d.branch).filter(Boolean))).slice(0, 5);
-                    const availableMonths = Array.from(new Set(data.map(d => d.month).filter(Boolean))).slice(0, 5);
+                    const availableBranches = Array.from(new Set(data.map(d => d.branch).filter(Boolean)));
+                    const availableMonths = Array.from(new Set(data.map(d => d.month).filter(Boolean))).sort().reverse();
 
+                    // 店舗も月も指定されていない場合、質問で返す
+                    if (!targetBranch && !targetMonth) {
+                        let clarifyMsg = `質問の内容を詳しく教えてください。\n\n`;
+                        clarifyMsg += `どの店舗について知りたいですか？\n`;
+                        clarifyMsg += availableBranches.slice(0, 8).map(b => `・${b}`).join('\n');
+                        if (availableBranches.length > 8) clarifyMsg += `\n・その他 ${availableBranches.length - 8} 店舗...`;
+                        clarifyMsg += `\n\nまた、どの期間について知りたいですか？\n`;
+                        clarifyMsg += `例: 2026年1月、26年1月、1月など`;
+
+                        return {
+                            success: true,
+                            message: clarifyMsg,
+                            newContext: { branch: null, month: null }
+                        };
+                    }
+
+                    // 店舗だけ指定されていて月がない場合
+                    if (targetBranch && !targetMonth) {
+                        let clarifyMsg = `${targetBranch}についてですね。\n\nどの期間について分析しますか？\n\n`;
+                        clarifyMsg += `利用可能な月:\n`;
+                        clarifyMsg += availableMonths.slice(0, 6).map(m => `・${m}`).join('\n');
+                        if (availableMonths.length > 6) clarifyMsg += `\n・その他 ${availableMonths.length - 6} ヶ月...`;
+
+                        return {
+                            success: true,
+                            message: clarifyMsg,
+                            newContext: { branch: targetBranch, month: null }
+                        };
+                    }
+
+                    // それ以外の場合、エラーメッセージ
                     let errorMsg = `${targetBranch || ''}${targetMonth || ''}のデータが見つかりませんでした。\n\n`;
 
                     if (targetBranch && !availableBranches.includes(targetBranch)) {
                         errorMsg += `店舗「${targetBranch}」が見つかりません。\n`;
-                        errorMsg += `利用可能な店舗: ${availableBranches.join('、')}${availableBranches.length < data.length ? '...' : ''}\n\n`;
+                        errorMsg += `利用可能な店舗: ${availableBranches.slice(0, 5).join('、')}${availableBranches.length > 5 ? '...' : ''}\n\n`;
                     }
 
                     if (targetMonth && !availableMonths.includes(targetMonth)) {
                         errorMsg += `月「${targetMonth}」のデータがありません。\n`;
-                        errorMsg += `利用可能な月: ${availableMonths.join('、')}${availableMonths.length < data.length ? '...' : ''}\n\n`;
+                        errorMsg += `利用可能な月: ${availableMonths.slice(0, 5).join('、')}${availableMonths.length > 5 ? '...' : ''}\n\n`;
                     }
 
                     errorMsg += `質問の表記を確認してください。例:\n`;
@@ -1726,6 +1781,15 @@
                     result = useMktData
                         ? analyzeMarketingData(filteredAnalysisData, targetBranch, targetMonth)
                         : analyzeOperationalData(filteredAnalysisData, targetBranch, targetMonth);
+                }
+
+                // 文脈を使用した場合、メッセージの先頭に注記を追加
+                if (result.success && (usingContextBranch || usingContextMonth)) {
+                    const contextParts = [];
+                    if (usingContextBranch) contextParts.push(`店舗: ${targetBranch}`);
+                    if (usingContextMonth) contextParts.push(`期間: ${targetMonth}`);
+
+                    result.message = `💡 次の質問でも同じ${contextParts.join('、')}を使用します。変更する場合は明示してください。\n\n` + result.message;
                 }
 
                 // 新しい文脈を含めて返す

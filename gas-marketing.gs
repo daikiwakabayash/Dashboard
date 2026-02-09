@@ -589,9 +589,9 @@ function getMenuFromSummarySheets() {
       var statsCol = -1;
       var headerRow = -1;
 
-      // 全行・全列を検索（制限なし）
+      // 列25以降を検索（メインテーブルの予約/実来院と区別するため）
       for (var r = 0; r < allData.length; r++) {
-        for (var c = 1; c < lastCol - 1; c++) {
+        for (var c = 25; c < lastCol - 1; c++) {
           var v1 = String(allData[r][c]).replace(/\n/g, '').trim();
           var v2 = String(allData[r][c + 1]).replace(/\n/g, '').trim();
           // 「予約」の隣に「実来院」がある = メニュー分析のヘッダー行
@@ -616,10 +616,10 @@ function getMenuFromSummarySheets() {
         if (headerRow >= 0) break;
       }
 
-      // パターン2: 「事前」「当日」が並ぶ行を探す
+      // パターン2: 「事前」「当日」が並ぶ行を探す（列25以降）
       if (headerRow < 0) {
         for (var r = 0; r < allData.length; r++) {
-          for (var c = 1; c < lastCol - 3; c++) {
+          for (var c = 25; c < lastCol - 3; c++) {
             var v1 = String(allData[r][c]).replace(/\n/g, '').trim();
             var v2 = String(allData[r][c + 1]).replace(/\n/g, '').trim();
             var v3 = String(allData[r][c + 2]).replace(/\n/g, '').trim();

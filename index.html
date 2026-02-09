@@ -434,6 +434,7 @@
             const [selectedMenuNames, setSelectedMenuNames] = useState([]);
             const [menuSearchText, setMenuSearchText] = useState('');
             const [menuDropdownOpen, setMenuDropdownOpen] = useState(false);
+            const [menuRegionFilter, setMenuRegionFilter] = useState('all'); // 'all' | 'jp' | 'overseas'
             const menuDropdownRef = useRef(null);
 
             // チャット機能用 State
@@ -666,6 +667,12 @@
 
             // ===== 予約メニュー分析機能（J列メニュー名ベース） =====
 
+            // 海外メニュー判定（英語のみ=海外）
+            const isOverseasMenu = (menuName) => {
+                const cleaned = menuName.replace(/[《》\d\s¥$,.\-()（）/:;!?@#%&*+='"""''　]/g, '');
+                return cleaned.length > 0 && /^[a-zA-Z\s]+$/.test(cleaned);
+            };
+
             // メニュー名から価格を抽出（500円〜99,999円対応）
             const extractPriceFromMenu = (menuName) => {
                 // パターン1: 1,000円 / 2,000円 / 3,500円 のようにカンマ付き
@@ -894,10 +901,15 @@
 
                     if (filteredByPeriod.length === 0) return null;
 
-                    console.log('📊 Menu filter: total=' + sourceData.length + ', filtered=' + filteredByPeriod.length);
+                    // 国内/海外フィルター適用
+                    const filteredByRegion = menuRegionFilter === 'all' ? filteredByPeriod
+                        : menuRegionFilter === 'overseas' ? filteredByPeriod.filter(m => isOverseasMenu(m.menuName))
+                        : filteredByPeriod.filter(m => !isOverseasMenu(m.menuName));
 
-                    // typeで分離（GASからtypeが付いている場合）
-                    const hasTypes = filteredByPeriod.some(m => m.type);
+                    if (filteredByRegion.length === 0) return null;
+
+                    // 対象月リスト（ソート済み）
+                    const activeMonths = [...new Set(filteredByRegion.map(m => m.month))].sort();
 
                     // 同名データを月をまたいで統合するヘルパー
                     const mergeByName = (rows) => {
@@ -919,47 +931,40 @@
 
                     let menuList, byPrice, byBodyPart, bySource;
 
+                    // J列データ（type付き）
+                    const hasTypes = filteredByRegion.some(m => m.type);
+
                     if (hasTypes) {
-                        // 数値まとめAG-AP列データ（type付き）
-                        const menuRows = filteredByPeriod.filter(m => m.type === 'menu');
-                        const priceRows = filteredByPeriod.filter(m => m.type === 'priceTier');
-                        const symptomRows = filteredByPeriod.filter(m => m.type === 'symptom');
-
+                        const menuRows = filteredByRegion.filter(m => m.type === 'menu');
                         menuList = mergeByName(menuRows).sort((a, b) => b.reservations - a.reservations);
-
-                        byPrice = mergeByName(priceRows)
-                            .map(m => ({ ...m, label: m.menuName, price: parseInt((m.menuName.match(/¥(\d+)/) || [])[1]) || 0 }))
-                            .sort((a, b) => a.price - b.price);
-
-                        byBodyPart = mergeByName(symptomRows)
-                            .map(m => ({ ...m, label: m.menuName, bodyPart: m.menuName.replace(/\s*訴求.*/, '') }))
-                            .sort((a, b) => b.reservations - a.reservations);
                     } else {
-                        // J列フォールバック（type無し → フロントで分類）
-                        const merged = mergeByName(filteredByPeriod);
-                        menuList = merged.map(m => ({
-                            ...m,
-                            price: extractPriceFromMenu(m.menuName),
-                            bodyPart: extractBodyPartFromMenu(m.menuName),
-                            source: extractSourceFromMenu(m.menuName)
-                        })).sort((a, b) => b.reservations - a.reservations);
-
-                        // 価格帯別集計
-                        const priceGroups = {};
-                        menuList.forEach(m => { if (m.price > 0) { if (!priceGroups[m.price]) priceGroups[m.price] = []; priceGroups[m.price].push(m); }});
-                        byPrice = Object.entries(priceGroups).map(([p, menus]) => ({
-                            label: `¥${Number(p).toLocaleString()}円訴求 整体`, price: Number(p), ...aggregateMenus(menus)
-                        })).sort((a, b) => a.price - b.price);
-
-                        // 症状別集計
-                        const bodyPartGroups = {};
-                        menuList.forEach(m => { if (m.bodyPart !== 'その他') { if (!bodyPartGroups[m.bodyPart]) bodyPartGroups[m.bodyPart] = []; bodyPartGroups[m.bodyPart].push(m); }});
-                        byBodyPart = Object.entries(bodyPartGroups).map(([part, menus]) => ({
-                            label: `${part} 訴求`, bodyPart: part, ...aggregateMenus(menus)
-                        })).sort((a, b) => b.reservations - a.reservations);
+                        menuList = mergeByName(filteredByRegion).sort((a, b) => b.reservations - a.reservations);
                     }
 
-                    // 集客媒体別（《xxx》プレフィックスでグルーピング）
+                    // 全メニューに price, bodyPart を付与
+                    menuList = menuList.map(m => ({
+                        ...m,
+                        price: extractPriceFromMenu(m.menuName),
+                        bodyPart: extractBodyPartFromMenu(m.menuName),
+                        source: extractSourceFromMenu(m.menuName),
+                        isOverseas: isOverseasMenu(m.menuName)
+                    }));
+
+                    // 価格帯別集計（合計）
+                    const priceGroups = {};
+                    menuList.forEach(m => { if (m.price > 0) { if (!priceGroups[m.price]) priceGroups[m.price] = []; priceGroups[m.price].push(m); }});
+                    byPrice = Object.entries(priceGroups).map(([p, menus]) => ({
+                        label: `¥${Number(p).toLocaleString()}円訴求`, price: Number(p), ...aggregateMenus(menus)
+                    })).sort((a, b) => a.price - b.price);
+
+                    // 症状別集計（合計）
+                    const bodyPartGroups = {};
+                    menuList.forEach(m => { if (m.bodyPart !== 'その他') { if (!bodyPartGroups[m.bodyPart]) bodyPartGroups[m.bodyPart] = []; bodyPartGroups[m.bodyPart].push(m); }});
+                    byBodyPart = Object.entries(bodyPartGroups).map(([part, menus]) => ({
+                        label: `${part} 訴求`, bodyPart: part, ...aggregateMenus(menus)
+                    })).sort((a, b) => b.reservations - a.reservations);
+
+                    // 集客媒体別
                     const sourceGroups = {};
                     menuList.forEach(m => {
                         const match = m.menuName.match(/《([^》]+?)(?:新規限定|限定)?》/);
@@ -971,13 +976,57 @@
                         .map(([source, menus]) => ({ label: `${source}経由`, source, menus: menus.sort((a, b) => b.reservations - a.reservations), ...aggregateMenus(menus) }))
                         .sort((a, b) => b.reservations - a.reservations);
 
-                    console.log('✅ Menu analysis:', { menus: menuList.length, prices: byPrice.length, symptoms: byBodyPart.length, sources: bySource.length });
-                    return { menuList, byPrice, byBodyPart, bySource };
+                    // ===== 価格帯 × 月別クロス集計 =====
+                    const byPriceMonthly = {};
+                    filteredByRegion.forEach(m => {
+                        const price = extractPriceFromMenu(m.menuName);
+                        if (price <= 0) return;
+                        const key = price;
+                        if (!byPriceMonthly[key]) byPriceMonthly[key] = {};
+                        if (!byPriceMonthly[key][m.month]) byPriceMonthly[key][m.month] = { reservations: 0, actualVisits: 0, advanceCancels: 0, sameDayCancels: 0, enrollments: 0, reviews: 0 };
+                        const t = byPriceMonthly[key][m.month];
+                        t.reservations += m.reservations || 0;
+                        t.actualVisits += m.actualVisits || 0;
+                        t.advanceCancels += m.advanceCancels || 0;
+                        t.sameDayCancels += m.sameDayCancels || 0;
+                        t.enrollments += m.enrollments || 0;
+                        t.reviews += m.reviews || 0;
+                    });
+                    const priceMonthlyData = Object.entries(byPriceMonthly).map(([price, months]) => ({
+                        label: `¥${Number(price).toLocaleString()}円`, price: Number(price),
+                        months: Object.fromEntries(Object.entries(months).map(([mo, d]) => [mo, calcMenuMetrics(d)]))
+                    })).sort((a, b) => a.price - b.price);
+
+                    // ===== 症状 × 月別クロス集計 =====
+                    const byBodyPartMonthly = {};
+                    filteredByRegion.forEach(m => {
+                        const part = extractBodyPartFromMenu(m.menuName);
+                        if (part === 'その他') return;
+                        if (!byBodyPartMonthly[part]) byBodyPartMonthly[part] = {};
+                        if (!byBodyPartMonthly[part][m.month]) byBodyPartMonthly[part][m.month] = { reservations: 0, actualVisits: 0, advanceCancels: 0, sameDayCancels: 0, enrollments: 0, reviews: 0 };
+                        const t = byBodyPartMonthly[part][m.month];
+                        t.reservations += m.reservations || 0;
+                        t.actualVisits += m.actualVisits || 0;
+                        t.advanceCancels += m.advanceCancels || 0;
+                        t.sameDayCancels += m.sameDayCancels || 0;
+                        t.enrollments += m.enrollments || 0;
+                        t.reviews += m.reviews || 0;
+                    });
+                    const bodyPartMonthlyData = Object.entries(byBodyPartMonthly).map(([part, months]) => ({
+                        label: part,
+                        months: Object.fromEntries(Object.entries(months).map(([mo, d]) => [mo, calcMenuMetrics(d)]))
+                    })).sort((a, b) => {
+                        const aTotal = Object.values(a.months).reduce((s, d) => s + d.reservations, 0);
+                        const bTotal = Object.values(b.months).reduce((s, d) => s + d.reservations, 0);
+                        return bTotal - aTotal;
+                    });
+
+                    return { menuList, byPrice, byBodyPart, bySource, priceMonthlyData, bodyPartMonthlyData, activeMonths };
                 } catch (error) {
                     console.error('❌ Menu analysis error:', error);
                     return null;
                 }
-            }, [menuRawData, mktTargetMonths]);
+            }, [menuRawData, mktTargetMonths, menuRegionFilter]);
 
             const mktFiltered = useMemo(() => {
                 return mktData.filter(d => {
@@ -1122,6 +1171,45 @@
                         cancelRate: cancelDenom > 0 ? Math.round((m.cancelCount / cancelDenom) * 100) : 0,
                     };
                 });
+            }, [mktFiltered]);
+
+            // 媒体別 × 月別クロス集計
+            const mktMediaMonthly = useMemo(() => {
+                if (mktFiltered.length === 0) return { mediaList: [], months: [], data: {} };
+                const mediaSet = new Set();
+                const monthSet = new Set();
+                const data = {};
+                mktFiltered.forEach(d => {
+                    const media = d.media || '不明';
+                    const month = d.month || '不明';
+                    mediaSet.add(media);
+                    monthSet.add(month);
+                    const key = media + '|||' + month;
+                    if (!data[key]) data[key] = { newCount: 0, reservationCount: 0, enrollCount: 0, cancelCount: 0, adSpend: 0, revenue: 0, reviewCount: 0 };
+                    data[key].newCount += d.newCount || 0;
+                    data[key].reservationCount += d.reservationCount || 0;
+                    data[key].enrollCount += d.enrollCount || 0;
+                    data[key].cancelCount += d.cancelCount || 0;
+                    data[key].adSpend += d.adSpend || 0;
+                    data[key].revenue += d.revenue || 0;
+                    data[key].reviewCount += d.reviewCount || 0;
+                });
+                const months = [...monthSet].sort((a, b) => parseMonthKey(a) - parseMonthKey(b));
+                const mediaList = [...mediaSet].sort((a, b) => {
+                    const aTotal = months.reduce((s, mo) => s + ((data[a+'|||'+mo] || {}).newCount || 0), 0);
+                    const bTotal = months.reduce((s, mo) => s + ((data[b+'|||'+mo] || {}).newCount || 0), 0);
+                    return bTotal - aTotal;
+                });
+                // calc rates
+                Object.keys(data).forEach(k => {
+                    const d = data[k];
+                    const cancelDenom = d.reservationCount > 0 ? d.reservationCount : d.newCount;
+                    d.cpa = d.newCount > 0 ? Math.round(d.adSpend / d.newCount) : 0;
+                    d.enrollRate = d.newCount > 0 ? Math.round((d.enrollCount / d.newCount) * 100) : 0;
+                    d.cancelRate = cancelDenom > 0 ? Math.round((d.cancelCount / cancelDenom) * 100) : 0;
+                    d.roas = d.adSpend > 0 ? Math.round((d.revenue / d.adSpend) * 100) : 0;
+                });
+                return { mediaList, months, data };
             }, [mktFiltered]);
 
             // 業界ベンチマーク評価関数
@@ -4065,6 +4153,61 @@
                                                             })}
                                                         </div>
                                                     )}
+
+                                                    {/* ===== 媒体別 月別トレンド一覧 ===== */}
+                                                    {mktMediaMonthly.mediaList.length > 0 && mktMediaMonthly.months.length > 1 && (
+                                                        <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                                                            <div className="p-6 border-b border-slate-100">
+                                                                <h2 className="text-xl font-black flex items-center gap-2 text-slate-800 italic">
+                                                                    <TrendingUp className="text-indigo-500" size={24} /> 媒体別 月別トレンド
+                                                                </h2>
+                                                                <p className="text-xs text-slate-500 mt-1">各媒体の月ごとの推移を指標別に確認できます</p>
+                                                            </div>
+                                                            <div className="p-6 space-y-8">
+                                                                {[
+                                                                    { key: 'newCount', label: '実来院数', format: v => v, color: '#7c3aed' },
+                                                                    { key: 'reservationCount', label: '予約数', format: v => v, color: '#2563eb' },
+                                                                    { key: 'cpa', label: 'CPA（来院単価）', format: v => '¥' + v.toLocaleString(), color: '#0891b2' },
+                                                                    { key: 'enrollRate', label: '入会率', format: v => v + '%', color: '#059669' },
+                                                                    { key: 'cancelRate', label: 'キャンセル率', format: v => v + '%', color: '#e11d48' },
+                                                                    { key: 'adSpend', label: '広告費', format: v => '¥' + v.toLocaleString(), color: '#d97706' },
+                                                                    { key: 'roas', label: 'ROAS', format: v => v + '%', color: '#16a34a' },
+                                                                ].map(metric => (
+                                                                    <div key={metric.key}>
+                                                                        <h4 className="text-sm font-black mb-3" style={{color: metric.color}}>{metric.label}</h4>
+                                                                        <div className="overflow-x-auto">
+                                                                            <table className="w-full text-sm border-collapse">
+                                                                                <thead>
+                                                                                    <tr style={{backgroundColor: metric.color}} className="text-white text-xs font-bold">
+                                                                                        <th className="px-3 py-2 text-left border border-slate-400 min-w-[140px]">媒体</th>
+                                                                                        {mktMediaMonthly.months.map(mo => (
+                                                                                            <th key={mo} className="px-3 py-2 text-right border border-slate-400 min-w-[90px]">{mo}</th>
+                                                                                        ))}
+                                                                                    </tr>
+                                                                                </thead>
+                                                                                <tbody>
+                                                                                    {mktMediaMonthly.mediaList.map((media, idx) => (
+                                                                                        <tr key={media} className={`${idx % 2 === 0 ? 'bg-slate-50' : 'bg-white'} font-bold hover:bg-indigo-50 transition-colors`}>
+                                                                                            <td className="px-3 py-2 border border-slate-200 text-slate-800 font-black">{media}</td>
+                                                                                            {mktMediaMonthly.months.map(mo => {
+                                                                                                const d = mktMediaMonthly.data[media + '|||' + mo];
+                                                                                                const val = d ? d[metric.key] || 0 : 0;
+                                                                                                return (
+                                                                                                    <td key={mo} className={`px-3 py-2 border border-slate-200 text-right ${metric.key === 'cancelRate' && val > 25 ? 'text-rose-600 bg-rose-50' : metric.key === 'enrollRate' && val >= 50 ? 'text-emerald-600 bg-emerald-50' : ''}`}>
+                                                                                                        {val > 0 ? metric.format(val) : '-'}
+                                                                                                    </td>
+                                                                                                );
+                                                                                            })}
+                                                                                        </tr>
+                                                                                    ))}
+                                                                                </tbody>
+                                                                            </table>
+                                                                        </div>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             )}
 
@@ -4077,6 +4220,24 @@
                                                             <h2 className="text-2xl font-black italic">予約メニュー分析</h2>
                                                         </div>
                                                         <p className="text-indigo-100 font-bold">J列のメニュー名から価格帯・症状訴求・集客媒体別にキャンセル率・入会率・口コミ率を分析します。</p>
+                                                    </div>
+
+                                                    {/* 国内/海外フィルター */}
+                                                    <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-200">
+                                                        <div className="flex items-center gap-3 flex-wrap">
+                                                            <span className="text-sm font-black text-slate-700 whitespace-nowrap">地域:</span>
+                                                            {[{id:'all',label:'全て'},{id:'jp',label:'国内'},{id:'overseas',label:'海外'}].map(r => (
+                                                                <button key={r.id} onClick={() => setMenuRegionFilter(r.id)}
+                                                                    className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${menuRegionFilter === r.id ? 'bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                                                                    {r.label}
+                                                                </button>
+                                                            ))}
+                                                            {menuRegionFilter !== 'all' && analyzeMenuData && (
+                                                                <span className="text-xs text-slate-500 font-bold ml-2">
+                                                                    ({menuRegionFilter === 'jp' ? '国内' : '海外'}メニュー: {analyzeMenuData.menuList.length}件)
+                                                                </span>
+                                                            )}
+                                                        </div>
                                                     </div>
 
                                                     {/* メニュー名フィルター */}
@@ -4257,103 +4418,118 @@
                                                                             </div>
                                                                         </div>
 
-                                                                        {/* ===== 価格帯別サマリー ===== */}
-                                                                        {analyzeMenuData.byPrice.length > 0 && (
+                                                                        {/* ===== 価格帯 × 月別トレンド ===== */}
+                                                                        {analyzeMenuData.priceMonthlyData && analyzeMenuData.priceMonthlyData.length > 0 && (
                                                                             <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
                                                                                 <div className="flex items-center gap-3 mb-6">
                                                                                     <DollarSign className="text-blue-600" size={28} />
-                                                                                    <h3 className="text-xl font-black text-slate-800">価格帯別サマリー</h3>
+                                                                                    <h3 className="text-xl font-black text-slate-800">価格帯別 月別トレンド</h3>
                                                                                 </div>
-                                                                                <div className="overflow-x-auto">
-                                                                                    <table className="w-full text-sm border-collapse">
-                                                                                        <thead className="bg-blue-700 text-white">
-                                                                                            <tr className="text-xs font-bold">
-                                                                                                <th className="px-3 py-2 text-left border border-blue-600 min-w-[200px]">価格帯</th>
-                                                                                                <th className="px-3 py-2 text-right border border-blue-600">予約</th>
-                                                                                                <th className="px-3 py-2 text-right border border-blue-600">実来院</th>
-                                                                                                <th className="px-3 py-2 text-right border border-blue-600">事前</th>
-                                                                                                <th className="px-3 py-2 text-right border border-blue-600">当日</th>
-                                                                                                <th className="px-3 py-2 text-right border border-blue-600">キャン%</th>
-                                                                                                <th className="px-3 py-2 text-right border border-blue-600">入会</th>
-                                                                                                <th className="px-3 py-2 text-right border border-blue-600">入会%</th>
-                                                                                                <th className="px-3 py-2 text-right border border-blue-600">口コミ</th>
-                                                                                                <th className="px-3 py-2 text-right border border-blue-600">口コミ%</th>
-                                                                                            </tr>
-                                                                                        </thead>
-                                                                                        <tbody>
-                                                                                            {analyzeMenuData.byPrice.map((row, idx) => (
-                                                                                                <tr key={row.price} className={`${idx % 2 === 0 ? 'bg-blue-50' : 'bg-white'} font-bold hover:bg-blue-100 transition-colors`}>
-                                                                                                    <td className="px-3 py-2 border border-slate-200 text-blue-800">{row.label}</td>
-                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.reservations}</td>
-                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.actualVisits}</td>
-                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.advanceCancels}</td>
-                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.sameDayCancels}</td>
-                                                                                                    <td className={`px-3 py-2 border border-slate-200 text-right ${row.cancelRate > 25 ? 'text-rose-600 bg-rose-50' : row.cancelRate > 15 ? 'text-amber-600' : ''}`}>
-                                                                                                        {row.reservations > 0 ? Math.round(row.cancelRate) + '%' : '-'}
-                                                                                                    </td>
-                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.enrollments}</td>
-                                                                                                    <td className={`px-3 py-2 border border-slate-200 text-right ${row.enrollRate >= 30 ? 'text-emerald-600 bg-emerald-50' : row.enrollRate >= 15 ? 'text-amber-600' : ''}`}>
-                                                                                                        {row.actualVisits > 0 ? Math.round(row.enrollRate) + '%' : '-'}
-                                                                                                    </td>
-                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.reviews}</td>
-                                                                                                    <td className={`px-3 py-2 border border-slate-200 text-right ${row.reviewRate >= 30 ? 'text-emerald-600 bg-emerald-50' : ''}`}>
-                                                                                                        {row.actualVisits > 0 ? Math.round(row.reviewRate) + '%' : '-'}
-                                                                                                    </td>
-                                                                                                </tr>
-                                                                                            ))}
-                                                                                        </tbody>
-                                                                                    </table>
-                                                                                </div>
+                                                                                {/* 指標ごとにテーブル */}
+                                                                                {[
+                                                                                    { key: 'reservations', label: '予約数', color: 'blue' },
+                                                                                    { key: 'actualVisits', label: '実来院数', color: 'emerald' },
+                                                                                    { key: 'cancelRate', label: 'キャンセル率', color: 'rose', isRate: true },
+                                                                                    { key: 'enrollRate', label: '入会率', color: 'amber', isRate: true },
+                                                                                ].map(metric => (
+                                                                                    <div key={metric.key} className="mb-6 last:mb-0">
+                                                                                        <h4 className={`text-sm font-black text-${metric.color}-700 mb-2`}>{metric.label}</h4>
+                                                                                        <div className="overflow-x-auto">
+                                                                                            <table className="w-full text-sm border-collapse">
+                                                                                                <thead className={`bg-${metric.color}-700 text-white`} style={{backgroundColor: metric.color === 'blue' ? '#1d4ed8' : metric.color === 'emerald' ? '#047857' : metric.color === 'rose' ? '#be123c' : '#b45309'}}>
+                                                                                                    <tr className="text-xs font-bold">
+                                                                                                        <th className="px-3 py-2 text-left border border-slate-400 min-w-[120px]">価格帯</th>
+                                                                                                        {analyzeMenuData.activeMonths.map(mo => (
+                                                                                                            <th key={mo} className="px-3 py-2 text-right border border-slate-400 min-w-[80px]">{mo}</th>
+                                                                                                        ))}
+                                                                                                        <th className="px-3 py-2 text-right border border-slate-400 font-black min-w-[80px]">合計/平均</th>
+                                                                                                    </tr>
+                                                                                                </thead>
+                                                                                                <tbody>
+                                                                                                    {analyzeMenuData.priceMonthlyData.map((row, idx) => {
+                                                                                                        const totalVal = metric.isRate
+                                                                                                            ? (() => { const s = Object.values(row.months).reduce((a,d) => ({r:a.r+d.reservations,c:a.c+d.advanceCancels+d.sameDayCancels,v:a.v+d.actualVisits,e:a.e+d.enrollments}),{r:0,c:0,v:0,e:0}); return metric.key === 'cancelRate' ? (s.r>0?Math.round(s.c/s.r*100):0) : (s.v>0?Math.round(s.e/s.v*100):0); })()
+                                                                                                            : Object.values(row.months).reduce((s,d) => s + (d[metric.key]||0), 0);
+                                                                                                        return (
+                                                                                                            <tr key={row.price} className={`${idx % 2 === 0 ? 'bg-slate-50' : 'bg-white'} font-bold hover:bg-blue-50 transition-colors`}>
+                                                                                                                <td className="px-3 py-2 border border-slate-200 text-blue-800">{row.label}</td>
+                                                                                                                {analyzeMenuData.activeMonths.map(mo => {
+                                                                                                                    const d = row.months[mo];
+                                                                                                                    const val = d ? (metric.isRate ? Math.round(d[metric.key]) : d[metric.key]) : 0;
+                                                                                                                    return (
+                                                                                                                        <td key={mo} className={`px-3 py-2 border border-slate-200 text-right ${metric.isRate && metric.key === 'cancelRate' && val > 25 ? 'text-rose-600 bg-rose-50' : metric.isRate && metric.key === 'enrollRate' && val >= 30 ? 'text-emerald-600 bg-emerald-50' : ''}`}>
+                                                                                                                            {val > 0 ? (metric.isRate ? val + '%' : val) : '-'}
+                                                                                                                        </td>
+                                                                                                                    );
+                                                                                                                })}
+                                                                                                                <td className="px-3 py-2 border border-slate-200 text-right font-black bg-slate-100">
+                                                                                                                    {metric.isRate ? totalVal + '%' : totalVal}
+                                                                                                                </td>
+                                                                                                            </tr>
+                                                                                                        );
+                                                                                                    })}
+                                                                                                </tbody>
+                                                                                            </table>
+                                                                                        </div>
+                                                                                    </div>
+                                                                                ))}
                                                                             </div>
                                                                         )}
 
-                                                                        {/* ===== 症状訴求別サマリー ===== */}
-                                                                        {analyzeMenuData.byBodyPart.length > 0 && (
+                                                                        {/* ===== 症状訴求 × 月別トレンド ===== */}
+                                                                        {analyzeMenuData.bodyPartMonthlyData && analyzeMenuData.bodyPartMonthlyData.length > 0 && (
                                                                             <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
                                                                                 <div className="flex items-center gap-3 mb-6">
                                                                                     <Heart className="text-purple-600" size={28} />
-                                                                                    <h3 className="text-xl font-black text-slate-800">症状訴求別サマリー</h3>
+                                                                                    <h3 className="text-xl font-black text-slate-800">症状訴求別 月別トレンド</h3>
                                                                                 </div>
-                                                                                <div className="overflow-x-auto">
-                                                                                    <table className="w-full text-sm border-collapse">
-                                                                                        <thead className="bg-purple-700 text-white">
-                                                                                            <tr className="text-xs font-bold">
-                                                                                                <th className="px-3 py-2 text-left border border-purple-600 min-w-[200px]">症状訴求</th>
-                                                                                                <th className="px-3 py-2 text-right border border-purple-600">予約</th>
-                                                                                                <th className="px-3 py-2 text-right border border-purple-600">実来院</th>
-                                                                                                <th className="px-3 py-2 text-right border border-purple-600">事前</th>
-                                                                                                <th className="px-3 py-2 text-right border border-purple-600">当日</th>
-                                                                                                <th className="px-3 py-2 text-right border border-purple-600">キャン%</th>
-                                                                                                <th className="px-3 py-2 text-right border border-purple-600">入会</th>
-                                                                                                <th className="px-3 py-2 text-right border border-purple-600">入会%</th>
-                                                                                                <th className="px-3 py-2 text-right border border-purple-600">口コミ</th>
-                                                                                                <th className="px-3 py-2 text-right border border-purple-600">口コミ%</th>
-                                                                                            </tr>
-                                                                                        </thead>
-                                                                                        <tbody>
-                                                                                            {analyzeMenuData.byBodyPart.map((row, idx) => (
-                                                                                                <tr key={row.bodyPart} className={`${idx % 2 === 0 ? 'bg-purple-50' : 'bg-white'} font-bold hover:bg-purple-100 transition-colors`}>
-                                                                                                    <td className="px-3 py-2 border border-slate-200 text-purple-800">{row.label}</td>
-                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.reservations}</td>
-                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.actualVisits}</td>
-                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.advanceCancels}</td>
-                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.sameDayCancels}</td>
-                                                                                                    <td className={`px-3 py-2 border border-slate-200 text-right ${row.cancelRate > 25 ? 'text-rose-600 bg-rose-50' : row.cancelRate > 15 ? 'text-amber-600' : ''}`}>
-                                                                                                        {row.reservations > 0 ? Math.round(row.cancelRate) + '%' : '-'}
-                                                                                                    </td>
-                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.enrollments}</td>
-                                                                                                    <td className={`px-3 py-2 border border-slate-200 text-right ${row.enrollRate >= 30 ? 'text-emerald-600 bg-emerald-50' : row.enrollRate >= 15 ? 'text-amber-600' : ''}`}>
-                                                                                                        {row.actualVisits > 0 ? Math.round(row.enrollRate) + '%' : '-'}
-                                                                                                    </td>
-                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right">{row.reviews}</td>
-                                                                                                    <td className={`px-3 py-2 border border-slate-200 text-right ${row.reviewRate >= 30 ? 'text-emerald-600 bg-emerald-50' : ''}`}>
-                                                                                                        {row.actualVisits > 0 ? Math.round(row.reviewRate) + '%' : '-'}
-                                                                                                    </td>
-                                                                                                </tr>
-                                                                                            ))}
-                                                                                        </tbody>
-                                                                                    </table>
-                                                                                </div>
+                                                                                {[
+                                                                                    { key: 'reservations', label: '予約数', color: 'purple' },
+                                                                                    { key: 'actualVisits', label: '実来院数', color: 'emerald' },
+                                                                                    { key: 'cancelRate', label: 'キャンセル率', color: 'rose', isRate: true },
+                                                                                    { key: 'enrollRate', label: '入会率', color: 'amber', isRate: true },
+                                                                                ].map(metric => (
+                                                                                    <div key={metric.key} className="mb-6 last:mb-0">
+                                                                                        <h4 className={`text-sm font-black mb-2`} style={{color: metric.color === 'purple' ? '#7e22ce' : metric.color === 'emerald' ? '#047857' : metric.color === 'rose' ? '#be123c' : '#b45309'}}>{metric.label}</h4>
+                                                                                        <div className="overflow-x-auto">
+                                                                                            <table className="w-full text-sm border-collapse">
+                                                                                                <thead style={{backgroundColor: metric.color === 'purple' ? '#7e22ce' : metric.color === 'emerald' ? '#047857' : metric.color === 'rose' ? '#be123c' : '#b45309'}} className="text-white">
+                                                                                                    <tr className="text-xs font-bold">
+                                                                                                        <th className="px-3 py-2 text-left border border-slate-400 min-w-[120px]">症状</th>
+                                                                                                        {analyzeMenuData.activeMonths.map(mo => (
+                                                                                                            <th key={mo} className="px-3 py-2 text-right border border-slate-400 min-w-[80px]">{mo}</th>
+                                                                                                        ))}
+                                                                                                        <th className="px-3 py-2 text-right border border-slate-400 font-black min-w-[80px]">合計/平均</th>
+                                                                                                    </tr>
+                                                                                                </thead>
+                                                                                                <tbody>
+                                                                                                    {analyzeMenuData.bodyPartMonthlyData.map((row, idx) => {
+                                                                                                        const totalVal = metric.isRate
+                                                                                                            ? (() => { const s = Object.values(row.months).reduce((a,d) => ({r:a.r+d.reservations,c:a.c+d.advanceCancels+d.sameDayCancels,v:a.v+d.actualVisits,e:a.e+d.enrollments}),{r:0,c:0,v:0,e:0}); return metric.key === 'cancelRate' ? (s.r>0?Math.round(s.c/s.r*100):0) : (s.v>0?Math.round(s.e/s.v*100):0); })()
+                                                                                                            : Object.values(row.months).reduce((s,d) => s + (d[metric.key]||0), 0);
+                                                                                                        return (
+                                                                                                            <tr key={row.label} className={`${idx % 2 === 0 ? 'bg-slate-50' : 'bg-white'} font-bold hover:bg-purple-50 transition-colors`}>
+                                                                                                                <td className="px-3 py-2 border border-slate-200 text-purple-800">{row.label}</td>
+                                                                                                                {analyzeMenuData.activeMonths.map(mo => {
+                                                                                                                    const d = row.months[mo];
+                                                                                                                    const val = d ? (metric.isRate ? Math.round(d[metric.key]) : d[metric.key]) : 0;
+                                                                                                                    return (
+                                                                                                                        <td key={mo} className={`px-3 py-2 border border-slate-200 text-right ${metric.isRate && metric.key === 'cancelRate' && val > 25 ? 'text-rose-600 bg-rose-50' : metric.isRate && metric.key === 'enrollRate' && val >= 30 ? 'text-emerald-600 bg-emerald-50' : ''}`}>
+                                                                                                                            {val > 0 ? (metric.isRate ? val + '%' : val) : '-'}
+                                                                                                                        </td>
+                                                                                                                    );
+                                                                                                                })}
+                                                                                                                <td className="px-3 py-2 border border-slate-200 text-right font-black bg-slate-100">
+                                                                                                                    {metric.isRate ? totalVal + '%' : totalVal}
+                                                                                                                </td>
+                                                                                                            </tr>
+                                                                                                        );
+                                                                                                    })}
+                                                                                                </tbody>
+                                                                                            </table>
+                                                                                        </div>
+                                                                                    </div>
+                                                                                ))}
                                                                             </div>
                                                                         )}
 

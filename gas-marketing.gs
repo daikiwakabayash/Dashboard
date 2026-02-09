@@ -535,17 +535,10 @@ function testGetData() {
 }
 
 
-// メニュー分析データ取得（メイン）
-// 1. 数値まとめシートのAG-AP列（集計済みデータ + 価格帯/症状サマリー）を優先
-// 2. 見つからない場合は予約進捗管理シートのJ列から直接集計
+// メニュー分析データ取得
+// 予約進捗管理シートのJ列(index 9)から直接集計
 function getMenuAnalysisData() {
   try {
-    var agData = getMenuFromSummarySheets();
-    if (agData.length > 0) {
-      Logger.log('✅ 数値まとめAG列から取得: ' + agData.length + '件');
-      return agData;
-    }
-    Logger.log('⚠ AG列データなし → J列フォールバック');
     return getMenuFromJColumn();
   } catch (error) {
     Logger.log('❌ メニュー分析エラー: ' + error.toString());
@@ -738,91 +731,8 @@ function getMenuFromJColumn() {
 
       var headers = allData[headerRowIdx].map(function(h) { return String(h).trim(); });
 
-      // === メニュー列を複数の方法で検出 ===
-      var menuCol = -1;
-
-      // 方法1: ヘッダーに「メニュー」「コース」を含む列
-      for (var c = 5; c < Math.min(15, lastCol); c++) {
-        var h = headers[c].replace(/\n/g, '');
-        if (h.indexOf('メニュー') >= 0 || h.indexOf('コース名') >= 0) {
-          menuCol = c;
-          Logger.log('  ✅ ヘッダー「メニュー」検出: col=' + c);
-          break;
-        }
-      }
-
-      // 方法2: 「要望」ヘッダーの1つ左 = メニュー列
-      if (menuCol < 0) {
-        for (var c = 1; c < Math.min(15, lastCol); c++) {
-          var h = headers[c].replace(/\n/g, '');
-          if (h === '要望' || h.indexOf('要望') >= 0) {
-            menuCol = c - 1;
-            Logger.log('  ✅ 「要望」列の左: col=' + (c - 1));
-            break;
-          }
-        }
-      }
-
-      // 方法3: ヘッダーに「フィルタ」を含む列（J列特有のヘッダー）
-      if (menuCol < 0) {
-        for (var c = 5; c < Math.min(15, lastCol); c++) {
-          var h = headers[c].replace(/\n/g, '');
-          if (h.indexOf('フィルタ') >= 0) {
-            menuCol = c;
-            Logger.log('  ✅ 「フィルタ」ヘッダー検出: col=' + c);
-            break;
-          }
-        }
-      }
-
-      // 方法4: 日本語メニューパターンのスコアリング
-      if (menuCol < 0) {
-        for (var c = 5; c < Math.min(15, lastCol); c++) {
-          var menuScore = 0;
-          for (var r2 = headerRowIdx + 1; r2 < Math.min(headerRowIdx + 50, allData.length); r2++) {
-            var val = String(allData[r2][c] || '').trim();
-            if (!val || val.length < 3) continue;
-            if (val.indexOf('《') >= 0 || val.indexOf('》') >= 0) menuScore += 3;
-            if (val.indexOf('コース') >= 0) menuScore += 2;
-            if (val.indexOf('整体') >= 0) menuScore += 2;
-            if (val.indexOf('円') >= 0 && (val.indexOf('分') >= 0 || val.indexOf('(') >= 0)) menuScore += 2;
-            if (val.indexOf('限定') >= 0) menuScore += 1;
-            if (val.indexOf('新規') >= 0) menuScore += 1;
-          }
-          if (menuScore >= 8) {
-            menuCol = c;
-            Logger.log('  ✅ パターンスコア検出: col=' + c + ' score=' + menuScore);
-            break;
-          }
-        }
-      }
-
-      // 方法5: 文字列長で判定（メニュー名は平均30文字以上、要望は短い）
-      if (menuCol < 0) {
-        var maxAvgLen = 0;
-        var maxLenCol = -1;
-        for (var c = 7; c < Math.min(13, lastCol); c++) {
-          if (headers[c] === '要望') continue;
-          var totalLen = 0;
-          var cnt = 0;
-          for (var r2 = headerRowIdx + 1; r2 < Math.min(headerRowIdx + 100, allData.length); r2++) {
-            var val = String(allData[r2][c] || '').trim();
-            if (val && val.length >= 3 && val !== '未入力') { totalLen += val.length; cnt++; }
-          }
-          var avgLen = cnt > 0 ? totalLen / cnt : 0;
-          if (avgLen > maxAvgLen) { maxAvgLen = avgLen; maxLenCol = c; }
-        }
-        if (maxAvgLen >= 20 && maxLenCol >= 0) {
-          menuCol = maxLenCol;
-          Logger.log('  ✅ 文字列長検出: col=' + maxLenCol + ' avgLen=' + Math.round(maxAvgLen));
-        }
-      }
-
-      // 最終フォールバック
-      if (menuCol < 0) {
-        menuCol = 9;
-        Logger.log('  ⚠ 全方法失敗 → デフォルト col=9');
-      }
+      // J列 = インデックス9（debugMenuColumnsで確認済み）
+      var menuCol = 9;
 
       // 来店・キャンセル列を検出
       var statusCol = -1;

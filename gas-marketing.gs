@@ -37,17 +37,27 @@ var MARKETING_SHEET_NAME = '数値まとめ';
 // GETリクエストを処理（ダッシュボードからのAPI呼び出し）
 function doGet(e) {
   try {
+    // GAS側キャッシュ（3分間有効、スプレッドシート読取を削減）
+    var cache = CacheService.getScriptCache();
+    var cached = cache.get('dashboard_response');
+    if (cached) {
+      return ContentService.createTextOutput(cached).setMimeType(ContentService.MimeType.JSON);
+    }
+
     const data = getMarketingData();
     const menuData = getMenuAnalysisData();
-    return ContentService
-      .createTextOutput(JSON.stringify({
-        success: true,
-        data: data,
-        menuData: menuData,
-        count: data.length,
-        timestamp: new Date().toISOString()
-      }))
-      .setMimeType(ContentService.MimeType.JSON);
+    var response = JSON.stringify({
+      success: true,
+      data: data,
+      menuData: menuData,
+      count: data.length,
+      timestamp: new Date().toISOString()
+    });
+
+    // キャッシュに保存（180秒=3分）、GAS制限: 最大100KB
+    try { cache.put('dashboard_response', response, 180); } catch(ce) { /* 超過時はスキップ */ }
+
+    return ContentService.createTextOutput(response).setMimeType(ContentService.MimeType.JSON);
   } catch (error) {
     Logger.log('doGet エラー: ' + error.toString());
     return ContentService

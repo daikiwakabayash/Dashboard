@@ -438,6 +438,12 @@
             const mktStaffRef = useRef(null);
             const mktMediaRef = useRef(null);
 
+            // ソート用 State
+            const [branchSortKey, setBranchSortKey] = useState('newCount');
+            const [branchSortOrder, setBranchSortOrder] = useState('desc');
+            const [mediaSortKey, setMediaSortKey] = useState('newCount');
+            const [mediaSortOrder, setMediaSortOrder] = useState('desc');
+
             // メニュー分析用 State（予約進捗管理シートから取得）
             const [menuRawData, setMenuRawData] = useState([]);
             const [selectedMenuNames, setSelectedMenuNames] = useState([]);
@@ -1167,6 +1173,24 @@
                     };
                 }).sort((a, b) => b.newCount - a.newCount);
             }, [mktFiltered]);
+
+            // ソート済み店舗データ
+            const sortedMktByBranch = useMemo(() => {
+                return [...mktByBranch].sort((a, b) => {
+                    const av = a[branchSortKey] ?? 0;
+                    const bv = b[branchSortKey] ?? 0;
+                    return branchSortOrder === 'asc' ? av - bv : bv - av;
+                });
+            }, [mktByBranch, branchSortKey, branchSortOrder]);
+
+            // ソート済み媒体データ
+            const sortedMktByMedia = useMemo(() => {
+                return [...mktByMedia].sort((a, b) => {
+                    const av = a[mediaSortKey] ?? 0;
+                    const bv = b[mediaSortKey] ?? 0;
+                    return mediaSortOrder === 'asc' ? av - bv : bv - av;
+                });
+            }, [mktByMedia, mediaSortKey, mediaSortOrder]);
 
             // 月別推移データ
             const mktMonthlyTrend = useMemo(() => {
@@ -3863,6 +3887,24 @@
                                                             <h2 className="text-xl font-black flex items-center gap-2 text-slate-800 italic">
                                                                 <MapPin className="text-purple-500" size={24} /> 店舗別パフォーマンス
                                                             </h2>
+                                                            <div className="flex flex-wrap gap-2 mt-3">
+                                                                {[
+                                                                    { key: 'newCount', label: '実来院' },
+                                                                    { key: 'reservationCount', label: '予約数' },
+                                                                    { key: 'enrollRate', label: '入会率' },
+                                                                    { key: 'cancelRate', label: 'C率' },
+                                                                    { key: 'reservationCpa', label: '予約CPA' },
+                                                                    { key: 'visitCpa', label: '来店CPA' },
+                                                                    { key: 'adSpend', label: '広告費' },
+                                                                    { key: 'revenue', label: '売上' },
+                                                                    { key: 'roas', label: 'ROAS' },
+                                                                ].map(opt => (
+                                                                    <button key={opt.key} onClick={() => { if (branchSortKey === opt.key) { setBranchSortOrder(o => o === 'asc' ? 'desc' : 'asc'); } else { setBranchSortKey(opt.key); setBranchSortOrder(opt.key === 'cancelRate' || opt.key === 'reservationCpa' || opt.key === 'visitCpa' ? 'asc' : 'desc'); } }}
+                                                                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${branchSortKey === opt.key ? 'bg-purple-600 text-white shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                                                                        {opt.label} {branchSortKey === opt.key ? (branchSortOrder === 'asc' ? '↑' : '↓') : ''}
+                                                                    </button>
+                                                                ))}
+                                                            </div>
                                                         </div>
                                                         <div className="overflow-x-auto scrollbar-thin">
                                                             <table className="w-full text-left border-collapse">
@@ -3883,7 +3925,7 @@
                                                                     </tr>
                                                                 </thead>
                                                                 <tbody className="divide-y divide-slate-100">
-                                                                    {mktByBranch.map((b, i) => (
+                                                                    {sortedMktByBranch.map((b, i) => (
                                                                         <tr key={b.branch} className="hover:bg-slate-50 transition-colors text-sm font-bold">
                                                                             <td className="px-6 py-4">
                                                                                 <div className="flex items-center gap-3">
@@ -4066,6 +4108,24 @@
                                                             <h2 className="text-xl font-black flex items-center gap-2 text-slate-800 italic">
                                                                 <BarChart3 className="text-purple-500" size={24} /> 媒体別パフォーマンス
                                                             </h2>
+                                                            <div className="flex flex-wrap gap-2 mt-3">
+                                                                {[
+                                                                    { key: 'newCount', label: '実来院' },
+                                                                    { key: 'reservationCount', label: '予約数' },
+                                                                    { key: 'enrollRate', label: '入会率' },
+                                                                    { key: 'cancelRate', label: 'C率' },
+                                                                    { key: 'reservationCpa', label: '予約CPA' },
+                                                                    { key: 'visitCpa', label: '来店CPA' },
+                                                                    { key: 'adSpend', label: '広告費' },
+                                                                    { key: 'revenue', label: '売上' },
+                                                                    { key: 'roas', label: 'ROAS' },
+                                                                ].map(opt => (
+                                                                    <button key={opt.key} onClick={() => { if (mediaSortKey === opt.key) { setMediaSortOrder(o => o === 'asc' ? 'desc' : 'asc'); } else { setMediaSortKey(opt.key); setMediaSortOrder(opt.key === 'cancelRate' || opt.key === 'reservationCpa' || opt.key === 'visitCpa' ? 'asc' : 'desc'); } }}
+                                                                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${mediaSortKey === opt.key ? 'bg-purple-600 text-white shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                                                                        {opt.label} {mediaSortKey === opt.key ? (mediaSortOrder === 'asc' ? '↑' : '↓') : ''}
+                                                                    </button>
+                                                                ))}
+                                                            </div>
                                                         </div>
                                                         {mktByMedia.length > 0 ? (
                                                             <div className="overflow-x-auto scrollbar-thin">
@@ -4087,7 +4147,7 @@
                                                                         </tr>
                                                                     </thead>
                                                                     <tbody className="divide-y divide-slate-100">
-                                                                        {mktByMedia.map((m, i) => (
+                                                                        {sortedMktByMedia.map((m, i) => (
                                                                             <tr key={m.media} className="hover:bg-slate-50 transition-colors text-sm font-bold">
                                                                                 <td className="px-6 py-4">
                                                                                     <div className="flex items-center gap-3">
@@ -4363,7 +4423,6 @@
                                                                 const totalDayCancel = displayMenus.reduce((s, m) => s + m.sameDayCancels, 0);
                                                                 const totalEnroll = displayMenus.reduce((s, m) => s + m.enrollments, 0);
                                                                 const totalReview = displayMenus.reduce((s, m) => s + m.reviews, 0);
-                                                                const adSpend = mktStats.totalAdSpend || 0;
 
                                                                 return (
                                                                     <>
@@ -4406,8 +4465,6 @@
                                                                                             <th className="px-3 py-2 text-right border border-teal-600">事前</th>
                                                                                             <th className="px-3 py-2 text-right border border-teal-600">当日</th>
                                                                                             <th className="px-3 py-2 text-right border border-teal-600">キャン%</th>
-                                                                                            <th className="px-3 py-2 text-right border border-teal-600">予約CPA</th>
-                                                                                            <th className="px-3 py-2 text-right border border-teal-600">来店CPA</th>
                                                                                             <th className="px-3 py-2 text-right border border-teal-600">入会</th>
                                                                                             <th className="px-3 py-2 text-right border border-teal-600">入会%</th>
                                                                                             <th className="px-3 py-2 text-right border border-teal-600">口コミ</th>
@@ -4423,8 +4480,6 @@
                                                                                             <td className="px-3 py-2 border border-slate-200 text-right">{totalAdvCancel.toLocaleString()}</td>
                                                                                             <td className="px-3 py-2 border border-slate-200 text-right">{totalDayCancel.toLocaleString()}</td>
                                                                                             <td className="px-3 py-2 border border-slate-200 text-right">{totalRes > 0 ? Math.round((totalAdvCancel + totalDayCancel) / totalRes * 100) + '%' : '-'}</td>
-                                                                                            <td className="px-3 py-2 border border-slate-200 text-right text-blue-700">¥{totalRes > 0 ? Math.round(adSpend / totalRes).toLocaleString() : '-'}</td>
-                                                                                            <td className="px-3 py-2 border border-slate-200 text-right text-purple-700">¥{totalVisits > 0 ? Math.round(adSpend / totalVisits).toLocaleString() : '-'}</td>
                                                                                             <td className="px-3 py-2 border border-slate-200 text-right">{totalEnroll.toLocaleString()}</td>
                                                                                             <td className="px-3 py-2 border border-slate-200 text-right">{totalVisits > 0 ? Math.round(totalEnroll / totalVisits * 100) + '%' : '-'}</td>
                                                                                             <td className="px-3 py-2 border border-slate-200 text-right">{totalReview.toLocaleString()}</td>
@@ -4440,12 +4495,6 @@
                                                                                                 <td className="px-3 py-2 border border-slate-200 text-right">{menu.sameDayCancels}</td>
                                                                                                 <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.cancelRate > 25 ? 'text-rose-600 bg-rose-50' : menu.cancelRate > 15 ? 'text-amber-600' : 'text-slate-700'}`}>
                                                                                                     {menu.reservations > 0 ? Math.round(menu.cancelRate) + '%' : '-'}
-                                                                                                </td>
-                                                                                                <td className="px-3 py-2 border border-slate-200 text-right font-mono text-blue-700">
-                                                                                                    {adSpend > 0 && menu.reservations > 0 ? '¥' + Math.round(adSpend / menu.reservations).toLocaleString() : '-'}
-                                                                                                </td>
-                                                                                                <td className="px-3 py-2 border border-slate-200 text-right font-mono text-purple-700">
-                                                                                                    {adSpend > 0 && menu.actualVisits > 0 ? '¥' + Math.round(adSpend / menu.actualVisits).toLocaleString() : '-'}
                                                                                                 </td>
                                                                                                 <td className="px-3 py-2 border border-slate-200 text-right font-bold">{menu.enrollments}</td>
                                                                                                 <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.enrollRate >= 30 ? 'text-emerald-600 bg-emerald-50' : menu.enrollRate >= 15 ? 'text-amber-600' : 'text-slate-700'}`}>
@@ -4474,12 +4523,10 @@
                                                                                     { key: 'reservations', label: '予約数', color: 'blue' },
                                                                                     { key: 'actualVisits', label: '実来院数', color: 'emerald' },
                                                                                     { key: 'cancelRate', label: 'キャンセル率', color: 'rose', isRate: true },
-                                                                                    { key: 'reservationCpa', label: '予約CPA', color: 'blue', isCpa: true },
-                                                                                    { key: 'visitCpa', label: '来店CPA', color: 'purple', isCpa: true },
                                                                                     { key: 'enrollRate', label: '入会率', color: 'amber', isRate: true },
                                                                                 ].map(metric => (
                                                                                     <div key={metric.key} className="mb-6 last:mb-0">
-                                                                                        <h4 className={`text-sm font-black mb-2`} style={{color: metric.color === 'blue' ? '#1d4ed8' : metric.color === 'emerald' ? '#047857' : metric.color === 'rose' ? '#be123c' : metric.color === 'purple' ? '#7e22ce' : '#b45309'}}>{metric.label}</h4>
+                                                                                        <h4 className={`text-sm font-black mb-2`} style={{color: metric.color === 'blue' ? '#1d4ed8' : metric.color === 'emerald' ? '#047857' : metric.color === 'rose' ? '#be123c' : '#b45309'}}>{metric.label}</h4>
                                                                                         <div className="overflow-x-auto">
                                                                                             <table className="w-full text-sm border-collapse">
                                                                                                 <thead className={`bg-${metric.color}-700 text-white`} style={{backgroundColor: metric.color === 'blue' ? '#1d4ed8' : metric.color === 'emerald' ? '#047857' : metric.color === 'rose' ? '#be123c' : '#b45309'}}>
@@ -4495,25 +4542,21 @@
                                                                                                     {analyzeMenuData.priceMonthlyData.map((row, idx) => {
                                                                                                         const totalVal = metric.isRate
                                                                                                             ? (() => { const s = Object.values(row.months).reduce((a,d) => ({r:a.r+d.reservations,c:a.c+d.advanceCancels+d.sameDayCancels,v:a.v+d.actualVisits,e:a.e+d.enrollments}),{r:0,c:0,v:0,e:0}); return metric.key === 'cancelRate' ? (s.r>0?Math.round(s.c/s.r*100):0) : (s.v>0?Math.round(s.e/s.v*100):0); })()
-                                                                                                            : metric.isCpa
-                                                                                                            ? (() => { const s = Object.values(row.months).reduce((a,d) => ({r:a.r+d.reservations,v:a.v+d.actualVisits}),{r:0,v:0}); const denom = metric.key === 'reservationCpa' ? s.r : s.v; return denom > 0 ? Math.round(adSpend / denom) : 0; })()
                                                                                                             : Object.values(row.months).reduce((s,d) => s + (d[metric.key]||0), 0);
                                                                                                         return (
                                                                                                             <tr key={row.price} className={`${idx % 2 === 0 ? 'bg-slate-50' : 'bg-white'} font-bold hover:bg-blue-50 transition-colors`}>
                                                                                                                 <td className="px-3 py-2 border border-slate-200 text-blue-800">{row.label}</td>
                                                                                                                 {analyzeMenuData.activeMonths.map(mo => {
                                                                                                                     const d = row.months[mo];
-                                                                                                                    const val = metric.isCpa
-                                                                                                                        ? (d ? (() => { const denom = metric.key === 'reservationCpa' ? d.reservations : d.actualVisits; return denom > 0 ? Math.round(adSpend / denom) : 0; })() : 0)
-                                                                                                                        : d ? (metric.isRate ? Math.round(d[metric.key]) : d[metric.key]) : 0;
+                                                                                                                    const val = d ? (metric.isRate ? Math.round(d[metric.key]) : d[metric.key]) : 0;
                                                                                                                     return (
-                                                                                                                        <td key={mo} className={`px-3 py-2 border border-slate-200 text-right ${metric.isRate && metric.key === 'cancelRate' && val > 25 ? 'text-rose-600 bg-rose-50' : metric.isRate && metric.key === 'enrollRate' && val >= 30 ? 'text-emerald-600 bg-emerald-50' : metric.isCpa ? (metric.key === 'reservationCpa' ? 'text-blue-700' : 'text-purple-700') : ''}`}>
-                                                                                                                            {val > 0 ? (metric.isRate ? val + '%' : metric.isCpa ? '¥' + val.toLocaleString() : val) : '-'}
+                                                                                                                        <td key={mo} className={`px-3 py-2 border border-slate-200 text-right ${metric.isRate && metric.key === 'cancelRate' && val > 25 ? 'text-rose-600 bg-rose-50' : metric.isRate && metric.key === 'enrollRate' && val >= 30 ? 'text-emerald-600 bg-emerald-50' : ''}`}>
+                                                                                                                            {val > 0 ? (metric.isRate ? val + '%' : val) : '-'}
                                                                                                                         </td>
                                                                                                                     );
                                                                                                                 })}
-                                                                                                                <td className={`px-3 py-2 border border-slate-200 text-right font-black bg-slate-100 ${metric.isCpa ? (metric.key === 'reservationCpa' ? 'text-blue-700' : 'text-purple-700') : ''}`}>
-                                                                                                                    {metric.isRate ? totalVal + '%' : metric.isCpa ? (totalVal > 0 ? '¥' + totalVal.toLocaleString() : '-') : totalVal}
+                                                                                                                <td className="px-3 py-2 border border-slate-200 text-right font-black bg-slate-100">
+                                                                                                                    {metric.isRate ? totalVal + '%' : totalVal}
                                                                                                                 </td>
                                                                                                             </tr>
                                                                                                         );
@@ -4537,8 +4580,6 @@
                                                                                     { key: 'reservations', label: '予約数', color: 'purple' },
                                                                                     { key: 'actualVisits', label: '実来院数', color: 'emerald' },
                                                                                     { key: 'cancelRate', label: 'キャンセル率', color: 'rose', isRate: true },
-                                                                                    { key: 'reservationCpa', label: '予約CPA', color: 'blue', isCpa: true },
-                                                                                    { key: 'visitCpa', label: '来店CPA', color: 'purple', isCpa: true },
                                                                                     { key: 'enrollRate', label: '入会率', color: 'amber', isRate: true },
                                                                                 ].map(metric => (
                                                                                     <div key={metric.key} className="mb-6 last:mb-0">
@@ -4558,25 +4599,21 @@
                                                                                                     {analyzeMenuData.bodyPartMonthlyData.map((row, idx) => {
                                                                                                         const totalVal = metric.isRate
                                                                                                             ? (() => { const s = Object.values(row.months).reduce((a,d) => ({r:a.r+d.reservations,c:a.c+d.advanceCancels+d.sameDayCancels,v:a.v+d.actualVisits,e:a.e+d.enrollments}),{r:0,c:0,v:0,e:0}); return metric.key === 'cancelRate' ? (s.r>0?Math.round(s.c/s.r*100):0) : (s.v>0?Math.round(s.e/s.v*100):0); })()
-                                                                                                            : metric.isCpa
-                                                                                                            ? (() => { const s = Object.values(row.months).reduce((a,d) => ({r:a.r+d.reservations,v:a.v+d.actualVisits}),{r:0,v:0}); const denom = metric.key === 'reservationCpa' ? s.r : s.v; return denom > 0 ? Math.round(adSpend / denom) : 0; })()
                                                                                                             : Object.values(row.months).reduce((s,d) => s + (d[metric.key]||0), 0);
                                                                                                         return (
                                                                                                             <tr key={row.label} className={`${idx % 2 === 0 ? 'bg-slate-50' : 'bg-white'} font-bold hover:bg-purple-50 transition-colors`}>
                                                                                                                 <td className="px-3 py-2 border border-slate-200 text-purple-800">{row.label}</td>
                                                                                                                 {analyzeMenuData.activeMonths.map(mo => {
                                                                                                                     const d = row.months[mo];
-                                                                                                                    const val = metric.isCpa
-                                                                                                                        ? (d ? (() => { const denom = metric.key === 'reservationCpa' ? d.reservations : d.actualVisits; return denom > 0 ? Math.round(adSpend / denom) : 0; })() : 0)
-                                                                                                                        : d ? (metric.isRate ? Math.round(d[metric.key]) : d[metric.key]) : 0;
+                                                                                                                    const val = d ? (metric.isRate ? Math.round(d[metric.key]) : d[metric.key]) : 0;
                                                                                                                     return (
-                                                                                                                        <td key={mo} className={`px-3 py-2 border border-slate-200 text-right ${metric.isRate && metric.key === 'cancelRate' && val > 25 ? 'text-rose-600 bg-rose-50' : metric.isRate && metric.key === 'enrollRate' && val >= 30 ? 'text-emerald-600 bg-emerald-50' : metric.isCpa ? (metric.key === 'reservationCpa' ? 'text-blue-700' : 'text-purple-700') : ''}`}>
-                                                                                                                            {val > 0 ? (metric.isRate ? val + '%' : metric.isCpa ? '¥' + val.toLocaleString() : val) : '-'}
+                                                                                                                        <td key={mo} className={`px-3 py-2 border border-slate-200 text-right ${metric.isRate && metric.key === 'cancelRate' && val > 25 ? 'text-rose-600 bg-rose-50' : metric.isRate && metric.key === 'enrollRate' && val >= 30 ? 'text-emerald-600 bg-emerald-50' : ''}`}>
+                                                                                                                            {val > 0 ? (metric.isRate ? val + '%' : val) : '-'}
                                                                                                                         </td>
                                                                                                                     );
                                                                                                                 })}
-                                                                                                                <td className={`px-3 py-2 border border-slate-200 text-right font-black bg-slate-100 ${metric.isCpa ? (metric.key === 'reservationCpa' ? 'text-blue-700' : 'text-purple-700') : ''}`}>
-                                                                                                                    {metric.isRate ? totalVal + '%' : metric.isCpa ? (totalVal > 0 ? '¥' + totalVal.toLocaleString() : '-') : totalVal}
+                                                                                                                <td className="px-3 py-2 border border-slate-200 text-right font-black bg-slate-100">
+                                                                                                                    {metric.isRate ? totalVal + '%' : totalVal}
                                                                                                                 </td>
                                                                                                             </tr>
                                                                                                         );

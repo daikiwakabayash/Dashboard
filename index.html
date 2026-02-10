@@ -577,8 +577,6 @@
                 console.log('📡 Fetching data from GAS API... (forceRefresh:', forceRefresh, ')');
 
                 try {
-                    setError(null);
-
                     // キャッシュファースト: キャッシュがあれば即座に表示
                     const cachedData = getCachedData();
                     const hasCachedData = cachedData && cachedData.length > 0;
@@ -643,20 +641,28 @@
                         }
 
                         setLastFetchTime(new Date());
+                        setError(null);
                         console.log('✅ Data fetch completed successfully');
                     } catch (fetchError) {
                         console.error('❌ Fetch error:', fetchError);
-                        // キャッシュデータがあればエラーを飲み込む
+                        // キャッシュデータがあればエラーを飲み込んでキャッシュを使う
                         if (hasCachedData) {
                             console.log('⚠️ Fetch failed but using cached data');
                             setRawData(cachedData);
+                            setError(null);
                             return;
                         }
-                        throw fetchError;
+                        // キャッシュもない場合のみエラー表示
+                        setError(fetchError.message || 'データの取得に失敗しました。ネットワーク接続を確認してください。');
                     }
                 } catch (err) {
                     console.error('❌ データ取得エラー:', err);
-                    setError(err.message || 'データの取得に失敗しました。ネットワーク接続を確認してください。');
+                    // キャッシュデータがあればエラー画面にしない
+                    if (rawData.length > 0) {
+                        console.log('⚠️ Error occurred but rawData exists, not showing error screen');
+                    } else {
+                        setError(err.message || 'データの取得に失敗しました。ネットワーク接続を確認してください。');
+                    }
                 } finally {
                     setLoading(false);
                 }
@@ -2619,7 +2625,7 @@
                 );
             }
 
-            if (error) {
+            if (error && rawData.length === 0) {
                 console.log('❌ Rendering error screen:', error);
                 return (
                     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
@@ -2632,7 +2638,7 @@
                                 <pre className="mt-2 p-2 bg-slate-50 rounded text-xs overflow-auto">{error}</pre>
                             </details>
                             <button
-                                onClick={fetchDataFromSpreadsheet}
+                                onClick={() => { setError(null); fetchDataFromSpreadsheet(true); }}
                                 className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors font-bold text-sm"
                             >
                                 Retry Connection
@@ -3506,11 +3512,11 @@
                                             </div>
                                             <div className="flex items-center gap-3">
                                                 <button
-                                                    onClick={() => { fetchMarketingData(true); fetchDataFromSpreadsheet(true); }}
+                                                    onClick={() => fetchMarketingData(true)}
                                                     className="p-3 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-all shadow-lg flex items-center gap-2 font-black text-sm uppercase tracking-tighter disabled:opacity-50"
-                                                    disabled={mktLoading || loading}
+                                                    disabled={mktLoading}
                                                 >
-                                                    <RefreshCw size={18} className={mktLoading || loading ? 'animate-spin' : ''} /> Sync
+                                                    <RefreshCw size={18} className={mktLoading ? 'animate-spin' : ''} /> Sync
                                                 </button>
                                                 {mktLastFetch && (
                                                     <div className="text-right">

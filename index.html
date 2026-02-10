@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>整体院 経営総合ダッシュボード</title>
+    <title>NAORU 総合ダッシュボード</title>
 
     <!-- Preconnect for faster loading -->
     <link rel="preconnect" href="https://cdn.tailwindcss.com">
@@ -1810,8 +1810,31 @@
             }, [filteredData]);
 
             // 質問の種類を分類する関数
+            // 数値バリデーション（チャット分析用）
+            const validateNumber = (num) => {
+                if (num === null || num === undefined || isNaN(num) || !isFinite(num)) return 0;
+                return Math.round(num);
+            };
+
             const classifyQuestion = (question) => {
                 const lowerQ = question.toLowerCase();
+
+                // データ関連キーワードの有無チェック（オフトピック検出）
+                const dataKeywords = [
+                    '売上', '新規', '入会', '退会', '離反', 'スタッフ', '店舗', '院',
+                    'cpa', 'roas', 'cvr', 'ctr', '広告', '媒体', 'meta', 'hpb', 'google', 'line', 'tt', 'チラシ',
+                    '予約', 'キャンセル', '口コミ', 'レビュー', '実績', '成績', 'パフォーマンス',
+                    'マーケ', 'クリック', 'インプレッション', '集客', '来院', '来店',
+                    '比較', 'ランキング', 'トップ', '一番', '改善', 'アドバイス',
+                    '月', '年', '期間', '推移', '分析', '数字', 'データ', '合計', '平均',
+                    '何人', 'いくら', '金額', '費用', '予算', '利益', '客単価',
+                    '蒲田', '池袋', '千葉', '札幌', '名古屋', '大阪', '福岡', '横浜', '白石',
+                    '全店', '全体', 'naoru'
+                ];
+                const hasDataKeyword = dataKeywords.some(kw => lowerQ.includes(kw));
+                if (!hasDataKeyword) {
+                    return 'off_topic';
+                }
 
                 // スタッフリスト要求
                 if (lowerQ.includes('スタッフ') && (lowerQ.includes('教えて') || lowerQ.includes('誰') || lowerQ.includes('一覧') || lowerQ.includes('リスト') || lowerQ.includes('は？') || lowerQ.includes('は?') || lowerQ.match(/スタッフ[はを]/) || lowerQ.endsWith('スタッフ？') || lowerQ.endsWith('スタッフ?'))) {
@@ -1876,6 +1899,15 @@
                 // 質問の種類を分類
                 const questionType = classifyQuestion(question);
                 console.log('🔍 Question type:', questionType);
+
+                // オフトピック検出: データに関係ない質問は明確に断る
+                if (questionType === 'off_topic') {
+                    return {
+                        success: true,
+                        message: 'すみません、その質問にはお答えできません。\n\n私はNAORUの経営データ・マーケティングデータに基づいた分析のみ対応しています。\n\n質問例:\n・「蒲田の1月の売上は？」\n・「全店舗のCPAを比較して」\n・「池袋院の入会率は？」\n・「Meta広告の実績を教えて」',
+                        newContext: currentContext
+                    };
+                }
 
                 // 店舗名の抽出（より柔軟なマッチング）
                 let targetBranch = null;
@@ -2526,28 +2558,27 @@
 
                 // 少し遅延を入れてリアルな感じに
                 setTimeout(() => {
+                    try {
                     // 現在の文脈を渡して分析
                     const result = analyzeChatQuestion(userMessage, chatContext);
 
                     // 文脈のリセットが要求された場合
                     if (result.resetContext) {
                         setChatContext({ branch: null, month: null });
-                        console.log('🔄 Context cleared');
                     }
                     // 新しい文脈がある場合、更新
                     else if (result.newContext) {
                         setChatContext(result.newContext);
-                        console.log('📌 Context updated:', result.newContext);
                     }
 
-                    // メッセージに文脈情報を追加（デバッグ用）
+                    // メッセージに文脈情報を追加
                     let displayMessage = result.message;
                     if (result.newContext && !result.resetContext) {
                         const contextInfo = [];
                         if (result.newContext.branch) contextInfo.push(`店舗: ${result.newContext.branch}`);
                         if (result.newContext.month) contextInfo.push(`期間: ${result.newContext.month}`);
                         if (contextInfo.length > 0) {
-                            displayMessage += `\n\n---\n💡 次の質問でも同じ${contextInfo.join('、')}を使用します。変更する場合は明示してください。`;
+                            displayMessage += `\n\n---\n次の質問でも同じ${contextInfo.join('、')}を使用します。変更する場合は明示してください。`;
                         }
                     }
 
@@ -2555,6 +2586,13 @@
                         type: 'assistant',
                         content: displayMessage
                     }]);
+                    } catch (chatErr) {
+                        console.error('Chat analysis error:', chatErr);
+                        setChatMessages(prev => [...prev, {
+                            type: 'assistant',
+                            content: 'すみません、分析中にエラーが発生しました。質問を変えて再度お試しください。\n\n質問例:\n・「蒲田の1月の売上は？」\n・「全店舗のCPAを比較して」'
+                        }]);
+                    }
                     setChatLoading(false);
 
                     // スクロールを最下部へ
@@ -2624,7 +2662,7 @@
                                     <div className="inline-flex items-center gap-2 px-3 py-1 bg-indigo-100 text-indigo-700 rounded-full text-xs font-black uppercase tracking-widest mb-1">
                                         <Activity size={14} /> Analytics Dashboard
                                     </div>
-                                    <h1 className="text-3xl font-black tracking-tight text-slate-900 italic">整体院 経営総合ダッシュボード</h1>
+                                    <h1 className="text-3xl font-black tracking-tight text-slate-900 italic">経営指標</h1>
                                 </div>
 
                                 {/* Mobile View Toggle */}
@@ -2781,11 +2819,11 @@
 
                                 <div className="flex flex-col gap-2">
                                     <button
-                                        onClick={() => fetchDataFromSpreadsheet(true)}
+                                        onClick={() => { fetchDataFromSpreadsheet(true); fetchMarketingData(true); }}
                                         className="p-3 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-all shadow-lg flex items-center gap-2 font-black text-sm uppercase tracking-tighter disabled:opacity-50"
-                                        disabled={loading}
+                                        disabled={loading || mktLoading}
                                     >
-                                        <RefreshCw size={18} className={loading ? 'animate-spin' : ''} /> Sync
+                                        <RefreshCw size={18} className={loading || mktLoading ? 'animate-spin' : ''} /> Sync
                                     </button>
                                     {lastFetchTime && (
                                         <span className="text-xs text-slate-400 text-center">
@@ -3176,7 +3214,7 @@
                             </div>
                         )}
 
-                        {/* グラフ化ダッシュボード */}
+                        {/* ダッシュボード */}
                         {currentPage === 'charts' && (
                             <div className="p-4 lg:p-6 font-sans text-slate-900">
                                 <div className="max-w-[1600px] mx-auto space-y-6">
@@ -3187,7 +3225,7 @@
                                                 <div className="inline-flex items-center gap-2 px-3 py-1 bg-indigo-100 text-indigo-700 rounded-full text-xs font-black uppercase tracking-widest mb-2">
                                                     <BarChart3 size={14} /> Charts Dashboard
                                                 </div>
-                                                <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-slate-900 italic">グラフ化ダッシュボード</h1>
+                                                <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-slate-900 italic">ダッシュボード</h1>
                                             </div>
                                         </div>
 
@@ -3447,19 +3485,6 @@
                             </div>
                         )}
 
-                        {/* 売上・媒体分析 */}
-                        {currentPage === 'sales-analysis' && (
-                            <div className="p-4 lg:p-6 font-sans text-slate-900">
-                                <div className="max-w-[1600px] mx-auto space-y-6">
-                                    <div className="bg-white p-12 rounded-3xl shadow-sm border border-slate-200 text-center">
-                                        <TrendingUp size={64} className="mx-auto text-slate-300 mb-4" />
-                                        <h2 className="text-2xl font-black text-slate-900 mb-2">売上・媒体分析</h2>
-                                        <p className="text-slate-500 font-bold">このページは開発中です。</p>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-
                         {/* マーケティング */}
                         {currentPage === 'marketing' && (
                             <div className="p-4 lg:p-6 font-sans text-slate-900">
@@ -3481,11 +3506,11 @@
                                             </div>
                                             <div className="flex items-center gap-3">
                                                 <button
-                                                    onClick={() => fetchMarketingData(true)}
+                                                    onClick={() => { fetchMarketingData(true); fetchDataFromSpreadsheet(true); }}
                                                     className="p-3 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-all shadow-lg flex items-center gap-2 font-black text-sm uppercase tracking-tighter disabled:opacity-50"
-                                                    disabled={mktLoading}
+                                                    disabled={mktLoading || loading}
                                                 >
-                                                    <RefreshCw size={18} className={mktLoading ? 'animate-spin' : ''} /> Sync
+                                                    <RefreshCw size={18} className={mktLoading || loading ? 'animate-spin' : ''} /> Sync
                                                 </button>
                                                 {mktLastFetch && (
                                                     <div className="text-right">
@@ -4459,7 +4484,7 @@
                                                     )}
 
                                                     {/* ===== 媒体別 月別トレンド一覧 ===== */}
-                                                    {mktMediaMonthly.mediaList.length > 0 && mktMediaMonthly.months.length > 1 && (
+                                                    {mktMediaMonthly.mediaList.length > 0 && mktMediaMonthly.months.length > 0 && (
                                                         <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
                                                             <div className="p-6 border-b border-slate-100">
                                                                 <h2 className="text-xl font-black flex items-center gap-2 text-slate-800 italic">
@@ -6490,9 +6515,8 @@
 
         const Sidebar = ({ currentPage, setCurrentPage }) => {
             const menuItems = [
-                { id: 'dashboard', label: '経営ダッシュボード', icon: <Home size={20} /> },
-                { id: 'charts', label: 'グラフ化ダッシュボード', icon: <BarChart3 size={20} /> },
-                { id: 'sales-analysis', label: '売上・媒体分析', icon: <TrendingUp size={20} /> },
+                { id: 'dashboard', label: '経営指標', icon: <Home size={20} /> },
+                { id: 'charts', label: 'ダッシュボード', icon: <BarChart3 size={20} /> },
                 { id: 'marketing', label: 'マーケティング', icon: <Megaphone size={20} /> }
             ];
 
@@ -6500,8 +6524,8 @@
                 <div className="w-64 min-h-screen bg-white border-r border-slate-200 p-6 flex flex-col">
                     {/* Logo/Title */}
                     <div className="mb-8">
-                        <h1 className="text-xl font-black text-slate-900">整体院</h1>
-                        <p className="text-xs text-slate-400 font-bold">経営総合ダッシュボード</p>
+                        <h1 className="text-xl font-black text-slate-900">NAORU</h1>
+                        <p className="text-xs text-slate-400 font-bold">総合ダッシュボード</p>
                     </div>
 
                     {/* Menu Items */}

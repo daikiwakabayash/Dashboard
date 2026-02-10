@@ -37,11 +37,23 @@ var MARKETING_SHEET_NAME = '数値まとめ';
 // GETリクエストを処理（ダッシュボードからのAPI呼び出し）
 function doGet(e) {
   try {
-    // GAS側キャッシュ（3分間有効、スプレッドシート読取を削減）
+    // GAS側キャッシュ（10分間有効、スプレッドシート読取を大幅削減）
     var cache = CacheService.getScriptCache();
-    var cached = cache.get('dashboard_response');
-    if (cached) {
-      return ContentService.createTextOutput(cached).setMimeType(ContentService.MimeType.JSON);
+
+    // 分割キャッシュ: GAS制限100KBを超える場合に対応
+    var cachedMkt = cache.get('dashboard_mkt');
+    var cachedMenu = cache.get('dashboard_menu');
+
+    if (cachedMkt && cachedMenu) {
+      var cachedResponse = JSON.stringify({
+        success: true,
+        data: JSON.parse(cachedMkt),
+        menuData: JSON.parse(cachedMenu),
+        count: JSON.parse(cachedMkt).length,
+        timestamp: new Date().toISOString(),
+        cached: true
+      });
+      return ContentService.createTextOutput(cachedResponse).setMimeType(ContentService.MimeType.JSON);
     }
 
     const data = getMarketingData();
@@ -54,8 +66,14 @@ function doGet(e) {
       timestamp: new Date().toISOString()
     });
 
-    // キャッシュに保存（180秒=3分）、GAS制限: 最大100KB
-    try { cache.put('dashboard_response', response, 180); } catch(ce) { /* 超過時はスキップ */ }
+    // 分割キャッシュに保存（600秒=10分）
+    try {
+      cache.put('dashboard_mkt', JSON.stringify(data), 600);
+      cache.put('dashboard_menu', JSON.stringify(menuData), 600);
+    } catch(ce) {
+      // 分割でも超過する場合はフルレスポンスで試行
+      try { cache.put('dashboard_response_full', response, 600); } catch(ce2) { /* 超過時はスキップ */ }
+    }
 
     return ContentService.createTextOutput(response).setMimeType(ContentService.MimeType.JSON);
   } catch (error) {

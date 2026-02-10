@@ -168,7 +168,37 @@
         const CACHE_KEY = 'dashboard_data_cache';
         const MARKETING_CACHE_KEY = 'marketing_data_cache';
         const UI_STATE_KEY = 'dashboard_ui_state';
-        const CACHE_EXPIRY_MS = 15 * 60 * 1000; // 15分
+        const CACHE_EXPIRY_MS = 30 * 60 * 1000; // 30分（GASタイムアウト対策）
+
+        // リトライ付きfetch（タイムアウト + エクスポネンシャルバックオフ）
+        const fetchWithRetry = async (url, options = {}) => {
+            const maxRetries = 3;
+            const timeoutMs = 60000; // 60秒（GASコールドスタート対応）
+            let lastError;
+            for (let attempt = 0; attempt < maxRetries; attempt++) {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+                try {
+                    if (attempt > 0) {
+                        const delay = Math.min(3000 * Math.pow(2, attempt - 1), 12000);
+                        console.log(`⏳ リトライ ${attempt}/${maxRetries - 1}... (${delay/1000}秒後)`);
+                        await new Promise(r => setTimeout(r, delay));
+                    }
+                    const response = await fetch(url, { ...options, signal: controller.signal, redirect: 'follow' });
+                    clearTimeout(timeoutId);
+                    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                    return response;
+                } catch (err) {
+                    clearTimeout(timeoutId);
+                    lastError = err;
+                    console.warn(`❌ Attempt ${attempt + 1}/${maxRetries} failed:`, err.message);
+                    if (err.name === 'AbortError') {
+                        lastError = new Error('タイムアウト: サーバーの応答に時間がかかっています。自動リトライ中...');
+                    }
+                }
+            }
+            throw lastError;
+        };
 
         // マーケティングデータのカラムマッピング（スプレッドシートの日本語カラム名を標準キーに変換）
         const MARKETING_COLUMN_MAP = {
@@ -464,38 +494,48 @@
             const fetchMarketingData = async (forceRefresh = false) => {
                 console.log('📡 Fetching marketing data...');
                 try {
-                    setMktLoading(true);
                     setMktError(null);
 
-                    if (!forceRefresh) {
-                        const cached = getMarketingCachedData();
-                        if (cached && cached.length > 0 && menuRawData.length > 0) {
-                            console.log('💾 Using cached marketing data:', cached.length, 'records');
-                            setMktData(cached);
-                            if (!mktInitialized && !savedUIState?.mktSelectedMonth) {
-                                const branches = Array.from(new Set(cached.map(d => d.branch).filter(Boolean)));
-                                setMktSelectedBranches(branches);
-                                const months = sortMonths(Array.from(new Set(cached.map(d => d.month).filter(Boolean))));
-                                if (months.length > 0) {
-                                    setMktSelectedMonth(months[0]);
-                                    setMktEndMonth(months[months.length - 1]);
-                                }
-                                setMktInitialized(true);
+                    // キャッシュファースト: キャッシュがあれば即座に表示し、バックグラウンドで更新
+                    const cached = getMarketingCachedData();
+                    const hasCachedData = cached && cached.length > 0;
+
+                    if (!forceRefresh && hasCachedData) {
+                        console.log('💾 Using cached marketing data:', cached.length, 'records');
+                        setMktData(cached);
+                        if (!mktInitialized && !savedUIState?.mktSelectedMonth) {
+                            const branches = Array.from(new Set(cached.map(d => d.branch).filter(Boolean)));
+                            setMktSelectedBranches(branches);
+                            const months = sortMonths(Array.from(new Set(cached.map(d => d.month).filter(Boolean))));
+                            if (months.length > 0) {
+                                setMktSelectedMonth(months[0]);
+                                setMktEndMonth(months[months.length - 1]);
                             }
-                            setMktLoading(false);
-                            setMktLastFetch(new Date());
-                            return;
+                            setMktInitialized(true);
                         }
+                        setMktLoading(false);
+                        setMktLastFetch(new Date());
+                        return;
                     }
+
+                    // キャッシュがあればローディング非表示で裏で更新、なければローディング表示
+                    if (!hasCachedData) setMktLoading(true);
 
                     let result;
                     try {
-                        const response = await fetch(MARKETING_API_URL);
+                        const response = await fetchWithRetry(MARKETING_API_URL);
                         const text = await response.text();
                         result = JSON.parse(text);
                     } catch (fetchErr) {
                         console.error('Fetch error details:', fetchErr);
-                        throw new Error('データ取得エラー: ' + (fetchErr.message || 'GAS APIに接続できません'));
+                        // キャッシュデータがあればエラーを飲み込む
+                        if (hasCachedData) {
+                            console.log('⚠️ Fetch failed but using cached data');
+                            setMktData(cached);
+                            setMktLoading(false);
+                            return;
+                        }
+                        throw new Error(fetchErr.message || 'GAS APIに接続できません');
                     }
 
                     if (!result.success) throw new Error(result.error || 'マーケティングデータの取得に失敗');
@@ -504,7 +544,6 @@
                     console.log('✅ Marketing data normalized:', normalized.length, 'records');
                     setMktData(normalized);
 
-                    // メニュー分析データを取得（GASから返される場合）
                     if (result.menuData && Array.isArray(result.menuData) && result.menuData.length > 0) {
                         console.log('📊 Menu analysis data received:', result.menuData.length, 'menus');
                         setMenuRawData(result.menuData);
@@ -526,7 +565,7 @@
                     setMktLastFetch(new Date());
                 } catch (err) {
                     console.error('❌ Marketing fetch error:', err);
-                    setMktError(err.name === 'AbortError' ? 'タイムアウト: サーバーの応答に時間がかかりすぎています' : err.message || 'マーケティングデータの取得に失敗しました');
+                    setMktError(err.message || 'マーケティングデータの取得に失敗しました');
                 } finally {
                     setMktLoading(false);
                 }
@@ -536,113 +575,82 @@
 
             const fetchDataFromSpreadsheet = async (forceRefresh = false) => {
                 console.log('📡 Fetching data from GAS API... (forceRefresh:', forceRefresh, ')');
-                console.log('🔗 API URL:', GAS_API_URL);
 
                 try {
-                    setLoading(true);
                     setError(null);
 
-                    // キャッシュをチェック（強制更新でない場合）
-                    if (!forceRefresh) {
-                        const cachedData = getCachedData();
-                        if (cachedData && cachedData.length > 0) {
-                            console.log('💾 Using cached data:', cachedData.length, 'records');
-                            setRawData(cachedData);
+                    // キャッシュファースト: キャッシュがあれば即座に表示
+                    const cachedData = getCachedData();
+                    const hasCachedData = cachedData && cachedData.length > 0;
 
-                            // 初期選択を設定（保存されたUI状態がない場合のみ）
-                            if (cachedData.length > 0 && !savedUIState) {
-                                const sortedMonths = Array.from(new Set(cachedData.map(d => d.month))).sort((a, b) => {
-                                    const [ay, am] = a.replace('年', '-').replace('月', '').split('-');
-                                    const [by, bm] = b.replace('年', '-').replace('月', '').split('-');
-                                    return new Date(by, bm - 1) - new Date(ay, am - 1);
-                                });
-                                if (!startMonth) setStartMonth(sortedMonths[0] || '');
-                                if (!endMonth) setEndMonth(sortedMonths[0] || '');
-
-                                // 日付範囲も設定（最新月の1日から最終日まで）
-                                if (!startDate && sortedMonths.length > 0) {
-                                    const latestMonth = sortedMonths[0];
-                                    const [year, month] = latestMonth.replace('年', '-').replace('月', '').split('-');
-                                    const firstDay = new Date(parseInt(year), parseInt(month) - 1, 1);
-                                    const lastDay = new Date(parseInt(year), parseInt(month), 0);
-                                    setStartDate(firstDay);
-                                    setEndDate(lastDay);
-                                }
-
-                                const allBranches = Array.from(new Set(cachedData.map(d => d.branch)));
-                                if (selectedBranches.length === 0) setSelectedBranches(allBranches);
+                    if (!forceRefresh && hasCachedData) {
+                        console.log('💾 Using cached data:', cachedData.length, 'records');
+                        setRawData(cachedData);
+                        if (!savedUIState) {
+                            const sortedMonths = Array.from(new Set(cachedData.map(d => d.month))).sort((a, b) => {
+                                const [ay, am] = a.replace('年', '-').replace('月', '').split('-');
+                                const [by, bm] = b.replace('年', '-').replace('月', '').split('-');
+                                return new Date(by, bm - 1) - new Date(ay, am - 1);
+                            });
+                            if (!startMonth) setStartMonth(sortedMonths[0] || '');
+                            if (!endMonth) setEndMonth(sortedMonths[0] || '');
+                            if (!startDate && sortedMonths.length > 0) {
+                                const latestMonth = sortedMonths[0];
+                                const [year, month] = latestMonth.replace('年', '-').replace('月', '').split('-');
+                                setStartDate(new Date(parseInt(year), parseInt(month) - 1, 1));
+                                setEndDate(new Date(parseInt(year), parseInt(month), 0));
                             }
-
-                            setLoading(false);
-                            setLastFetchTime(new Date());
-                            return;
+                            const allBranches = Array.from(new Set(cachedData.map(d => d.branch)));
+                            if (selectedBranches.length === 0) setSelectedBranches(allBranches);
                         }
+                        setLoading(false);
+                        setLastFetchTime(new Date());
+                        return;
                     }
 
-                    // タイムアウト付きfetch (30秒)
-                    const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 30000);
+                    // キャッシュがなければローディング表示
+                    if (!hasCachedData) setLoading(true);
 
                     try {
-                        console.log('⏳ Sending request to GAS...');
-                        const response = await fetch(GAS_API_URL, {
-                            redirect: 'follow',
-                            signal: controller.signal
-                        });
-                        clearTimeout(timeoutId);
+                        console.log('⏳ Sending request to GAS (with auto-retry)...');
+                        const response = await fetchWithRetry(GAS_API_URL);
 
-                        console.log('✅ Response received:', response.status, response.statusText);
-
-                        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-
-                        console.log('📦 Parsing JSON...');
                         const result = await response.json();
-                        console.log('✅ JSON parsed:', result);
-
                         if (!result.success) throw new Error(result.error || 'データの取得に失敗しました');
 
-                        console.log('💾 Setting raw data:', result.data ? result.data.length : 0, 'records');
                         const fetchedData = result.data || [];
                         setRawData(fetchedData);
 
-                        // キャッシュに保存
                         if (fetchedData.length > 0) {
                             setCachedData(fetchedData);
                         }
 
-                        // 初期選択を設定（保存されたUI状態がない場合のみ）
                         if (fetchedData.length > 0 && !savedUIState) {
                             const sortedMonths = Array.from(new Set(fetchedData.map(d => d.month))).sort((a, b) => {
                                 const [ay, am] = a.replace('年', '-').replace('月', '').split('-');
                                 const [by, bm] = b.replace('年', '-').replace('月', '').split('-');
                                 return new Date(by, bm - 1) - new Date(ay, am - 1);
                             });
-                            console.log('📅 Setting start and end months:', sortedMonths[0]);
                             setStartMonth(sortedMonths[0] || '');
                             setEndMonth(sortedMonths[0] || '');
-
-                            // 日付範囲も設定（最新月の1日から最終日まで）
                             if (!startDate && sortedMonths.length > 0) {
                                 const latestMonth = sortedMonths[0];
                                 const [year, month] = latestMonth.replace('年', '-').replace('月', '').split('-');
-                                const firstDay = new Date(parseInt(year), parseInt(month) - 1, 1);
-                                const lastDay = new Date(parseInt(year), parseInt(month), 0);
-                                setStartDate(firstDay);
-                                setEndDate(lastDay);
+                                setStartDate(new Date(parseInt(year), parseInt(month) - 1, 1));
+                                setEndDate(new Date(parseInt(year), parseInt(month), 0));
                             }
-
-                            const allBranches = Array.from(new Set(fetchedData.map(d => d.branch)));
-                            console.log('🏢 Setting selected branches:', allBranches);
-                            setSelectedBranches(allBranches);
+                            setSelectedBranches(Array.from(new Set(fetchedData.map(d => d.branch))));
                         }
 
                         setLastFetchTime(new Date());
                         console.log('✅ Data fetch completed successfully');
                     } catch (fetchError) {
-                        clearTimeout(timeoutId);
                         console.error('❌ Fetch error:', fetchError);
-                        if (fetchError.name === 'AbortError') {
-                            throw new Error('タイムアウト: サーバーの応答に時間がかかりすぎています');
+                        // キャッシュデータがあればエラーを飲み込む
+                        if (hasCachedData) {
+                            console.log('⚠️ Fetch failed but using cached data');
+                            setRawData(cachedData);
+                            return;
                         }
                         throw fetchError;
                     }
@@ -651,7 +659,6 @@
                     setError(err.message || 'データの取得に失敗しました。ネットワーク接続を確認してください。');
                 } finally {
                     setLoading(false);
-                    console.log('🏁 Fetch completed (loading=false)');
                 }
             };
 

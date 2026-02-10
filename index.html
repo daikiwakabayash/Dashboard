@@ -4363,6 +4363,7 @@
                                                                 const totalDayCancel = displayMenus.reduce((s, m) => s + m.sameDayCancels, 0);
                                                                 const totalEnroll = displayMenus.reduce((s, m) => s + m.enrollments, 0);
                                                                 const totalReview = displayMenus.reduce((s, m) => s + m.reviews, 0);
+                                                                const adSpend = mktStats.totalAdSpend || 0;
 
                                                                 return (
                                                                     <>
@@ -4399,12 +4400,14 @@
                                                                                 <table className="w-full text-sm border-collapse">
                                                                                     <thead className="bg-teal-700 text-white sticky top-0 z-10">
                                                                                         <tr className="text-xs font-bold">
-                                                                                            <th className="px-3 py-2 text-left border border-teal-600 min-w-[350px]">メニュー名</th>
+                                                                                            <th className="px-3 py-2 text-left border border-teal-600 min-w-[300px]">メニュー名</th>
                                                                                             <th className="px-3 py-2 text-right border border-teal-600">予約</th>
                                                                                             <th className="px-3 py-2 text-right border border-teal-600">実来院</th>
                                                                                             <th className="px-3 py-2 text-right border border-teal-600">事前</th>
                                                                                             <th className="px-3 py-2 text-right border border-teal-600">当日</th>
                                                                                             <th className="px-3 py-2 text-right border border-teal-600">キャン%</th>
+                                                                                            <th className="px-3 py-2 text-right border border-teal-600">予約CPA</th>
+                                                                                            <th className="px-3 py-2 text-right border border-teal-600">来店CPA</th>
                                                                                             <th className="px-3 py-2 text-right border border-teal-600">入会</th>
                                                                                             <th className="px-3 py-2 text-right border border-teal-600">入会%</th>
                                                                                             <th className="px-3 py-2 text-right border border-teal-600">口コミ</th>
@@ -4420,6 +4423,8 @@
                                                                                             <td className="px-3 py-2 border border-slate-200 text-right">{totalAdvCancel.toLocaleString()}</td>
                                                                                             <td className="px-3 py-2 border border-slate-200 text-right">{totalDayCancel.toLocaleString()}</td>
                                                                                             <td className="px-3 py-2 border border-slate-200 text-right">{totalRes > 0 ? Math.round((totalAdvCancel + totalDayCancel) / totalRes * 100) + '%' : '-'}</td>
+                                                                                            <td className="px-3 py-2 border border-slate-200 text-right text-blue-700">¥{totalRes > 0 ? Math.round(adSpend / totalRes).toLocaleString() : '-'}</td>
+                                                                                            <td className="px-3 py-2 border border-slate-200 text-right text-purple-700">¥{totalVisits > 0 ? Math.round(adSpend / totalVisits).toLocaleString() : '-'}</td>
                                                                                             <td className="px-3 py-2 border border-slate-200 text-right">{totalEnroll.toLocaleString()}</td>
                                                                                             <td className="px-3 py-2 border border-slate-200 text-right">{totalVisits > 0 ? Math.round(totalEnroll / totalVisits * 100) + '%' : '-'}</td>
                                                                                             <td className="px-3 py-2 border border-slate-200 text-right">{totalReview.toLocaleString()}</td>
@@ -4435,6 +4440,12 @@
                                                                                                 <td className="px-3 py-2 border border-slate-200 text-right">{menu.sameDayCancels}</td>
                                                                                                 <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.cancelRate > 25 ? 'text-rose-600 bg-rose-50' : menu.cancelRate > 15 ? 'text-amber-600' : 'text-slate-700'}`}>
                                                                                                     {menu.reservations > 0 ? Math.round(menu.cancelRate) + '%' : '-'}
+                                                                                                </td>
+                                                                                                <td className="px-3 py-2 border border-slate-200 text-right font-mono text-blue-700">
+                                                                                                    {adSpend > 0 && menu.reservations > 0 ? '¥' + Math.round(adSpend / menu.reservations).toLocaleString() : '-'}
+                                                                                                </td>
+                                                                                                <td className="px-3 py-2 border border-slate-200 text-right font-mono text-purple-700">
+                                                                                                    {adSpend > 0 && menu.actualVisits > 0 ? '¥' + Math.round(adSpend / menu.actualVisits).toLocaleString() : '-'}
                                                                                                 </td>
                                                                                                 <td className="px-3 py-2 border border-slate-200 text-right font-bold">{menu.enrollments}</td>
                                                                                                 <td className={`px-3 py-2 border border-slate-200 text-right font-bold ${menu.enrollRate >= 30 ? 'text-emerald-600 bg-emerald-50' : menu.enrollRate >= 15 ? 'text-amber-600' : 'text-slate-700'}`}>
@@ -4463,10 +4474,12 @@
                                                                                     { key: 'reservations', label: '予約数', color: 'blue' },
                                                                                     { key: 'actualVisits', label: '実来院数', color: 'emerald' },
                                                                                     { key: 'cancelRate', label: 'キャンセル率', color: 'rose', isRate: true },
+                                                                                    { key: 'reservationCpa', label: '予約CPA', color: 'blue', isCpa: true },
+                                                                                    { key: 'visitCpa', label: '来店CPA', color: 'purple', isCpa: true },
                                                                                     { key: 'enrollRate', label: '入会率', color: 'amber', isRate: true },
                                                                                 ].map(metric => (
                                                                                     <div key={metric.key} className="mb-6 last:mb-0">
-                                                                                        <h4 className={`text-sm font-black text-${metric.color}-700 mb-2`}>{metric.label}</h4>
+                                                                                        <h4 className={`text-sm font-black mb-2`} style={{color: metric.color === 'blue' ? '#1d4ed8' : metric.color === 'emerald' ? '#047857' : metric.color === 'rose' ? '#be123c' : metric.color === 'purple' ? '#7e22ce' : '#b45309'}}>{metric.label}</h4>
                                                                                         <div className="overflow-x-auto">
                                                                                             <table className="w-full text-sm border-collapse">
                                                                                                 <thead className={`bg-${metric.color}-700 text-white`} style={{backgroundColor: metric.color === 'blue' ? '#1d4ed8' : metric.color === 'emerald' ? '#047857' : metric.color === 'rose' ? '#be123c' : '#b45309'}}>
@@ -4482,21 +4495,25 @@
                                                                                                     {analyzeMenuData.priceMonthlyData.map((row, idx) => {
                                                                                                         const totalVal = metric.isRate
                                                                                                             ? (() => { const s = Object.values(row.months).reduce((a,d) => ({r:a.r+d.reservations,c:a.c+d.advanceCancels+d.sameDayCancels,v:a.v+d.actualVisits,e:a.e+d.enrollments}),{r:0,c:0,v:0,e:0}); return metric.key === 'cancelRate' ? (s.r>0?Math.round(s.c/s.r*100):0) : (s.v>0?Math.round(s.e/s.v*100):0); })()
+                                                                                                            : metric.isCpa
+                                                                                                            ? (() => { const s = Object.values(row.months).reduce((a,d) => ({r:a.r+d.reservations,v:a.v+d.actualVisits}),{r:0,v:0}); const denom = metric.key === 'reservationCpa' ? s.r : s.v; return denom > 0 ? Math.round(adSpend / denom) : 0; })()
                                                                                                             : Object.values(row.months).reduce((s,d) => s + (d[metric.key]||0), 0);
                                                                                                         return (
                                                                                                             <tr key={row.price} className={`${idx % 2 === 0 ? 'bg-slate-50' : 'bg-white'} font-bold hover:bg-blue-50 transition-colors`}>
                                                                                                                 <td className="px-3 py-2 border border-slate-200 text-blue-800">{row.label}</td>
                                                                                                                 {analyzeMenuData.activeMonths.map(mo => {
                                                                                                                     const d = row.months[mo];
-                                                                                                                    const val = d ? (metric.isRate ? Math.round(d[metric.key]) : d[metric.key]) : 0;
+                                                                                                                    const val = metric.isCpa
+                                                                                                                        ? (d ? (() => { const denom = metric.key === 'reservationCpa' ? d.reservations : d.actualVisits; return denom > 0 ? Math.round(adSpend / denom) : 0; })() : 0)
+                                                                                                                        : d ? (metric.isRate ? Math.round(d[metric.key]) : d[metric.key]) : 0;
                                                                                                                     return (
-                                                                                                                        <td key={mo} className={`px-3 py-2 border border-slate-200 text-right ${metric.isRate && metric.key === 'cancelRate' && val > 25 ? 'text-rose-600 bg-rose-50' : metric.isRate && metric.key === 'enrollRate' && val >= 30 ? 'text-emerald-600 bg-emerald-50' : ''}`}>
-                                                                                                                            {val > 0 ? (metric.isRate ? val + '%' : val) : '-'}
+                                                                                                                        <td key={mo} className={`px-3 py-2 border border-slate-200 text-right ${metric.isRate && metric.key === 'cancelRate' && val > 25 ? 'text-rose-600 bg-rose-50' : metric.isRate && metric.key === 'enrollRate' && val >= 30 ? 'text-emerald-600 bg-emerald-50' : metric.isCpa ? (metric.key === 'reservationCpa' ? 'text-blue-700' : 'text-purple-700') : ''}`}>
+                                                                                                                            {val > 0 ? (metric.isRate ? val + '%' : metric.isCpa ? '¥' + val.toLocaleString() : val) : '-'}
                                                                                                                         </td>
                                                                                                                     );
                                                                                                                 })}
-                                                                                                                <td className="px-3 py-2 border border-slate-200 text-right font-black bg-slate-100">
-                                                                                                                    {metric.isRate ? totalVal + '%' : totalVal}
+                                                                                                                <td className={`px-3 py-2 border border-slate-200 text-right font-black bg-slate-100 ${metric.isCpa ? (metric.key === 'reservationCpa' ? 'text-blue-700' : 'text-purple-700') : ''}`}>
+                                                                                                                    {metric.isRate ? totalVal + '%' : metric.isCpa ? (totalVal > 0 ? '¥' + totalVal.toLocaleString() : '-') : totalVal}
                                                                                                                 </td>
                                                                                                             </tr>
                                                                                                         );
@@ -4520,6 +4537,8 @@
                                                                                     { key: 'reservations', label: '予約数', color: 'purple' },
                                                                                     { key: 'actualVisits', label: '実来院数', color: 'emerald' },
                                                                                     { key: 'cancelRate', label: 'キャンセル率', color: 'rose', isRate: true },
+                                                                                    { key: 'reservationCpa', label: '予約CPA', color: 'blue', isCpa: true },
+                                                                                    { key: 'visitCpa', label: '来店CPA', color: 'purple', isCpa: true },
                                                                                     { key: 'enrollRate', label: '入会率', color: 'amber', isRate: true },
                                                                                 ].map(metric => (
                                                                                     <div key={metric.key} className="mb-6 last:mb-0">
@@ -4539,21 +4558,25 @@
                                                                                                     {analyzeMenuData.bodyPartMonthlyData.map((row, idx) => {
                                                                                                         const totalVal = metric.isRate
                                                                                                             ? (() => { const s = Object.values(row.months).reduce((a,d) => ({r:a.r+d.reservations,c:a.c+d.advanceCancels+d.sameDayCancels,v:a.v+d.actualVisits,e:a.e+d.enrollments}),{r:0,c:0,v:0,e:0}); return metric.key === 'cancelRate' ? (s.r>0?Math.round(s.c/s.r*100):0) : (s.v>0?Math.round(s.e/s.v*100):0); })()
+                                                                                                            : metric.isCpa
+                                                                                                            ? (() => { const s = Object.values(row.months).reduce((a,d) => ({r:a.r+d.reservations,v:a.v+d.actualVisits}),{r:0,v:0}); const denom = metric.key === 'reservationCpa' ? s.r : s.v; return denom > 0 ? Math.round(adSpend / denom) : 0; })()
                                                                                                             : Object.values(row.months).reduce((s,d) => s + (d[metric.key]||0), 0);
                                                                                                         return (
                                                                                                             <tr key={row.label} className={`${idx % 2 === 0 ? 'bg-slate-50' : 'bg-white'} font-bold hover:bg-purple-50 transition-colors`}>
                                                                                                                 <td className="px-3 py-2 border border-slate-200 text-purple-800">{row.label}</td>
                                                                                                                 {analyzeMenuData.activeMonths.map(mo => {
                                                                                                                     const d = row.months[mo];
-                                                                                                                    const val = d ? (metric.isRate ? Math.round(d[metric.key]) : d[metric.key]) : 0;
+                                                                                                                    const val = metric.isCpa
+                                                                                                                        ? (d ? (() => { const denom = metric.key === 'reservationCpa' ? d.reservations : d.actualVisits; return denom > 0 ? Math.round(adSpend / denom) : 0; })() : 0)
+                                                                                                                        : d ? (metric.isRate ? Math.round(d[metric.key]) : d[metric.key]) : 0;
                                                                                                                     return (
-                                                                                                                        <td key={mo} className={`px-3 py-2 border border-slate-200 text-right ${metric.isRate && metric.key === 'cancelRate' && val > 25 ? 'text-rose-600 bg-rose-50' : metric.isRate && metric.key === 'enrollRate' && val >= 30 ? 'text-emerald-600 bg-emerald-50' : ''}`}>
-                                                                                                                            {val > 0 ? (metric.isRate ? val + '%' : val) : '-'}
+                                                                                                                        <td key={mo} className={`px-3 py-2 border border-slate-200 text-right ${metric.isRate && metric.key === 'cancelRate' && val > 25 ? 'text-rose-600 bg-rose-50' : metric.isRate && metric.key === 'enrollRate' && val >= 30 ? 'text-emerald-600 bg-emerald-50' : metric.isCpa ? (metric.key === 'reservationCpa' ? 'text-blue-700' : 'text-purple-700') : ''}`}>
+                                                                                                                            {val > 0 ? (metric.isRate ? val + '%' : metric.isCpa ? '¥' + val.toLocaleString() : val) : '-'}
                                                                                                                         </td>
                                                                                                                     );
                                                                                                                 })}
-                                                                                                                <td className="px-3 py-2 border border-slate-200 text-right font-black bg-slate-100">
-                                                                                                                    {metric.isRate ? totalVal + '%' : totalVal}
+                                                                                                                <td className={`px-3 py-2 border border-slate-200 text-right font-black bg-slate-100 ${metric.isCpa ? (metric.key === 'reservationCpa' ? 'text-blue-700' : 'text-purple-700') : ''}`}>
+                                                                                                                    {metric.isRate ? totalVal + '%' : metric.isCpa ? (totalVal > 0 ? '¥' + totalVal.toLocaleString() : '-') : totalVal}
                                                                                                                 </td>
                                                                                                             </tr>
                                                                                                         );

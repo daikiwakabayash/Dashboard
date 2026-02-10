@@ -1466,7 +1466,7 @@
                     roas: m.adSpend > 0 ? Math.round(m.revenue / m.adSpend * 100) : 0,
                 })).sort((a, b) => b.newCount - a.newCount);
 
-                // Monthly trend per media
+                // Monthly trend (全媒体合算)
                 const monthlyMap = {};
                 storeData.forEach(d => {
                     const key = d.month || '不明';
@@ -1483,9 +1483,108 @@
                 const monthlyTrend = Object.values(monthlyMap).map(m => ({
                     ...m,
                     cpa: m.newCount > 0 ? Math.round(m.adSpend / m.newCount) : 0,
+                    reservationCpa: m.reservationCount > 0 ? Math.round(m.adSpend / m.reservationCount) : 0,
+                    visitCpa: m.newCount > 0 ? Math.round(m.adSpend / m.newCount) : 0,
                     enrollRate: m.newCount > 0 ? Math.round(m.enrollCount / m.newCount * 100) : 0,
                     cancelRate: m.reservationCount > 0 ? Math.round(m.cancelCount / m.reservationCount * 100) : 0,
+                    roas: m.adSpend > 0 ? Math.round(m.revenue / m.adSpend * 100) : 0,
                 })).sort((a, b) => parseMonthKey(a.month) - parseMonthKey(b.month));
+
+                // 媒体×月クロス集計
+                const mediaMonthMap = {};
+                const allMonthsSet = new Set();
+                storeData.forEach(d => {
+                    const media = d.media || '不明';
+                    const month = d.month || '不明';
+                    allMonthsSet.add(month);
+                    const key = media + '|||' + month;
+                    if (!mediaMonthMap[key]) mediaMonthMap[key] = { media, month, reservationCount: 0, newCount: 0, enrollCount: 0, cancelCount: 0, adSpend: 0, revenue: 0, reviewCount: 0 };
+                    const mm = mediaMonthMap[key];
+                    mm.reservationCount += d.reservationCount || 0;
+                    mm.newCount += d.newCount || 0;
+                    mm.enrollCount += d.enrollCount || 0;
+                    mm.cancelCount += d.cancelCount || 0;
+                    mm.adSpend += d.adSpend || 0;
+                    mm.revenue += d.revenue || 0;
+                    mm.reviewCount += d.reviewCount || 0;
+                });
+                const mediaMonthlyMonths = [...allMonthsSet].sort((a, b) => parseMonthKey(a) - parseMonthKey(b));
+                const mediaMonthlyData = {};
+                Object.values(mediaMonthMap).forEach(mm => {
+                    if (!mediaMonthlyData[mm.media]) mediaMonthlyData[mm.media] = {};
+                    mediaMonthlyData[mm.media][mm.month] = {
+                        ...mm,
+                        reservationCpa: mm.reservationCount > 0 ? Math.round(mm.adSpend / mm.reservationCount) : 0,
+                        visitCpa: mm.newCount > 0 ? Math.round(mm.adSpend / mm.newCount) : 0,
+                        enrollRate: mm.newCount > 0 ? Math.round(mm.enrollCount / mm.newCount * 100) : 0,
+                        cancelRate: mm.reservationCount > 0 ? Math.round(mm.cancelCount / mm.reservationCount * 100) : 0,
+                        roas: mm.adSpend > 0 ? Math.round(mm.revenue / mm.adSpend * 100) : 0,
+                    };
+                });
+                const mediaMonthlyList = Object.keys(mediaMonthlyData).sort((a, b) => {
+                    const aTotal = Object.values(mediaMonthlyData[a]).reduce((s, d) => s + d.newCount, 0);
+                    const bTotal = Object.values(mediaMonthlyData[b]).reduce((s, d) => s + d.newCount, 0);
+                    return bTotal - aTotal;
+                });
+
+                // 自動インサイト生成
+                const insights = [];
+                if (monthlyTrend.length >= 2) {
+                    const prev = monthlyTrend[monthlyTrend.length - 2];
+                    const curr = monthlyTrend[monthlyTrend.length - 1];
+                    // 来店CPA変化
+                    if (prev.visitCpa > 0 && curr.visitCpa > 0) {
+                        const cpaDiff = curr.visitCpa - prev.visitCpa;
+                        const cpaPct = Math.round((cpaDiff / prev.visitCpa) * 100);
+                        if (cpaDiff < 0) insights.push({ type: 'good', text: `来店CPA: ${prev.month} ¥${prev.visitCpa.toLocaleString()} → ${curr.month} ¥${curr.visitCpa.toLocaleString()}（${cpaPct}% 改善）` });
+                        else if (cpaDiff > 0) insights.push({ type: 'warn', text: `来店CPA: ${prev.month} ¥${prev.visitCpa.toLocaleString()} → ${curr.month} ¥${curr.visitCpa.toLocaleString()}（+${cpaPct}% 悪化）` });
+                    }
+                    // 予約CPA変化
+                    if (prev.reservationCpa > 0 && curr.reservationCpa > 0) {
+                        const cpaDiff = curr.reservationCpa - prev.reservationCpa;
+                        const cpaPct = Math.round((cpaDiff / prev.reservationCpa) * 100);
+                        if (cpaDiff < 0) insights.push({ type: 'good', text: `予約CPA: ${prev.month} ¥${prev.reservationCpa.toLocaleString()} → ${curr.month} ¥${curr.reservationCpa.toLocaleString()}（${cpaPct}% 改善）` });
+                        else if (cpaDiff > 0) insights.push({ type: 'warn', text: `予約CPA: ${prev.month} ¥${prev.reservationCpa.toLocaleString()} → ${curr.month} ¥${curr.reservationCpa.toLocaleString()}（+${cpaPct}% 悪化）` });
+                    }
+                    // 入会率変化
+                    if (prev.enrollRate > 0 || curr.enrollRate > 0) {
+                        const diff = curr.enrollRate - prev.enrollRate;
+                        if (diff > 0) insights.push({ type: 'good', text: `入会率: ${prev.month} ${prev.enrollRate}% → ${curr.month} ${curr.enrollRate}%（+${diff}pt 改善）` });
+                        else if (diff < 0) insights.push({ type: 'warn', text: `入会率: ${prev.month} ${prev.enrollRate}% → ${curr.month} ${curr.enrollRate}%（${diff}pt 低下）` });
+                    }
+                    // キャンセル率変化
+                    if (prev.cancelRate > 0 || curr.cancelRate > 0) {
+                        const diff = curr.cancelRate - prev.cancelRate;
+                        if (diff < 0) insights.push({ type: 'good', text: `C率: ${prev.month} ${prev.cancelRate}% → ${curr.month} ${curr.cancelRate}%（${diff}pt 改善）` });
+                        else if (diff > 0) insights.push({ type: 'warn', text: `C率: ${prev.month} ${prev.cancelRate}% → ${curr.month} ${curr.cancelRate}%（+${diff}pt 悪化）` });
+                    }
+                    // 実来院数変化
+                    if (prev.newCount > 0 && curr.newCount > 0) {
+                        const diff = curr.newCount - prev.newCount;
+                        const pct = Math.round((diff / prev.newCount) * 100);
+                        if (diff > 0) insights.push({ type: 'good', text: `実来院: ${prev.month} ${prev.newCount}名 → ${curr.month} ${curr.newCount}名（+${pct}% 増加）` });
+                        else if (diff < 0) insights.push({ type: 'warn', text: `実来院: ${prev.month} ${prev.newCount}名 → ${curr.month} ${curr.newCount}名（${pct}% 減少）` });
+                    }
+                }
+                // 媒体別インサイト（最新2ヶ月比較）
+                if (mediaMonthlyMonths.length >= 2) {
+                    const pm = mediaMonthlyMonths[mediaMonthlyMonths.length - 2];
+                    const cm = mediaMonthlyMonths[mediaMonthlyMonths.length - 1];
+                    mediaMonthlyList.forEach(media => {
+                        const pd = mediaMonthlyData[media]?.[pm];
+                        const cd = mediaMonthlyData[media]?.[cm];
+                        if (pd && cd && pd.visitCpa > 0 && cd.visitCpa > 0) {
+                            const diff = cd.visitCpa - pd.visitCpa;
+                            const pct = Math.round((diff / pd.visitCpa) * 100);
+                            if (Math.abs(pct) >= 10) {
+                                insights.push({
+                                    type: diff < 0 ? 'good' : 'warn',
+                                    text: `${media}: 来店CPA ${pm} ¥${pd.visitCpa.toLocaleString()} → ${cm} ¥${cd.visitCpa.toLocaleString()}（${diff < 0 ? '' : '+'}${pct}%）`
+                                });
+                            }
+                        }
+                    });
+                }
 
                 // Totals
                 const total = mediaBreakdown.reduce((acc, m) => {
@@ -1502,11 +1601,13 @@
                     return acc;
                 }, { reservationCount: 0, newCount: 0, enrollCount: 0, cancelCount: 0, adSpend: 0, revenue: 0, futureRevenue: 0, reviewCount: 0, clicks: 0, impressions: 0 });
                 total.cpa = total.newCount > 0 ? Math.round(total.adSpend / total.newCount) : 0;
+                total.reservationCpa = total.reservationCount > 0 ? Math.round(total.adSpend / total.reservationCount) : 0;
+                total.visitCpa = total.newCount > 0 ? Math.round(total.adSpend / total.newCount) : 0;
                 total.enrollRate = total.newCount > 0 ? Math.round(total.enrollCount / total.newCount * 100) : 0;
                 total.cancelRate = total.reservationCount > 0 ? Math.round(total.cancelCount / total.reservationCount * 100) : 0;
                 total.roas = total.adSpend > 0 ? Math.round(total.revenue / total.adSpend * 100) : 0;
 
-                return { storeName, area: storeData[0]?.area || '', mediaBreakdown, monthlyTrend, total };
+                return { storeName, area: storeData[0]?.area || '', mediaBreakdown, monthlyTrend, total, mediaMonthlyData, mediaMonthlyList, mediaMonthlyMonths, insights };
             }, [mktSelectedBranches, mktFiltered]);
 
             const stats = useMemo(() => {
@@ -3577,7 +3678,8 @@
                                                                 { label: '入会数', value: mktStoreDetail.total.enrollCount, unit: '名', color: 'blue' },
                                                                 { label: '入会率', value: mktStoreDetail.total.enrollRate, unit: '%', color: 'emerald' },
                                                                 { label: 'C率', value: mktStoreDetail.total.cancelRate, unit: '%', color: 'rose' },
-                                                                { label: 'CPA', value: `¥${mktStoreDetail.total.cpa.toLocaleString()}`, unit: '', color: 'amber' },
+                                                                { label: '予約CPA', value: `¥${mktStoreDetail.total.reservationCpa.toLocaleString()}`, unit: '', color: 'blue' },
+                                                                { label: '来店CPA', value: `¥${mktStoreDetail.total.visitCpa.toLocaleString()}`, unit: '', color: 'amber' },
                                                                 { label: '広告費', value: `¥${mktStoreDetail.total.adSpend.toLocaleString()}`, unit: '', color: 'orange' },
                                                                 { label: '売上', value: `¥${mktStoreDetail.total.revenue.toLocaleString()}`, unit: '', color: 'emerald' },
                                                                 { label: 'ROAS', value: mktStoreDetail.total.roas, unit: '%', color: 'indigo' },
@@ -3683,15 +3785,32 @@
                                                             </div>
                                                         </div>
 
-                                                        {/* Monthly Trend Table */}
+                                                        {/* Insights Section */}
+                                                        {mktStoreDetail.insights && mktStoreDetail.insights.length > 0 && (
+                                                            <div className="bg-gradient-to-r from-slate-50 to-indigo-50 rounded-3xl p-6 border border-indigo-100">
+                                                                <h3 className="text-lg font-black text-slate-800 flex items-center gap-2 mb-4">
+                                                                    <Activity className="text-amber-500" size={22} /> パフォーマンス分析
+                                                                </h3>
+                                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                                    {mktStoreDetail.insights.map((ins, idx) => (
+                                                                        <div key={idx} className={`flex items-start gap-3 p-3 rounded-xl ${ins.type === 'good' ? 'bg-emerald-50 border border-emerald-200' : 'bg-amber-50 border border-amber-200'}`}>
+                                                                            <span className="text-lg mt-0.5">{ins.type === 'good' ? '\u2191' : '\u2193'}</span>
+                                                                            <span className={`text-sm font-bold ${ins.type === 'good' ? 'text-emerald-800' : 'text-amber-800'}`}>{ins.text}</span>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        {/* Monthly Trend Table (全媒体合算) */}
                                                         {mktStoreDetail.monthlyTrend.length > 1 && (
                                                             <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
                                                                 <div className="p-6 border-b border-slate-100">
                                                                     <h2 className="text-xl font-black text-slate-800 italic flex items-center gap-2">
-                                                                        <TrendingUp className="text-purple-500" size={24} /> 月別推移
+                                                                        <TrendingUp className="text-purple-500" size={24} /> 月別推移（全媒体合算）
                                                                     </h2>
                                                                 </div>
-                                                                <div className="overflow-x-auto">
+                                                                <div className="overflow-x-auto scrollbar-thin">
                                                                     <table className="w-full text-left border-collapse text-sm">
                                                                         <thead>
                                                                             <tr className="bg-slate-50 text-[10px] uppercase tracking-widest text-slate-400 font-black border-b border-slate-100">
@@ -3703,12 +3822,18 @@
                                                                                 <th className="px-4 py-3 text-right">C率</th>
                                                                                 <th className="px-4 py-3 text-right">口コミ</th>
                                                                                 <th className="px-4 py-3 text-right">広告費</th>
-                                                                                <th className="px-4 py-3 text-right">CPA</th>
+                                                                                <th className="px-4 py-3 text-right">予約CPA</th>
+                                                                                <th className="px-4 py-3 text-right">来店CPA</th>
                                                                                 <th className="px-4 py-3 text-right">売上</th>
+                                                                                <th className="px-4 py-3 text-right">ROAS</th>
                                                                             </tr>
                                                                         </thead>
                                                                         <tbody className="divide-y divide-slate-100">
-                                                                            {mktStoreDetail.monthlyTrend.map(m => (
+                                                                            {mktStoreDetail.monthlyTrend.map((m, idx) => {
+                                                                                const prev = idx > 0 ? mktStoreDetail.monthlyTrend[idx - 1] : null;
+                                                                                const cpaBetter = prev && prev.visitCpa > 0 && m.visitCpa < prev.visitCpa;
+                                                                                const cpaWorse = prev && prev.visitCpa > 0 && m.visitCpa > prev.visitCpa;
+                                                                                return (
                                                                                 <tr key={m.month} className="hover:bg-slate-50 transition-colors font-bold">
                                                                                     <td className="px-6 py-3 font-black">{m.month}</td>
                                                                                     <td className="px-4 py-3 text-right">{m.reservationCount}</td>
@@ -3718,12 +3843,92 @@
                                                                                     <td className="px-4 py-3 text-right"><span className={`px-1.5 py-0.5 rounded text-[10px] font-black ${m.cancelRate <= 10 ? 'bg-emerald-100 text-emerald-700' : m.cancelRate <= 20 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{m.cancelRate}%</span></td>
                                                                                     <td className="px-4 py-3 text-right">{m.reviewCount}</td>
                                                                                     <td className="px-4 py-3 text-right font-mono">¥{m.adSpend.toLocaleString()}</td>
-                                                                                    <td className="px-4 py-3 text-right font-mono font-black">¥{m.cpa.toLocaleString()}</td>
+                                                                                    <td className="px-4 py-3 text-right font-mono text-blue-700">{m.reservationCpa > 0 ? `¥${m.reservationCpa.toLocaleString()}` : '-'}</td>
+                                                                                    <td className={`px-4 py-3 text-right font-mono font-black ${cpaBetter ? 'text-emerald-600 bg-emerald-50' : cpaWorse ? 'text-rose-600 bg-rose-50' : 'text-purple-700'}`}>
+                                                                                        {m.visitCpa > 0 ? `¥${m.visitCpa.toLocaleString()}` : '-'}
+                                                                                        {cpaBetter && ' \u2193'}
+                                                                                        {cpaWorse && ' \u2191'}
+                                                                                    </td>
                                                                                     <td className="px-4 py-3 text-right font-mono text-emerald-700">¥{m.revenue.toLocaleString()}</td>
+                                                                                    <td className="px-4 py-3 text-right"><span className={`px-1.5 py-0.5 rounded text-[10px] font-black ${m.roas >= 200 ? 'bg-emerald-100 text-emerald-700' : m.roas >= 100 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>{m.roas > 0 ? `${m.roas}%` : '-'}</span></td>
                                                                                 </tr>
-                                                                            ))}
+                                                                                );
+                                                                            })}
                                                                         </tbody>
                                                                     </table>
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        {/* 媒体×月別クロス集計 */}
+                                                        {mktStoreDetail.mediaMonthlyMonths.length > 0 && mktStoreDetail.mediaMonthlyList.length > 0 && (
+                                                            <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                                                                <div className="p-6 border-b border-slate-100">
+                                                                    <h2 className="text-xl font-black text-slate-800 italic flex items-center gap-2">
+                                                                        <BarChart3 className="text-indigo-500" size={24} /> 媒体別 月別クロス分析
+                                                                    </h2>
+                                                                    <p className="text-xs text-slate-500 mt-1">各媒体の月ごとの推移を指標別に確認</p>
+                                                                </div>
+                                                                <div className="p-6 space-y-8">
+                                                                    {[
+                                                                        { key: 'newCount', label: '実来院数', color: '#7c3aed' },
+                                                                        { key: 'reservationCount', label: '予約数', color: '#2563eb' },
+                                                                        { key: 'adSpend', label: '広告費', color: '#d97706', isMoney: true },
+                                                                        { key: 'reservationCpa', label: '予約CPA（広告費÷予約）', color: '#2563eb', isMoney: true },
+                                                                        { key: 'visitCpa', label: '来店CPA（広告費÷実来院）', color: '#7c3aed', isMoney: true },
+                                                                        { key: 'enrollRate', label: '入会率', color: '#059669', isRate: true },
+                                                                        { key: 'cancelRate', label: 'キャンセル率', color: '#e11d48', isRate: true },
+                                                                        { key: 'roas', label: 'ROAS', color: '#16a34a', isRate: true },
+                                                                    ].map(metric => (
+                                                                        <div key={metric.key}>
+                                                                            <h4 className="text-sm font-black mb-3" style={{color: metric.color}}>{metric.label}</h4>
+                                                                            <div className="overflow-x-auto">
+                                                                                <table className="w-full text-sm border-collapse">
+                                                                                    <thead>
+                                                                                        <tr style={{backgroundColor: metric.color}} className="text-white text-xs font-bold">
+                                                                                            <th className="px-3 py-2 text-left border border-slate-400 min-w-[140px]">媒体</th>
+                                                                                            {mktStoreDetail.mediaMonthlyMonths.map(mo => (
+                                                                                                <th key={mo} className="px-3 py-2 text-right border border-slate-400 min-w-[90px]">{mo}</th>
+                                                                                            ))}
+                                                                                            <th className="px-3 py-2 text-right border border-slate-400 min-w-[90px] font-black">合計/平均</th>
+                                                                                        </tr>
+                                                                                    </thead>
+                                                                                    <tbody>
+                                                                                        {mktStoreDetail.mediaMonthlyList.map((media, idx) => {
+                                                                                            const mData = mktStoreDetail.mediaMonthlyData[media];
+                                                                                            const allVals = mktStoreDetail.mediaMonthlyMonths.map(mo => mData[mo]?.[metric.key] || 0);
+                                                                                            const total = metric.isRate
+                                                                                                ? (allVals.filter(v => v > 0).length > 0 ? Math.round(allVals.filter(v => v > 0).reduce((a,b)=>a+b,0) / allVals.filter(v => v > 0).length) : 0)
+                                                                                                : metric.isMoney && (metric.key === 'reservationCpa' || metric.key === 'visitCpa')
+                                                                                                    ? (() => { const t = mktStoreDetail.mediaMonthlyMonths.reduce((a,mo) => ({s:a.s+(mData[mo]?.adSpend||0),d:a.d+(mData[mo]?.[metric.key === 'reservationCpa' ? 'reservationCount' : 'newCount']||0)}),{s:0,d:0}); return t.d > 0 ? Math.round(t.s / t.d) : 0; })()
+                                                                                                    : allVals.reduce((a,b) => a+b, 0);
+                                                                                            return (
+                                                                                                <tr key={media} className={`${idx % 2 === 0 ? 'bg-slate-50' : 'bg-white'} font-bold hover:bg-blue-50 transition-colors`}>
+                                                                                                    <td className="px-3 py-2 border border-slate-200 font-black text-slate-800">{media}</td>
+                                                                                                    {mktStoreDetail.mediaMonthlyMonths.map((mo, moIdx) => {
+                                                                                                        const val = mData[mo]?.[metric.key] || 0;
+                                                                                                        const prevMo = moIdx > 0 ? mktStoreDetail.mediaMonthlyMonths[moIdx - 1] : null;
+                                                                                                        const prevVal = prevMo ? (mData[prevMo]?.[metric.key] || 0) : 0;
+                                                                                                        const isCpaMetric = metric.key === 'reservationCpa' || metric.key === 'visitCpa';
+                                                                                                        const better = prevVal > 0 && val > 0 && (isCpaMetric ? val < prevVal : metric.key === 'cancelRate' ? val < prevVal : val > prevVal);
+                                                                                                        const worse = prevVal > 0 && val > 0 && (isCpaMetric ? val > prevVal : metric.key === 'cancelRate' ? val > prevVal : val < prevVal);
+                                                                                                        return (
+                                                                                                            <td key={mo} className={`px-3 py-2 border border-slate-200 text-right ${better && prevMo ? 'bg-emerald-50 text-emerald-700' : worse && prevMo ? 'bg-rose-50 text-rose-600' : ''}`}>
+                                                                                                                {val > 0 ? (metric.isMoney ? '¥' + val.toLocaleString() : metric.isRate ? val + '%' : val) : '-'}
+                                                                                                            </td>
+                                                                                                        );
+                                                                                                    })}
+                                                                                                    <td className="px-3 py-2 border border-slate-200 text-right font-black bg-slate-100">
+                                                                                                        {total > 0 ? (metric.isMoney ? '¥' + total.toLocaleString() : metric.isRate ? total + '%' : total) : '-'}
+                                                                                                    </td>
+                                                                                                </tr>
+                                                                                            );
+                                                                                        })}
+                                                                                    </tbody>
+                                                                                </table>
+                                                                            </div>
+                                                                        </div>
+                                                                    ))}
                                                                 </div>
                                                             </div>
                                                         )}

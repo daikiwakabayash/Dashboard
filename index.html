@@ -1176,13 +1176,21 @@
                     const subInvs = invBySub[sub.id] || [];
                     const paid = subInvs.filter(i => i.status === 'PAID');
 
-                    // 決済月のリストを保持（dedup時にユニーク月数を計算するため）
-                    const paidMonths = paid.map(i => toYM(i.createdAt)).filter(Boolean);
+                    // 月別の決済額マップ（dedup時にユニーク月のみの金額を計算するため）
+                    const paidByMonth = {};
+                    for (const inv of paid) {
+                        const ym = toYM(inv.createdAt);
+                        if (ym && !paidByMonth[ym]) {
+                            paidByMonth[ym] = inv.amount;
+                        }
+                    }
+                    const paidMonths = Object.keys(paidByMonth);
 
                     const entry = {
                         id: sub.id, customerId: sub.customerId, name, plan: planName,
-                        paidCount: paid.length,
-                        paidTotal: paid.reduce((s, i) => s + i.amount, 0),
+                        paidCount: paidMonths.length,
+                        paidTotal: paidMonths.reduce((s, m) => s + paidByMonth[m], 0),
+                        paidByMonth,
                         paidMonths,
                         startDate: sub.startDate, canceledDate: sub.canceledDate,
                         monthlyPrice: sub.monthlyPrice,
@@ -1220,17 +1228,22 @@
                 }
 
                 // 重複排除: 同一名前+同一月額のサブスクをマージ（プラン名の微妙な違いに対応）
-                // paidCountは合算せずユニーク月数を使用（複数サブスクの膨張を防止）
+                // 複数サブスクの重複月は1回分としてカウント（膨張を防止）
                 const dedup = (list) => {
                     const map = {};
                     for (const entry of list) {
                         const key = `${entry.name}|${entry.monthlyPrice}`;
                         if (map[key]) {
-                            // 決済月をマージしてユニーク月数をカウント
-                            const mergedMonths = new Set([...(map[key].paidMonths || []), ...(entry.paidMonths || [])]);
-                            map[key].paidMonths = [...mergedMonths];
-                            map[key].paidCount = mergedMonths.size;
-                            map[key].paidTotal += entry.paidTotal;
+                            // 月別決済額をマージ（同月は最初の値を優先＝重複課金を排除）
+                            const merged = { ...(map[key].paidByMonth || {}) };
+                            for (const [m, amt] of Object.entries(entry.paidByMonth || {})) {
+                                if (!merged[m]) merged[m] = amt;
+                            }
+                            map[key].paidByMonth = merged;
+                            const months = Object.keys(merged);
+                            map[key].paidMonths = months;
+                            map[key].paidCount = months.length;
+                            map[key].paidTotal = months.reduce((s, m) => s + merged[m], 0);
                             // 最も早い入会日を採用
                             if (entry.startDate && (!map[key].startDate || entry.startDate < map[key].startDate)) {
                                 map[key].startDate = entry.startDate;
@@ -1241,7 +1254,7 @@
                             }
                             map[key].subCount = (map[key].subCount || 1) + 1;
                         } else {
-                            map[key] = { ...entry, paidCount: new Set(entry.paidMonths || []).size || entry.paidCount, subCount: 1 };
+                            map[key] = { ...entry, subCount: 1 };
                         }
                     }
                     return Object.values(map);
@@ -1255,12 +1268,17 @@
                     const planName = plans[sub.planVariationId] ? plans[sub.planVariationId].name : '不明';
                     const subInvs = invBySub[sub.id] || [];
                     const paid = subInvs.filter(i => i.status === 'PAID');
-                    const paidMonths = paid.map(i => toYM(i.createdAt)).filter(Boolean);
+                    const paidByMonth = {};
+                    for (const inv of paid) {
+                        const ym = toYM(inv.createdAt);
+                        if (ym && !paidByMonth[ym]) paidByMonth[ym] = inv.amount;
+                    }
+                    const paidMonths = Object.keys(paidByMonth);
                     newMonthList.push({
                         id: sub.id, customerId: sub.customerId, name, plan: planName,
-                        paidCount: paid.length,
-                        paidTotal: paid.reduce((s, i) => s + i.amount, 0),
-                        paidMonths,
+                        paidCount: paidMonths.length,
+                        paidTotal: paidMonths.reduce((s, m) => s + paidByMonth[m], 0),
+                        paidByMonth, paidMonths,
                         startDate: sub.startDate, canceledDate: sub.canceledDate,
                         monthlyPrice: sub.monthlyPrice,
                     });
@@ -6009,7 +6027,10 @@
                                             <div>
                                                 <p className="text-sm font-black text-amber-700">一部アカウントの取得に失敗しました</p>
                                                 <p className="text-xs text-amber-600 font-bold mt-1">
-                                                    {sqData.meta.failedAccounts.join('、')} のデータを取得できませんでした。トークンの有効期限やアクセス権限を確認してください。
+                                                    {sqData.meta.failedAccounts.join('、')} のデータを取得できませんでした。
+                                                </p>
+                                                <p className="text-xs text-amber-500 mt-1">
+                                                    Vercel環境変数のSQUARE_TOKENSを確認: トークンの有効期限切れ、env（sandbox/production）の設定ミス、Square Developer Dashboardでのアクセス権限を確認してください。
                                                 </p>
                                             </div>
                                         </div>

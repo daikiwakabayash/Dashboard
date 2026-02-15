@@ -135,13 +135,14 @@ async function fetchPayments(client, locationIds) {
     let cursor = undefined;
     do {
       try {
-        const params = {
-          beginTime: beginStr,
-          locationId: locId,
-          sortOrder: 'DESC',
-        };
-        if (cursor) params.cursor = cursor;
-        const { result } = await client.paymentsApi.listPayments(params);
+        // Square SDK v39: listPayments(beginTime, endTime, sortOrder, cursor, locationId, total, last4, cardBrand, limit)
+        const { result } = await client.paymentsApi.listPayments(
+          beginStr,     // beginTime
+          undefined,    // endTime
+          'DESC',       // sortOrder
+          cursor,       // cursor
+          locId,        // locationId
+        );
         if (result.payments) {
           for (const p of result.payments) {
             // COMPLETED決済のみ（Square管理画面の売上サマリーと同じ）
@@ -217,10 +218,16 @@ async function fetchInvoices(client, locationIds) {
 // 1つのSquareアカウントの全データを取得
 async function fetchAccountData(tokenConfig, isMultiAccount) {
   const accountName = tokenConfig.name || '';
+  console.log(`[${accountName || 'main'}] データ取得開始... (token: ${tokenConfig.token ? tokenConfig.token.slice(0, 8) + '...' : 'EMPTY'})`);
   try {
+    if (!tokenConfig.token) {
+      console.error(`[${accountName}] トークンが空です`);
+      return null;
+    }
     const client = await createClient(tokenConfig);
 
     let stores = await fetchLocations(client);
+    console.log(`[${accountName || 'main'}] ロケーション取得: ${stores.length}件`, stores.map(s => s.name));
     if (stores.length === 0) {
       stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];
     }
@@ -268,7 +275,15 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     console.log(`[${accountName || 'main'}] ${stores.length} stores, ${subscriptions.length} subs, ${invoices.length} inv, ${payments.length} payments`);
     return { stores, subscriptions, customers, invoices, payments, plans };
   } catch (err) {
-    console.error(`Account "${accountName}" error:`, err.message);
+    let detail = err.message;
+    try {
+      if (err.result && err.result.errors) {
+        detail = err.result.errors.map(e => `${e.code}: ${e.detail}`).join('; ');
+      }
+    } catch (_) {}
+    console.error(`❌ Account "${accountName}" error:`, detail);
+    console.error(`   Token prefix: ${tokenConfig.token ? tokenConfig.token.slice(0, 12) + '...' : 'EMPTY'}`);
+    console.error(`   Environment: ${tokenConfig.env}`);
     return null;
   }
 }

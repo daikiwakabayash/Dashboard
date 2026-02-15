@@ -485,6 +485,9 @@
             const [sqTab, setSqTab] = useState('active');
             const [sqSort, setSqSort] = useState({ key: 'paidTotal', dir: 'desc' });
             const [sqDrilldown, setSqDrilldown] = useState(null); // { month, type: 'new'|'canceled' }
+            const [sqStoreMenuOpen, setSqStoreMenuOpen] = useState(false);
+            const [sqStoreSearch, setSqStoreSearch] = useState('');
+            const sqStoreMenuRef = useRef(null);
 
             // ソート用 State
             const [branchSortKey, setBranchSortKey] = useState('newCount');
@@ -740,6 +743,8 @@
 
             useEffect(() => {
                 fetchDataFromSpreadsheet();
+                // Square店舗名を店舗検索に表示するため、起動時にSquareデータも取得
+                fetchSquareData();
 
                 // Auto-refresh every 5 minutes
                 const autoRefreshInterval = setInterval(() => {
@@ -757,6 +762,9 @@
                     }
                     if (menuDropdownRef.current && !menuDropdownRef.current.contains(event.target)) {
                         setMenuDropdownOpen(false);
+                    }
+                    if (sqStoreMenuRef.current && !sqStoreMenuRef.current.contains(event.target)) {
+                        setSqStoreMenuOpen(false);
                     }
                 };
 
@@ -867,6 +875,22 @@
                     setSqMonth(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`);
                 }
             }, [sqData]);
+
+            // 店舗選択とSquare店舗フィルタの連動
+            useEffect(() => {
+                if (!sqData || !sqData.stores || sqData.stores.length <= 1) return;
+                // 選択店舗が1つだけ、かつSquare店舗名と一致する場合 → sqStoreを自動切替
+                if (selectedBranches.length === 1) {
+                    const selected = selectedBranches[0];
+                    const matchStore = sqData.stores.find(s => s.name === selected);
+                    if (matchStore) {
+                        setSqStore(matchStore.id);
+                        return;
+                    }
+                }
+                // それ以外は全店舗表示
+                setSqStore('all');
+            }, [selectedBranches, sqData]);
 
             // Square 全指標計算
             const sqMetrics = useMemo(() => {
@@ -1364,7 +1388,11 @@
                 });
             }, [rawData]);
 
-            const allBranches = useMemo(() => Array.from(new Set(rawData.map(d => d.branch))), [rawData]);
+            const allBranches = useMemo(() => {
+                const spreadsheetBranches = rawData.map(d => d.branch);
+                const squareBranches = (sqData && sqData.stores) ? sqData.stores.map(s => s.name) : [];
+                return Array.from(new Set([...spreadsheetBranches, ...squareBranches]));
+            }, [rawData, sqData]);
 
             const filteredBranches = useMemo(() => {
                 if (!branchSearchTerm) return allBranches;
@@ -2370,8 +2398,8 @@
                     '比較', 'ランキング', 'トップ', '一番', '改善', 'アドバイス',
                     '月', '年', '期間', '推移', '分析', '数字', 'データ', '合計', '平均',
                     '何人', 'いくら', '金額', '費用', '予算', '利益', '客単価',
-                    '蒲田', '池袋', '千葉', '札幌', '名古屋', '大阪', '福岡', '横浜', '白石',
-                    '全店', '全体', 'naoru'
+                    '蒲田', '池袋', '千葉', '千葉駅', '札幌', '名古屋', '大阪', '福岡', '横浜', '白石', '恵比寿',
+                    '全店', '全体', 'naoru', 'サブスク', 'mrr', '解約', 'churn'
                 ];
                 const hasDataKeyword = dataKeywords.some(kw => lowerQ.includes(kw));
                 if (!hasDataKeyword) {
@@ -5883,12 +5911,54 @@
                                                 </div>
                                             </div>
                                             <div className="flex items-center gap-3 flex-wrap">
-                                                {sqData && sqData.stores && sqData.stores.length > 1 && (
-                                                    <select value={sqStore} onChange={e => setSqStore(e.target.value)}
-                                                        className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
-                                                        <option value="all">全店舗</option>
-                                                        {sqData.stores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                                                    </select>
+                                                {sqData && sqData.stores && sqData.stores.length > 0 && (
+                                                    <div className="relative" ref={sqStoreMenuRef}>
+                                                        <button
+                                                            onClick={() => setSqStoreMenuOpen(!sqStoreMenuOpen)}
+                                                            className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 flex items-center gap-2 min-w-[160px]"
+                                                        >
+                                                            <MapPin size={16} className="text-slate-400" />
+                                                            <span className="truncate">{sqStore === 'all' ? '全店舗' : (sqData.stores.find(s => s.id === sqStore)?.name || '全店舗')}</span>
+                                                            <ChevronDown size={16} className={`ml-auto transition-transform ${sqStoreMenuOpen ? 'rotate-180' : ''}`} />
+                                                        </button>
+                                                        {sqStoreMenuOpen && (
+                                                            <div className="absolute top-full left-0 mt-2 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 p-3 space-y-2 min-w-[220px] max-h-[350px] overflow-hidden flex flex-col">
+                                                                <div className="relative px-1 pb-2">
+                                                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                                                                    <input
+                                                                        type="text"
+                                                                        placeholder="店舗を検索..."
+                                                                        className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none"
+                                                                        value={sqStoreSearch}
+                                                                        onChange={(e) => setSqStoreSearch(e.target.value)}
+                                                                        onClick={(e) => e.stopPropagation()}
+                                                                    />
+                                                                </div>
+                                                                <div className="overflow-y-auto flex-1 space-y-1">
+                                                                    {(!sqStoreSearch || '全店舗'.includes(sqStoreSearch)) && (
+                                                                        <div
+                                                                            onClick={() => { setSqStore('all'); setSqStoreMenuOpen(false); setSqStoreSearch(''); }}
+                                                                            className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${sqStore === 'all' ? 'bg-blue-50 text-blue-700' : 'hover:bg-slate-50 text-slate-600'}`}
+                                                                        >
+                                                                            <span className="text-sm font-bold">全店舗</span>
+                                                                        </div>
+                                                                    )}
+                                                                    {sqData.stores
+                                                                        .filter(s => !sqStoreSearch || s.name.toLowerCase().includes(sqStoreSearch.toLowerCase()))
+                                                                        .map(s => (
+                                                                            <div
+                                                                                key={s.id}
+                                                                                onClick={() => { setSqStore(s.id); setSqStoreMenuOpen(false); setSqStoreSearch(''); }}
+                                                                                className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${sqStore === s.id ? 'bg-blue-50 text-blue-700' : 'hover:bg-slate-50 text-slate-600'}`}
+                                                                            >
+                                                                                <span className="text-sm font-bold">{s.name}</span>
+                                                                            </div>
+                                                                        ))
+                                                                    }
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                    </div>
                                                 )}
                                                 {sqMetrics && sqMetrics.availableMonths && (
                                                     <select value={sqMonth} onChange={e => setSqMonth(e.target.value)}

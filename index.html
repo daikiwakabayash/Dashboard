@@ -950,13 +950,30 @@
                 const prevMrr = filteredPrevSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
                 const mrrChange = prevMrr > 0 ? Math.round((mrr - prevMrr) / prevMrr * 10000) / 100 : 0;
 
-                // 決済総額 = Square Payments API（管理画面の売上サマリーと同じ）
+                // 決済総額 = Payments API or Orders APIの決済データ
                 const allPayments = sqData.payments || [];
                 const paymentsFiltered = sqStore === 'all'
                     ? allPayments
                     : allPayments.filter(p => p.locationId === sqStore);
                 const monthPayments = paymentsFiltered.filter(p => toYM(p.createdAt) === sqMonth);
                 let totalSales = monthPayments.reduce((sum, p) => sum + p.amount, 0);
+                // フォールバック: payments が空の場合、全PAIDインボイス合計を使用
+                if (totalSales === 0 && allPayments.length === 0) {
+                    const allInvs = sqData.invoices || [];
+                    const paidInvsMonth = allInvs.filter(inv =>
+                        inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth
+                    );
+                    const storeInvs = sqStore === 'all'
+                        ? paidInvsMonth
+                        : paidInvsMonth.filter(inv => {
+                            if (inv.subscriptionId) {
+                                const sub = subs.find(s => s.id === inv.subscriptionId);
+                                return sub && sub.locationId === sqStore;
+                            }
+                            return true;
+                        });
+                    totalSales = storeInvs.reduce((sum, inv) => sum + inv.amount, 0);
+                }
 
                 // 新規・解約（基準月）
                 const newInMonth = filtered.filter(s => toYM(s.startDate) === sqMonth);

@@ -123,29 +123,25 @@ async function fetchPlanDetails(client, planVariationIds) {
   return plans;
 }
 
-// 全決済データ取得（売上サマリー用 - Payments API）
+// 決済データ取得（Payments API → Orders API フォールバック）
 // Square管理画面の売上サマリーと一致する正確な決済データを取得
 async function fetchPayments(client, locationIds) {
-  const payments = [];
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
   const beginStr = beginTime.toISOString();
 
-  for (const locId of locationIds) {
-    let cursor = undefined;
-    do {
-      try {
-        // Square SDK v39: listPayments(beginTime, endTime, sortOrder, cursor, locationId, total, last4, cardBrand, limit)
+  // まずPayments APIを試行
+  let payments = [];
+  let paymentsApiOk = false;
+  try {
+    for (const locId of locationIds) {
+      let cursor = undefined;
+      do {
         const { result } = await client.paymentsApi.listPayments(
-          beginStr,     // beginTime
-          undefined,    // endTime
-          'DESC',       // sortOrder
-          cursor,       // cursor
-          locId,        // locationId
+          beginStr, undefined, 'DESC', cursor, locId,
         );
         if (result.payments) {
           for (const p of result.payments) {
-            // COMPLETED決済のみ（Square管理画面の売上サマリーと同じ）
             if (p.status !== 'COMPLETED') continue;
             payments.push({
               amount: toNumber(p.totalMoney && p.totalMoney.amount),
@@ -155,12 +151,51 @@ async function fetchPayments(client, locationIds) {
           }
         }
         cursor = result.cursor;
+      } while (cursor);
+    }
+    paymentsApiOk = true;
+    console.log(`  Payments API: ${payments.length}件取得`);
+  } catch (err) {
+    console.warn(`  Payments API失敗 (${err.message}), Orders APIにフォールバック`);
+    payments = [];
+  }
+
+  // Payments APIが失敗 or 0件の場合、Orders APIで取得
+  if (!paymentsApiOk || payments.length === 0) {
+    console.log('  Orders APIで決済データを取得...');
+    let cursor = undefined;
+    do {
+      try {
+        const body = {
+          locationIds,
+          query: {
+            filter: {
+              dateTimeFilter: { closedAt: { startAt: beginStr } },
+              stateFilter: { states: ['COMPLETED'] },
+            },
+            sort: { sortField: 'CLOSED_AT', sortOrder: 'DESC' },
+          },
+        };
+        if (cursor) body.cursor = cursor;
+        const { result } = await client.ordersApi.searchOrders(body);
+        if (result.orders) {
+          for (const o of result.orders) {
+            payments.push({
+              amount: toNumber(o.totalMoney && o.totalMoney.amount),
+              createdAt: o.closedAt || o.createdAt,
+              locationId: o.locationId,
+            });
+          }
+        }
+        cursor = result.cursor;
       } catch (err) {
-        console.error(`fetchPayments (payments API) error for location ${locId}:`, err.message);
+        console.error(`  Orders API error:`, err.message);
         cursor = undefined;
       }
     } while (cursor);
+    console.log(`  Orders API: ${payments.length}件取得`);
   }
+
   return payments;
 }
 
@@ -231,8 +266,8 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     if (stores.length === 0) {
       stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];
     }
-    // 複数アカウント時は店舗名にアカウント名を付与
-    if (isMultiAccount && accountName) {
+    // アカウント名が設定されている場合は常に店舗名として使用
+    if (accountName) {
       stores = stores.map(s => ({ ...s, name: `${accountName}` + (stores.length > 1 ? ` (${s.name})` : '') }));
     }
     const locationIds = stores.map(s => s.id);

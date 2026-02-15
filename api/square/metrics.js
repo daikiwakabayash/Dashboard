@@ -342,6 +342,14 @@ async function fetchInvoices(client, locationIds) {
   return invoices;
 }
 
+// タイムアウト付きPromise
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`TIMEOUT: ${label} が${ms / 1000}秒以内に完了しませんでした`)), ms)),
+  ]);
+}
+
 // 1つのSquareアカウントの全データを取得
 async function fetchAccountData(tokenConfig, isMultiAccount) {
   const accountName = tokenConfig.name || '';
@@ -367,12 +375,13 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     // 診断情報トラッキング
     const diag = {};
 
-    // サブスク＋インボイス＋売上＋返品を並列取得（Payments API優先）
+    // サブスク＋インボイス＋売上＋返品を並列取得（各API 20秒タイムアウト）
+    const API_TIMEOUT = 20000;
     const [rawSubs, invoices, paymentsApiData, refundsApiData] = await Promise.all([
-      fetchAllSubscriptions(client, locationIds),
-      fetchInvoices(client, locationIds),
-      fetchSalesPayments(client, locationIds, diag),
-      fetchRefundsFromApi(client, locationIds, diag),
+      withTimeout(fetchAllSubscriptions(client, locationIds), API_TIMEOUT, 'Subscriptions').catch(e => { console.error(`  ${e.message}`); return []; }),
+      withTimeout(fetchInvoices(client, locationIds), API_TIMEOUT, 'Invoices').catch(e => { console.error(`  ${e.message}`); return []; }),
+      withTimeout(fetchSalesPayments(client, locationIds, diag), API_TIMEOUT, 'Payments').catch(e => { console.error(`  ${e.message}`); diag.paymentsApi = e.message; return null; }),
+      withTimeout(fetchRefundsFromApi(client, locationIds, diag), API_TIMEOUT, 'Refunds').catch(e => { console.error(`  ${e.message}`); diag.refundsApi = e.message; return null; }),
     ]);
 
     let payments = paymentsApiData;
@@ -388,11 +397,11 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     payments = payments || [];
     refunds = refunds || [];
 
-    // 顧客名＋プラン詳細を並列取得
+    // 顧客名＋プラン詳細を並列取得（各15秒タイムアウト）
     const planVariationIds = rawSubs.map(s => s.planVariationId).filter(Boolean);
     const [customers, plans] = await Promise.all([
-      fetchAllCustomers(client),
-      fetchPlanDetails(client, planVariationIds),
+      withTimeout(fetchAllCustomers(client), 15000, 'Customers').catch(e => { console.error(`  ${e.message}`); return {}; }),
+      withTimeout(fetchPlanDetails(client, planVariationIds), 15000, 'Plans').catch(e => { console.error(`  ${e.message}`); return {}; }),
     ]);
 
     // サブスクリプションを整形
@@ -462,7 +471,8 @@ export default async function handler(req, res) {
 
     const summaryMode = req.query && req.query.summary === '1';
 
-    // 全アカウントのデータを並列取得（最大10アカウントずつ）
+    // 全アカウントのデータを並列取得（アカウントごと25秒タイムアウト）
+    const ACCOUNT_TIMEOUT = 25000;
     const merged = {
       stores: [],
       subscriptions: [],
@@ -475,33 +485,33 @@ export default async function handler(req, res) {
     const failedAccounts = [];
     const allDiag = [];
 
-    const BATCH_SIZE = 10;
-    for (let i = 0; i < configs.length; i += BATCH_SIZE) {
-      const batch = configs.slice(i, i + BATCH_SIZE);
-      const results = await Promise.all(
-        batch.map(cfg => fetchAccountData(cfg, isMultiAccount))
-      );
-      for (let j = 0; j < results.length; j++) {
-        const r = results[j];
-        const cfg = batch[j];
-        if (!r || r._failed) {
-          const errorDetail = r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です';
-          failedAccounts.push({
-            name: cfg.name || `アカウント${i + j + 1}`,
-            error: errorDetail,
-          });
-          console.error(`❌ アカウント「${cfg.name}」のデータ取得に失敗しました: ${errorDetail}`);
-          continue;
-        }
-        merged.stores.push(...r.stores);
-        merged.subscriptions.push(...r.subscriptions);
-        Object.assign(merged.customers, r.customers);
-        merged.invoices.push(...r.invoices);
-        merged.payments.push(...r.payments);
-        merged.refunds.push(...(r.refunds || []));
-        Object.assign(merged.plans, r.plans);
-        if (r._diag) allDiag.push({ account: cfg.name, ...r._diag });
+    // 全アカウントを一括並列取得（逐次バッチではなく）
+    const results = await Promise.all(
+      configs.map(cfg =>
+        withTimeout(fetchAccountData(cfg, isMultiAccount), ACCOUNT_TIMEOUT, cfg.name || 'account')
+          .catch(err => ({ _failed: true, _errorDetail: err.message, _accountName: cfg.name }))
+      )
+    );
+    for (let j = 0; j < results.length; j++) {
+      const r = results[j];
+      const cfg = configs[j];
+      if (!r || r._failed) {
+        const errorDetail = r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です';
+        failedAccounts.push({
+          name: cfg.name || `アカウント${j + 1}`,
+          error: errorDetail,
+        });
+        console.error(`❌ アカウント「${cfg.name}」のデータ取得に失敗しました: ${errorDetail}`);
+        continue;
       }
+      merged.stores.push(...r.stores);
+      merged.subscriptions.push(...r.subscriptions);
+      Object.assign(merged.customers, r.customers);
+      merged.invoices.push(...r.invoices);
+      merged.payments.push(...r.payments);
+      merged.refunds.push(...(r.refunds || []));
+      Object.assign(merged.plans, r.plans);
+      if (r._diag) allDiag.push({ account: cfg.name, ...r._diag });
     }
 
     if (merged.stores.length === 0) {

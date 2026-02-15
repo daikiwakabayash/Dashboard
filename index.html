@@ -164,6 +164,7 @@
         const Repeat = (props) => <Icon {...props}><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></Icon>;
         const UserPlus = (props) => <Icon {...props}><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></Icon>;
         const UserMinus = (props) => <Icon {...props}><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="23" y1="11" x2="17" y2="11"/></Icon>;
+        const X = (props) => <Icon {...props}><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></Icon>;
 
         console.log('✅ All icon components defined');
 
@@ -483,6 +484,7 @@
             const [sqMonth, setSqMonth] = useState('');
             const [sqTab, setSqTab] = useState('active');
             const [sqSort, setSqSort] = useState({ key: 'paidTotal', dir: 'desc' });
+            const [sqDrilldown, setSqDrilldown] = useState(null); // { month, type: 'new'|'canceled' }
 
             // ソート用 State
             const [branchSortKey, setBranchSortKey] = useState('newCount');
@@ -1103,7 +1105,22 @@
                     }
                 }
 
-                return { activeList, canceledList, refundedList, overdueList };
+                // 重複排除: 同一名前+同一プラン+同一開始日のサブスクをマージ
+                const dedup = (list) => {
+                    const map = {};
+                    for (const entry of list) {
+                        const key = `${entry.name}|${entry.plan}|${entry.startDate}`;
+                        if (map[key]) {
+                            map[key].paidCount += entry.paidCount;
+                            map[key].paidTotal += entry.paidTotal;
+                        } else {
+                            map[key] = { ...entry };
+                        }
+                    }
+                    return Object.values(map);
+                };
+
+                return { activeList: dedup(activeList), canceledList: dedup(canceledList), refundedList, overdueList };
             }, [sqData, sqStore, sqMonth]);
 
             const sqSortedList = useMemo(() => {
@@ -1125,6 +1142,53 @@
             const sqHandleSort = (key) => {
                 setSqSort(prev => ({ key, dir: prev.key === key ? (prev.dir === 'asc' ? 'desc' : 'asc') : 'desc' }));
             };
+
+            // チャートドリルダウンリスト
+            const sqDrilldownList = useMemo(() => {
+                if (!sqDrilldown || !sqData || !sqData.subscriptions) return [];
+                const { month, type } = sqDrilldown;
+                const cust = sqData.customers || {};
+                const plans = sqData.plans || {};
+                const storeSubs = sqStore === 'all' ? sqData.subscriptions : sqData.subscriptions.filter(s => s.locationId === sqStore);
+                const toYM = d => { if (!d) return null; const dt = new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`; };
+                const invBySub = {};
+                for (const inv of (sqData.invoices || [])) {
+                    if (!inv.subscriptionId) continue;
+                    if (!invBySub[inv.subscriptionId]) invBySub[inv.subscriptionId] = [];
+                    invBySub[inv.subscriptionId].push(inv);
+                }
+                let matched;
+                if (type === 'new') {
+                    matched = storeSubs.filter(s => toYM(s.startDate) === month);
+                } else {
+                    matched = storeSubs.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === month);
+                }
+                const list = matched.map(sub => {
+                    const name = cust[sub.customerId] ? cust[sub.customerId].name : sub.customerId || '不明';
+                    const planName = plans[sub.planVariationId] ? plans[sub.planVariationId].name : '不明';
+                    const subInvs = invBySub[sub.id] || [];
+                    const paid = subInvs.filter(i => i.status === 'PAID');
+                    return {
+                        id: sub.id, name, plan: planName,
+                        paidCount: paid.length,
+                        paidTotal: paid.reduce((s, i) => s + i.amount, 0),
+                        startDate: sub.startDate, canceledDate: sub.canceledDate,
+                        monthlyPrice: sub.monthlyPrice,
+                    };
+                });
+                // 重複排除
+                const map = {};
+                for (const entry of list) {
+                    const key = `${entry.name}|${entry.plan}|${entry.startDate}`;
+                    if (map[key]) {
+                        map[key].paidCount += entry.paidCount;
+                        map[key].paidTotal += entry.paidTotal;
+                    } else {
+                        map[key] = { ...entry };
+                    }
+                }
+                return Object.values(map);
+            }, [sqDrilldown, sqData, sqStore]);
 
             // マーケティングドロップダウンのクリック外検知
             useEffect(() => {
@@ -5948,7 +6012,53 @@
                                                 <SquareChart title="MRR推移" icon={<Wallet size={24} />} data={sqMetrics.monthlyTrends} dataKey="mrr" label="MRR" isCurrency={true} color="59, 130, 246" gradientFrom="from-blue-50" gradientTo="to-cyan-50" borderColor="border-blue-200" iconColor="text-blue-600" />
                                             </div>
 
-                                            <SquareBarChart title="月別 入会・解約数" data={sqMetrics.monthlyTrends} />
+                                            <SquareBarChart title="月別 入会・解約数" data={sqMetrics.monthlyTrends} onBarClick={(month, type) => setSqDrilldown({ month, type })} />
+
+                                            {/* チャートドリルダウンモーダル */}
+                                            {sqDrilldown && (
+                                                <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setSqDrilldown(null)}>
+                                                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] overflow-hidden" onClick={e => e.stopPropagation()}>
+                                                        <div className={`p-5 border-b border-slate-200 flex items-center justify-between ${sqDrilldown.type === 'new' ? 'bg-gradient-to-r from-emerald-50 to-green-50' : 'bg-gradient-to-r from-rose-50 to-red-50'}`}>
+                                                            <div>
+                                                                <h3 className="text-lg font-black text-slate-900">
+                                                                    {sqDrilldown.month.split('-')[1]}月 {sqDrilldown.type === 'new' ? '入会' : '解約'}者一覧
+                                                                </h3>
+                                                                <p className="text-sm text-slate-500 font-bold mt-1">{sqDrilldownList.length}名</p>
+                                                            </div>
+                                                            <button onClick={() => setSqDrilldown(null)} className="p-2 hover:bg-white/80 rounded-xl transition-colors">
+                                                                <X size={20} className="text-slate-500" />
+                                                            </button>
+                                                        </div>
+                                                        <div className="overflow-y-auto" style={{maxHeight: 'calc(80vh - 80px)'}}>
+                                                            <table className="w-full text-sm">
+                                                                <thead className="sticky top-0 z-10">
+                                                                    <tr className="bg-slate-50">
+                                                                        <th className="px-4 py-3 text-left text-xs font-black text-slate-500">氏名</th>
+                                                                        <th className="px-4 py-3 text-left text-xs font-black text-slate-500">コース</th>
+                                                                        <th className="px-4 py-3 text-right text-xs font-black text-slate-500">決済回数</th>
+                                                                        <th className="px-4 py-3 text-right text-xs font-black text-slate-500">合計金額</th>
+                                                                        <th className="px-4 py-3 text-left text-xs font-black text-slate-500">{sqDrilldown.type === 'new' ? '開始日' : '解約日'}</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody className="divide-y divide-slate-100">
+                                                                    {sqDrilldownList.length === 0 && (
+                                                                        <tr><td colSpan={5} className="px-4 py-8 text-center text-slate-400 font-bold">データがありません</td></tr>
+                                                                    )}
+                                                                    {sqDrilldownList.map((row, i) => (
+                                                                        <tr key={row.id || i} className="hover:bg-slate-50">
+                                                                            <td className="px-4 py-2.5 font-bold text-slate-800 whitespace-nowrap">{row.name}</td>
+                                                                            <td className="px-4 py-2.5 text-slate-600">{row.plan}</td>
+                                                                            <td className="px-4 py-2.5 font-bold text-right">{row.paidCount}回</td>
+                                                                            <td className="px-4 py-2.5 font-bold text-right">¥{row.paidTotal.toLocaleString()}</td>
+                                                                            <td className="px-4 py-2.5 text-slate-500 text-xs">{sqDrilldown.type === 'new' ? (row.startDate || '-') : (row.canceledDate || '-')}</td>
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
 
                                             {/* コホート分析 */}
                                             {sqMetrics.cohort && sqMetrics.cohort.length > 0 && (
@@ -7315,7 +7425,7 @@
         };
 
         // Square 棒グラフコンポーネント（入会・解約）
-        const SquareBarChart = ({ title, data }) => {
+        const SquareBarChart = ({ title, data, onBarClick }) => {
             const chartRef = useRef(null);
             const chartInstanceRef = useRef(null);
 
@@ -7357,6 +7467,17 @@
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
+                        onClick: (event, elements) => {
+                            if (elements.length > 0 && onBarClick) {
+                                const { datasetIndex, index } = elements[0];
+                                const month = data[index].month;
+                                const type = datasetIndex === 0 ? 'new' : 'canceled';
+                                onBarClick(month, type);
+                            }
+                        },
+                        onHover: (event, elements) => {
+                            if (event.native) event.native.target.style.cursor = elements.length > 0 ? 'pointer' : 'default';
+                        },
                         plugins: {
                             legend: {
                                 display: true,
@@ -7368,6 +7489,9 @@
                                 padding: 12,
                                 titleFont: { size: 13, weight: 'bold' },
                                 bodyFont: { size: 14, weight: 'bold' },
+                                callbacks: {
+                                    afterBody: () => 'クリックで詳細表示',
+                                },
                             },
                             datalabels: {
                                 display: function(context) {
@@ -7407,7 +7531,7 @@
                 return () => {
                     if (chartInstanceRef.current) chartInstanceRef.current.destroy();
                 };
-            }, [data]);
+            }, [data, onBarClick]);
 
             return (
                 <div className="bg-white rounded-3xl shadow-sm border-2 border-slate-200 overflow-hidden hover:shadow-md transition-shadow">

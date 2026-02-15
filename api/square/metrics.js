@@ -342,14 +342,6 @@ async function fetchInvoices(client, locationIds) {
   return invoices;
 }
 
-// タイムアウト付きPromise
-function withTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`TIMEOUT: ${label} が${ms / 1000}秒以内に完了しませんでした`)), ms)),
-  ]);
-}
-
 // 1つのSquareアカウントの全データを取得
 async function fetchAccountData(tokenConfig, isMultiAccount) {
   const accountName = tokenConfig.name || '';
@@ -366,6 +358,17 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     if (stores.length === 0) {
       stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];
     }
+    // excludeLocations: 不要なロケーションを除外（例: ["株式会社SSiM"]）
+    if (tokenConfig.excludeLocations && Array.isArray(tokenConfig.excludeLocations)) {
+      const before = stores.length;
+      stores = stores.filter(s => !tokenConfig.excludeLocations.some(ex => s.name && s.name.includes(ex)));
+      if (stores.length < before) {
+        console.log(`[${accountName}] ${before - stores.length}件のロケーションを除外`);
+      }
+      if (stores.length === 0) {
+        stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];
+      }
+    }
     // アカウント名が設定されている場合は常に店舗名として使用
     if (accountName) {
       stores = stores.map(s => ({ ...s, name: `${accountName}` + (stores.length > 1 ? ` (${s.name})` : '') }));
@@ -375,13 +378,12 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     // 診断情報トラッキング
     const diag = {};
 
-    // サブスク＋インボイス＋売上＋返品を並列取得（各API 20秒タイムアウト）
-    const API_TIMEOUT = 20000;
+    // サブスク＋インボイス＋売上＋返品を並列取得
     const [rawSubs, invoices, paymentsApiData, refundsApiData] = await Promise.all([
-      withTimeout(fetchAllSubscriptions(client, locationIds), API_TIMEOUT, 'Subscriptions').catch(e => { console.error(`  ${e.message}`); return []; }),
-      withTimeout(fetchInvoices(client, locationIds), API_TIMEOUT, 'Invoices').catch(e => { console.error(`  ${e.message}`); return []; }),
-      withTimeout(fetchSalesPayments(client, locationIds, diag), API_TIMEOUT, 'Payments').catch(e => { console.error(`  ${e.message}`); diag.paymentsApi = e.message; return null; }),
-      withTimeout(fetchRefundsFromApi(client, locationIds, diag), API_TIMEOUT, 'Refunds').catch(e => { console.error(`  ${e.message}`); diag.refundsApi = e.message; return null; }),
+      fetchAllSubscriptions(client, locationIds),
+      fetchInvoices(client, locationIds),
+      fetchSalesPayments(client, locationIds, diag),
+      fetchRefundsFromApi(client, locationIds, diag),
     ]);
 
     let payments = paymentsApiData;
@@ -397,11 +399,11 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     payments = payments || [];
     refunds = refunds || [];
 
-    // 顧客名＋プラン詳細を並列取得（各15秒タイムアウト）
+    // 顧客名＋プラン詳細を並列取得
     const planVariationIds = rawSubs.map(s => s.planVariationId).filter(Boolean);
     const [customers, plans] = await Promise.all([
-      withTimeout(fetchAllCustomers(client), 15000, 'Customers').catch(e => { console.error(`  ${e.message}`); return {}; }),
-      withTimeout(fetchPlanDetails(client, planVariationIds), 15000, 'Plans').catch(e => { console.error(`  ${e.message}`); return {}; }),
+      fetchAllCustomers(client),
+      fetchPlanDetails(client, planVariationIds),
     ]);
 
     // サブスクリプションを整形
@@ -450,134 +452,158 @@ function sendJson(res, status, data) {
   return res.status(status).end(safeJson(data));
 }
 
+// レスポンス生成ヘルパー
+function buildResponse(merged, failedAccounts, allDiag, configs, summaryMode, partial) {
+  const meta = {
+    totalSubscriptions: merged.subscriptions.length,
+    totalInvoices: merged.invoices.length,
+    totalPayments: merged.payments.length,
+    totalRefunds: merged.refunds.length,
+    totalAccounts: configs.length,
+    failedAccounts: failedAccounts.length > 0 ? failedAccounts : undefined,
+    diagnostics: allDiag,
+    partial: partial || undefined,
+    generatedAt: new Date().toISOString(),
+  };
+
+  if (summaryMode) {
+    const salesByMonth = {};
+    merged.payments.forEach(p => {
+      const ym = p.createdAt ? p.createdAt.slice(0, 7) : 'unknown';
+      if (!salesByMonth[ym]) salesByMonth[ym] = { total: 0, count: 0 };
+      salesByMonth[ym].total += p.amount;
+      salesByMonth[ym].count++;
+    });
+    const refundsByMonth = {};
+    merged.refunds.forEach(r => {
+      const ym = r.createdAt ? r.createdAt.slice(0, 7) : 'unknown';
+      if (!refundsByMonth[ym]) refundsByMonth[ym] = { total: 0, count: 0 };
+      refundsByMonth[ym].total += r.amount;
+      refundsByMonth[ym].count++;
+    });
+    return { success: true, stores: merged.stores, salesByMonth, refundsByMonth, meta };
+  }
+
+  return {
+    success: true,
+    stores: merged.stores,
+    plans: merged.plans,
+    subscriptions: merged.subscriptions,
+    customers: merged.customers,
+    invoices: merged.invoices,
+    payments: merged.payments,
+    refunds: merged.refunds,
+    meta,
+  };
+}
+
 export default async function handler(req, res) {
-  try {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // グローバルデッドライン: Vercelの60秒制限の前に必ずJSONを返す
+  const DEADLINE_MS = 50000;
+  let hasResponded = false;
 
-    if (req.method === 'OPTIONS') return sendJson(res, 200, { ok: true });
-    if (req.method !== 'GET') return sendJson(res, 405, { success: false, error: 'Method not allowed' });
+  function respond(status, data) {
+    if (hasResponded) return;
+    hasResponded = true;
+    sendJson(res, status, data);
+  }
 
-    const configs = getTokenConfigs();
-    if (configs.length === 0) {
-      return sendJson(res, 500, {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') return respond(200, { ok: true });
+  if (req.method !== 'GET') return respond(405, { success: false, error: 'Method not allowed' });
+
+  const configs = getTokenConfigs();
+  if (configs.length === 0) {
+    return respond(500, {
+      success: false,
+      error: '環境変数が未設定です: SQUARE_ACCESS_TOKEN または SQUARE_TOKENS を設定してください',
+    });
+  }
+
+  const isMultiAccount = configs.length > 1;
+  const summaryMode = req.query && req.query.summary === '1';
+
+  // 共有データ（各アカウントが完了次第マージ）
+  const merged = {
+    stores: [], subscriptions: [], customers: {}, invoices: [],
+    payments: [], refunds: [], plans: {},
+  };
+  const failedAccounts = [];
+  const allDiag = [];
+
+  // デッドラインタイマー: 50秒で部分データを返す
+  const deadlineTimer = setTimeout(() => {
+    console.warn('⏰ デッドライン到達 - 部分データで応答します');
+    const remaining = configs.filter((cfg, i) =>
+      !failedAccounts.some(f => f.name === cfg.name) &&
+      !merged.stores.some(s => s.name && s.name.includes(cfg.name))
+    );
+    remaining.forEach(cfg => {
+      failedAccounts.push({ name: cfg.name || 'unknown', error: 'タイムアウト: 処理時間超過' });
+    });
+
+    if (merged.stores.length > 0) {
+      respond(200, buildResponse(merged, failedAccounts, allDiag, configs, summaryMode, true));
+    } else {
+      respond(200, {
         success: false,
-        error: '環境変数が未設定です: SQUARE_ACCESS_TOKEN または SQUARE_TOKENS を設定してください',
+        error: 'データ取得がタイムアウトしました。再読み込みしてください。',
+        stores: [], meta: { failedAccounts, partial: true, generatedAt: new Date().toISOString() },
       });
     }
+  }, DEADLINE_MS);
 
-    const isMultiAccount = configs.length > 1;
-
-    const summaryMode = req.query && req.query.summary === '1';
-
-    // 全アカウントのデータを並列取得（API単位のタイムアウトで保護）
-    const merged = {
-      stores: [],
-      subscriptions: [],
-      customers: {},
-      invoices: [],
-      payments: [],
-      refunds: [],
-      plans: {},
-    };
-    const failedAccounts = [];
-    const allDiag = [];
-
-    // 全アカウントを一括並列取得
-    const results = await Promise.all(
-      configs.map(cfg => fetchAccountData(cfg, isMultiAccount))
-    );
-    for (let j = 0; j < results.length; j++) {
-      const r = results[j];
-      const cfg = configs[j];
-      if (!r || r._failed) {
-        const errorDetail = r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です';
-        failedAccounts.push({
-          name: cfg.name || `アカウント${j + 1}`,
-          error: errorDetail,
-        });
-        console.error(`❌ アカウント「${cfg.name}」のデータ取得に失敗しました: ${errorDetail}`);
-        continue;
+  try {
+    // 各アカウントを並列実行、完了次第mergedにマージ
+    const accountPromises = configs.map(async (cfg, j) => {
+      try {
+        const r = await fetchAccountData(cfg, isMultiAccount);
+        if (!r || r._failed) {
+          const errorDetail = r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です';
+          failedAccounts.push({ name: cfg.name || `アカウント${j + 1}`, error: errorDetail });
+          console.error(`❌ アカウント「${cfg.name}」失敗: ${errorDetail}`);
+          return;
+        }
+        // 完了次第マージ
+        merged.stores.push(...r.stores);
+        merged.subscriptions.push(...r.subscriptions);
+        Object.assign(merged.customers, r.customers);
+        merged.invoices.push(...r.invoices);
+        merged.payments.push(...r.payments);
+        merged.refunds.push(...(r.refunds || []));
+        Object.assign(merged.plans, r.plans);
+        if (r._diag) allDiag.push({ account: cfg.name, ...r._diag });
+      } catch (err) {
+        failedAccounts.push({ name: cfg.name || `アカウント${j + 1}`, error: err.message });
       }
-      merged.stores.push(...r.stores);
-      merged.subscriptions.push(...r.subscriptions);
-      Object.assign(merged.customers, r.customers);
-      merged.invoices.push(...r.invoices);
-      merged.payments.push(...r.payments);
-      merged.refunds.push(...(r.refunds || []));
-      Object.assign(merged.plans, r.plans);
-      if (r._diag) allDiag.push({ account: cfg.name, ...r._diag });
-    }
+    });
+
+    await Promise.allSettled(accountPromises);
+    clearTimeout(deadlineTimer);
+
+    if (hasResponded) return; // デッドラインで既に応答済み
 
     if (merged.stores.length === 0) {
-      return sendJson(res, 500, {
+      return respond(200, {
         success: false,
         error: '全アカウントのデータ取得に失敗しました',
-        failedAccounts,
+        stores: [], meta: { failedAccounts, generatedAt: new Date().toISOString() },
       });
     }
 
-    const meta = {
-      totalSubscriptions: merged.subscriptions.length,
-      totalInvoices: merged.invoices.length,
-      totalPayments: merged.payments.length,
-      totalRefunds: merged.refunds.length,
-      totalAccounts: configs.length,
-      failedAccounts: failedAccounts.length > 0 ? failedAccounts : undefined,
-      diagnostics: allDiag,
-      generatedAt: new Date().toISOString(),
-    };
-
-    // サマリーモード: 診断用コンパクトレスポンス
-    if (summaryMode) {
-      const salesByMonth = {};
-      merged.payments.forEach(p => {
-        const ym = p.createdAt ? p.createdAt.slice(0, 7) : 'unknown';
-        if (!salesByMonth[ym]) salesByMonth[ym] = { total: 0, count: 0 };
-        salesByMonth[ym].total += p.amount;
-        salesByMonth[ym].count++;
-      });
-      const refundsByMonth = {};
-      merged.refunds.forEach(r => {
-        const ym = r.createdAt ? r.createdAt.slice(0, 7) : 'unknown';
-        if (!refundsByMonth[ym]) refundsByMonth[ym] = { total: 0, count: 0 };
-        refundsByMonth[ym].total += r.amount;
-        refundsByMonth[ym].count++;
-      });
-      return sendJson(res, 200, {
-        success: true,
-        stores: merged.stores,
-        salesByMonth,
-        refundsByMonth,
-        meta,
-      });
-    }
-
-    return sendJson(res, 200, {
-      success: true,
-      stores: merged.stores,
-      plans: merged.plans,
-      subscriptions: merged.subscriptions,
-      customers: merged.customers,
-      invoices: merged.invoices,
-      payments: merged.payments,
-      refunds: merged.refunds,
-      meta,
-    });
+    return respond(200, buildResponse(merged, failedAccounts, allDiag, configs, summaryMode, false));
   } catch (err) {
+    clearTimeout(deadlineTimer);
     console.error('Square API error:', err);
     let errorMessage = err.message || 'Square API request failed';
-    let errorDetail = null;
     try {
       if (err.result && err.result.errors) {
-        errorDetail = err.result.errors.map(e => `${e.category}: ${e.code} - ${e.detail}`).join('; ');
-        errorMessage = errorDetail;
-      } else if (err.errors) {
-        errorDetail = err.errors.map(e => `${e.category}: ${e.code} - ${e.detail}`).join('; ');
-        errorMessage = errorDetail;
+        errorMessage = err.result.errors.map(e => `${e.category}: ${e.code} - ${e.detail}`).join('; ');
       }
     } catch (_) {}
-    return sendJson(res, 500, { success: false, error: errorMessage, detail: errorDetail });
+    return respond(500, { success: false, error: errorMessage });
   }
 }

@@ -248,22 +248,29 @@ function calculateMetrics(subscriptions, planPrices, invoices) {
   };
 }
 
+// BigIntを含むオブジェクトを安全にJSON化
+function safeJson(obj) {
+  return JSON.stringify(obj, (_, v) => typeof v === 'bigint' ? Number(v) : v);
+}
+
+function sendJson(res, status, data) {
+  res.setHeader('Content-Type', 'application/json');
+  return res.status(status).end(safeJson(data));
+}
+
 export default async function handler(req, res) {
   try {
-    // 全レスポンスをJSONとして返すことを保証
-    res.setHeader('Content-Type', 'application/json');
-
     // CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
     if (req.method === 'OPTIONS') {
-      return res.status(200).json({ ok: true });
+      return sendJson(res, 200, { ok: true });
     }
 
     if (req.method !== 'GET') {
-      return res.status(405).json({ success: false, error: 'Method not allowed' });
+      return sendJson(res, 405, { success: false, error: 'Method not allowed' });
     }
 
     // 環境変数チェック
@@ -273,9 +280,9 @@ export default async function handler(req, res) {
     if (!process.env.SQUARE_ENVIRONMENT) missing.push('SQUARE_ENVIRONMENT');
 
     if (missing.length > 0) {
-      return res.status(500).json({
+      return sendJson(res, 500, {
         success: false,
-        error: `環境変数が未設定です: ${missing.join(', ')}。Vercelのプロジェクト設定で環境変数を追加してください（チームレベルではなくプロジェクトレベル）。`,
+        error: `環境変数が未設定です: ${missing.join(', ')}。Vercelのプロジェクト設定で環境変数を追加してください。`,
       });
     }
 
@@ -294,24 +301,23 @@ export default async function handler(req, res) {
 
     const metrics = calculateMetrics(subscriptions, planPrices, invoices);
 
-    return res.status(200).json({ success: true, ...metrics });
+    return sendJson(res, 200, { success: true, ...metrics });
   } catch (err) {
     console.error('Square API error:', err);
-
-    // ヘッダーが未設定の場合に備えてセット
-    try { res.setHeader('Content-Type', 'application/json'); } catch (_) {}
 
     let errorMessage = err.message || 'Square API request failed';
     let errorDetail = null;
 
-    if (err.result && err.result.errors) {
-      errorDetail = err.result.errors.map(e => `${e.category}: ${e.code} - ${e.detail}`).join('; ');
-      errorMessage = errorDetail;
-    } else if (err.errors) {
-      errorDetail = err.errors.map(e => `${e.category}: ${e.code} - ${e.detail}`).join('; ');
-      errorMessage = errorDetail;
-    }
+    try {
+      if (err.result && err.result.errors) {
+        errorDetail = err.result.errors.map(e => `${e.category}: ${e.code} - ${e.detail}`).join('; ');
+        errorMessage = errorDetail;
+      } else if (err.errors) {
+        errorDetail = err.errors.map(e => `${e.category}: ${e.code} - ${e.detail}`).join('; ');
+        errorMessage = errorDetail;
+      }
+    } catch (_) {}
 
-    return res.status(500).json({ success: false, error: errorMessage, detail: errorDetail });
+    return sendJson(res, 500, { success: false, error: errorMessage, detail: errorDetail });
   }
 }

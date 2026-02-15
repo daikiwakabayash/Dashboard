@@ -471,8 +471,7 @@ export default async function handler(req, res) {
 
     const summaryMode = req.query && req.query.summary === '1';
 
-    // 全アカウントのデータを並列取得（アカウントごと25秒タイムアウト）
-    const ACCOUNT_TIMEOUT = 25000;
+    // 全アカウントのデータを並列取得（API単位のタイムアウトで保護）
     const merged = {
       stores: [],
       subscriptions: [],
@@ -485,12 +484,9 @@ export default async function handler(req, res) {
     const failedAccounts = [];
     const allDiag = [];
 
-    // 全アカウントを一括並列取得（逐次バッチではなく）
+    // 全アカウントを一括並列取得
     const results = await Promise.all(
-      configs.map(cfg =>
-        withTimeout(fetchAccountData(cfg, isMultiAccount), ACCOUNT_TIMEOUT, cfg.name || 'account')
-          .catch(err => ({ _failed: true, _errorDetail: err.message, _accountName: cfg.name }))
-      )
+      configs.map(cfg => fetchAccountData(cfg, isMultiAccount))
     );
     for (let j = 0; j < results.length; j++) {
       const r = results[j];
@@ -515,7 +511,11 @@ export default async function handler(req, res) {
     }
 
     if (merged.stores.length === 0) {
-      return sendJson(res, 500, { success: false, error: 'ロケーションが見つかりません' });
+      return sendJson(res, 500, {
+        success: false,
+        error: '全アカウントのデータ取得に失敗しました',
+        failedAccounts,
+      });
     }
 
     const meta = {

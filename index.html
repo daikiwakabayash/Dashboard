@@ -932,7 +932,25 @@
                     ? allPayments
                     : allPayments.filter(p => p.locationId === sqStore);
                 const monthPayments = paymentsFiltered.filter(p => toYM(p.createdAt) === sqMonth);
-                const totalSales = monthPayments.reduce((sum, p) => sum + p.amount, 0);
+                let totalSales = monthPayments.reduce((sum, p) => sum + p.amount, 0);
+                // フォールバック: payments（Orders API）が空の場合、全PAIDインボイス合計を使用
+                if (totalSales === 0) {
+                    const allInvs = sqData.invoices || [];
+                    const paidInvsMonth = allInvs.filter(inv =>
+                        inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth
+                    );
+                    const storeInvs = sqStore === 'all'
+                        ? paidInvsMonth
+                        : paidInvsMonth.filter(inv => {
+                            // インボイスのsubscriptionIdから店舗を特定
+                            if (inv.subscriptionId) {
+                                const sub = subs.find(s => s.id === inv.subscriptionId);
+                                return sub && sub.locationId === sqStore;
+                            }
+                            return true;
+                        });
+                    totalSales = storeInvs.reduce((sum, inv) => sum + inv.amount, 0);
+                }
 
                 // 新規・解約（基準月）
                 const newInMonth = filtered.filter(s => toYM(s.startDate) === sqMonth);
@@ -972,7 +990,7 @@
                 for (const s of activeRef) {
                     const name = getName(s);
                     const pn = plansMap[s.planVariationId] ? plansMap[s.planVariationId].name : '不明';
-                    const dedupKey = `${name}|${pn}`;
+                    const dedupKey = `${name}|${s.monthlyPrice}`;
                     const subInvForThis = filteredSubInvs.filter(inv => inv.subscriptionId === s.id);
                     const subMrr = subInvForThis.reduce((sum, inv) => sum + inv.amount, 0);
                     if (!byPlan[pn]) byPlan[pn] = { count: 0, mrr: 0 };
@@ -1172,11 +1190,11 @@
                     }
                 }
 
-                // 重複排除: 同一名前+同一プランのサブスクをマージ（startDate不問）
+                // 重複排除: 同一名前+同一月額のサブスクをマージ（プラン名の微妙な違いに対応）
                 const dedup = (list) => {
                     const map = {};
                     for (const entry of list) {
-                        const key = `${entry.name}|${entry.plan}`;
+                        const key = `${entry.name}|${entry.monthlyPrice}`;
                         if (map[key]) {
                             map[key].paidCount += entry.paidCount;
                             map[key].paidTotal += entry.paidTotal;
@@ -1187,12 +1205,29 @@
                     return Object.values(map);
                 };
 
-                return { activeList: dedup(activeList), canceledList: dedup(canceledList), refundedList, overdueList };
+                // 新規入会: 選択月に入会したサブスク
+                const newMonthList = [];
+                for (const sub of storeSubs) {
+                    if (toYM(sub.startDate) !== sqMonth) continue;
+                    const name = cust[sub.customerId] ? cust[sub.customerId].name : sub.customerId || '不明';
+                    const planName = plans[sub.planVariationId] ? plans[sub.planVariationId].name : '不明';
+                    const subInvs = invBySub[sub.id] || [];
+                    const paid = subInvs.filter(i => i.status === 'PAID');
+                    newMonthList.push({
+                        id: sub.id, customerId: sub.customerId, name, plan: planName,
+                        paidCount: paid.length,
+                        paidTotal: paid.reduce((s, i) => s + i.amount, 0),
+                        startDate: sub.startDate, canceledDate: sub.canceledDate,
+                        monthlyPrice: sub.monthlyPrice,
+                    });
+                }
+
+                return { activeList: dedup(activeList), newMonthList: dedup(newMonthList), canceledList: dedup(canceledList), refundedList, overdueList };
             }, [sqData, sqStore, sqMonth]);
 
             const sqSortedList = useMemo(() => {
                 if (!sqCustomerData) return [];
-                const lists = { active: sqCustomerData.activeList, canceled: sqCustomerData.canceledList, refunded: sqCustomerData.refundedList, overdue: sqCustomerData.overdueList };
+                const lists = { active: sqCustomerData.activeList, newMonth: sqCustomerData.newMonthList, canceled: sqCustomerData.canceledList, refunded: sqCustomerData.refundedList, overdue: sqCustomerData.overdueList };
                 const list = [...(lists[sqTab] || [])];
                 const { key, dir } = sqSort;
                 list.sort((a, b) => {
@@ -1251,10 +1286,10 @@
                         monthlyPrice: sub.monthlyPrice,
                     };
                 });
-                // 重複排除（名前+プランでマージ）
+                // 重複排除（名前+月額でマージ）
                 const map = {};
                 for (const entry of list) {
-                    const key = `${entry.name}|${entry.plan}`;
+                    const key = `${entry.name}|${entry.monthlyPrice}`;
                     if (map[key]) {
                         map[key].paidCount += entry.paidCount;
                         map[key].paidTotal += entry.paidTotal;
@@ -5923,6 +5958,7 @@
                                                     <div className="flex flex-wrap border-b border-slate-200">
                                                         {[
                                                             { key: 'active', label: 'アクティブ', count: sqCustomerData.activeList.length, color: 'emerald' },
+                                                            { key: 'newMonth', label: '新規入会', count: sqCustomerData.newMonthList.length, color: 'blue' },
                                                             { key: 'canceled', label: '解約済み', count: sqCustomerData.canceledList.length, color: 'rose' },
                                                             { key: 'refunded', label: '払戻し', count: sqCustomerData.refundedList.length, color: 'amber' },
                                                             { key: 'overdue', label: '期限超過', count: sqCustomerData.overdueList.length, color: 'red' },
@@ -5937,7 +5973,7 @@
                                                         <table className="w-full text-sm">
                                                             <thead className="sticky top-0 z-10">
                                                                 <tr className="bg-slate-50">
-                                                                    {(sqTab === 'active' || sqTab === 'canceled' ? [
+                                                                    {(sqTab === 'active' || sqTab === 'newMonth' || sqTab === 'canceled' ? [
                                                                         { k: 'name', label: '氏名' },
                                                                         { k: 'plan', label: 'コース' },
                                                                         { k: 'paidCount', label: '決済回数' },
@@ -5964,7 +6000,7 @@
                                                                 {sqSortedList.length === 0 && (
                                                                     <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400 font-bold">データがありません</td></tr>
                                                                 )}
-                                                                {(sqTab === 'active' || sqTab === 'canceled') && sqSortedList.map((row, i) => (
+                                                                {(sqTab === 'active' || sqTab === 'newMonth' || sqTab === 'canceled') && sqSortedList.map((row, i) => (
                                                                     <tr key={row.id || i} className="hover:bg-slate-50">
                                                                         <td className="px-4 py-2.5 font-bold text-slate-800 whitespace-nowrap">{row.name}</td>
                                                                         <td className="px-4 py-2.5 text-slate-600">{row.plan}</td>

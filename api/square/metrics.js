@@ -498,35 +498,71 @@ function buildResponse(merged, failedAccounts, allDiag, configs, summaryMode, pa
 }
 
 export default async function handler(req, res) {
-  // グローバルデッドライン: Vercelの60秒制限の前に必ずJSONを返す
-  const DEADLINE_MS = 50000;
-  let hasResponded = false;
-
-  function respond(status, data) {
-    if (hasResponded) return;
-    hasResponded = true;
-    sendJson(res, status, data);
-  }
-
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  if (req.method === 'OPTIONS') return respond(200, { ok: true });
-  if (req.method !== 'GET') return respond(405, { success: false, error: 'Method not allowed' });
+  if (req.method === 'OPTIONS') return sendJson(res, 200, { ok: true });
+  if (req.method !== 'GET') return sendJson(res, 405, { success: false, error: 'Method not allowed' });
 
   const configs = getTokenConfigs();
   if (configs.length === 0) {
-    return respond(500, {
+    return sendJson(res, 500, {
       success: false,
       error: '環境変数が未設定です: SQUARE_ACCESS_TOKEN または SQUARE_TOKENS を設定してください',
     });
   }
 
+  // ── アカウント一覧モード: ?info=1 ──
+  if (req.query && req.query.info === '1') {
+    return sendJson(res, 200, {
+      success: true,
+      accounts: configs.map((cfg, i) => ({ index: i, name: cfg.name || `アカウント${i + 1}` })),
+    });
+  }
+
+  // ── 単一アカウントモード: ?account=N ──
+  if (req.query && req.query.account !== undefined) {
+    const idx = parseInt(req.query.account, 10);
+    if (isNaN(idx) || idx < 0 || idx >= configs.length) {
+      return sendJson(res, 400, { success: false, error: `アカウントインデックスが無効です: ${req.query.account}` });
+    }
+    try {
+      const cfg = configs[idx];
+      const r = await fetchAccountData(cfg, configs.length > 1);
+      if (!r || r._failed) {
+        return sendJson(res, 200, {
+          success: false,
+          error: r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です',
+          accountName: cfg.name,
+        });
+      }
+      return sendJson(res, 200, {
+        success: true,
+        stores: r.stores,
+        subscriptions: r.subscriptions,
+        customers: r.customers,
+        invoices: r.invoices,
+        payments: r.payments,
+        refunds: r.refunds || [],
+        plans: r.plans,
+        _diag: r._diag,
+      });
+    } catch (err) {
+      console.error(`Square API error (account ${idx}):`, err);
+      let errorMessage = err.message || 'Square API request failed';
+      try {
+        if (err.result && err.result.errors) {
+          errorMessage = err.result.errors.map(e => `${e.code}: ${e.detail}`).join('; ');
+        }
+      } catch (_) {}
+      return sendJson(res, 200, { success: false, error: errorMessage, accountName: configs[idx].name });
+    }
+  }
+
+  // ── 全アカウント一括モード（後方互換） ──
   const isMultiAccount = configs.length > 1;
   const summaryMode = req.query && req.query.summary === '1';
-
-  // 共有データ（各アカウントが完了次第マージ）
   const merged = {
     stores: [], subscriptions: [], customers: {}, invoices: [],
     payments: [], refunds: [], plans: {},
@@ -534,30 +570,20 @@ export default async function handler(req, res) {
   const failedAccounts = [];
   const allDiag = [];
 
-  // デッドラインフラグ
   let deadlineReached = false;
-  const deadlineTimer = setTimeout(() => {
-    deadlineReached = true;
-    console.warn('⏰ デッドライン到達');
-  }, DEADLINE_MS);
+  const deadlineTimer = setTimeout(() => { deadlineReached = true; }, 50000);
 
   try {
-    // アカウントを順次処理（先に完了したデータを確保するため）
     for (let j = 0; j < configs.length; j++) {
       const cfg = configs[j];
-
-      // デッドライン到達済みなら残りはスキップ
       if (deadlineReached) {
         failedAccounts.push({ name: cfg.name || `アカウント${j + 1}`, error: 'タイムアウト: 処理時間超過' });
         continue;
       }
-
       try {
         const r = await fetchAccountData(cfg, isMultiAccount);
         if (!r || r._failed) {
-          const errorDetail = r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です';
-          failedAccounts.push({ name: cfg.name || `アカウント${j + 1}`, error: errorDetail });
-          console.error(`❌ アカウント「${cfg.name}」失敗: ${errorDetail}`);
+          failedAccounts.push({ name: cfg.name || `アカウント${j + 1}`, error: r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です' });
           continue;
         }
         merged.stores.push(...r.stores);
@@ -568,32 +594,22 @@ export default async function handler(req, res) {
         merged.refunds.push(...(r.refunds || []));
         Object.assign(merged.plans, r.plans);
         if (r._diag) allDiag.push({ account: cfg.name, ...r._diag });
-        console.log(`✅ アカウント「${cfg.name}」完了 (${merged.stores.length} stores)`);
       } catch (err) {
         failedAccounts.push({ name: cfg.name || `アカウント${j + 1}`, error: err.message });
       }
     }
-
     clearTimeout(deadlineTimer);
 
     if (merged.stores.length === 0) {
-      return respond(200, {
-        success: false,
-        error: '全アカウントのデータ取得に失敗しました',
+      return sendJson(res, 200, {
+        success: false, error: '全アカウントのデータ取得に失敗しました',
         stores: [], meta: { failedAccounts, generatedAt: new Date().toISOString() },
       });
     }
-
-    return respond(200, buildResponse(merged, failedAccounts, allDiag, configs, summaryMode, deadlineReached));
+    return sendJson(res, 200, buildResponse(merged, failedAccounts, allDiag, configs, summaryMode, deadlineReached));
   } catch (err) {
     clearTimeout(deadlineTimer);
     console.error('Square API error:', err);
-    let errorMessage = err.message || 'Square API request failed';
-    try {
-      if (err.result && err.result.errors) {
-        errorMessage = err.result.errors.map(e => `${e.category}: ${e.code} - ${e.detail}`).join('; ');
-      }
-    } catch (_) {}
-    return respond(500, { success: false, error: errorMessage });
+    return sendJson(res, 500, { success: false, error: err.message || 'Square API request failed' });
   }
 }

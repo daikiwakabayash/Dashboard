@@ -1,13 +1,39 @@
 // Square API からサブスクリプションデータを取得
-// 全店舗対応・顧客名＋インボイス付き
+// 複数Squareアカウント対応・全店舗・顧客名＋インボイス付き
 
-async function getClient() {
-  const { Client, Environment } = await import('square');
+let _squareModule = null;
+async function getSquareModule() {
+  if (!_squareModule) _squareModule = await import('square');
+  return _squareModule;
+}
+
+// 環境変数からトークン設定を取得
+// SQUARE_TOKENS: JSON配列 [{"name":"恵比寿院","token":"xxx","env":"production"}, ...]
+// SQUARE_ACCESS_TOKEN: 後方互換（単一アカウント用）
+function getTokenConfigs() {
+  if (process.env.SQUARE_TOKENS) {
+    try {
+      const tokens = JSON.parse(process.env.SQUARE_TOKENS);
+      if (Array.isArray(tokens) && tokens.length > 0) return tokens;
+    } catch (e) {
+      console.error('SQUARE_TOKENS parse error:', e.message);
+    }
+  }
+  if (process.env.SQUARE_ACCESS_TOKEN) {
+    return [{
+      name: '',
+      token: process.env.SQUARE_ACCESS_TOKEN,
+      env: process.env.SQUARE_ENVIRONMENT || 'production',
+    }];
+  }
+  return [];
+}
+
+async function createClient(tokenConfig) {
+  const { Client, Environment } = await getSquareModule();
   return new Client({
-    accessToken: process.env.SQUARE_ACCESS_TOKEN,
-    environment: process.env.SQUARE_ENVIRONMENT === 'production'
-      ? Environment.Production
-      : Environment.Sandbox,
+    accessToken: tokenConfig.token,
+    environment: tokenConfig.env === 'production' ? Environment.Production : Environment.Sandbox,
   });
 }
 
@@ -97,37 +123,45 @@ async function fetchPlanDetails(client, planVariationIds) {
   return plans;
 }
 
-// 全決済データ取得（売上サマリー用）
+// 全決済データ取得（売上サマリー用 - Orders API）
 async function fetchPayments(client, locationIds) {
   const payments = [];
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
   const beginStr = beginTime.toISOString();
 
-  for (const locId of locationIds) {
-    let cursor = undefined;
-    do {
-      try {
-        const params = { beginTime: beginStr, locationId: locId };
-        if (cursor) params.cursor = cursor;
-        const { result } = await client.paymentsApi.listPayments(params);
-        if (result.payments) {
-          for (const p of result.payments) {
-            if (p.status !== 'COMPLETED') continue;
-            payments.push({
-              amount: toNumber(p.totalMoney && p.totalMoney.amount),
-              createdAt: p.createdAt,
-              locationId: p.locationId,
-            });
-          }
+  let cursor = undefined;
+  do {
+    try {
+      const body = {
+        locationIds,
+        query: {
+          filter: {
+            dateTimeFilter: {
+              closedAt: { startAt: beginStr },
+            },
+            stateFilter: { states: ['COMPLETED'] },
+          },
+          sort: { sortField: 'CLOSED_AT', sortOrder: 'DESC' },
+        },
+      };
+      if (cursor) body.cursor = cursor;
+      const { result } = await client.ordersApi.searchOrders(body);
+      if (result.orders) {
+        for (const o of result.orders) {
+          payments.push({
+            amount: toNumber(o.totalMoney && o.totalMoney.amount),
+            createdAt: o.closedAt || o.createdAt,
+            locationId: o.locationId,
+          });
         }
-        cursor = result.cursor;
-      } catch (err) {
-        console.error('fetchPayments error (loc=' + locId + '):', err.message);
-        cursor = undefined;
       }
-    } while (cursor);
-  }
+      cursor = result.cursor;
+    } catch (err) {
+      console.error('fetchPayments (orders) error:', err.message);
+      cursor = undefined;
+    }
+  } while (cursor);
   return payments;
 }
 
@@ -182,62 +216,37 @@ async function fetchInvoices(client, locationIds) {
   return invoices;
 }
 
-function safeJson(obj) {
-  return JSON.stringify(obj, (_, v) => typeof v === 'bigint' ? Number(v) : v);
-}
-
-function sendJson(res, status, data) {
-  res.setHeader('Content-Type', 'application/json');
-  return res.status(status).end(safeJson(data));
-}
-
-export default async function handler(req, res) {
+// 1つのSquareアカウントの全データを取得
+async function fetchAccountData(tokenConfig, isMultiAccount) {
+  const accountName = tokenConfig.name || '';
   try {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    const client = await createClient(tokenConfig);
 
-    if (req.method === 'OPTIONS') return sendJson(res, 200, { ok: true });
-    if (req.method !== 'GET') return sendJson(res, 405, { success: false, error: 'Method not allowed' });
-
-    const missing = [];
-    if (!process.env.SQUARE_ACCESS_TOKEN) missing.push('SQUARE_ACCESS_TOKEN');
-    if (!process.env.SQUARE_ENVIRONMENT) missing.push('SQUARE_ENVIRONMENT');
-    if (missing.length > 0) {
-      return sendJson(res, 500, {
-        success: false,
-        error: `環境変数が未設定です: ${missing.join(', ')}`,
-      });
-    }
-
-    const client = await getClient();
-
-    // 1. ロケーション取得
     let stores = await fetchLocations(client);
-    if (process.env.SQUARE_LOCATION_ID && stores.length === 0) {
-      stores = [{ id: process.env.SQUARE_LOCATION_ID, name: 'メイン店舗' }];
-    }
     if (stores.length === 0) {
-      return sendJson(res, 500, { success: false, error: 'ロケーションが見つかりません' });
+      stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];
+    }
+    // 複数アカウント時は店舗名にアカウント名を付与
+    if (isMultiAccount && accountName) {
+      stores = stores.map(s => ({ ...s, name: `${accountName}` + (stores.length > 1 ? ` (${s.name})` : '') }));
     }
     const locationIds = stores.map(s => s.id);
 
-    // 2. サブスク＋インボイス＋決済を並列取得
+    // サブスク＋インボイス＋決済を並列取得
     const [rawSubs, invoices, payments] = await Promise.all([
       fetchAllSubscriptions(client, locationIds),
       fetchInvoices(client, locationIds),
       fetchPayments(client, locationIds),
     ]);
 
-    // 3. 顧客名＋プラン詳細を並列取得
-    const customerIds = [...new Set(rawSubs.map(s => s.customerId).filter(Boolean))];
+    // 顧客名＋プラン詳細を並列取得
     const planVariationIds = rawSubs.map(s => s.planVariationId).filter(Boolean);
     const [customers, plans] = await Promise.all([
       fetchAllCustomers(client),
       fetchPlanDetails(client, planVariationIds),
     ]);
 
-    // 4. サブスクリプションを整形
+    // サブスクリプションを整形
     const subscriptions = rawSubs.map(s => {
       const plan = plans[s.planVariationId];
       let monthlyPrice = 0;
@@ -258,18 +267,86 @@ export default async function handler(req, res) {
       };
     });
 
+    console.log(`[${accountName || 'main'}] ${stores.length} stores, ${subscriptions.length} subs, ${invoices.length} inv, ${payments.length} payments`);
+    return { stores, subscriptions, customers, invoices, payments, plans };
+  } catch (err) {
+    console.error(`Account "${accountName}" error:`, err.message);
+    return null;
+  }
+}
+
+function safeJson(obj) {
+  return JSON.stringify(obj, (_, v) => typeof v === 'bigint' ? Number(v) : v);
+}
+
+function sendJson(res, status, data) {
+  res.setHeader('Content-Type', 'application/json');
+  return res.status(status).end(safeJson(data));
+}
+
+export default async function handler(req, res) {
+  try {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') return sendJson(res, 200, { ok: true });
+    if (req.method !== 'GET') return sendJson(res, 405, { success: false, error: 'Method not allowed' });
+
+    const configs = getTokenConfigs();
+    if (configs.length === 0) {
+      return sendJson(res, 500, {
+        success: false,
+        error: '環境変数が未設定です: SQUARE_ACCESS_TOKEN または SQUARE_TOKENS を設定してください',
+      });
+    }
+
+    const isMultiAccount = configs.length > 1;
+
+    // 全アカウントのデータを並列取得（最大10アカウントずつ）
+    const merged = {
+      stores: [],
+      subscriptions: [],
+      customers: {},
+      invoices: [],
+      payments: [],
+      plans: {},
+    };
+
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < configs.length; i += BATCH_SIZE) {
+      const batch = configs.slice(i, i + BATCH_SIZE);
+      const results = await Promise.all(
+        batch.map(cfg => fetchAccountData(cfg, isMultiAccount))
+      );
+      for (const r of results) {
+        if (!r) continue;
+        merged.stores.push(...r.stores);
+        merged.subscriptions.push(...r.subscriptions);
+        Object.assign(merged.customers, r.customers);
+        merged.invoices.push(...r.invoices);
+        merged.payments.push(...r.payments);
+        Object.assign(merged.plans, r.plans);
+      }
+    }
+
+    if (merged.stores.length === 0) {
+      return sendJson(res, 500, { success: false, error: 'ロケーションが見つかりません' });
+    }
+
     return sendJson(res, 200, {
       success: true,
-      stores,
-      plans,
-      subscriptions,
-      customers,
-      invoices,
-      payments,
+      stores: merged.stores,
+      plans: merged.plans,
+      subscriptions: merged.subscriptions,
+      customers: merged.customers,
+      invoices: merged.invoices,
+      payments: merged.payments,
       meta: {
-        totalSubscriptions: subscriptions.length,
-        totalInvoices: invoices.length,
-        totalPayments: payments.length,
+        totalSubscriptions: merged.subscriptions.length,
+        totalInvoices: merged.invoices.length,
+        totalPayments: merged.payments.length,
+        totalAccounts: configs.length,
         generatedAt: new Date().toISOString(),
       },
     });

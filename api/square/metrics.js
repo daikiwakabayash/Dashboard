@@ -1,5 +1,5 @@
 // Square API からサブスクリプションデータを取得
-// 全店舗対応・フロントエンドで分析計算を行う設計
+// 全店舗対応・顧客名＋インボイス付き
 
 async function getClient() {
   const { Client, Environment } = await import('square');
@@ -32,7 +32,6 @@ function normalizeToMonthly(amount, cadence) {
   }
 }
 
-// 全ロケーション取得
 async function fetchLocations(client) {
   try {
     const { result } = await client.locationsApi.listLocations();
@@ -46,7 +45,6 @@ async function fetchLocations(client) {
   }
 }
 
-// 全サブスクリプション取得（複数ロケーション対応）
 async function fetchAllSubscriptions(client, locationIds) {
   const subscriptions = [];
   let cursor = undefined;
@@ -61,7 +59,6 @@ async function fetchAllSubscriptions(client, locationIds) {
   return subscriptions;
 }
 
-// カタログからプラン詳細取得（名前＋価格）
 async function fetchPlanDetails(client, planVariationIds) {
   const plans = {};
   if (planVariationIds.length === 0) return plans;
@@ -87,9 +84,7 @@ async function fetchPlanDetails(client, planVariationIds) {
             }
             plans[obj.id] = {
               name: data.name || obj.id,
-              amount,
-              currency,
-              cadence,
+              amount, currency, cadence,
               monthlyPrice: Math.round(normalizeToMonthly(amount, cadence)),
             };
           }
@@ -100,6 +95,55 @@ async function fetchPlanDetails(client, planVariationIds) {
     }
   }
   return plans;
+}
+
+// 全顧客名を取得
+async function fetchAllCustomers(client) {
+  const customers = {};
+  let cursor = undefined;
+  do {
+    const { result } = await client.customersApi.listCustomers(cursor, 100);
+    if (result.customers) {
+      for (const c of result.customers) {
+        customers[c.id] = {
+          name: `${c.familyName || ''} ${c.givenName || ''}`.trim() || c.id,
+        };
+      }
+    }
+    cursor = result.cursor;
+  } while (cursor);
+  return customers;
+}
+
+// インボイス取得（全ステータス）
+async function fetchInvoices(client, locationIds) {
+  const invoices = [];
+  let cursor = undefined;
+  do {
+    const { result } = await client.invoicesApi.searchInvoices({
+      query: {
+        filter: { locationIds },
+        sort: { field: 'INVOICE_SORT_DATE', order: 'DESC' },
+      },
+      cursor,
+    });
+    if (result.invoices) {
+      for (const inv of result.invoices) {
+        const pr = inv.paymentRequests && inv.paymentRequests[0];
+        invoices.push({
+          id: inv.id,
+          customerId: inv.primaryRecipient ? inv.primaryRecipient.customerId : null,
+          subscriptionId: inv.subscriptionId || null,
+          status: inv.status,
+          amount: pr ? toNumber(pr.computedAmountMoney && pr.computedAmountMoney.amount) : 0,
+          dueDate: pr ? pr.dueDate : null,
+          createdAt: inv.createdAt,
+        });
+      }
+    }
+    cursor = result.cursor;
+  } while (cursor);
+  return invoices;
 }
 
 function safeJson(obj) {
@@ -132,7 +176,7 @@ export default async function handler(req, res) {
 
     const client = await getClient();
 
-    // 1. 全ロケーション取得
+    // 1. ロケーション取得
     let stores = await fetchLocations(client);
     if (process.env.SQUARE_LOCATION_ID && stores.length === 0) {
       stores = [{ id: process.env.SQUARE_LOCATION_ID, name: 'メイン店舗' }];
@@ -142,14 +186,21 @@ export default async function handler(req, res) {
     }
     const locationIds = stores.map(s => s.id);
 
-    // 2. 全サブスクリプション取得
-    const rawSubs = await fetchAllSubscriptions(client, locationIds);
+    // 2. サブスク＋インボイスを並列取得
+    const [rawSubs, invoices] = await Promise.all([
+      fetchAllSubscriptions(client, locationIds),
+      fetchInvoices(client, locationIds),
+    ]);
 
-    // 3. プラン詳細取得
+    // 3. 顧客名＋プラン詳細を並列取得
+    const customerIds = [...new Set(rawSubs.map(s => s.customerId).filter(Boolean))];
     const planVariationIds = rawSubs.map(s => s.planVariationId).filter(Boolean);
-    const plans = await fetchPlanDetails(client, planVariationIds);
+    const [customers, plans] = await Promise.all([
+      fetchAllCustomers(client),
+      fetchPlanDetails(client, planVariationIds),
+    ]);
 
-    // 4. サブスクリプションを整形して返却
+    // 4. サブスクリプションを整形
     const subscriptions = rawSubs.map(s => {
       const plan = plans[s.planVariationId];
       let monthlyPrice = 0;
@@ -175,8 +226,11 @@ export default async function handler(req, res) {
       stores,
       plans,
       subscriptions,
+      customers,
+      invoices,
       meta: {
         totalSubscriptions: subscriptions.length,
+        totalInvoices: invoices.length,
         generatedAt: new Date().toISOString(),
       },
     });

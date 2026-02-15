@@ -481,6 +481,8 @@
             const [sqLastFetch, setSqLastFetch] = useState(null);
             const [sqStore, setSqStore] = useState('all');
             const [sqMonth, setSqMonth] = useState('');
+            const [sqTab, setSqTab] = useState('active');
+            const [sqSort, setSqSort] = useState({ key: 'paidTotal', dir: 'desc' });
 
             // ソート用 State
             const [branchSortKey, setBranchSortKey] = useState('newCount');
@@ -1030,6 +1032,75 @@
                     byStore, byPlan, monthlyTrends, cohort, availableMonths,
                 };
             }, [sqData, sqStore, sqMonth]);
+
+            // 顧客テーブルデータ
+            const sqCustomerData = useMemo(() => {
+                if (!sqData || !sqData.subscriptions || !sqData.invoices) return null;
+                const cust = sqData.customers || {};
+                const plans = sqData.plans || {};
+                const invByCust = {};
+                for (const inv of sqData.invoices) {
+                    if (!inv.customerId || !inv.subscriptionId) continue;
+                    if (!invByCust[inv.customerId]) invByCust[inv.customerId] = [];
+                    invByCust[inv.customerId].push(inv);
+                }
+                const activeList = [];
+                const canceledList = [];
+                const refundedList = [];
+                const overdueList = [];
+                const seen = {};
+                const filtered = sqStore === 'all' ? sqData.subscriptions : sqData.subscriptions.filter(s => s.locationId === sqStore);
+                for (const sub of filtered) {
+                    const custInvs = invByCust[sub.customerId] || [];
+                    const paid = custInvs.filter(i => i.status === 'PAID');
+                    const name = cust[sub.customerId] ? cust[sub.customerId].name : sub.customerId || '不明';
+                    const planName = plans[sub.planVariationId] ? plans[sub.planVariationId].name : '不明';
+                    const entry = {
+                        id: sub.id, customerId: sub.customerId, name, plan: planName,
+                        paidCount: paid.length,
+                        paidTotal: paid.reduce((s, i) => s + i.amount, 0),
+                        startDate: sub.startDate, canceledDate: sub.canceledDate,
+                        monthlyPrice: sub.monthlyPrice, status: sub.status,
+                    };
+                    if (sub.status === 'ACTIVE' || sub.status === 'PAUSED') {
+                        activeList.push(entry);
+                    } else if (sub.status === 'CANCELED' || sub.status === 'DEACTIVATED') {
+                        canceledList.push(entry);
+                    }
+                    // 払戻し・期限超過を収集
+                    for (const inv of custInvs) {
+                        if (seen[inv.id]) continue;
+                        seen[inv.id] = true;
+                        if (inv.status === 'REFUNDED' || inv.status === 'PARTIALLY_REFUNDED') {
+                            refundedList.push({ ...inv, name, plan: planName });
+                        }
+                        if (inv.dueDate && new Date(inv.dueDate) < new Date() && (inv.status === 'UNPAID' || inv.status === 'PAYMENT_PENDING')) {
+                            overdueList.push({ ...inv, name, plan: planName });
+                        }
+                    }
+                }
+                return { activeList, canceledList, refundedList, overdueList };
+            }, [sqData, sqStore]);
+
+            const sqSortedList = useMemo(() => {
+                if (!sqCustomerData) return [];
+                const lists = { active: sqCustomerData.activeList, canceled: sqCustomerData.canceledList, refunded: sqCustomerData.refundedList, overdue: sqCustomerData.overdueList };
+                const list = [...(lists[sqTab] || [])];
+                const { key, dir } = sqSort;
+                list.sort((a, b) => {
+                    const va = a[key]; const vb = b[key];
+                    if (va == null && vb == null) return 0;
+                    if (va == null) return 1;
+                    if (vb == null) return -1;
+                    if (typeof va === 'string') return dir === 'asc' ? va.localeCompare(vb, 'ja') : vb.localeCompare(va, 'ja');
+                    return dir === 'asc' ? va - vb : vb - va;
+                });
+                return list;
+            }, [sqCustomerData, sqTab, sqSort]);
+
+            const sqHandleSort = (key) => {
+                setSqSort(prev => ({ key, dir: prev.key === key ? (prev.dir === 'asc' ? 'desc' : 'asc') : 'desc' }));
+            };
 
             // マーケティングドロップダウンのクリック外検知
             useEffect(() => {
@@ -5683,6 +5754,86 @@
                                                     ))}
                                                 </div>
                                             </div>
+
+                                            {/* 会員リスト（ソート可能テーブル） */}
+                                            {sqCustomerData && (
+                                                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                                                    <div className="flex flex-wrap border-b border-slate-200">
+                                                        {[
+                                                            { key: 'active', label: 'アクティブ', count: sqCustomerData.activeList.length, color: 'emerald' },
+                                                            { key: 'canceled', label: '解約済み', count: sqCustomerData.canceledList.length, color: 'rose' },
+                                                            { key: 'refunded', label: '払戻し', count: sqCustomerData.refundedList.length, color: 'amber' },
+                                                            { key: 'overdue', label: '期限超過', count: sqCustomerData.overdueList.length, color: 'red' },
+                                                        ].map(t => (
+                                                            <button key={t.key} onClick={() => { setSqTab(t.key); setSqSort({ key: 'paidTotal', dir: 'desc' }); }}
+                                                                className={`px-5 py-3 text-sm font-bold transition-colors ${sqTab === t.key ? `text-${t.color}-700 border-b-2 border-${t.color}-500 bg-${t.color}-50` : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'}`}>
+                                                                {t.label} <span className={`ml-1 px-2 py-0.5 rounded-full text-xs font-black ${sqTab === t.key ? `bg-${t.color}-200 text-${t.color}-800` : 'bg-slate-100 text-slate-500'}`}>{t.count}</span>
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                    <div className="overflow-x-auto" style={{maxHeight: '500px', overflowY: 'auto'}}>
+                                                        <table className="w-full text-sm">
+                                                            <thead className="sticky top-0 z-10">
+                                                                <tr className="bg-slate-50">
+                                                                    {(sqTab === 'active' || sqTab === 'canceled' ? [
+                                                                        { k: 'name', label: '氏名' },
+                                                                        { k: 'plan', label: 'コース' },
+                                                                        { k: 'paidCount', label: '決済回数' },
+                                                                        { k: 'paidTotal', label: '合計金額' },
+                                                                        { k: 'startDate', label: '開始日' },
+                                                                        ...(sqTab === 'canceled' ? [{ k: 'canceledDate', label: '解約日' }] : []),
+                                                                    ] : [
+                                                                        { k: 'name', label: '氏名' },
+                                                                        { k: 'amount', label: '金額' },
+                                                                        { k: sqTab === 'overdue' ? 'dueDate' : 'createdAt', label: sqTab === 'overdue' ? '期限日' : '日付' },
+                                                                        { k: 'status', label: 'ステータス' },
+                                                                    ]).map(col => (
+                                                                        <th key={col.k} onClick={() => sqHandleSort(col.k)}
+                                                                            className="px-4 py-3 font-black text-slate-500 text-xs cursor-pointer hover:bg-slate-100 select-none whitespace-nowrap">
+                                                                            <span className="inline-flex items-center gap-1">
+                                                                                {col.label}
+                                                                                {sqSort.key === col.k && <span className="text-blue-500">{sqSort.dir === 'asc' ? '▲' : '▼'}</span>}
+                                                                            </span>
+                                                                        </th>
+                                                                    ))}
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody className="divide-y divide-slate-100">
+                                                                {sqSortedList.length === 0 && (
+                                                                    <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400 font-bold">データがありません</td></tr>
+                                                                )}
+                                                                {(sqTab === 'active' || sqTab === 'canceled') && sqSortedList.map((row, i) => (
+                                                                    <tr key={row.id || i} className="hover:bg-slate-50">
+                                                                        <td className="px-4 py-2.5 font-bold text-slate-800 whitespace-nowrap">{row.name}</td>
+                                                                        <td className="px-4 py-2.5 text-slate-600">{row.plan}</td>
+                                                                        <td className="px-4 py-2.5 font-bold text-right">{row.paidCount}回</td>
+                                                                        <td className="px-4 py-2.5 font-bold text-right">¥{row.paidTotal.toLocaleString()}</td>
+                                                                        <td className="px-4 py-2.5 text-slate-500 text-xs">{row.startDate || '-'}</td>
+                                                                        {sqTab === 'canceled' && <td className="px-4 py-2.5 text-rose-500 text-xs font-bold">{row.canceledDate || '-'}</td>}
+                                                                    </tr>
+                                                                ))}
+                                                                {(sqTab === 'refunded' || sqTab === 'overdue') && sqSortedList.map((row, i) => (
+                                                                    <tr key={row.id || i} className="hover:bg-slate-50">
+                                                                        <td className="px-4 py-2.5 font-bold text-slate-800 whitespace-nowrap">{row.name}</td>
+                                                                        <td className="px-4 py-2.5 font-bold text-right">¥{(row.amount || 0).toLocaleString()}</td>
+                                                                        <td className="px-4 py-2.5 text-slate-500 text-xs">{(sqTab === 'overdue' ? row.dueDate : (row.createdAt ? row.createdAt.split('T')[0] : '-')) || '-'}</td>
+                                                                        <td className="px-4 py-2.5">
+                                                                            <span className={`px-2 py-1 rounded-full text-xs font-bold ${row.status === 'REFUNDED' ? 'bg-amber-100 text-amber-700' : row.status === 'PARTIALLY_REFUNDED' ? 'bg-amber-50 text-amber-600' : 'bg-red-100 text-red-700'}`}>
+                                                                                {row.status === 'REFUNDED' ? '全額払戻' : row.status === 'PARTIALLY_REFUNDED' ? '一部払戻' : row.status === 'UNPAID' ? '未払い' : row.status}
+                                                                            </span>
+                                                                        </td>
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                    {sqSortedList.length > 0 && (
+                                                        <div className="px-5 py-3 border-t border-slate-100 text-xs text-slate-400 font-bold">
+                                                            {sqSortedList.length}件表示
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
 
                                             {/* ② 解約・継続 KPI */}
                                             <div>

@@ -342,14 +342,6 @@ async function fetchInvoices(client, locationIds) {
   return invoices;
 }
 
-// タイムアウト付きPromise
-function withTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`TIMEOUT: ${label} が${ms / 1000}秒以内に完了しませんでした`)), ms)),
-  ]);
-}
-
 // 1つのSquareアカウントの全データを取得
 async function fetchAccountData(tokenConfig, isMultiAccount) {
   const accountName = tokenConfig.name || '';
@@ -366,6 +358,17 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     if (stores.length === 0) {
       stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];
     }
+    // excludeLocations: 不要なロケーションを除外（例: ["株式会社SSiM"]）
+    if (tokenConfig.excludeLocations && Array.isArray(tokenConfig.excludeLocations)) {
+      const before = stores.length;
+      stores = stores.filter(s => !tokenConfig.excludeLocations.some(ex => s.name && s.name.includes(ex)));
+      if (stores.length < before) {
+        console.log(`[${accountName}] ${before - stores.length}件のロケーションを除外`);
+      }
+      if (stores.length === 0) {
+        stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];
+      }
+    }
     // アカウント名が設定されている場合は常に店舗名として使用
     if (accountName) {
       stores = stores.map(s => ({ ...s, name: `${accountName}` + (stores.length > 1 ? ` (${s.name})` : '') }));
@@ -375,13 +378,12 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     // 診断情報トラッキング
     const diag = {};
 
-    // サブスク＋インボイス＋売上＋返品を並列取得（各API 12秒タイムアウト）
-    const API_TIMEOUT = 12000;
+    // サブスク＋インボイス＋売上＋返品を並列取得
     const [rawSubs, invoices, paymentsApiData, refundsApiData] = await Promise.all([
-      withTimeout(fetchAllSubscriptions(client, locationIds), API_TIMEOUT, 'Subscriptions').catch(e => { console.error(`  ${e.message}`); return []; }),
-      withTimeout(fetchInvoices(client, locationIds), API_TIMEOUT, 'Invoices').catch(e => { console.error(`  ${e.message}`); return []; }),
-      withTimeout(fetchSalesPayments(client, locationIds, diag), API_TIMEOUT, 'Payments').catch(e => { console.error(`  ${e.message}`); diag.paymentsApi = e.message; return null; }),
-      withTimeout(fetchRefundsFromApi(client, locationIds, diag), API_TIMEOUT, 'Refunds').catch(e => { console.error(`  ${e.message}`); diag.refundsApi = e.message; return null; }),
+      fetchAllSubscriptions(client, locationIds),
+      fetchInvoices(client, locationIds),
+      fetchSalesPayments(client, locationIds, diag),
+      fetchRefundsFromApi(client, locationIds, diag),
     ]);
 
     let payments = paymentsApiData;
@@ -397,11 +399,11 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     payments = payments || [];
     refunds = refunds || [];
 
-    // 顧客名＋プラン詳細を並列取得（各10秒タイムアウト）
+    // 顧客名＋プラン詳細を並列取得
     const planVariationIds = rawSubs.map(s => s.planVariationId).filter(Boolean);
     const [customers, plans] = await Promise.all([
-      withTimeout(fetchAllCustomers(client), 10000, 'Customers').catch(e => { console.error(`  ${e.message}`); return {}; }),
-      withTimeout(fetchPlanDetails(client, planVariationIds), 10000, 'Plans').catch(e => { console.error(`  ${e.message}`); return {}; }),
+      fetchAllCustomers(client),
+      fetchPlanDetails(client, planVariationIds),
     ]);
 
     // サブスクリプションを整形

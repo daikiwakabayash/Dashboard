@@ -1,7 +1,6 @@
-import { Client, Environment } from 'square';
-
-// Square クライアント初期化
-function getClient() {
+// Square クライアント初期化（動的importで依存関係の読み込み失敗を防止）
+async function getClient() {
+  const { Client, Environment } = await import('square');
   return new Client({
     accessToken: process.env.SQUARE_ACCESS_TOKEN,
     environment: process.env.SQUARE_ENVIRONMENT === 'production'
@@ -351,7 +350,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const client = getClient();
+    const client = await getClient();
     const locationId = process.env.SQUARE_LOCATION_ID;
 
     const [subscriptions, invoices] = await Promise.all([

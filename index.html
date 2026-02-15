@@ -583,24 +583,53 @@
                 }
             };
 
+            // デモデータ生成（フロントエンド側で完結）
+            const generateSquareDemoData = () => {
+                const now = new Date();
+                const monthlyTrends = [];
+                let baseMemberCount = 42;
+
+                for (let i = 11; i >= 0; i--) {
+                    const targetDate = new Date(now.getFullYear(), now.getMonth() - i, 1);
+                    const ym = `${targetDate.getFullYear()}-${String(targetDate.getMonth() + 1).padStart(2, '0')}`;
+                    const seasonFactor = 1 + 0.05 * Math.sin((targetDate.getMonth() - 3) * Math.PI / 6);
+                    const newEnrolled = Math.floor(4 + Math.random() * 6);
+                    const canceled = Math.floor(1 + Math.random() * 3);
+                    baseMemberCount = Math.max(10, baseMemberCount + newEnrolled - canceled);
+                    const mrr = Math.round(baseMemberCount * (8500 + Math.random() * 1500) * seasonFactor);
+                    monthlyTrends.push({ month: ym, memberCount: baseMemberCount, mrr, newEnrolled, canceled });
+                }
+
+                const current = monthlyTrends[monthlyTrends.length - 1];
+                const prev = monthlyTrends[monthlyTrends.length - 2];
+                const mrrChange = prev.mrr > 0 ? Math.round(((current.mrr - prev.mrr) / prev.mrr) * 10000) / 100 : 0;
+                const memberChange = current.memberCount - prev.memberCount;
+                const recentCanceled = current.canceled;
+                const activeAtStart = current.memberCount + recentCanceled;
+                const churnRate = Math.round((recentCanceled / activeAtStart) * 10000) / 100;
+                const retentionRate = Math.round((100 - churnRate) * 100) / 100;
+                const avgRev = current.memberCount > 0 ? current.mrr / current.memberCount : 0;
+                const ltv = churnRate > 0 ? Math.round(avgRev / (churnRate / 100)) : Math.round(avgRev * 24);
+
+                return {
+                    success: true, demo: true,
+                    summary: { mrr: current.mrr, memberCount: current.memberCount, churnRate, retentionRate, ltv, mrrChange, memberChange },
+                    monthlyTrends,
+                    meta: { totalSubscriptions: current.memberCount + 18, activeSubscriptions: current.memberCount, locationId: 'DEMO_LOCATION', currency: 'JPY', generatedAt: now.toISOString() },
+                };
+            };
+
             // Square データ取得
             const fetchSquareData = async (forceRefresh = false, demo = false) => {
                 console.log('📡 Fetching Square data...', demo ? '(DEMO)' : '');
                 try {
                     setSqError(null);
 
-                    // デモモード: APIに?demo=trueを付与
+                    // デモモード: API不要、フロントで直接生成
                     if (demo) {
-                        setSqLoading(true);
-                        const url = SQUARE_API_URL + '?demo=true';
-                        const response = await fetch(url);
-                        const result = await response.json();
-                        if (!response.ok || !result.success) {
-                            throw new Error(result.error || `Square API HTTP ${response.status}`);
-                        }
-                        setSqData(result);
+                        const demoResult = generateSquareDemoData();
+                        setSqData(demoResult);
                         setSqLastFetch(new Date());
-                        setSqLoading(false);
                         return;
                     }
 

@@ -123,45 +123,43 @@ async function fetchPlanDetails(client, planVariationIds) {
   return plans;
 }
 
-// 全決済データ取得（売上サマリー用 - Orders API）
+// 全決済データ取得（売上サマリー用 - Payments API）
+// Square管理画面の売上サマリーと一致する正確な決済データを取得
 async function fetchPayments(client, locationIds) {
   const payments = [];
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
   const beginStr = beginTime.toISOString();
 
-  let cursor = undefined;
-  do {
-    try {
-      const body = {
-        locationIds,
-        query: {
-          filter: {
-            dateTimeFilter: {
-              closedAt: { startAt: beginStr },
-            },
-            stateFilter: { states: ['COMPLETED'] },
-          },
-          sort: { sortField: 'CLOSED_AT', sortOrder: 'DESC' },
-        },
-      };
-      if (cursor) body.cursor = cursor;
-      const { result } = await client.ordersApi.searchOrders(body);
-      if (result.orders) {
-        for (const o of result.orders) {
-          payments.push({
-            amount: toNumber(o.totalMoney && o.totalMoney.amount),
-            createdAt: o.closedAt || o.createdAt,
-            locationId: o.locationId,
-          });
+  for (const locId of locationIds) {
+    let cursor = undefined;
+    do {
+      try {
+        const params = {
+          beginTime: beginStr,
+          locationId: locId,
+          sortOrder: 'DESC',
+        };
+        if (cursor) params.cursor = cursor;
+        const { result } = await client.paymentsApi.listPayments(params);
+        if (result.payments) {
+          for (const p of result.payments) {
+            // COMPLETED決済のみ（Square管理画面の売上サマリーと同じ）
+            if (p.status !== 'COMPLETED') continue;
+            payments.push({
+              amount: toNumber(p.totalMoney && p.totalMoney.amount),
+              createdAt: p.createdAt,
+              locationId: p.locationId || locId,
+            });
+          }
         }
+        cursor = result.cursor;
+      } catch (err) {
+        console.error(`fetchPayments (payments API) error for location ${locId}:`, err.message);
+        cursor = undefined;
       }
-      cursor = result.cursor;
-    } catch (err) {
-      console.error('fetchPayments (orders) error:', err.message);
-      cursor = undefined;
-    }
-  } while (cursor);
+    } while (cursor);
+  }
   return payments;
 }
 
@@ -312,6 +310,7 @@ export default async function handler(req, res) {
       payments: [],
       plans: {},
     };
+    const failedAccounts = [];
 
     const BATCH_SIZE = 10;
     for (let i = 0; i < configs.length; i += BATCH_SIZE) {
@@ -319,8 +318,14 @@ export default async function handler(req, res) {
       const results = await Promise.all(
         batch.map(cfg => fetchAccountData(cfg, isMultiAccount))
       );
-      for (const r of results) {
-        if (!r) continue;
+      for (let j = 0; j < results.length; j++) {
+        const r = results[j];
+        const cfg = batch[j];
+        if (!r) {
+          failedAccounts.push(cfg.name || `アカウント${i + j + 1}`);
+          console.error(`❌ アカウント「${cfg.name}」のデータ取得に失敗しました`);
+          continue;
+        }
         merged.stores.push(...r.stores);
         merged.subscriptions.push(...r.subscriptions);
         Object.assign(merged.customers, r.customers);
@@ -347,6 +352,7 @@ export default async function handler(req, res) {
         totalInvoices: merged.invoices.length,
         totalPayments: merged.payments.length,
         totalAccounts: configs.length,
+        failedAccounts: failedAccounts.length > 0 ? failedAccounts : undefined,
         generatedAt: new Date().toISOString(),
       },
     });

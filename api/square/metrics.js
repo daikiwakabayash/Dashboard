@@ -80,16 +80,29 @@ async function fetchPlanPrices(client, planVariationIds) {
   return prices;
 }
 
-// インボイスからサブスクリプション売上を取得
+// インボイスからサブスクリプション売上を取得（過去13ヶ月に限定）
 async function fetchSubscriptionInvoices(client, locationId) {
   const invoices = [];
   let cursor = undefined;
 
+  // 過去13ヶ月分のみ取得（12ヶ月表示+余裕1ヶ月）
+  const since = new Date();
+  since.setMonth(since.getMonth() - 13);
+  const sinceStr = since.toISOString().split('T')[0];
+
   do {
-    const { result } = await client.invoicesApi.listInvoices(
-      locationId,
+    const { result } = await client.invoicesApi.searchInvoices({
+      query: {
+        filter: {
+          locationIds: [locationId],
+          dateRange: {
+            startDate: sinceStr,
+          },
+        },
+        sort: { field: 'INVOICE_SORT_DATE', order: 'DESC' },
+      },
       cursor,
-    );
+    });
 
     if (result.invoices) {
       for (const inv of result.invoices) {

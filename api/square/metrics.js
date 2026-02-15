@@ -248,108 +248,37 @@ function calculateMetrics(subscriptions, planPrices, invoices) {
   };
 }
 
-// デモデータ生成
-function generateDemoData() {
-  const now = new Date();
-  const monthlyTrends = [];
-
-  // 12ヶ月分のリアルなトレンドデータ
-  let baseMemberCount = 42;
-  let baseMrr = 378000; // ¥37.8万
-
-  for (let i = 11; i >= 0; i--) {
-    const targetDate = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const ym = `${targetDate.getFullYear()}-${String(targetDate.getMonth() + 1).padStart(2, '0')}`;
-
-    // 自然な成長トレンド + 季節変動
-    const seasonFactor = 1 + 0.05 * Math.sin((targetDate.getMonth() - 3) * Math.PI / 6);
-    const growthRate = 1.03 + Math.random() * 0.04; // 月3-7%成長
-
-    const newEnrolled = Math.floor(4 + Math.random() * 6); // 月4-9名入会
-    const canceled = Math.floor(1 + Math.random() * 3);    // 月1-3名解約
-
-    baseMemberCount = Math.max(10, baseMemberCount + newEnrolled - canceled);
-    baseMrr = Math.round(baseMemberCount * (8500 + Math.random() * 1500) * seasonFactor);
-
-    monthlyTrends.push({
-      month: ym,
-      memberCount: baseMemberCount,
-      mrr: baseMrr,
-      newEnrolled,
-      canceled,
-    });
-  }
-
-  const current = monthlyTrends[monthlyTrends.length - 1];
-  const prev = monthlyTrends[monthlyTrends.length - 2];
-  const mrrChange = prev.mrr > 0 ? Math.round(((current.mrr - prev.mrr) / prev.mrr) * 10000) / 100 : 0;
-  const memberChange = current.memberCount - prev.memberCount;
-
-  // 過去30日間の解約数
-  const recentCanceled = current.canceled;
-  const activeAtStart = current.memberCount + recentCanceled;
-  const churnRate = Math.round((recentCanceled / activeAtStart) * 10000) / 100;
-  const retentionRate = Math.round((100 - churnRate) * 100) / 100;
-  const avgRevPerMember = current.memberCount > 0 ? current.mrr / current.memberCount : 0;
-  const ltv = churnRate > 0 ? Math.round(avgRevPerMember / (churnRate / 100)) : Math.round(avgRevPerMember * 24);
-
-  return {
-    success: true,
-    demo: true,
-    summary: {
-      mrr: current.mrr,
-      memberCount: current.memberCount,
-      churnRate,
-      retentionRate,
-      ltv,
-      mrrChange,
-      memberChange,
-    },
-    monthlyTrends,
-    meta: {
-      totalSubscriptions: current.memberCount + 18,
-      activeSubscriptions: current.memberCount,
-      locationId: 'DEMO_LOCATION',
-      currency: 'JPY',
-      generatedAt: now.toISOString(),
-    },
-  };
-}
-
 export default async function handler(req, res) {
-  // 全レスポンスをJSONとして返すことを保証
-  res.setHeader('Content-Type', 'application/json');
-
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  if (req.method !== 'GET') {
-    return res.status(405).json({ success: false, error: 'Method not allowed' });
-  }
-
-  // デモモード: ?demo=true でダミーデータを返す
-  if (req.query.demo === 'true') {
-    return res.status(200).json(generateDemoData());
-  }
-
-  // 環境変数チェック
-  if (!process.env.SQUARE_ACCESS_TOKEN) {
-    return res.status(500).json({ success: false, error: 'SQUARE_ACCESS_TOKEN が未設定です。Vercelの環境変数を確認してください。' });
-  }
-  if (!process.env.SQUARE_LOCATION_ID) {
-    return res.status(500).json({ success: false, error: 'SQUARE_LOCATION_ID が未設定です。Vercelの環境変数を確認してください。' });
-  }
-  if (!process.env.SQUARE_ENVIRONMENT) {
-    return res.status(500).json({ success: false, error: 'SQUARE_ENVIRONMENT が未設定です。Vercelの環境変数に "production" を設定してください。' });
-  }
-
   try {
+    // 全レスポンスをJSONとして返すことを保証
+    res.setHeader('Content-Type', 'application/json');
+
+    // CORS
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+      return res.status(200).json({ ok: true });
+    }
+
+    if (req.method !== 'GET') {
+      return res.status(405).json({ success: false, error: 'Method not allowed' });
+    }
+
+    // 環境変数チェック
+    const missing = [];
+    if (!process.env.SQUARE_ACCESS_TOKEN) missing.push('SQUARE_ACCESS_TOKEN');
+    if (!process.env.SQUARE_LOCATION_ID) missing.push('SQUARE_LOCATION_ID');
+    if (!process.env.SQUARE_ENVIRONMENT) missing.push('SQUARE_ENVIRONMENT');
+
+    if (missing.length > 0) {
+      return res.status(500).json({
+        success: false,
+        error: `環境変数が未設定です: ${missing.join(', ')}。Vercelのプロジェクト設定で環境変数を追加してください（チームレベルではなくプロジェクトレベル）。`,
+      });
+    }
+
     const client = await getClient();
     const locationId = process.env.SQUARE_LOCATION_ID;
 
@@ -368,6 +297,9 @@ export default async function handler(req, res) {
     return res.status(200).json({ success: true, ...metrics });
   } catch (err) {
     console.error('Square API error:', err);
+
+    // ヘッダーが未設定の場合に備えてセット
+    try { res.setHeader('Content-Type', 'application/json'); } catch (_) {}
 
     let errorMessage = err.message || 'Square API request failed';
     let errorDetail = null;

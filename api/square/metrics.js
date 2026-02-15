@@ -86,10 +86,10 @@ async function fetchSubscriptionInvoices(client, locationId) {
   let cursor = undefined;
 
   do {
-    const { result } = await client.invoicesApi.listInvoices({
+    const { result } = await client.invoicesApi.listInvoices(
       locationId,
       cursor,
-    });
+    );
 
     if (result.invoices) {
       for (const inv of result.invoices) {

@@ -102,7 +102,9 @@ async function fetchAllCustomers(client) {
   const customers = {};
   let cursor = undefined;
   do {
-    const { result } = await client.customersApi.listCustomers(cursor, 100);
+    const { result } = cursor
+      ? await client.customersApi.listCustomers(cursor)
+      : await client.customersApi.listCustomers();
     if (result.customers) {
       for (const c of result.customers) {
         customers[c.id] = {

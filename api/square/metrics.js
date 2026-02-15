@@ -1,4 +1,4 @@
-const { Client, Environment } = require('square');
+import { Client, Environment } from 'square';
 
 // Square クライアント初期化
 function getClient() {
@@ -8,6 +8,13 @@ function getClient() {
       ? Environment.Production
       : Environment.Sandbox,
   });
+}
+
+// BigInt を Number に安全変換
+function toNumber(val) {
+  if (val === undefined || val === null) return 0;
+  if (typeof val === 'bigint') return Number(val);
+  return Number(val) || 0;
 }
 
 // 全サブスクリプションを取得（ページネーション対応）
@@ -39,10 +46,8 @@ async function fetchPlanPrices(client, planVariationIds) {
   const prices = {};
   if (planVariationIds.length === 0) return prices;
 
-  // 重複を除去
   const uniqueIds = [...new Set(planVariationIds)];
 
-  // バッチで取得（最大1000件）
   for (let i = 0; i < uniqueIds.length; i += 100) {
     const batch = uniqueIds.slice(i, i + 100);
     try {
@@ -59,7 +64,7 @@ async function fetchPlanPrices(client, planVariationIds) {
               const pricing = phases[0].pricing;
               if (pricing && pricing.priceMoney) {
                 prices[obj.id] = {
-                  amount: Number(pricing.priceMoney.amount) || 0,
+                  amount: toNumber(pricing.priceMoney.amount),
                   currency: pricing.priceMoney.currency || 'JPY',
                   cadence: phases[0].cadence || 'MONTHLY',
                 };
@@ -69,7 +74,7 @@ async function fetchPlanPrices(client, planVariationIds) {
         }
       }
     } catch (err) {
-      console.error(`Catalog batch fetch error:`, err.message);
+      console.error('Catalog batch fetch error:', err.message);
     }
   }
 
@@ -127,9 +132,6 @@ function toYearMonth(dateStr) {
 // 指標を計算
 function calculateMetrics(subscriptions, planPrices, invoices) {
   const now = new Date();
-  const currentYM = toYearMonth(now.toISOString());
-  const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  const prevYM = toYearMonth(prevMonth.toISOString());
 
   // --- アクティブサブスクリプション ---
   const active = subscriptions.filter(s => s.status === 'ACTIVE');
@@ -140,7 +142,7 @@ function calculateMetrics(subscriptions, planPrices, invoices) {
   for (const sub of active) {
     const planId = sub.planVariationId;
     if (sub.priceOverrideMoney) {
-      const amount = Number(sub.priceOverrideMoney.amount) || 0;
+      const amount = toNumber(sub.priceOverrideMoney.amount);
       mrr += normalizeToMonthly(amount, 'MONTHLY');
     } else if (planPrices[planId]) {
       const { amount, cadence } = planPrices[planId];
@@ -148,8 +150,7 @@ function calculateMetrics(subscriptions, planPrices, invoices) {
     }
   }
 
-  // --- 解約率計算 ---
-  // 過去30日間の解約
+  // --- 解約率計算（過去30日間） ---
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
   const recentCanceled = subscriptions.filter(s => {
     if (s.status !== 'CANCELED' && s.status !== 'DEACTIVATED') return false;
@@ -157,7 +158,6 @@ function calculateMetrics(subscriptions, planPrices, invoices) {
     return cancelDate && cancelDate >= thirtyDaysAgo;
   });
 
-  // 30日前時点のアクティブ会員数（近似）
   const activeAtStart = active.length + recentCanceled.length;
   const churnRate = activeAtStart > 0
     ? (recentCanceled.length / activeAtStart) * 100
@@ -167,12 +167,11 @@ function calculateMetrics(subscriptions, planPrices, invoices) {
   const retentionRate = 100 - churnRate;
 
   // --- LTV計算 ---
-  // 方法: 平均月額売上 / 月次解約率
   const avgMonthlyRevPerMember = memberCount > 0 ? mrr / memberCount : 0;
   const monthlyChurnRate = churnRate / 100;
   const ltv = monthlyChurnRate > 0
     ? avgMonthlyRevPerMember / monthlyChurnRate
-    : avgMonthlyRevPerMember * 24; // 解約率0の場合は24ヶ月分と仮定
+    : avgMonthlyRevPerMember * 24;
 
   // --- 月別推移データ（過去12ヶ月） ---
   const monthlyData = [];
@@ -181,54 +180,40 @@ function calculateMetrics(subscriptions, planPrices, invoices) {
     const ym = toYearMonth(targetDate.toISOString());
     const endOfMonth = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 0);
 
-    // その月末時点でアクティブだったサブスクリプション
     const activeAtMonth = subscriptions.filter(s => {
       const startDate = s.startDate ? new Date(s.startDate) : (s.createdAt ? new Date(s.createdAt) : null);
       if (!startDate || startDate > endOfMonth) return false;
-
       if (s.status === 'ACTIVE' || s.status === 'PAUSED') return true;
-
-      // 解約日がその月末より後なら、その月はまだアクティブ
       const cancelDate = s.canceledDate ? new Date(s.canceledDate) : null;
       if (cancelDate && cancelDate > endOfMonth) return true;
-
       return false;
     });
 
     const monthMemberCount = new Set(activeAtMonth.map(s => s.customerId)).size;
 
-    // その月のMRR
     let monthMrr = 0;
     for (const sub of activeAtMonth) {
       const planId = sub.planVariationId;
       if (sub.priceOverrideMoney) {
-        monthMrr += normalizeToMonthly(Number(sub.priceOverrideMoney.amount) || 0, 'MONTHLY');
+        monthMrr += normalizeToMonthly(toNumber(sub.priceOverrideMoney.amount), 'MONTHLY');
       } else if (planPrices[planId]) {
         const { amount, cadence } = planPrices[planId];
         monthMrr += normalizeToMonthly(amount, cadence);
       }
     }
 
-    // その月の新規入会
     const newEnrolled = subscriptions.filter(s => {
       const startDate = s.startDate ? new Date(s.startDate) : (s.createdAt ? new Date(s.createdAt) : null);
       return startDate && toYearMonth(startDate.toISOString()) === ym;
     }).length;
 
-    // その月の解約
     const canceled = subscriptions.filter(s => {
       if (s.status !== 'CANCELED' && s.status !== 'DEACTIVATED') return false;
       const cancelDate = s.canceledDate ? new Date(s.canceledDate) : null;
       return cancelDate && toYearMonth(cancelDate.toISOString()) === ym;
     }).length;
 
-    monthlyData.push({
-      month: ym,
-      memberCount: monthMemberCount,
-      mrr: monthMrr,
-      newEnrolled,
-      canceled,
-    });
+    monthlyData.push({ month: ym, memberCount: monthMemberCount, mrr: monthMrr, newEnrolled, canceled });
   }
 
   // --- 前月比 ---
@@ -236,26 +221,14 @@ function calculateMetrics(subscriptions, planPrices, invoices) {
   const prevMonthData = monthlyData.length >= 2 ? monthlyData[monthlyData.length - 2] : null;
 
   const mrrChange = prevMonthData
-    ? (prevMonthData.mrr > 0
-      ? ((currentMonthData.mrr - prevMonthData.mrr) / prevMonthData.mrr) * 100
-      : 0)
+    ? (prevMonthData.mrr > 0 ? ((currentMonthData.mrr - prevMonthData.mrr) / prevMonthData.mrr) * 100 : 0)
     : 0;
 
   const memberChange = prevMonthData
     ? currentMonthData.memberCount - prevMonthData.memberCount
     : 0;
 
-  // --- インボイスベースの実績売上（参考値） ---
-  const invoiceRevenue = {};
-  for (const inv of invoices) {
-    const ym = toYearMonth(inv.paymentRequests?.[0]?.dueDate || inv.createdAt);
-    if (!ym) continue;
-    const amount = Number(inv.paymentRequests?.[0]?.computedAmountMoney?.amount) || 0;
-    invoiceRevenue[ym] = (invoiceRevenue[ym] || 0) + amount;
-  }
-
   return {
-    // TOP画面指標
     summary: {
       mrr: Math.round(mrr),
       memberCount,
@@ -265,12 +238,7 @@ function calculateMetrics(subscriptions, planPrices, invoices) {
       mrrChange: Math.round(mrrChange * 100) / 100,
       memberChange,
     },
-    // 推移データ
-    monthlyTrends: monthlyData.map(m => ({
-      ...m,
-      mrr: Math.round(m.mrr),
-    })),
-    // メタ情報
+    monthlyTrends: monthlyData.map(m => ({ ...m, mrr: Math.round(m.mrr) })),
     meta: {
       totalSubscriptions: subscriptions.length,
       activeSubscriptions: active.length,
@@ -281,7 +249,7 @@ function calculateMetrics(subscriptions, planPrices, invoices) {
   };
 }
 
-module.exports = async function handler(req, res) {
+export default async function handler(req, res) {
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -297,40 +265,43 @@ module.exports = async function handler(req, res) {
 
   // 環境変数チェック
   if (!process.env.SQUARE_ACCESS_TOKEN) {
-    return res.status(500).json({ error: 'SQUARE_ACCESS_TOKEN is not configured' });
+    return res.status(500).json({ success: false, error: 'SQUARE_ACCESS_TOKEN が未設定です。Vercelの環境変数を確認してください。' });
   }
   if (!process.env.SQUARE_LOCATION_ID) {
-    return res.status(500).json({ error: 'SQUARE_LOCATION_ID is not configured' });
+    return res.status(500).json({ success: false, error: 'SQUARE_LOCATION_ID が未設定です。Vercelの環境変数を確認してください。' });
   }
 
   try {
     const client = getClient();
     const locationId = process.env.SQUARE_LOCATION_ID;
 
-    // 並行でデータ取得
     const [subscriptions, invoices] = await Promise.all([
       fetchAllSubscriptions(client, locationId),
       fetchSubscriptionInvoices(client, locationId),
     ]);
 
-    // プランの価格情報を取得
     const planVariationIds = subscriptions
       .map(s => s.planVariationId)
       .filter(Boolean);
     const planPrices = await fetchPlanPrices(client, planVariationIds);
 
-    // 指標計算
     const metrics = calculateMetrics(subscriptions, planPrices, invoices);
 
-    return res.status(200).json({
-      success: true,
-      ...metrics,
-    });
+    return res.status(200).json({ success: true, ...metrics });
   } catch (err) {
     console.error('Square API error:', err);
-    return res.status(500).json({
-      success: false,
-      error: err.message || 'Square API request failed',
-    });
+
+    let errorMessage = err.message || 'Square API request failed';
+    let errorDetail = null;
+
+    if (err.result && err.result.errors) {
+      errorDetail = err.result.errors.map(e => `${e.category}: ${e.code} - ${e.detail}`).join('; ');
+      errorMessage = errorDetail;
+    } else if (err.errors) {
+      errorDetail = err.errors.map(e => `${e.category}: ${e.code} - ${e.detail}`).join('; ');
+      errorMessage = errorDetail;
+    }
+
+    return res.status(500).json({ success: false, error: errorMessage, detail: errorDetail });
   }
-};
+}

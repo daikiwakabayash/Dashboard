@@ -124,7 +124,7 @@ async function fetchPlanDetails(client, planVariationIds) {
 }
 
 // 売上データ取得（Payments API - Square管理画面の「総売上高」と一致）
-async function fetchSalesPayments(client, locationIds) {
+async function fetchSalesPayments(client, locationIds, diag) {
   const payments = [];
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
@@ -154,19 +154,21 @@ async function fetchSalesPayments(client, locationIds) {
         }
         cursor = result.cursor;
       } catch (err) {
-        console.error(`  Payments API error (${locId}):`, err.message);
-        // 最初のロケーションで失敗 → 権限エラーの可能性大、fallback必要
+        const errMsg = extractApiError(err);
+        console.error(`  Payments API error (${locId}):`, errMsg);
+        diag.paymentsApi = `error: ${errMsg}`;
         if (payments.length === 0) return null;
         cursor = undefined;
       }
     } while (cursor);
   }
+  diag.paymentsApi = `ok: ${payments.length}件`;
   console.log(`  Payments API: ${payments.length}件取得`);
   return payments;
 }
 
 // 返品データ取得（Refunds API）
-async function fetchRefundsFromApi(client, locationIds) {
+async function fetchRefundsFromApi(client, locationIds, diag) {
   const refunds = [];
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
@@ -196,20 +198,25 @@ async function fetchRefundsFromApi(client, locationIds) {
         }
         cursor = result.cursor;
       } catch (err) {
-        console.error(`  Refunds API error (${locId}):`, err.message);
+        const errMsg = extractApiError(err);
+        console.error(`  Refunds API error (${locId}):`, errMsg);
+        diag.refundsApi = `error: ${errMsg}`;
         if (refunds.length === 0) return null;
         cursor = undefined;
       }
     } while (cursor);
   }
+  diag.refundsApi = `ok: ${refunds.length}件`;
   console.log(`  Refunds API: ${refunds.length}件取得`);
   return refunds;
 }
 
-// Orders APIフォールバック（売上＋返品を同時取得、createdAtフィルタ使用）
-async function fetchSalesFromOrders(client, locationIds) {
+// Orders APIフォールバック（売上＋返品を同時取得）
+// stateFilterなし → COMPLETED + 支払い済みOPEN注文を含む
+async function fetchSalesFromOrders(client, locationIds, diag) {
   const payments = [];
   const refunds = [];
+  const stateCount = {};
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
   const beginStr = beginTime.toISOString();
@@ -222,7 +229,6 @@ async function fetchSalesFromOrders(client, locationIds) {
         query: {
           filter: {
             dateTimeFilter: { createdAt: { startAt: beginStr } },
-            stateFilter: { states: ['COMPLETED'] },
           },
           sort: { sortField: 'CREATED_AT', sortOrder: 'DESC' },
         },
@@ -231,21 +237,30 @@ async function fetchSalesFromOrders(client, locationIds) {
       const { result } = await client.ordersApi.searchOrders(body);
       if (result.orders) {
         for (const o of result.orders) {
-          payments.push({
-            amount: toNumber(o.totalMoney && o.totalMoney.amount),
-            createdAt: o.closedAt || o.createdAt,
-            locationId: o.locationId,
-          });
-          // 返品データをオーダーから抽出
-          if (o.refunds) {
-            for (const r of o.refunds) {
-              if (r.status === 'COMPLETED') {
-                refunds.push({
-                  amount: toNumber(r.amountMoney && r.amountMoney.amount),
-                  createdAt: r.createdAt || o.closedAt || o.createdAt,
-                  locationId: o.locationId,
-                });
-              }
+          // state分布をトラッキング
+          stateCount[o.state || 'UNKNOWN'] = (stateCount[o.state || 'UNKNOWN'] || 0) + 1;
+
+          // DRAFT/CANCELEDはスキップ
+          if (o.state === 'DRAFT' || o.state === 'CANCELED') continue;
+
+          // COMPLETED注文 or 支払い済みOPEN注文（tendersあり）
+          if (o.state === 'COMPLETED' || (o.tenders && o.tenders.length > 0)) {
+            payments.push({
+              amount: toNumber(o.totalMoney && o.totalMoney.amount),
+              createdAt: o.closedAt || o.createdAt,
+              locationId: o.locationId,
+            });
+          }
+
+          // 返品データ: returnAmountsから抽出（o.refundsはdeprecated）
+          if (o.returnAmounts && o.returnAmounts.totalMoney) {
+            const returnAmt = toNumber(o.returnAmounts.totalMoney.amount);
+            if (returnAmt > 0) {
+              refunds.push({
+                amount: returnAmt,
+                createdAt: o.updatedAt || o.closedAt || o.createdAt,
+                locationId: o.locationId,
+              });
             }
           }
         }
@@ -256,8 +271,19 @@ async function fetchSalesFromOrders(client, locationIds) {
       cursor = undefined;
     }
   } while (cursor);
-  console.log(`  Orders API fallback: ${payments.length}件売上, ${refunds.length}件返品`);
+  diag.ordersFallback = `${payments.length}件売上, ${refunds.length}件返品`;
+  diag.orderStates = stateCount;
+  console.log(`  Orders API fallback: ${payments.length}件売上, ${refunds.length}件返品, states:`, JSON.stringify(stateCount));
   return { payments, refunds };
+}
+
+function extractApiError(err) {
+  try {
+    if (err.result && err.result.errors) {
+      return err.result.errors.map(e => `${e.code}: ${e.detail}`).join('; ');
+    }
+  } catch (_) {}
+  return err.message || 'unknown error';
 }
 
 // 全顧客名を取得
@@ -333,12 +359,15 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     }
     const locationIds = stores.map(s => s.id);
 
+    // 診断情報トラッキング
+    const diag = {};
+
     // サブスク＋インボイス＋売上＋返品を並列取得（Payments API優先）
     const [rawSubs, invoices, paymentsApiData, refundsApiData] = await Promise.all([
       fetchAllSubscriptions(client, locationIds),
       fetchInvoices(client, locationIds),
-      fetchSalesPayments(client, locationIds),
-      fetchRefundsFromApi(client, locationIds),
+      fetchSalesPayments(client, locationIds, diag),
+      fetchRefundsFromApi(client, locationIds, diag),
     ]);
 
     let payments = paymentsApiData;
@@ -347,7 +376,7 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     // Payments/Refunds APIが使えない場合、Orders APIフォールバック
     if (payments === null || refunds === null) {
       console.log(`  → Orders APIフォールバック (payments=${payments === null ? '必要' : 'OK'}, refunds=${refunds === null ? '必要' : 'OK'})`);
-      const ordersData = await fetchSalesFromOrders(client, locationIds);
+      const ordersData = await fetchSalesFromOrders(client, locationIds, diag);
       if (payments === null) payments = ordersData.payments;
       if (refunds === null) refunds = ordersData.refunds;
     }
@@ -383,7 +412,7 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     });
 
     console.log(`[${accountName || 'main'}] ${stores.length} stores, ${subscriptions.length} subs, ${invoices.length} inv, ${payments.length} payments, ${refunds.length} refunds`);
-    return { stores, subscriptions, customers, invoices, payments, refunds, plans };
+    return { stores, subscriptions, customers, invoices, payments, refunds, plans, _diag: diag };
   } catch (err) {
     let detail = err.message;
     try {
@@ -426,6 +455,8 @@ export default async function handler(req, res) {
 
     const isMultiAccount = configs.length > 1;
 
+    const summaryMode = req.query && req.query.summary === '1';
+
     // 全アカウントのデータを並列取得（最大10アカウントずつ）
     const merged = {
       stores: [],
@@ -437,6 +468,7 @@ export default async function handler(req, res) {
       plans: {},
     };
     const failedAccounts = [];
+    const allDiag = [];
 
     const BATCH_SIZE = 10;
     for (let i = 0; i < configs.length; i += BATCH_SIZE) {
@@ -459,11 +491,48 @@ export default async function handler(req, res) {
         merged.payments.push(...r.payments);
         merged.refunds.push(...(r.refunds || []));
         Object.assign(merged.plans, r.plans);
+        if (r._diag) allDiag.push({ account: cfg.name, ...r._diag });
       }
     }
 
     if (merged.stores.length === 0) {
       return sendJson(res, 500, { success: false, error: 'ロケーションが見つかりません' });
+    }
+
+    const meta = {
+      totalSubscriptions: merged.subscriptions.length,
+      totalInvoices: merged.invoices.length,
+      totalPayments: merged.payments.length,
+      totalRefunds: merged.refunds.length,
+      totalAccounts: configs.length,
+      failedAccounts: failedAccounts.length > 0 ? failedAccounts : undefined,
+      diagnostics: allDiag,
+      generatedAt: new Date().toISOString(),
+    };
+
+    // サマリーモード: 診断用コンパクトレスポンス
+    if (summaryMode) {
+      const salesByMonth = {};
+      merged.payments.forEach(p => {
+        const ym = p.createdAt ? p.createdAt.slice(0, 7) : 'unknown';
+        if (!salesByMonth[ym]) salesByMonth[ym] = { total: 0, count: 0 };
+        salesByMonth[ym].total += p.amount;
+        salesByMonth[ym].count++;
+      });
+      const refundsByMonth = {};
+      merged.refunds.forEach(r => {
+        const ym = r.createdAt ? r.createdAt.slice(0, 7) : 'unknown';
+        if (!refundsByMonth[ym]) refundsByMonth[ym] = { total: 0, count: 0 };
+        refundsByMonth[ym].total += r.amount;
+        refundsByMonth[ym].count++;
+      });
+      return sendJson(res, 200, {
+        success: true,
+        stores: merged.stores,
+        salesByMonth,
+        refundsByMonth,
+        meta,
+      });
     }
 
     return sendJson(res, 200, {
@@ -475,15 +544,7 @@ export default async function handler(req, res) {
       invoices: merged.invoices,
       payments: merged.payments,
       refunds: merged.refunds,
-      meta: {
-        totalSubscriptions: merged.subscriptions.length,
-        totalInvoices: merged.invoices.length,
-        totalPayments: merged.payments.length,
-        totalRefunds: merged.refunds.length,
-        totalAccounts: configs.length,
-        failedAccounts: failedAccounts.length > 0 ? failedAccounts : undefined,
-        generatedAt: new Date().toISOString(),
-      },
+      meta,
     });
   } catch (err) {
     console.error('Square API error:', err);

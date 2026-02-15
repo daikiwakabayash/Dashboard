@@ -73,15 +73,18 @@ async function fetchLocations(client) {
 
 async function fetchAllSubscriptions(client, locationIds) {
   const subscriptions = [];
-  let cursor = undefined;
-  do {
-    const { result } = await client.subscriptionsApi.searchSubscriptions({
-      query: { filter: { locationIds } },
-      cursor,
-    });
-    if (result.subscriptions) subscriptions.push(...result.subscriptions);
-    cursor = result.cursor;
-  } while (cursor);
+  // Square APIはlocationIds を1つずつしか受け付けない
+  for (const locId of locationIds) {
+    let cursor = undefined;
+    do {
+      const { result } = await client.subscriptionsApi.searchSubscriptions({
+        query: { filter: { locationIds: [locId] } },
+        cursor,
+      });
+      if (result.subscriptions) subscriptions.push(...result.subscriptions);
+      cursor = result.cursor;
+    } while (cursor);
+  }
   return subscriptions;
 }
 
@@ -221,56 +224,55 @@ async function fetchSalesFromOrders(client, locationIds, diag) {
   beginTime.setMonth(beginTime.getMonth() - 13);
   const beginStr = beginTime.toISOString();
 
-  let cursor = undefined;
-  do {
-    try {
-      const body = {
-        locationIds,
-        query: {
-          filter: {
-            dateTimeFilter: { createdAt: { startAt: beginStr } },
+  // ロケーションごとにクエリ（複数渡すとエラーになる場合がある）
+  for (const locId of locationIds) {
+    let cursor = undefined;
+    do {
+      try {
+        const body = {
+          locationIds: [locId],
+          query: {
+            filter: {
+              dateTimeFilter: { createdAt: { startAt: beginStr } },
+            },
+            sort: { sortField: 'CREATED_AT', sortOrder: 'DESC' },
           },
-          sort: { sortField: 'CREATED_AT', sortOrder: 'DESC' },
-        },
-      };
-      if (cursor) body.cursor = cursor;
-      const { result } = await client.ordersApi.searchOrders(body);
-      if (result.orders) {
-        for (const o of result.orders) {
-          // state分布をトラッキング
-          stateCount[o.state || 'UNKNOWN'] = (stateCount[o.state || 'UNKNOWN'] || 0) + 1;
+        };
+        if (cursor) body.cursor = cursor;
+        const { result } = await client.ordersApi.searchOrders(body);
+        if (result.orders) {
+          for (const o of result.orders) {
+            stateCount[o.state || 'UNKNOWN'] = (stateCount[o.state || 'UNKNOWN'] || 0) + 1;
 
-          // DRAFT/CANCELEDはスキップ
-          if (o.state === 'DRAFT' || o.state === 'CANCELED') continue;
+            if (o.state === 'DRAFT' || o.state === 'CANCELED') continue;
 
-          // COMPLETED注文 or 支払い済みOPEN注文（tendersあり）
-          if (o.state === 'COMPLETED' || (o.tenders && o.tenders.length > 0)) {
-            payments.push({
-              amount: toNumber(o.totalMoney && o.totalMoney.amount),
-              createdAt: o.closedAt || o.createdAt,
-              locationId: o.locationId,
-            });
-          }
-
-          // 返品データ: returnAmountsから抽出（o.refundsはdeprecated）
-          if (o.returnAmounts && o.returnAmounts.totalMoney) {
-            const returnAmt = toNumber(o.returnAmounts.totalMoney.amount);
-            if (returnAmt > 0) {
-              refunds.push({
-                amount: returnAmt,
-                createdAt: o.updatedAt || o.closedAt || o.createdAt,
+            if (o.state === 'COMPLETED' || (o.tenders && o.tenders.length > 0)) {
+              payments.push({
+                amount: toNumber(o.totalMoney && o.totalMoney.amount),
+                createdAt: o.closedAt || o.createdAt,
                 locationId: o.locationId,
               });
             }
+
+            if (o.returnAmounts && o.returnAmounts.totalMoney) {
+              const returnAmt = toNumber(o.returnAmounts.totalMoney.amount);
+              if (returnAmt > 0) {
+                refunds.push({
+                  amount: returnAmt,
+                  createdAt: o.updatedAt || o.closedAt || o.createdAt,
+                  locationId: o.locationId,
+                });
+              }
+            }
           }
         }
+        cursor = result.cursor;
+      } catch (err) {
+        console.error(`  Orders API error (${locId}):`, err.message);
+        cursor = undefined;
       }
-      cursor = result.cursor;
-    } catch (err) {
-      console.error('  Orders API error:', err.message);
-      cursor = undefined;
-    }
-  } while (cursor);
+    } while (cursor);
+  }
   diag.ordersFallback = `${payments.length}件売上, ${refunds.length}件返品`;
   diag.orderStates = stateCount;
   console.log(`  Orders API fallback: ${payments.length}件売上, ${refunds.length}件返品, states:`, JSON.stringify(stateCount));
@@ -309,31 +311,34 @@ async function fetchAllCustomers(client) {
 // インボイス取得（全ステータス）
 async function fetchInvoices(client, locationIds) {
   const invoices = [];
-  let cursor = undefined;
-  do {
-    const { result } = await client.invoicesApi.searchInvoices({
-      query: {
-        filter: { locationIds },
-        sort: { field: 'INVOICE_SORT_DATE', order: 'DESC' },
-      },
-      cursor,
-    });
-    if (result.invoices) {
-      for (const inv of result.invoices) {
-        const pr = inv.paymentRequests && inv.paymentRequests[0];
-        invoices.push({
-          id: inv.id,
-          customerId: inv.primaryRecipient ? inv.primaryRecipient.customerId : null,
-          subscriptionId: inv.subscriptionId || null,
-          status: inv.status,
-          amount: pr ? toNumber(pr.computedAmountMoney && pr.computedAmountMoney.amount) : 0,
-          dueDate: pr ? pr.dueDate : null,
-          createdAt: inv.createdAt,
-        });
+  // Square APIはlocationIds を1つずつしか受け付けない
+  for (const locId of locationIds) {
+    let cursor = undefined;
+    do {
+      const { result } = await client.invoicesApi.searchInvoices({
+        query: {
+          filter: { locationIds: [locId] },
+          sort: { field: 'INVOICE_SORT_DATE', order: 'DESC' },
+        },
+        cursor,
+      });
+      if (result.invoices) {
+        for (const inv of result.invoices) {
+          const pr = inv.paymentRequests && inv.paymentRequests[0];
+          invoices.push({
+            id: inv.id,
+            customerId: inv.primaryRecipient ? inv.primaryRecipient.customerId : null,
+            subscriptionId: inv.subscriptionId || null,
+            status: inv.status,
+            amount: pr ? toNumber(pr.computedAmountMoney && pr.computedAmountMoney.amount) : 0,
+            dueDate: pr ? pr.dueDate : null,
+            createdAt: inv.createdAt,
+          });
+        }
       }
-    }
-    cursor = result.cursor;
-  } while (cursor);
+      cursor = result.cursor;
+    } while (cursor);
+  }
   return invoices;
 }
 

@@ -1033,78 +1033,82 @@
                 };
             }, [sqData, sqStore, sqMonth]);
 
-            // 顧客テーブルデータ（顧客単位で集約）
+            // 顧客テーブルデータ（サブスク単位・月フィルター連動）
             const sqCustomerData = useMemo(() => {
-                if (!sqData || !sqData.subscriptions || !sqData.invoices) return null;
+                if (!sqData || !sqData.subscriptions || !sqData.invoices || !sqMonth) return null;
                 const cust = sqData.customers || {};
                 const plans = sqData.plans || {};
-                const invByCust = {};
-                for (const inv of sqData.invoices) {
-                    if (!inv.customerId || !inv.subscriptionId) continue;
-                    if (!invByCust[inv.customerId]) invByCust[inv.customerId] = [];
-                    invByCust[inv.customerId].push(inv);
-                }
-                const filtered = sqStore === 'all' ? sqData.subscriptions : sqData.subscriptions.filter(s => s.locationId === sqStore);
+                const [refY, refM] = sqMonth.split('-').map(Number);
+                const monthStart = new Date(refY, refM - 1, 1);
+                const monthEnd = new Date(refY, refM, 0, 23, 59, 59);
+                const toYM = d => { if (!d) return null; const dt = new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`; };
 
-                // 顧客単位でサブスクをグループ化
-                const activeMap = {};
-                const canceledMap = {};
+                // インボイスをサブスクリプション単位でグループ化
+                const invBySub = {};
+                for (const inv of sqData.invoices) {
+                    if (!inv.subscriptionId) continue;
+                    if (!invBySub[inv.subscriptionId]) invBySub[inv.subscriptionId] = [];
+                    invBySub[inv.subscriptionId].push(inv);
+                }
+                const storeSubs = sqStore === 'all' ? sqData.subscriptions : sqData.subscriptions.filter(s => s.locationId === sqStore);
+
+                const activeList = [];
+                const canceledList = [];
                 const refundedList = [];
                 const overdueList = [];
                 const seenInv = {};
 
-                for (const sub of filtered) {
-                    const cid = sub.customerId;
-                    const name = cust[cid] ? cust[cid].name : cid || '不明';
+                for (const sub of storeSubs) {
+                    const name = cust[sub.customerId] ? cust[sub.customerId].name : sub.customerId || '不明';
                     const planName = plans[sub.planVariationId] ? plans[sub.planVariationId].name : '不明';
-                    const custInvs = invByCust[cid] || [];
-                    const paid = custInvs.filter(i => i.status === 'PAID');
-                    const paidCount = paid.length;
-                    const paidTotal = paid.reduce((s, i) => s + i.amount, 0);
+                    const subInvs = invBySub[sub.id] || [];
+                    const paid = subInvs.filter(i => i.status === 'PAID');
 
-                    const isActive = sub.status === 'ACTIVE' || sub.status === 'PAUSED';
-                    const isCanceled = sub.status === 'CANCELED' || sub.status === 'DEACTIVATED';
+                    const entry = {
+                        id: sub.id, customerId: sub.customerId, name, plan: planName,
+                        paidCount: paid.length,
+                        paidTotal: paid.reduce((s, i) => s + i.amount, 0),
+                        startDate: sub.startDate, canceledDate: sub.canceledDate,
+                        monthlyPrice: sub.monthlyPrice,
+                    };
 
-                    if (isActive) {
-                        if (!activeMap[cid]) {
-                            activeMap[cid] = { id: cid, customerId: cid, name, plan: planName, paidCount, paidTotal, startDate: sub.startDate, monthlyPrice: sub.monthlyPrice };
-                        } else {
-                            const existing = activeMap[cid];
-                            existing.plan = existing.plan === planName ? planName : existing.plan + ' / ' + planName;
-                            existing.monthlyPrice += sub.monthlyPrice;
-                            if (sub.startDate && (!existing.startDate || sub.startDate < existing.startDate)) existing.startDate = sub.startDate;
-                        }
-                    } else if (isCanceled) {
-                        if (!canceledMap[cid]) {
-                            canceledMap[cid] = { id: cid, customerId: cid, name, plan: planName, paidCount, paidTotal, startDate: sub.startDate, canceledDate: sub.canceledDate, monthlyPrice: sub.monthlyPrice };
-                        } else {
-                            const existing = canceledMap[cid];
-                            existing.plan = existing.plan === planName ? planName : existing.plan + ' / ' + planName;
-                            if (sub.canceledDate && (!existing.canceledDate || sub.canceledDate > existing.canceledDate)) existing.canceledDate = sub.canceledDate;
-                            if (sub.startDate && (!existing.startDate || sub.startDate < existing.startDate)) existing.startDate = sub.startDate;
-                        }
+                    // アクティブ: 選択月末時点でアクティブなサブスク
+                    const start = sub.startDate ? new Date(sub.startDate) : null;
+                    const isActiveAtMonth = start && start <= monthEnd && (
+                        (sub.status === 'ACTIVE' || sub.status === 'PAUSED') ||
+                        (sub.canceledDate && new Date(sub.canceledDate) > monthEnd)
+                    );
+                    if (isActiveAtMonth) {
+                        activeList.push(entry);
                     }
 
-                    // 払戻し・期限超過
-                    for (const inv of custInvs) {
+                    // 解約: 選択月内に解約されたサブスクのみ
+                    if ((sub.status === 'CANCELED' || sub.status === 'DEACTIVATED') && toYM(sub.canceledDate) === sqMonth) {
+                        canceledList.push(entry);
+                    }
+
+                    // 払戻し・期限超過: 選択月のインボイスのみ
+                    for (const inv of subInvs) {
                         if (seenInv[inv.id]) continue;
-                        seenInv[inv.id] = true;
-                        if (inv.status === 'REFUNDED' || inv.status === 'PARTIALLY_REFUNDED') {
+                        const invYM = inv.createdAt ? toYM(inv.createdAt) : null;
+                        const dueYM = inv.dueDate ? toYM(inv.dueDate) : null;
+                        if ((inv.status === 'REFUNDED' || inv.status === 'PARTIALLY_REFUNDED') && invYM === sqMonth) {
+                            seenInv[inv.id] = true;
                             refundedList.push({ ...inv, name, plan: planName });
                         }
-                        if (inv.dueDate && new Date(inv.dueDate) < new Date() && (inv.status === 'UNPAID' || inv.status === 'PAYMENT_PENDING')) {
+                        if ((inv.status === 'UNPAID' || inv.status === 'PAYMENT_PENDING') && dueYM === sqMonth) {
+                            seenInv[inv.id] = true;
                             overdueList.push({ ...inv, name, plan: planName });
                         }
                     }
                 }
 
-                // アクティブ会員に含まれる顧客は解約リストから除外
-                for (const cid of Object.keys(activeMap)) {
-                    delete canceledMap[cid];
+                return { activeList, canceledList, refundedList, overdueList };
+                    }
                 }
 
-                return { activeList: Object.values(activeMap), canceledList: Object.values(canceledMap), refundedList, overdueList };
-            }, [sqData, sqStore]);
+                return { activeList, canceledList, refundedList, overdueList };
+            }, [sqData, sqStore, sqMonth]);
 
             const sqSortedList = useMemo(() => {
                 if (!sqCustomerData) return [];

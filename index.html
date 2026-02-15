@@ -892,17 +892,40 @@
                 const activePrev = filtered.filter(s => isActiveAt(s, prevEnd));
                 const memberCount = new Set(activeRef.map(s => s.customerId)).size;
                 const prevMemberCount = new Set(activePrev.map(s => s.customerId)).size;
-                const mrr = activeRef.reduce((sum, s) => sum + s.monthlyPrice, 0);
-                const prevMrr = activePrev.reduce((sum, s) => sum + s.monthlyPrice, 0);
+
+                // MRR = 選択月のサブスク決済の合計（PAID invoices with subscriptionId）
+                const allInvoices = sqData.invoices || [];
+                const subInvsMonth = allInvoices.filter(inv =>
+                    inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth
+                );
+                const storeSubIds = sqStore === 'all' ? null : new Set(filtered.map(s => s.id));
+                const filteredSubInvs = storeSubIds
+                    ? subInvsMonth.filter(inv => storeSubIds.has(inv.subscriptionId))
+                    : subInvsMonth;
+                const mrr = filteredSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
+
+                const prevSubInvs = allInvoices.filter(inv =>
+                    inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === prevYM
+                );
+                const filteredPrevSubInvs = storeSubIds
+                    ? prevSubInvs.filter(inv => storeSubIds.has(inv.subscriptionId))
+                    : prevSubInvs;
+                const prevMrr = filteredPrevSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
                 const mrrChange = prevMrr > 0 ? Math.round((mrr - prevMrr) / prevMrr * 10000) / 100 : 0;
+
+                // 決済総額 = 全Square決済（サブスク＋単発）の合計
+                const allPayments = sqData.payments || [];
+                const paymentsFiltered = sqStore === 'all'
+                    ? allPayments
+                    : allPayments.filter(p => p.locationId === sqStore);
+                const monthPayments = paymentsFiltered.filter(p => toYM(p.createdAt) === sqMonth);
+                const totalSales = monthPayments.reduce((sum, p) => sum + p.amount, 0);
 
                 // 新規・解約（基準月）
                 const newInMonth = filtered.filter(s => toYM(s.startDate) === sqMonth);
                 const canceledInMonth = filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === sqMonth);
-                const newMRR = newInMonth.reduce((sum, s) => sum + s.monthlyPrice, 0);
-                const churnedMRR = canceledInMonth.reduce((sum, s) => sum + s.monthlyPrice, 0);
 
-                // ARPU
+                // ARPU = サブスク決済合計 / アクティブ人数
                 const arpu = memberCount > 0 ? Math.round(mrr / memberCount) : 0;
 
                 // 月間解約率
@@ -916,7 +939,9 @@
                     const sa = ss.filter(s => isActiveAt(s, refEnd));
                     const sp = ss.filter(s => isActiveAt(s, prevEnd));
                     const smc = new Set(sa.map(s => s.customerId)).size;
-                    const smrr = sa.reduce((sum, s) => sum + s.monthlyPrice, 0);
+                    const storeSubIdSet = new Set(ss.map(s => s.id));
+                    const storeSubInvs = subInvsMonth.filter(inv => storeSubIdSet.has(inv.subscriptionId));
+                    const smrr = storeSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
                     const sn = ss.filter(s => toYM(s.startDate) === sqMonth);
                     const sc = ss.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === sqMonth);
                     const sStartA = sp.length + sn.length;
@@ -928,13 +953,15 @@
                     };
                 }
 
-                // コース別
+                // コース別（アクティブ会員のみ）
                 const byPlan = {};
                 for (const s of activeRef) {
                     const pn = (sqData.plans && sqData.plans[s.planVariationId]) ? sqData.plans[s.planVariationId].name : '不明';
                     if (!byPlan[pn]) byPlan[pn] = { count: 0, mrr: 0 };
                     byPlan[pn].count++;
-                    byPlan[pn].mrr += s.monthlyPrice;
+                    // コース別MRRもインボイスベースで計算
+                    const subInvForThis = filteredSubInvs.filter(inv => inv.subscriptionId === s.id);
+                    byPlan[pn].mrr += subInvForThis.reduce((sum, inv) => sum + inv.amount, 0);
                 }
 
                 // 初月解約率・3ヶ月以内解約率
@@ -983,10 +1010,17 @@
                     const ym = `${td.getFullYear()}-${String(td.getMonth()+1).padStart(2,'0')}`;
                     const eom = new Date(td.getFullYear(), td.getMonth()+1, 0);
                     const ma = filtered.filter(s => isActiveAt(s, eom));
+                    // MRR = その月のPAIDサブスクインボイス合計
+                    const ymSubInvs = allInvoices.filter(inv =>
+                        inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === ym
+                    );
+                    const ymFilteredSubInvs = storeSubIds
+                        ? ymSubInvs.filter(inv => storeSubIds.has(inv.subscriptionId))
+                        : ymSubInvs;
                     monthlyTrends.push({
                         month: ym,
                         memberCount: new Set(ma.map(s => s.customerId)).size,
-                        mrr: ma.reduce((sum, s) => sum + s.monthlyPrice, 0),
+                        mrr: ymFilteredSubInvs.reduce((sum, inv) => sum + inv.amount, 0),
                         newEnrolled: filtered.filter(s => toYM(s.startDate) === ym).length,
                         canceled: filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === ym).length,
                     });
@@ -1028,7 +1062,7 @@
 
                 return {
                     memberCount, prevMemberCount, mrr, prevMrr, mrrChange,
-                    newMRR, churnedMRR, newEnrolled: newInMonth.length, canceled: canceledInMonth.length,
+                    totalSales, newEnrolled: newInMonth.length, canceled: canceledInMonth.length,
                     arpu, churnRate, firstMonthChurn, threeMonthChurn,
                     retention3m, retention6m, retention12m, ltv,
                     byStore, byPlan, monthlyTrends, cohort, availableMonths,
@@ -5818,13 +5852,12 @@
                                             {/* ① 会員 & 収益 KPI */}
                                             <div>
                                                 <h2 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-3 flex items-center gap-2"><Users size={14} /> 会員 & 収益</h2>
-                                                <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 gap-4">
+                                                <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
                                                     {[
                                                         { label: 'アクティブ会員数', value: `${sqMetrics.memberCount.toLocaleString()}名`, sub: sqMetrics.memberCount !== sqMetrics.prevMemberCount ? `前月比 ${sqMetrics.memberCount - sqMetrics.prevMemberCount >= 0 ? '+' : ''}${sqMetrics.memberCount - sqMetrics.prevMemberCount}名` : null, up: sqMetrics.memberCount >= sqMetrics.prevMemberCount, icon: <Users size={22} />, color: 'indigo' },
-                                                        { label: '総MRR', value: sqMetrics.mrr >= 10000 ? `¥${(sqMetrics.mrr/10000).toFixed(1)}万` : `¥${sqMetrics.mrr.toLocaleString()}`, sub: sqMetrics.mrrChange !== 0 ? `前月比 ${sqMetrics.mrrChange >= 0 ? '+' : ''}${sqMetrics.mrrChange}%` : null, up: sqMetrics.mrrChange >= 0, icon: <Wallet size={22} />, color: 'blue' },
-                                                        { label: 'ARPU', value: `¥${sqMetrics.arpu.toLocaleString()}`, sub: '月額平均単価', icon: <DollarSign size={22} />, color: 'cyan', neutral: true },
-                                                        { label: '新規MRR', value: sqMetrics.newMRR >= 10000 ? `+¥${(sqMetrics.newMRR/10000).toFixed(1)}万` : `+¥${sqMetrics.newMRR.toLocaleString()}`, sub: `${sqMetrics.newEnrolled}件入会`, icon: <TrendingUp size={22} />, color: 'emerald', neutral: true },
-                                                        { label: '解約MRR', value: sqMetrics.churnedMRR >= 10000 ? `-¥${(sqMetrics.churnedMRR/10000).toFixed(1)}万` : `-¥${sqMetrics.churnedMRR.toLocaleString()}`, sub: `${sqMetrics.canceled}件解約`, icon: <TrendingDown size={22} />, color: 'rose', neutral: true },
+                                                        { label: '総MRR', value: `¥${sqMetrics.mrr.toLocaleString()}`, sub: sqMetrics.mrrChange !== 0 ? `前月比 ${sqMetrics.mrrChange >= 0 ? '+' : ''}${sqMetrics.mrrChange}%` : null, up: sqMetrics.mrrChange >= 0, icon: <Wallet size={22} />, color: 'blue' },
+                                                        { label: 'ARPU', value: `¥${sqMetrics.arpu.toLocaleString()}`, sub: 'サブスク決済額÷会員数', icon: <DollarSign size={22} />, color: 'cyan', neutral: true },
+                                                        { label: '決済総額', value: sqMetrics.totalSales >= 10000 ? `¥${(sqMetrics.totalSales/10000).toFixed(1)}万` : `¥${sqMetrics.totalSales.toLocaleString()}`, sub: 'サブスク＋単発決済', icon: <TrendingUp size={22} />, color: 'emerald', neutral: true },
                                                         { label: 'LTV', value: sqMetrics.ltv >= 10000 ? `¥${(sqMetrics.ltv/10000).toFixed(1)}万` : `¥${sqMetrics.ltv.toLocaleString()}`, sub: '顧客生涯価値', icon: <DollarSign size={22} />, color: 'amber', neutral: true },
                                                     ].map((kpi, idx) => (
                                                         <div key={idx} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 hover:shadow-md transition-all">
@@ -5981,7 +6014,7 @@
                                                 {/* コース別 */}
                                                 <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
                                                     <div className="p-5 border-b border-slate-100">
-                                                        <h3 className="text-sm font-black text-slate-700 flex items-center gap-2"><CreditCard size={16} /> コース別内訳</h3>
+                                                        <h3 className="text-sm font-black text-slate-700 flex items-center gap-2"><CreditCard size={16} /> コース別内訳（アクティブ会員）</h3>
                                                     </div>
                                                     <div className="overflow-x-auto">
                                                         <table className="w-full text-sm">
@@ -7365,18 +7398,24 @@
                             datalabels: {
                                 display: function(context) {
                                     const len = context.dataset.data.length;
-                                    if (len <= 6) return true;
-                                    return context.dataIndex % 2 === 0 || context.dataIndex === len - 1;
+                                    if (len <= 4) return true;
+                                    if (len <= 8) return context.dataIndex % 2 === 0 || context.dataIndex === len - 1;
+                                    return context.dataIndex % 3 === 0 || context.dataIndex === len - 1;
                                 },
                                 anchor: 'end',
                                 align: 'top',
-                                font: { size: 11, weight: 'bold' },
+                                offset: 4,
+                                font: { size: 10, weight: 'bold' },
                                 color: `rgba(${color}, 0.8)`,
                                 formatter: function(value) {
                                     if (isCurrency) return `¥${value.toFixed(1)}万`;
                                     return value.toLocaleString() + suffix;
-                                }
+                                },
+                                padding: { top: 4 }
                             }
+                        },
+                        layout: {
+                            padding: { top: 25 }
                         },
                         scales: {
                             x: {

@@ -534,40 +534,32 @@ export default async function handler(req, res) {
   const failedAccounts = [];
   const allDiag = [];
 
-  // デッドラインタイマー: 50秒で部分データを返す
+  // デッドラインフラグ
+  let deadlineReached = false;
   const deadlineTimer = setTimeout(() => {
-    console.warn('⏰ デッドライン到達 - 部分データで応答します');
-    const remaining = configs.filter((cfg, i) =>
-      !failedAccounts.some(f => f.name === cfg.name) &&
-      !merged.stores.some(s => s.name && s.name.includes(cfg.name))
-    );
-    remaining.forEach(cfg => {
-      failedAccounts.push({ name: cfg.name || 'unknown', error: 'タイムアウト: 処理時間超過' });
-    });
-
-    if (merged.stores.length > 0) {
-      respond(200, buildResponse(merged, failedAccounts, allDiag, configs, summaryMode, true));
-    } else {
-      respond(200, {
-        success: false,
-        error: 'データ取得がタイムアウトしました。再読み込みしてください。',
-        stores: [], meta: { failedAccounts, partial: true, generatedAt: new Date().toISOString() },
-      });
-    }
+    deadlineReached = true;
+    console.warn('⏰ デッドライン到達');
   }, DEADLINE_MS);
 
   try {
-    // 各アカウントを並列実行、完了次第mergedにマージ
-    const accountPromises = configs.map(async (cfg, j) => {
+    // アカウントを順次処理（先に完了したデータを確保するため）
+    for (let j = 0; j < configs.length; j++) {
+      const cfg = configs[j];
+
+      // デッドライン到達済みなら残りはスキップ
+      if (deadlineReached) {
+        failedAccounts.push({ name: cfg.name || `アカウント${j + 1}`, error: 'タイムアウト: 処理時間超過' });
+        continue;
+      }
+
       try {
         const r = await fetchAccountData(cfg, isMultiAccount);
         if (!r || r._failed) {
           const errorDetail = r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です';
           failedAccounts.push({ name: cfg.name || `アカウント${j + 1}`, error: errorDetail });
           console.error(`❌ アカウント「${cfg.name}」失敗: ${errorDetail}`);
-          return;
+          continue;
         }
-        // 完了次第マージ
         merged.stores.push(...r.stores);
         merged.subscriptions.push(...r.subscriptions);
         Object.assign(merged.customers, r.customers);
@@ -576,15 +568,13 @@ export default async function handler(req, res) {
         merged.refunds.push(...(r.refunds || []));
         Object.assign(merged.plans, r.plans);
         if (r._diag) allDiag.push({ account: cfg.name, ...r._diag });
+        console.log(`✅ アカウント「${cfg.name}」完了 (${merged.stores.length} stores)`);
       } catch (err) {
         failedAccounts.push({ name: cfg.name || `アカウント${j + 1}`, error: err.message });
       }
-    });
+    }
 
-    await Promise.allSettled(accountPromises);
     clearTimeout(deadlineTimer);
-
-    if (hasResponded) return; // デッドラインで既に応答済み
 
     if (merged.stores.length === 0) {
       return respond(200, {
@@ -594,7 +584,7 @@ export default async function handler(req, res) {
       });
     }
 
-    return respond(200, buildResponse(merged, failedAccounts, allDiag, configs, summaryMode, false));
+    return respond(200, buildResponse(merged, failedAccounts, allDiag, configs, summaryMode, deadlineReached));
   } catch (err) {
     clearTimeout(deadlineTimer);
     console.error('Square API error:', err);

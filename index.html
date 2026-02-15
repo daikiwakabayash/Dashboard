@@ -173,7 +173,7 @@
         const SQUARE_API_URL = '/api/square/metrics';
         const CACHE_KEY = 'dashboard_data_cache';
         const MARKETING_CACHE_KEY = 'marketing_data_cache';
-        const SQUARE_CACHE_KEY = 'square_data_cache';
+        const SQUARE_CACHE_KEY = 'square_data_cache_v2'; // v2: accountName表示修正+返品データ追加
         const UI_STATE_KEY = 'dashboard_ui_state';
         const CACHE_EXPIRY_MS = 30 * 60 * 1000; // 30分（GASタイムアウト対策）
 
@@ -950,14 +950,14 @@
                 const prevMrr = filteredPrevSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
                 const mrrChange = prevMrr > 0 ? Math.round((mrr - prevMrr) / prevMrr * 10000) / 100 : 0;
 
-                // 決済総額 = Payments API or Orders APIの決済データ
+                // 総売上高 = Orders API COMPLETED注文のtotalMoney合計（Square管理画面と一致）
                 const allPayments = sqData.payments || [];
                 const paymentsFiltered = sqStore === 'all'
                     ? allPayments
                     : allPayments.filter(p => p.locationId === sqStore);
                 const monthPayments = paymentsFiltered.filter(p => toYM(p.createdAt) === sqMonth);
                 let totalSales = monthPayments.reduce((sum, p) => sum + p.amount, 0);
-                // フォールバック: payments が空の場合、全PAIDインボイス合計を使用
+                // フォールバック: Orders APIが空の場合、PAIDインボイス合計を使用
                 if (totalSales === 0 && allPayments.length === 0) {
                     const allInvs = sqData.invoices || [];
                     const paidInvsMonth = allInvs.filter(inv =>
@@ -974,6 +974,14 @@
                         });
                     totalSales = storeInvs.reduce((sum, inv) => sum + inv.amount, 0);
                 }
+
+                // 返品額 = Refunds API COMPLETED返金の合計（Square管理画面の「返品」と一致）
+                const allRefunds = sqData.refunds || [];
+                const refundsFiltered = sqStore === 'all'
+                    ? allRefunds
+                    : allRefunds.filter(r => r.locationId === sqStore);
+                const monthRefunds = refundsFiltered.filter(r => toYM(r.createdAt) === sqMonth);
+                const totalRefunds = monthRefunds.reduce((sum, r) => sum + r.amount, 0);
 
                 // 新規・解約（基準月）
                 const newInMonth = filtered.filter(s => toYM(s.startDate) === sqMonth);
@@ -1147,7 +1155,7 @@
 
                 return {
                     memberCount, prevMemberCount, mrr, prevMrr, mrrChange,
-                    totalSales, newEnrolled: newInMonth.length, canceled: canceledInMonth.length,
+                    totalSales, totalRefunds, newEnrolled: newInMonth.length, canceled: canceledInMonth.length,
                     arpu, churnRate, firstMonthChurn, threeMonthChurn,
                     retention3m, retention6m, retention12m, ltv,
                     byStore, byPlan, monthlyTrends, cohort, availableMonths,
@@ -6069,20 +6077,21 @@
                                             {/* ① 会員 & 収益 KPI */}
                                             <div>
                                                 <h2 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-3 flex items-center gap-2"><Users size={14} /> 会員 & 収益</h2>
-                                                <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+                                                <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
                                                     {[
                                                         { label: 'アクティブ会員数', value: `${sqMetrics.memberCount.toLocaleString()}名`, sub: sqMetrics.memberCount !== sqMetrics.prevMemberCount ? `前月比 ${sqMetrics.memberCount - sqMetrics.prevMemberCount >= 0 ? '+' : ''}${sqMetrics.memberCount - sqMetrics.prevMemberCount}名` : null, up: sqMetrics.memberCount >= sqMetrics.prevMemberCount, icon: <Users size={22} />, color: 'indigo' },
                                                         { label: '総MRR', value: `¥${sqMetrics.mrr.toLocaleString()}`, sub: sqMetrics.mrrChange !== 0 ? `前月比 ${sqMetrics.mrrChange >= 0 ? '+' : ''}${sqMetrics.mrrChange}%` : null, up: sqMetrics.mrrChange >= 0, icon: <Wallet size={22} />, color: 'blue' },
                                                         { label: 'ARPU', value: `¥${sqMetrics.arpu.toLocaleString()}`, sub: 'サブスク決済額÷会員数', icon: <DollarSign size={22} />, color: 'cyan', neutral: true },
-                                                        { label: '決済総額', value: sqMetrics.totalSales >= 10000 ? `¥${(sqMetrics.totalSales/10000).toFixed(1)}万` : `¥${sqMetrics.totalSales.toLocaleString()}`, sub: 'Square売上サマリー', icon: <TrendingUp size={22} />, color: 'emerald', neutral: true },
+                                                        { label: '総売上高', value: sqMetrics.totalSales >= 10000 ? `¥${(sqMetrics.totalSales/10000).toFixed(1)}万` : `¥${sqMetrics.totalSales.toLocaleString()}`, sub: 'Square売上サマリー', icon: <TrendingUp size={22} />, color: 'emerald', neutral: true },
+                                                        { label: '返品', value: sqMetrics.totalRefunds > 0 ? (sqMetrics.totalRefunds >= 10000 ? `-¥${(sqMetrics.totalRefunds/10000).toFixed(1)}万` : `-¥${sqMetrics.totalRefunds.toLocaleString()}`) : '¥0', sub: '返金・払戻', icon: <RefreshCw size={22} />, color: 'rose', neutral: true, warn: sqMetrics.totalRefunds > 0 },
                                                         { label: 'LTV', value: sqMetrics.ltv >= 10000 ? `¥${(sqMetrics.ltv/10000).toFixed(1)}万` : `¥${sqMetrics.ltv.toLocaleString()}`, sub: '顧客生涯価値', icon: <DollarSign size={22} />, color: 'amber', neutral: true },
                                                     ].map((kpi, idx) => (
-                                                        <div key={idx} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 hover:shadow-md transition-all">
+                                                        <div key={idx} className={`p-5 rounded-2xl shadow-sm border hover:shadow-md transition-all ${kpi.warn ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200'}`}>
                                                             <div className={`p-2.5 rounded-xl bg-${kpi.color}-500 text-white shadow-lg inline-block mb-3`}>
                                                                 {kpi.icon}
                                                             </div>
                                                             <h3 className="text-xs font-black text-slate-400 mb-1">{kpi.label}</h3>
-                                                            <p className="text-xl font-black text-slate-900 tracking-tight">{kpi.value}</p>
+                                                            <p className={`text-xl font-black tracking-tight ${kpi.warn ? 'text-rose-600' : 'text-slate-900'}`}>{kpi.value}</p>
                                                             {kpi.sub && (
                                                                 <p className={`text-xs font-bold mt-1 ${kpi.neutral ? 'text-slate-400' : kpi.up ? 'text-emerald-600' : 'text-rose-600'}`}>
                                                                     {kpi.sub}

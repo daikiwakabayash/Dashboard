@@ -123,80 +123,84 @@ async function fetchPlanDetails(client, planVariationIds) {
   return plans;
 }
 
-// 決済データ取得（Payments API → Orders API フォールバック）
-// Square管理画面の売上サマリーと一致する正確な決済データを取得
-async function fetchPayments(client, locationIds) {
+// 総売上高取得（Orders API - Square管理画面の「総売上高」と一致）
+async function fetchSalesOrders(client, locationIds) {
+  const payments = [];
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
   const beginStr = beginTime.toISOString();
 
-  // まずPayments APIを試行
-  let payments = [];
-  let paymentsApiOk = false;
-  try {
-    for (const locId of locationIds) {
-      let cursor = undefined;
-      do {
-        const { result } = await client.paymentsApi.listPayments(
-          beginStr, undefined, 'DESC', cursor, locId,
-        );
-        if (result.payments) {
-          for (const p of result.payments) {
-            if (p.status !== 'COMPLETED') continue;
-            payments.push({
-              amount: toNumber(p.totalMoney && p.totalMoney.amount),
-              createdAt: p.createdAt,
-              locationId: p.locationId || locId,
-            });
-          }
+  let cursor = undefined;
+  do {
+    try {
+      const body = {
+        locationIds,
+        query: {
+          filter: {
+            dateTimeFilter: { closedAt: { startAt: beginStr } },
+            stateFilter: { states: ['COMPLETED'] },
+          },
+          sort: { sortField: 'CLOSED_AT', sortOrder: 'DESC' },
+        },
+      };
+      if (cursor) body.cursor = cursor;
+      const { result } = await client.ordersApi.searchOrders(body);
+      if (result.orders) {
+        for (const o of result.orders) {
+          payments.push({
+            amount: toNumber(o.totalMoney && o.totalMoney.amount),
+            createdAt: o.closedAt || o.createdAt,
+            locationId: o.locationId,
+          });
         }
-        cursor = result.cursor;
-      } while (cursor);
+      }
+      cursor = result.cursor;
+    } catch (err) {
+      console.error('  Orders API error:', err.message);
+      cursor = undefined;
     }
-    paymentsApiOk = true;
-    console.log(`  Payments API: ${payments.length}件取得`);
-  } catch (err) {
-    console.warn(`  Payments API失敗 (${err.message}), Orders APIにフォールバック`);
-    payments = [];
-  }
+  } while (cursor);
+  console.log(`  Orders API: ${payments.length}件取得`);
+  return payments;
+}
 
-  // Payments APIが失敗 or 0件の場合、Orders APIで取得
-  if (!paymentsApiOk || payments.length === 0) {
-    console.log('  Orders APIで決済データを取得...');
+// 返品データ取得（Refunds API - Square管理画面の「返品」と一致）
+async function fetchRefunds(client, locationIds) {
+  const refunds = [];
+  const beginTime = new Date();
+  beginTime.setMonth(beginTime.getMonth() - 13);
+  const beginStr = beginTime.toISOString();
+
+  for (const locId of locationIds) {
     let cursor = undefined;
     do {
       try {
-        const body = {
-          locationIds,
-          query: {
-            filter: {
-              dateTimeFilter: { closedAt: { startAt: beginStr } },
-              stateFilter: { states: ['COMPLETED'] },
-            },
-            sort: { sortField: 'CLOSED_AT', sortOrder: 'DESC' },
-          },
-        };
-        if (cursor) body.cursor = cursor;
-        const { result } = await client.ordersApi.searchOrders(body);
-        if (result.orders) {
-          for (const o of result.orders) {
-            payments.push({
-              amount: toNumber(o.totalMoney && o.totalMoney.amount),
-              createdAt: o.closedAt || o.createdAt,
-              locationId: o.locationId,
+        const { result } = await client.refundsApi.listPaymentRefunds(
+          beginStr,     // beginTime
+          undefined,    // endTime
+          'DESC',       // sortOrder
+          cursor,       // cursor
+          locId,        // locationId
+          'COMPLETED',  // status
+        );
+        if (result.refunds) {
+          for (const r of result.refunds) {
+            refunds.push({
+              amount: toNumber(r.amountMoney && r.amountMoney.amount),
+              createdAt: r.createdAt,
+              locationId: r.locationId || locId,
             });
           }
         }
         cursor = result.cursor;
       } catch (err) {
-        console.error(`  Orders API error:`, err.message);
+        console.error(`  Refunds API error for location ${locId}:`, err.message);
         cursor = undefined;
       }
     } while (cursor);
-    console.log(`  Orders API: ${payments.length}件取得`);
   }
-
-  return payments;
+  console.log(`  Refunds API: ${refunds.length}件取得`);
+  return refunds;
 }
 
 // 全顧客名を取得
@@ -272,11 +276,12 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     }
     const locationIds = stores.map(s => s.id);
 
-    // サブスク＋インボイス＋決済を並列取得
-    const [rawSubs, invoices, payments] = await Promise.all([
+    // サブスク＋インボイス＋決済＋返品を並列取得
+    const [rawSubs, invoices, payments, refunds] = await Promise.all([
       fetchAllSubscriptions(client, locationIds),
       fetchInvoices(client, locationIds),
-      fetchPayments(client, locationIds),
+      fetchSalesOrders(client, locationIds),
+      fetchRefunds(client, locationIds),
     ]);
 
     // 顧客名＋プラン詳細を並列取得
@@ -307,8 +312,8 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
       };
     });
 
-    console.log(`[${accountName || 'main'}] ${stores.length} stores, ${subscriptions.length} subs, ${invoices.length} inv, ${payments.length} payments`);
-    return { stores, subscriptions, customers, invoices, payments, plans };
+    console.log(`[${accountName || 'main'}] ${stores.length} stores, ${subscriptions.length} subs, ${invoices.length} inv, ${payments.length} payments, ${refunds.length} refunds`);
+    return { stores, subscriptions, customers, invoices, payments, refunds, plans };
   } catch (err) {
     let detail = err.message;
     try {
@@ -358,6 +363,7 @@ export default async function handler(req, res) {
       customers: {},
       invoices: [],
       payments: [],
+      refunds: [],
       plans: {},
     };
     const failedAccounts = [];
@@ -381,6 +387,7 @@ export default async function handler(req, res) {
         Object.assign(merged.customers, r.customers);
         merged.invoices.push(...r.invoices);
         merged.payments.push(...r.payments);
+        merged.refunds.push(...(r.refunds || []));
         Object.assign(merged.plans, r.plans);
       }
     }
@@ -397,10 +404,12 @@ export default async function handler(req, res) {
       customers: merged.customers,
       invoices: merged.invoices,
       payments: merged.payments,
+      refunds: merged.refunds,
       meta: {
         totalSubscriptions: merged.subscriptions.length,
         totalInvoices: merged.invoices.length,
         totalPayments: merged.payments.length,
+        totalRefunds: merged.refunds.length,
         totalAccounts: configs.length,
         failedAccounts: failedAccounts.length > 0 ? failedAccounts : undefined,
         generatedAt: new Date().toISOString(),

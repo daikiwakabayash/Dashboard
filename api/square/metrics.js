@@ -318,6 +318,9 @@ function generateDemoData() {
 }
 
 export default async function handler(req, res) {
+  // 全レスポンスをJSONとして返すことを保証
+  res.setHeader('Content-Type', 'application/json');
+
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -328,7 +331,7 @@ export default async function handler(req, res) {
   }
 
   if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
+    return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
   // デモモード: ?demo=true でダミーデータを返す
@@ -342,6 +345,9 @@ export default async function handler(req, res) {
   }
   if (!process.env.SQUARE_LOCATION_ID) {
     return res.status(500).json({ success: false, error: 'SQUARE_LOCATION_ID が未設定です。Vercelの環境変数を確認してください。' });
+  }
+  if (!process.env.SQUARE_ENVIRONMENT) {
+    return res.status(500).json({ success: false, error: 'SQUARE_ENVIRONMENT が未設定です。Vercelの環境変数に "production" を設定してください。' });
   }
 
   try {

@@ -1069,7 +1069,9 @@
                     });
                 }
 
-                // コホート分析
+                // コホート分析（入会日基準・最低1ヶ月）
+                // 1ヶ月 = 入会日〜次回決済日前日の残存率
+                // 例: 2月15日入会 → 1ヶ月=2/15〜3/14、2ヶ月=3/15〜4/14
                 const cohortMap = {};
                 for (const s of filtered) {
                     if (!s.startDate) continue;
@@ -1077,15 +1079,32 @@
                     if (!cohortMap[ym]) cohortMap[ym] = [];
                     cohortMap[ym].push(s);
                 }
+                const today = new Date();
                 const cohort = Object.keys(cohortMap).sort().map(cm => {
                     const cs = cohortMap[cm];
                     const sc = cs.length;
-                    const [cy, cmo] = cm.split('-').map(Number);
                     const ret = [];
-                    for (let i = 0; i <= 11; i++) {
-                        const te = new Date(cy, cmo - 1 + i + 1, 0);
-                        if (te > refEnd) break;
-                        ret.push(Math.round(cs.filter(s => isActiveAt(s, te)).length / sc * 100));
+                    for (let i = 1; i <= 12; i++) {
+                        // 各メンバーの入会日 + iヶ月の日付を基準に判定
+                        // iヶ月目の残存 = 入会日+iヶ月時点でまだアクティブな人の割合
+                        let eligible = 0;
+                        let survived = 0;
+                        for (const s of cs) {
+                            const sd = new Date(s.startDate);
+                            // 入会日 + iヶ月 = 次回決済日（iヶ月目の開始）
+                            const billingDate = new Date(sd.getFullYear(), sd.getMonth() + i, sd.getDate());
+                            // まだ判定日が来ていないメンバーはスキップ
+                            if (billingDate > today) continue;
+                            eligible++;
+                            // 解約していない or 解約日がiヶ月目の決済日以降 → 生存
+                            if (s.status === 'ACTIVE' || s.status === 'PAUSED') {
+                                survived++;
+                            } else if (s.canceledDate) {
+                                if (new Date(s.canceledDate) >= billingDate) survived++;
+                            }
+                        }
+                        if (eligible === 0) break;
+                        ret.push(Math.round(survived / eligible * 100));
                     }
                     return { month: cm, startCount: sc, retention: ret };
                 });
@@ -6182,7 +6201,7 @@
                                                                 <th className="px-3 py-2 font-black text-slate-500 text-left sticky left-0 bg-slate-50">入会月</th>
                                                                 <th className="px-3 py-2 font-black text-slate-500 text-right">人数</th>
                                                                 {Array.from({length: 12}, (_, i) => (
-                                                                    <th key={i} className="px-3 py-2 font-black text-slate-500 text-center">{i}ヶ月</th>
+                                                                    <th key={i} className="px-3 py-2 font-black text-slate-500 text-center">{i + 1}ヶ月</th>
                                                                 ))}
                                                             </tr></thead>
                                                             <tbody className="divide-y divide-slate-100">

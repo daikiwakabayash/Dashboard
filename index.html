@@ -479,6 +479,8 @@
             const [sqLoading, setSqLoading] = useState(false);
             const [sqError, setSqError] = useState(null);
             const [sqLastFetch, setSqLastFetch] = useState(null);
+            const [sqStore, setSqStore] = useState('all');
+            const [sqMonth, setSqMonth] = useState('');
 
             // ソート用 State
             const [branchSortKey, setBranchSortKey] = useState('newCount');
@@ -853,6 +855,181 @@
                     fetchSquareData();
                 }
             }, [currentPage]);
+
+            // sqData読み込み時にデフォルト月を設定
+            useEffect(() => {
+                if (sqData && sqData.subscriptions && !sqMonth) {
+                    const now = new Date();
+                    setSqMonth(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`);
+                }
+            }, [sqData]);
+
+            // Square 全指標計算
+            const sqMetrics = useMemo(() => {
+                if (!sqData || !sqData.subscriptions || !sqMonth) return null;
+                const subs = sqData.subscriptions;
+                const filtered = sqStore === 'all' ? subs : subs.filter(s => s.locationId === sqStore);
+                const [refY, refM] = sqMonth.split('-').map(Number);
+                const refEnd = new Date(refY, refM, 0);
+                const prevEnd = new Date(refY, refM - 1, 0);
+                const prevYM = `${prevEnd.getFullYear()}-${String(prevEnd.getMonth() + 1).padStart(2, '0')}`;
+
+                const toYM = d => { if (!d) return null; const dt = new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`; };
+                const isActiveAt = (s, date) => {
+                    const start = s.startDate ? new Date(s.startDate) : null;
+                    if (!start || start > date) return false;
+                    if (s.status === 'ACTIVE' || s.status === 'PAUSED') return true;
+                    if (s.canceledDate) return new Date(s.canceledDate) > date;
+                    return false;
+                };
+
+                // 基準月・前月のアクティブ
+                const activeRef = filtered.filter(s => isActiveAt(s, refEnd));
+                const activePrev = filtered.filter(s => isActiveAt(s, prevEnd));
+                const memberCount = new Set(activeRef.map(s => s.customerId)).size;
+                const prevMemberCount = new Set(activePrev.map(s => s.customerId)).size;
+                const mrr = activeRef.reduce((sum, s) => sum + s.monthlyPrice, 0);
+                const prevMrr = activePrev.reduce((sum, s) => sum + s.monthlyPrice, 0);
+                const mrrChange = prevMrr > 0 ? Math.round((mrr - prevMrr) / prevMrr * 10000) / 100 : 0;
+
+                // 新規・解約（基準月）
+                const newInMonth = filtered.filter(s => toYM(s.startDate) === sqMonth);
+                const canceledInMonth = filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === sqMonth);
+                const newMRR = newInMonth.reduce((sum, s) => sum + s.monthlyPrice, 0);
+                const churnedMRR = canceledInMonth.reduce((sum, s) => sum + s.monthlyPrice, 0);
+
+                // ARPU
+                const arpu = memberCount > 0 ? Math.round(mrr / memberCount) : 0;
+
+                // 月間解約率
+                const startActive = activePrev.length + newInMonth.length;
+                const churnRate = startActive > 0 ? Math.round(canceledInMonth.length / startActive * 10000) / 100 : 0;
+
+                // 店舗別
+                const byStore = {};
+                for (const store of (sqData.stores || [])) {
+                    const ss = subs.filter(s => s.locationId === store.id);
+                    const sa = ss.filter(s => isActiveAt(s, refEnd));
+                    const sp = ss.filter(s => isActiveAt(s, prevEnd));
+                    const smc = new Set(sa.map(s => s.customerId)).size;
+                    const smrr = sa.reduce((sum, s) => sum + s.monthlyPrice, 0);
+                    const sn = ss.filter(s => toYM(s.startDate) === sqMonth);
+                    const sc = ss.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === sqMonth);
+                    const sStartA = sp.length + sn.length;
+                    byStore[store.id] = {
+                        name: store.name, memberCount: smc, mrr: smrr,
+                        arpu: smc > 0 ? Math.round(smrr / smc) : 0,
+                        churnRate: sStartA > 0 ? Math.round(sc.length / sStartA * 10000) / 100 : 0,
+                        newEnrolled: sn.length, canceled: sc.length,
+                    };
+                }
+
+                // コース別
+                const byPlan = {};
+                for (const s of activeRef) {
+                    const pn = (sqData.plans && sqData.plans[s.planVariationId]) ? sqData.plans[s.planVariationId].name : '不明';
+                    if (!byPlan[pn]) byPlan[pn] = { count: 0, mrr: 0 };
+                    byPlan[pn].count++;
+                    byPlan[pn].mrr += s.monthlyPrice;
+                }
+
+                // 初月解約率・3ヶ月以内解約率
+                const calcEarlyChurn = (days) => {
+                    const eligible = filtered.filter(s => {
+                        if (!s.startDate) return false;
+                        return (refEnd - new Date(s.startDate)) / 86400000 >= days;
+                    });
+                    const churned = eligible.filter(s => {
+                        if (s.status !== 'CANCELED' && s.status !== 'DEACTIVATED') return false;
+                        if (!s.canceledDate || !s.startDate) return false;
+                        return (new Date(s.canceledDate) - new Date(s.startDate)) / 86400000 <= days;
+                    });
+                    return eligible.length > 0 ? Math.round(churned.length / eligible.length * 1000) / 10 : 0;
+                };
+                const firstMonthChurn = calcEarlyChurn(30);
+                const threeMonthChurn = calcEarlyChurn(90);
+
+                // 継続率 (3/6/12ヶ月)
+                const calcRetention = (months) => {
+                    const cutoff = new Date(refY, refM - 1 - months, 1);
+                    const eligible = filtered.filter(s => s.startDate && new Date(s.startDate) <= cutoff);
+                    const survived = eligible.filter(s => {
+                        if (s.status === 'ACTIVE' || s.status === 'PAUSED') return true;
+                        if (s.canceledDate && s.startDate) {
+                            const dm = (new Date(s.canceledDate).getFullYear() - new Date(s.startDate).getFullYear()) * 12
+                                + new Date(s.canceledDate).getMonth() - new Date(s.startDate).getMonth();
+                            return dm >= months;
+                        }
+                        return false;
+                    });
+                    return eligible.length > 0 ? Math.round(survived.length / eligible.length * 100) : 0;
+                };
+                const retention3m = calcRetention(3);
+                const retention6m = calcRetention(6);
+                const retention12m = calcRetention(12);
+
+                // LTV
+                const mChurn = churnRate / 100;
+                const ltv = mChurn > 0 ? Math.round(arpu / mChurn) : arpu * 24;
+
+                // 月別推移（12ヶ月）
+                const monthlyTrends = [];
+                for (let i = 11; i >= 0; i--) {
+                    const td = new Date(refY, refM - 1 - i, 1);
+                    const ym = `${td.getFullYear()}-${String(td.getMonth()+1).padStart(2,'0')}`;
+                    const eom = new Date(td.getFullYear(), td.getMonth()+1, 0);
+                    const ma = filtered.filter(s => isActiveAt(s, eom));
+                    monthlyTrends.push({
+                        month: ym,
+                        memberCount: new Set(ma.map(s => s.customerId)).size,
+                        mrr: ma.reduce((sum, s) => sum + s.monthlyPrice, 0),
+                        newEnrolled: filtered.filter(s => toYM(s.startDate) === ym).length,
+                        canceled: filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === ym).length,
+                    });
+                }
+
+                // コホート分析
+                const cohortMap = {};
+                for (const s of filtered) {
+                    if (!s.startDate) continue;
+                    const ym = toYM(s.startDate);
+                    if (!cohortMap[ym]) cohortMap[ym] = [];
+                    cohortMap[ym].push(s);
+                }
+                const cohort = Object.keys(cohortMap).sort().map(cm => {
+                    const cs = cohortMap[cm];
+                    const sc = cs.length;
+                    const [cy, cmo] = cm.split('-').map(Number);
+                    const ret = [];
+                    for (let i = 0; i <= 11; i++) {
+                        const te = new Date(cy, cmo - 1 + i + 1, 0);
+                        if (te > refEnd) break;
+                        ret.push(Math.round(cs.filter(s => isActiveAt(s, te)).length / sc * 100));
+                    }
+                    return { month: cm, startCount: sc, retention: ret };
+                });
+
+                // 利用可能月リスト
+                const allMonths = new Set();
+                for (const s of subs) {
+                    if (s.startDate) allMonths.add(toYM(s.startDate));
+                    if (s.canceledDate) allMonths.add(toYM(s.canceledDate));
+                }
+                const now = new Date();
+                for (let i = 0; i < 12; i++) {
+                    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+                    allMonths.add(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
+                }
+                const availableMonths = [...allMonths].sort().reverse();
+
+                return {
+                    memberCount, prevMemberCount, mrr, prevMrr, mrrChange,
+                    newMRR, churnedMRR, newEnrolled: newInMonth.length, canceled: canceledInMonth.length,
+                    arpu, churnRate, firstMonthChurn, threeMonthChurn,
+                    retention3m, retention6m, retention12m, ltv,
+                    byStore, byPlan, monthlyTrends, cohort, availableMonths,
+                };
+            }, [sqData, sqStore, sqMonth]);
 
             // マーケティングドロップダウンのクリック外検知
             useEffect(() => {
@@ -5403,7 +5580,7 @@
                             <div className="p-4 lg:p-6 font-sans text-slate-900">
                                 <div className="max-w-[1600px] mx-auto space-y-6">
 
-                                    {/* Header */}
+                                    {/* Header + Filters */}
                                     <header className="flex flex-col gap-4 bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
                                         <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
                                             <div className="flex items-center gap-4">
@@ -5417,24 +5594,36 @@
                                                     <h1 className="text-3xl font-black tracking-tight text-slate-900 italic">サブスク分析</h1>
                                                 </div>
                                             </div>
-                                            <div className="flex items-center gap-3">
-                                                <button
-                                                    onClick={() => fetchSquareData(true)}
+                                            <div className="flex items-center gap-3 flex-wrap">
+                                                {sqData && sqData.stores && sqData.stores.length > 1 && (
+                                                    <select value={sqStore} onChange={e => setSqStore(e.target.value)}
+                                                        className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                                        <option value="all">全店舗</option>
+                                                        {sqData.stores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                                    </select>
+                                                )}
+                                                {sqMetrics && sqMetrics.availableMonths && (
+                                                    <select value={sqMonth} onChange={e => setSqMonth(e.target.value)}
+                                                        className="px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                                        {sqMetrics.availableMonths.map(m => {
+                                                            const [y, mo] = m.split('-');
+                                                            return <option key={m} value={m}>{y}年{parseInt(mo)}月</option>;
+                                                        })}
+                                                    </select>
+                                                )}
+                                                <button onClick={() => fetchSquareData(true)}
                                                     className="p-3 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-all shadow-lg flex items-center gap-2 font-black text-sm uppercase tracking-tighter disabled:opacity-50"
-                                                    disabled={sqLoading}
-                                                >
+                                                    disabled={sqLoading}>
                                                     <RefreshCw size={18} className={sqLoading ? 'animate-spin' : ''} /> Sync
                                                 </button>
                                                 {sqLastFetch && (
-                                                    <span className="text-xs text-slate-400 font-bold">
-                                                        {sqLastFetch.toLocaleTimeString('ja-JP')} 更新
-                                                    </span>
+                                                    <span className="text-xs text-slate-400 font-bold">{sqLastFetch.toLocaleTimeString('ja-JP')} 更新</span>
                                                 )}
                                             </div>
                                         </div>
                                     </header>
 
-                                    {/* Loading State */}
+                                    {/* Loading */}
                                     {sqLoading && !sqData && (
                                         <div className="flex items-center justify-center py-20">
                                             <div className="text-center">
@@ -5444,184 +5633,193 @@
                                         </div>
                                     )}
 
-                                    {/* Error State */}
+                                    {/* Error */}
                                     {sqError && (
                                         <div className="bg-red-50 border-2 border-red-200 rounded-3xl p-8 text-center">
                                             <AlertCircle size={48} className="text-red-400 mx-auto mb-4" />
                                             <h3 className="text-lg font-black text-red-700 mb-2">データ取得エラー</h3>
                                             <p className="text-red-600 font-bold mb-4">{sqError}</p>
-                                            <div className="flex items-center justify-center gap-3">
-                                                <button onClick={() => fetchSquareData(true)} className="px-6 py-3 bg-red-600 text-white rounded-xl hover:bg-red-700 transition-colors font-bold text-sm">再試行</button>
-                                            </div>
+                                            <button onClick={() => fetchSquareData(true)} className="px-6 py-3 bg-red-600 text-white rounded-xl hover:bg-red-700 transition-colors font-bold text-sm">再試行</button>
                                         </div>
                                     )}
 
-                                    {/* No Data State */}
+                                    {/* No Data */}
                                     {!sqLoading && !sqError && !sqData && (
                                         <div className="bg-blue-50 border-2 border-blue-200 rounded-3xl p-8 text-center">
                                             <CreditCard size={48} className="text-blue-400 mx-auto mb-4" />
                                             <h3 className="text-lg font-black text-blue-700 mb-2">Square連携</h3>
                                             <p className="text-blue-600 font-bold mb-4">Square APIからサブスクリプションデータを取得します</p>
-                                            <div className="flex items-center justify-center gap-3">
-                                                <button onClick={() => fetchSquareData()} className="px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors font-bold text-sm">データを取得</button>
-                                            </div>
+                                            <button onClick={() => fetchSquareData()} className="px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors font-bold text-sm">データを取得</button>
                                         </div>
                                     )}
 
                                     {/* Data Display */}
-                                    {sqData && sqData.summary && (
+                                    {sqMetrics && (
                                         <>
-                                            {/* TOP KPI Cards */}
-                                            <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
-                                                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
-                                                    <div className="absolute top-0 right-0 w-20 h-20 bg-blue-500 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
-                                                    <div className="flex items-start justify-between mb-4 relative z-10">
-                                                        <div className="p-3 rounded-2xl bg-blue-500 text-white shadow-lg">
-                                                            <Wallet size={22} />
-                                                        </div>
-                                                    </div>
-                                                    <div className="relative z-10">
-                                                        <h3 className="text-sm font-black text-slate-400 mb-2">総MRR</h3>
-                                                        <p className="text-2xl font-black text-slate-900 tracking-tight">
-                                                            ¥{(sqData.summary.mrr / 10000).toFixed(1)}<span className="text-base text-slate-500">万</span>
-                                                        </p>
-                                                        {sqData.summary.mrrChange !== 0 && (
-                                                            <div className={`flex items-center gap-1 mt-2 text-xs font-black ${sqData.summary.mrrChange >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                                                                {sqData.summary.mrrChange >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
-                                                                前月比 {sqData.summary.mrrChange >= 0 ? '+' : ''}{sqData.summary.mrrChange}%
+                                            {/* ① 会員 & 収益 KPI */}
+                                            <div>
+                                                <h2 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-3 flex items-center gap-2"><Users size={14} /> 会員 & 収益</h2>
+                                                <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 gap-4">
+                                                    {[
+                                                        { label: 'アクティブ会員数', value: `${sqMetrics.memberCount.toLocaleString()}名`, sub: sqMetrics.memberCount !== sqMetrics.prevMemberCount ? `前月比 ${sqMetrics.memberCount - sqMetrics.prevMemberCount >= 0 ? '+' : ''}${sqMetrics.memberCount - sqMetrics.prevMemberCount}名` : null, up: sqMetrics.memberCount >= sqMetrics.prevMemberCount, icon: <Users size={22} />, color: 'indigo' },
+                                                        { label: '総MRR', value: sqMetrics.mrr >= 10000 ? `¥${(sqMetrics.mrr/10000).toFixed(1)}万` : `¥${sqMetrics.mrr.toLocaleString()}`, sub: sqMetrics.mrrChange !== 0 ? `前月比 ${sqMetrics.mrrChange >= 0 ? '+' : ''}${sqMetrics.mrrChange}%` : null, up: sqMetrics.mrrChange >= 0, icon: <Wallet size={22} />, color: 'blue' },
+                                                        { label: 'ARPU', value: `¥${sqMetrics.arpu.toLocaleString()}`, sub: '月額平均単価', icon: <DollarSign size={22} />, color: 'cyan', neutral: true },
+                                                        { label: '新規MRR', value: sqMetrics.newMRR >= 10000 ? `+¥${(sqMetrics.newMRR/10000).toFixed(1)}万` : `+¥${sqMetrics.newMRR.toLocaleString()}`, sub: `${sqMetrics.newEnrolled}件入会`, icon: <TrendingUp size={22} />, color: 'emerald', neutral: true },
+                                                        { label: '解約MRR', value: sqMetrics.churnedMRR >= 10000 ? `-¥${(sqMetrics.churnedMRR/10000).toFixed(1)}万` : `-¥${sqMetrics.churnedMRR.toLocaleString()}`, sub: `${sqMetrics.canceled}件解約`, icon: <TrendingDown size={22} />, color: 'rose', neutral: true },
+                                                        { label: 'LTV', value: sqMetrics.ltv >= 10000 ? `¥${(sqMetrics.ltv/10000).toFixed(1)}万` : `¥${sqMetrics.ltv.toLocaleString()}`, sub: '顧客生涯価値', icon: <DollarSign size={22} />, color: 'amber', neutral: true },
+                                                    ].map((kpi, idx) => (
+                                                        <div key={idx} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 hover:shadow-md transition-all">
+                                                            <div className={`p-2.5 rounded-xl bg-${kpi.color}-500 text-white shadow-lg inline-block mb-3`}>
+                                                                {kpi.icon}
                                                             </div>
-                                                        )}
-                                                    </div>
+                                                            <h3 className="text-xs font-black text-slate-400 mb-1">{kpi.label}</h3>
+                                                            <p className="text-xl font-black text-slate-900 tracking-tight">{kpi.value}</p>
+                                                            {kpi.sub && (
+                                                                <p className={`text-xs font-bold mt-1 ${kpi.neutral ? 'text-slate-400' : kpi.up ? 'text-emerald-600' : 'text-rose-600'}`}>
+                                                                    {kpi.sub}
+                                                                </p>
+                                                            )}
+                                                        </div>
+                                                    ))}
                                                 </div>
+                                            </div>
 
-                                                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
-                                                    <div className="absolute top-0 right-0 w-20 h-20 bg-indigo-500 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
-                                                    <div className="flex items-start justify-between mb-4 relative z-10">
-                                                        <div className="p-3 rounded-2xl bg-indigo-500 text-white shadow-lg">
-                                                            <Users size={22} />
+                                            {/* ② 解約・継続 KPI */}
+                                            <div>
+                                                <h2 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-3 flex items-center gap-2"><UserMinus size={14} /> 解約・継続分析</h2>
+                                                <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+                                                    {[
+                                                        { label: '月間解約率', value: `${sqMetrics.churnRate}%`, warn: sqMetrics.churnRate > 5 },
+                                                        { label: '初月解約率', value: `${sqMetrics.firstMonthChurn}%`, warn: sqMetrics.firstMonthChurn > 10 },
+                                                        { label: '3ヶ月以内解約率', value: `${sqMetrics.threeMonthChurn}%`, warn: sqMetrics.threeMonthChurn > 20 },
+                                                        { label: '3ヶ月継続率', value: `${sqMetrics.retention3m}%`, good: sqMetrics.retention3m >= 80 },
+                                                        { label: '6ヶ月継続率', value: `${sqMetrics.retention6m}%`, good: sqMetrics.retention6m >= 70 },
+                                                        { label: '12ヶ月継続率', value: `${sqMetrics.retention12m}%`, good: sqMetrics.retention12m >= 60 },
+                                                    ].map((kpi, idx) => (
+                                                        <div key={idx} className={`p-5 rounded-2xl shadow-sm border-2 transition-all ${idx < 3 ? (kpi.warn ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200') : (kpi.good ? 'bg-emerald-50 border-emerald-200' : 'bg-white border-slate-200')}`}>
+                                                            <h3 className="text-xs font-black text-slate-400 mb-2">{kpi.label}</h3>
+                                                            <p className={`text-2xl font-black tracking-tight ${idx < 3 ? (kpi.warn ? 'text-rose-600' : 'text-slate-900') : (kpi.good ? 'text-emerald-600' : 'text-slate-900')}`}>
+                                                                {kpi.value}
+                                                            </p>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+
+                                            {/* 店舗別 & コース別 テーブル */}
+                                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                                                {/* 店舗別 */}
+                                                {sqData.stores && sqData.stores.length > 1 && (
+                                                    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                                                        <div className="p-5 border-b border-slate-100">
+                                                            <h3 className="text-sm font-black text-slate-700 flex items-center gap-2"><MapPin size={16} /> 店舗別サマリー</h3>
+                                                        </div>
+                                                        <div className="overflow-x-auto">
+                                                            <table className="w-full text-sm">
+                                                                <thead><tr className="bg-slate-50 text-left">
+                                                                    <th className="px-4 py-3 font-black text-slate-500 text-xs">店舗</th>
+                                                                    <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">会員数</th>
+                                                                    <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">MRR</th>
+                                                                    <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">ARPU</th>
+                                                                    <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">解約率</th>
+                                                                </tr></thead>
+                                                                <tbody className="divide-y divide-slate-100">
+                                                                    {Object.entries(sqMetrics.byStore).map(([id, s]) => (
+                                                                        <tr key={id} className="hover:bg-slate-50">
+                                                                            <td className="px-4 py-3 font-bold text-slate-700">{s.name}</td>
+                                                                            <td className="px-4 py-3 font-bold text-right">{s.memberCount}名</td>
+                                                                            <td className="px-4 py-3 font-bold text-right">¥{s.mrr >= 10000 ? `${(s.mrr/10000).toFixed(1)}万` : s.mrr.toLocaleString()}</td>
+                                                                            <td className="px-4 py-3 font-bold text-right">¥{s.arpu.toLocaleString()}</td>
+                                                                            <td className={`px-4 py-3 font-black text-right ${s.churnRate > 5 ? 'text-rose-600' : 'text-slate-700'}`}>{s.churnRate}%</td>
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                            </table>
                                                         </div>
                                                     </div>
-                                                    <div className="relative z-10">
-                                                        <h3 className="text-sm font-black text-slate-400 mb-2">会員数</h3>
-                                                        <p className="text-2xl font-black text-slate-900 tracking-tight">
-                                                            {sqData.summary.memberCount.toLocaleString()}<span className="text-base text-slate-500">名</span>
-                                                        </p>
-                                                        {sqData.summary.memberChange !== 0 && (
-                                                            <div className={`flex items-center gap-1 mt-2 text-xs font-black ${sqData.summary.memberChange >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                                                                {sqData.summary.memberChange >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
-                                                                前月比 {sqData.summary.memberChange >= 0 ? '+' : ''}{sqData.summary.memberChange}名
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                </div>
+                                                )}
 
-                                                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
-                                                    <div className="absolute top-0 right-0 w-20 h-20 bg-rose-500 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
-                                                    <div className="flex items-start justify-between mb-4 relative z-10">
-                                                        <div className="p-3 rounded-2xl bg-rose-500 text-white shadow-lg">
-                                                            <UserMinus size={22} />
-                                                        </div>
+                                                {/* コース別 */}
+                                                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                                                    <div className="p-5 border-b border-slate-100">
+                                                        <h3 className="text-sm font-black text-slate-700 flex items-center gap-2"><CreditCard size={16} /> コース別内訳</h3>
                                                     </div>
-                                                    <div className="relative z-10">
-                                                        <h3 className="text-sm font-black text-slate-400 mb-2">解約率</h3>
-                                                        <p className="text-2xl font-black text-slate-900 tracking-tight">
-                                                            {sqData.summary.churnRate}<span className="text-base text-slate-500">%</span>
-                                                        </p>
-                                                    </div>
-                                                </div>
-
-                                                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
-                                                    <div className="absolute top-0 right-0 w-20 h-20 bg-emerald-500 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
-                                                    <div className="flex items-start justify-between mb-4 relative z-10">
-                                                        <div className="p-3 rounded-2xl bg-emerald-500 text-white shadow-lg">
-                                                            <DollarSign size={22} />
-                                                        </div>
-                                                    </div>
-                                                    <div className="relative z-10">
-                                                        <h3 className="text-sm font-black text-slate-400 mb-2">LTV</h3>
-                                                        <p className="text-2xl font-black text-slate-900 tracking-tight">
-                                                            ¥{(sqData.summary.ltv / 10000).toFixed(1)}<span className="text-base text-slate-500">万</span>
-                                                        </p>
-                                                    </div>
-                                                </div>
-
-                                                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
-                                                    <div className="absolute top-0 right-0 w-20 h-20 bg-amber-500 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
-                                                    <div className="flex items-start justify-between mb-4 relative z-10">
-                                                        <div className="p-3 rounded-2xl bg-amber-500 text-white shadow-lg">
-                                                            <CheckCircle size={22} />
-                                                        </div>
-                                                    </div>
-                                                    <div className="relative z-10">
-                                                        <h3 className="text-sm font-black text-slate-400 mb-2">継続率</h3>
-                                                        <p className="text-2xl font-black text-slate-900 tracking-tight">
-                                                            {sqData.summary.retentionRate}<span className="text-base text-slate-500">%</span>
-                                                        </p>
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-sm">
+                                                            <thead><tr className="bg-slate-50 text-left">
+                                                                <th className="px-4 py-3 font-black text-slate-500 text-xs">コース名</th>
+                                                                <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">会員数</th>
+                                                                <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">MRR</th>
+                                                                <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">構成比</th>
+                                                            </tr></thead>
+                                                            <tbody className="divide-y divide-slate-100">
+                                                                {Object.entries(sqMetrics.byPlan).sort((a,b) => b[1].count - a[1].count).map(([name, p]) => (
+                                                                    <tr key={name} className="hover:bg-slate-50">
+                                                                        <td className="px-4 py-3 font-bold text-slate-700">{name}</td>
+                                                                        <td className="px-4 py-3 font-bold text-right">{p.count}名</td>
+                                                                        <td className="px-4 py-3 font-bold text-right">¥{p.mrr >= 10000 ? `${(p.mrr/10000).toFixed(1)}万` : p.mrr.toLocaleString()}</td>
+                                                                        <td className="px-4 py-3 font-bold text-right">{sqMetrics.memberCount > 0 ? Math.round(p.count / sqMetrics.memberCount * 100) : 0}%</td>
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
                                                     </div>
                                                 </div>
                                             </div>
 
                                             {/* Charts Row */}
                                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                                                {/* 会員数推移チャート */}
-                                                <SquareChart
-                                                    title="会員数推移"
-                                                    icon={<Users size={24} />}
-                                                    data={sqData.monthlyTrends}
-                                                    dataKey="memberCount"
-                                                    label="会員数"
-                                                    suffix="名"
-                                                    color="99, 102, 241"
-                                                    gradientFrom="from-indigo-50"
-                                                    gradientTo="to-blue-50"
-                                                    borderColor="border-indigo-200"
-                                                    iconColor="text-indigo-600"
-                                                />
-
-                                                {/* MRR推移チャート */}
-                                                <SquareChart
-                                                    title="MRR推移"
-                                                    icon={<Wallet size={24} />}
-                                                    data={sqData.monthlyTrends}
-                                                    dataKey="mrr"
-                                                    label="MRR"
-                                                    isCurrency={true}
-                                                    color="59, 130, 246"
-                                                    gradientFrom="from-blue-50"
-                                                    gradientTo="to-cyan-50"
-                                                    borderColor="border-blue-200"
-                                                    iconColor="text-blue-600"
-                                                />
+                                                <SquareChart title="会員数推移" icon={<Users size={24} />} data={sqMetrics.monthlyTrends} dataKey="memberCount" label="会員数" suffix="名" color="99, 102, 241" gradientFrom="from-indigo-50" gradientTo="to-blue-50" borderColor="border-indigo-200" iconColor="text-indigo-600" />
+                                                <SquareChart title="MRR推移" icon={<Wallet size={24} />} data={sqMetrics.monthlyTrends} dataKey="mrr" label="MRR" isCurrency={true} color="59, 130, 246" gradientFrom="from-blue-50" gradientTo="to-cyan-50" borderColor="border-blue-200" iconColor="text-blue-600" />
                                             </div>
 
-                                            {/* 入退会推移チャート */}
-                                            <SquareBarChart
-                                                title="月別 入会・解約数"
-                                                data={sqData.monthlyTrends}
-                                            />
+                                            <SquareBarChart title="月別 入会・解約数" data={sqMetrics.monthlyTrends} />
+
+                                            {/* コホート分析 */}
+                                            {sqMetrics.cohort && sqMetrics.cohort.length > 0 && (
+                                                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                                                    <div className="p-5 border-b border-slate-100">
+                                                        <h3 className="text-sm font-black text-slate-700 flex items-center gap-2"><BarChart3 size={16} /> コホート分析（月別入会者の継続率）</h3>
+                                                    </div>
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-xs">
+                                                            <thead><tr className="bg-slate-50">
+                                                                <th className="px-3 py-2 font-black text-slate-500 text-left sticky left-0 bg-slate-50">入会月</th>
+                                                                <th className="px-3 py-2 font-black text-slate-500 text-right">人数</th>
+                                                                {Array.from({length: 12}, (_, i) => (
+                                                                    <th key={i} className="px-3 py-2 font-black text-slate-500 text-center">{i}ヶ月</th>
+                                                                ))}
+                                                            </tr></thead>
+                                                            <tbody className="divide-y divide-slate-100">
+                                                                {sqMetrics.cohort.slice(-12).map(c => {
+                                                                    const [cy, cm] = c.month.split('-');
+                                                                    return (
+                                                                        <tr key={c.month} className="hover:bg-slate-50">
+                                                                            <td className="px-3 py-2 font-bold text-slate-700 whitespace-nowrap sticky left-0 bg-white">{cy}/{cm}</td>
+                                                                            <td className="px-3 py-2 font-bold text-right text-slate-600">{c.startCount}</td>
+                                                                            {Array.from({length: 12}, (_, i) => {
+                                                                                const val = c.retention[i];
+                                                                                if (val === undefined) return <td key={i} className="px-3 py-2 text-center text-slate-300">-</td>;
+                                                                                const bg = val >= 80 ? 'bg-emerald-100 text-emerald-800' : val >= 60 ? 'bg-emerald-50 text-emerald-700' : val >= 40 ? 'bg-amber-50 text-amber-700' : 'bg-rose-50 text-rose-700';
+                                                                                return <td key={i} className={`px-3 py-2 text-center font-bold ${bg}`}>{val}%</td>;
+                                                                            })}
+                                                                        </tr>
+                                                                    );
+                                                                })}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                </div>
+                                            )}
 
                                             {/* メタ情報 */}
-                                            <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-6">
-                                                <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-4 flex items-center gap-2">
-                                                    <Info size={16} /> 接続情報
-                                                </h3>
+                                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
+                                                <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-3 flex items-center gap-2"><Info size={14} /> 接続情報</h3>
                                                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
-                                                    <div>
-                                                        <span className="text-slate-400 font-bold block">Location ID</span>
-                                                        <span className="text-slate-700 font-black font-mono text-xs">{sqData.meta?.locationId || '-'}</span>
-                                                    </div>
-                                                    <div>
-                                                        <span className="text-slate-400 font-bold block">総サブスク数</span>
-                                                        <span className="text-slate-700 font-black">{sqData.meta?.totalSubscriptions || 0}</span>
-                                                    </div>
-                                                    <div>
-                                                        <span className="text-slate-400 font-bold block">アクティブ</span>
-                                                        <span className="text-slate-700 font-black">{sqData.meta?.activeSubscriptions || 0}</span>
-                                                    </div>
-                                                    <div>
-                                                        <span className="text-slate-400 font-bold block">通貨</span>
-                                                        <span className="text-slate-700 font-black">{sqData.meta?.currency || 'JPY'}</span>
-                                                    </div>
+                                                    <div><span className="text-slate-400 font-bold block">店舗数</span><span className="text-slate-700 font-black">{sqData.stores?.length || 0}</span></div>
+                                                    <div><span className="text-slate-400 font-bold block">総サブスク数</span><span className="text-slate-700 font-black">{sqData.meta?.totalSubscriptions || 0}</span></div>
+                                                    <div><span className="text-slate-400 font-bold block">アクティブ</span><span className="text-slate-700 font-black">{sqMetrics.memberCount}</span></div>
+                                                    <div><span className="text-slate-400 font-bold block">取得日時</span><span className="text-slate-700 font-black text-xs">{sqData.meta?.generatedAt ? new Date(sqData.meta.generatedAt).toLocaleString('ja-JP') : '-'}</span></div>
                                                 </div>
                                             </div>
                                         </>

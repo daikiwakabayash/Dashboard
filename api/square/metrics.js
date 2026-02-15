@@ -123,49 +123,50 @@ async function fetchPlanDetails(client, planVariationIds) {
   return plans;
 }
 
-// 総売上高取得（Orders API - Square管理画面の「総売上高」と一致）
-async function fetchSalesOrders(client, locationIds) {
+// 売上データ取得（Payments API - Square管理画面の「総売上高」と一致）
+async function fetchSalesPayments(client, locationIds) {
   const payments = [];
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
   const beginStr = beginTime.toISOString();
 
-  let cursor = undefined;
-  do {
-    try {
-      const body = {
-        locationIds,
-        query: {
-          filter: {
-            dateTimeFilter: { closedAt: { startAt: beginStr } },
-            stateFilter: { states: ['COMPLETED'] },
-          },
-          sort: { sortField: 'CLOSED_AT', sortOrder: 'DESC' },
-        },
-      };
-      if (cursor) body.cursor = cursor;
-      const { result } = await client.ordersApi.searchOrders(body);
-      if (result.orders) {
-        for (const o of result.orders) {
-          payments.push({
-            amount: toNumber(o.totalMoney && o.totalMoney.amount),
-            createdAt: o.closedAt || o.createdAt,
-            locationId: o.locationId,
-          });
+  for (const locId of locationIds) {
+    let cursor = undefined;
+    do {
+      try {
+        const { result } = await client.paymentsApi.listPayments(
+          beginStr,     // beginTime
+          undefined,    // endTime
+          'DESC',       // sortOrder
+          cursor,       // cursor
+          locId,        // locationId
+        );
+        if (result.payments) {
+          for (const p of result.payments) {
+            if (p.status === 'COMPLETED') {
+              payments.push({
+                amount: toNumber(p.totalMoney && p.totalMoney.amount),
+                createdAt: p.createdAt,
+                locationId: p.locationId || locId,
+              });
+            }
+          }
         }
+        cursor = result.cursor;
+      } catch (err) {
+        console.error(`  Payments API error (${locId}):`, err.message);
+        // 最初のロケーションで失敗 → 権限エラーの可能性大、fallback必要
+        if (payments.length === 0) return null;
+        cursor = undefined;
       }
-      cursor = result.cursor;
-    } catch (err) {
-      console.error('  Orders API error:', err.message);
-      cursor = undefined;
-    }
-  } while (cursor);
-  console.log(`  Orders API: ${payments.length}件取得`);
+    } while (cursor);
+  }
+  console.log(`  Payments API: ${payments.length}件取得`);
   return payments;
 }
 
-// 返品データ取得（Refunds API - Square管理画面の「返品」と一致）
-async function fetchRefunds(client, locationIds) {
+// 返品データ取得（Refunds API）
+async function fetchRefundsFromApi(client, locationIds) {
   const refunds = [];
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
@@ -181,26 +182,82 @@ async function fetchRefunds(client, locationIds) {
           'DESC',       // sortOrder
           cursor,       // cursor
           locId,        // locationId
-          'COMPLETED',  // status
         );
         if (result.refunds) {
           for (const r of result.refunds) {
-            refunds.push({
-              amount: toNumber(r.amountMoney && r.amountMoney.amount),
-              createdAt: r.createdAt,
-              locationId: r.locationId || locId,
-            });
+            if (r.status === 'COMPLETED') {
+              refunds.push({
+                amount: toNumber(r.amountMoney && r.amountMoney.amount),
+                createdAt: r.createdAt,
+                locationId: r.locationId || locId,
+              });
+            }
           }
         }
         cursor = result.cursor;
       } catch (err) {
-        console.error(`  Refunds API error for location ${locId}:`, err.message);
+        console.error(`  Refunds API error (${locId}):`, err.message);
+        if (refunds.length === 0) return null;
         cursor = undefined;
       }
     } while (cursor);
   }
   console.log(`  Refunds API: ${refunds.length}件取得`);
   return refunds;
+}
+
+// Orders APIフォールバック（売上＋返品を同時取得、createdAtフィルタ使用）
+async function fetchSalesFromOrders(client, locationIds) {
+  const payments = [];
+  const refunds = [];
+  const beginTime = new Date();
+  beginTime.setMonth(beginTime.getMonth() - 13);
+  const beginStr = beginTime.toISOString();
+
+  let cursor = undefined;
+  do {
+    try {
+      const body = {
+        locationIds,
+        query: {
+          filter: {
+            dateTimeFilter: { createdAt: { startAt: beginStr } },
+            stateFilter: { states: ['COMPLETED'] },
+          },
+          sort: { sortField: 'CREATED_AT', sortOrder: 'DESC' },
+        },
+      };
+      if (cursor) body.cursor = cursor;
+      const { result } = await client.ordersApi.searchOrders(body);
+      if (result.orders) {
+        for (const o of result.orders) {
+          payments.push({
+            amount: toNumber(o.totalMoney && o.totalMoney.amount),
+            createdAt: o.closedAt || o.createdAt,
+            locationId: o.locationId,
+          });
+          // 返品データをオーダーから抽出
+          if (o.refunds) {
+            for (const r of o.refunds) {
+              if (r.status === 'COMPLETED') {
+                refunds.push({
+                  amount: toNumber(r.amountMoney && r.amountMoney.amount),
+                  createdAt: r.createdAt || o.closedAt || o.createdAt,
+                  locationId: o.locationId,
+                });
+              }
+            }
+          }
+        }
+      }
+      cursor = result.cursor;
+    } catch (err) {
+      console.error('  Orders API error:', err.message);
+      cursor = undefined;
+    }
+  } while (cursor);
+  console.log(`  Orders API fallback: ${payments.length}件売上, ${refunds.length}件返品`);
+  return { payments, refunds };
 }
 
 // 全顧客名を取得
@@ -276,13 +333,26 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     }
     const locationIds = stores.map(s => s.id);
 
-    // サブスク＋インボイス＋決済＋返品を並列取得
-    const [rawSubs, invoices, payments, refunds] = await Promise.all([
+    // サブスク＋インボイス＋売上＋返品を並列取得（Payments API優先）
+    const [rawSubs, invoices, paymentsApiData, refundsApiData] = await Promise.all([
       fetchAllSubscriptions(client, locationIds),
       fetchInvoices(client, locationIds),
-      fetchSalesOrders(client, locationIds),
-      fetchRefunds(client, locationIds),
+      fetchSalesPayments(client, locationIds),
+      fetchRefundsFromApi(client, locationIds),
     ]);
+
+    let payments = paymentsApiData;
+    let refunds = refundsApiData;
+
+    // Payments/Refunds APIが使えない場合、Orders APIフォールバック
+    if (payments === null || refunds === null) {
+      console.log(`  → Orders APIフォールバック (payments=${payments === null ? '必要' : 'OK'}, refunds=${refunds === null ? '必要' : 'OK'})`);
+      const ordersData = await fetchSalesFromOrders(client, locationIds);
+      if (payments === null) payments = ordersData.payments;
+      if (refunds === null) refunds = ordersData.refunds;
+    }
+    payments = payments || [];
+    refunds = refunds || [];
 
     // 顧客名＋プラン詳細を並列取得
     const planVariationIds = rawSubs.map(s => s.planVariationId).filter(Boolean);

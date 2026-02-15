@@ -423,7 +423,7 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     console.error(`❌ Account "${accountName}" error:`, detail);
     console.error(`   Token prefix: ${tokenConfig.token ? tokenConfig.token.slice(0, 12) + '...' : 'EMPTY'}`);
     console.error(`   Environment: ${tokenConfig.env}`);
-    return null;
+    return { _failed: true, _errorDetail: detail, _accountName: accountName };
   }
 }
 
@@ -479,9 +479,13 @@ export default async function handler(req, res) {
       for (let j = 0; j < results.length; j++) {
         const r = results[j];
         const cfg = batch[j];
-        if (!r) {
-          failedAccounts.push(cfg.name || `アカウント${i + j + 1}`);
-          console.error(`❌ アカウント「${cfg.name}」のデータ取得に失敗しました`);
+        if (!r || r._failed) {
+          const errorDetail = r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です';
+          failedAccounts.push({
+            name: cfg.name || `アカウント${i + j + 1}`,
+            error: errorDetail,
+          });
+          console.error(`❌ アカウント「${cfg.name}」のデータ取得に失敗しました: ${errorDetail}`);
           continue;
         }
         merged.stores.push(...r.stores);

@@ -584,29 +584,10 @@
             };
 
             // Square データ取得
-            const fetchSquareData = async (forceRefresh = false, demo = false) => {
-                console.log('📡 Fetching Square data...', demo ? '(DEMO)' : '');
+            const fetchSquareData = async (forceRefresh = false) => {
+                console.log('📡 Fetching Square data...');
                 try {
                     setSqError(null);
-
-                    // デモモード: APIに?demo=trueを付与
-                    if (demo) {
-                        setSqLoading(true);
-                        const url = SQUARE_API_URL + '?demo=true';
-                        const response = await fetch(url);
-                        const contentType = response.headers.get('content-type') || '';
-                        if (!contentType.includes('application/json')) {
-                            throw new Error(`API がJSONを返しませんでした (${contentType.split(';')[0]})。Vercelサーバーレス関数が正しくデプロイされているか確認してください。`);
-                        }
-                        const result = await response.json();
-                        if (!response.ok || !result.success) {
-                            throw new Error(result.error || `Square API HTTP ${response.status}`);
-                        }
-                        setSqData(result);
-                        setSqLastFetch(new Date());
-                        setSqLoading(false);
-                        return;
-                    }
 
                     // キャッシュ確認
                     if (!forceRefresh) {
@@ -628,7 +609,7 @@
                     const response = await fetch(SQUARE_API_URL);
                     const contentType = response.headers.get('content-type') || '';
                     if (!contentType.includes('application/json')) {
-                        throw new Error(`API がJSONを返しませんでした (${contentType.split(';')[0] || 'unknown'})。Vercelサーバーレス関数が正しくデプロイされているか確認してください。`);
+                        throw new Error(`APIがJSONを返しませんでした (${contentType.split(';')[0] || 'unknown'})。Vercelの「Deployments」→最新デプロイの「Functions」タブでエラーログを確認してください。`);
                     }
                     const result = await response.json();
 
@@ -5438,22 +5419,12 @@
                                             </div>
                                             <div className="flex items-center gap-3">
                                                 <button
-                                                    onClick={() => fetchSquareData(false, true)}
-                                                    className="p-3 bg-amber-500 text-white rounded-xl hover:bg-amber-600 transition-all shadow-lg flex items-center gap-2 font-black text-sm uppercase tracking-tighter disabled:opacity-50"
-                                                    disabled={sqLoading}
-                                                >
-                                                    <Activity size={18} /> Demo
-                                                </button>
-                                                <button
                                                     onClick={() => fetchSquareData(true)}
                                                     className="p-3 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-all shadow-lg flex items-center gap-2 font-black text-sm uppercase tracking-tighter disabled:opacity-50"
                                                     disabled={sqLoading}
                                                 >
                                                     <RefreshCw size={18} className={sqLoading ? 'animate-spin' : ''} /> Sync
                                                 </button>
-                                                {sqData && sqData.demo && (
-                                                    <span className="px-3 py-1 bg-amber-100 text-amber-700 rounded-full text-xs font-black">DEMO</span>
-                                                )}
                                                 {sqLastFetch && (
                                                     <span className="text-xs text-slate-400 font-bold">
                                                         {sqLastFetch.toLocaleTimeString('ja-JP')} 更新
@@ -5481,7 +5452,6 @@
                                             <p className="text-red-600 font-bold mb-4">{sqError}</p>
                                             <div className="flex items-center justify-center gap-3">
                                                 <button onClick={() => fetchSquareData(true)} className="px-6 py-3 bg-red-600 text-white rounded-xl hover:bg-red-700 transition-colors font-bold text-sm">再試行</button>
-                                                <button onClick={() => fetchSquareData(false, true)} className="px-6 py-3 bg-amber-500 text-white rounded-xl hover:bg-amber-600 transition-colors font-bold text-sm">デモデータで確認</button>
                                             </div>
                                         </div>
                                     )}
@@ -5494,7 +5464,6 @@
                                             <p className="text-blue-600 font-bold mb-4">Square APIからサブスクリプションデータを取得します</p>
                                             <div className="flex items-center justify-center gap-3">
                                                 <button onClick={() => fetchSquareData()} className="px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors font-bold text-sm">データを取得</button>
-                                                <button onClick={() => fetchSquareData(false, true)} className="px-6 py-3 bg-amber-500 text-white rounded-xl hover:bg-amber-600 transition-colors font-bold text-sm">デモデータで確認</button>
                                             </div>
                                         </div>
                                     )}

@@ -97,37 +97,45 @@ async function fetchPlanDetails(client, planVariationIds) {
   return plans;
 }
 
-// 全決済データ取得（売上サマリー用）
+// 全決済データ取得（売上サマリー用 - Orders API）
 async function fetchPayments(client, locationIds) {
   const payments = [];
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
   const beginStr = beginTime.toISOString();
 
-  for (const locId of locationIds) {
-    let cursor = undefined;
-    do {
-      try {
-        const params = { beginTime: beginStr, locationId: locId };
-        if (cursor) params.cursor = cursor;
-        const { result } = await client.paymentsApi.listPayments(params);
-        if (result.payments) {
-          for (const p of result.payments) {
-            if (p.status !== 'COMPLETED') continue;
-            payments.push({
-              amount: toNumber(p.totalMoney && p.totalMoney.amount),
-              createdAt: p.createdAt,
-              locationId: p.locationId,
-            });
-          }
+  let cursor = undefined;
+  do {
+    try {
+      const body = {
+        locationIds,
+        query: {
+          filter: {
+            dateTimeFilter: {
+              closedAt: { startAt: beginStr },
+            },
+            stateFilter: { states: ['COMPLETED'] },
+          },
+          sort: { sortField: 'CLOSED_AT', sortOrder: 'DESC' },
+        },
+      };
+      if (cursor) body.cursor = cursor;
+      const { result } = await client.ordersApi.searchOrders(body);
+      if (result.orders) {
+        for (const o of result.orders) {
+          payments.push({
+            amount: toNumber(o.totalMoney && o.totalMoney.amount),
+            createdAt: o.closedAt || o.createdAt,
+            locationId: o.locationId,
+          });
         }
-        cursor = result.cursor;
-      } catch (err) {
-        console.error('fetchPayments error (loc=' + locId + '):', err.message);
-        cursor = undefined;
       }
-    } while (cursor);
-  }
+      cursor = result.cursor;
+    } catch (err) {
+      console.error('fetchPayments (orders) error:', err.message);
+      cursor = undefined;
+    }
+  } while (cursor);
   return payments;
 }
 

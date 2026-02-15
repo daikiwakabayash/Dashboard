@@ -871,7 +871,17 @@
             // Square 全指標計算
             const sqMetrics = useMemo(() => {
                 if (!sqData || !sqData.subscriptions || !sqMonth) return null;
-                const subs = sqData.subscriptions;
+                const cust = sqData.customers || {};
+                const plansMap = sqData.plans || {};
+
+                // テスト・0円プランを除外
+                const isRealSub = (s) => {
+                    if (s.monthlyPrice <= 0) return false;
+                    const pName = plansMap[s.planVariationId] ? plansMap[s.planVariationId].name : '';
+                    if (/テスト/i.test(pName)) return false;
+                    return true;
+                };
+                const subs = sqData.subscriptions.filter(isRealSub);
                 const filtered = sqStore === 'all' ? subs : subs.filter(s => s.locationId === sqStore);
                 const [refY, refM] = sqMonth.split('-').map(Number);
                 const refEnd = new Date(refY, refM, 0);
@@ -879,6 +889,7 @@
                 const prevYM = `${prevEnd.getFullYear()}-${String(prevEnd.getMonth() + 1).padStart(2, '0')}`;
 
                 const toYM = d => { if (!d) return null; const dt = new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`; };
+                const getName = (s) => cust[s.customerId] ? cust[s.customerId].name : s.customerId;
                 const isActiveAt = (s, date) => {
                     const start = s.startDate ? new Date(s.startDate) : null;
                     if (!start || start > date) return false;
@@ -890,13 +901,15 @@
                 // 基準月・前月のアクティブ
                 const activeRef = filtered.filter(s => isActiveAt(s, refEnd));
                 const activePrev = filtered.filter(s => isActiveAt(s, prevEnd));
-                const memberCount = new Set(activeRef.map(s => s.customerId)).size;
-                const prevMemberCount = new Set(activePrev.map(s => s.customerId)).size;
+                // 同一名前で重複排除した会員数
+                const memberCount = new Set(activeRef.map(s => getName(s))).size;
+                const prevMemberCount = new Set(activePrev.map(s => getName(s))).size;
 
                 // MRR = 選択月のサブスク決済の合計（PAID invoices with subscriptionId）
                 const allInvoices = sqData.invoices || [];
+                const realSubIds = new Set(subs.map(s => s.id));
                 const subInvsMonth = allInvoices.filter(inv =>
-                    inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth
+                    inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth && realSubIds.has(inv.subscriptionId)
                 );
                 const storeSubIds = sqStore === 'all' ? null : new Set(filtered.map(s => s.id));
                 const filteredSubInvs = storeSubIds
@@ -905,7 +918,7 @@
                 const mrr = filteredSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
 
                 const prevSubInvs = allInvoices.filter(inv =>
-                    inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === prevYM
+                    inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === prevYM && realSubIds.has(inv.subscriptionId)
                 );
                 const filteredPrevSubInvs = storeSubIds
                     ? prevSubInvs.filter(inv => storeSubIds.has(inv.subscriptionId))
@@ -938,7 +951,7 @@
                     const ss = subs.filter(s => s.locationId === store.id);
                     const sa = ss.filter(s => isActiveAt(s, refEnd));
                     const sp = ss.filter(s => isActiveAt(s, prevEnd));
-                    const smc = new Set(sa.map(s => s.customerId)).size;
+                    const smc = new Set(sa.map(s => getName(s))).size;
                     const storeSubIdSet = new Set(ss.map(s => s.id));
                     const storeSubInvs = subInvsMonth.filter(inv => storeSubIdSet.has(inv.subscriptionId));
                     const smrr = storeSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
@@ -953,15 +966,24 @@
                     };
                 }
 
-                // コース別（アクティブ会員のみ）
+                // コース別（アクティブ会員のみ・名前重複排除）
                 const byPlan = {};
+                const byPlanSeen = {};
                 for (const s of activeRef) {
-                    const pn = (sqData.plans && sqData.plans[s.planVariationId]) ? sqData.plans[s.planVariationId].name : '不明';
-                    if (!byPlan[pn]) byPlan[pn] = { count: 0, mrr: 0 };
-                    byPlan[pn].count++;
-                    // コース別MRRもインボイスベースで計算
+                    const name = getName(s);
+                    const pn = plansMap[s.planVariationId] ? plansMap[s.planVariationId].name : '不明';
+                    const dedupKey = `${name}|${pn}`;
                     const subInvForThis = filteredSubInvs.filter(inv => inv.subscriptionId === s.id);
-                    byPlan[pn].mrr += subInvForThis.reduce((sum, inv) => sum + inv.amount, 0);
+                    const subMrr = subInvForThis.reduce((sum, inv) => sum + inv.amount, 0);
+                    if (!byPlan[pn]) byPlan[pn] = { count: 0, mrr: 0 };
+                    if (byPlanSeen[dedupKey]) {
+                        // 同一人物・同一プラン → 人数は加算しない、MRRのみ加算
+                        byPlan[pn].mrr += subMrr;
+                    } else {
+                        byPlanSeen[dedupKey] = true;
+                        byPlan[pn].count++;
+                        byPlan[pn].mrr += subMrr;
+                    }
                 }
 
                 // 初月解約率・3ヶ月以内解約率
@@ -1010,19 +1032,22 @@
                     const ym = `${td.getFullYear()}-${String(td.getMonth()+1).padStart(2,'0')}`;
                     const eom = new Date(td.getFullYear(), td.getMonth()+1, 0);
                     const ma = filtered.filter(s => isActiveAt(s, eom));
-                    // MRR = その月のPAIDサブスクインボイス合計
+                    // MRR = その月のPAIDサブスクインボイス合計（テスト除外済み）
                     const ymSubInvs = allInvoices.filter(inv =>
-                        inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === ym
+                        inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === ym && realSubIds.has(inv.subscriptionId)
                     );
                     const ymFilteredSubInvs = storeSubIds
                         ? ymSubInvs.filter(inv => storeSubIds.has(inv.subscriptionId))
                         : ymSubInvs;
+                    // 名前で重複排除した入会・解約人数
+                    const newNames = new Set(filtered.filter(s => toYM(s.startDate) === ym).map(s => getName(s)));
+                    const canceledNames = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === ym).map(s => getName(s)));
                     monthlyTrends.push({
                         month: ym,
-                        memberCount: new Set(ma.map(s => s.customerId)).size,
+                        memberCount: new Set(ma.map(s => getName(s))).size,
                         mrr: ymFilteredSubInvs.reduce((sum, inv) => sum + inv.amount, 0),
-                        newEnrolled: filtered.filter(s => toYM(s.startDate) === ym).length,
-                        canceled: filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === ym).length,
+                        newEnrolled: newNames.size,
+                        canceled: canceledNames.size,
                     });
                 }
 
@@ -1075,9 +1100,16 @@
                 const cust = sqData.customers || {};
                 const plans = sqData.plans || {};
                 const [refY, refM] = sqMonth.split('-').map(Number);
-                const monthStart = new Date(refY, refM - 1, 1);
                 const monthEnd = new Date(refY, refM, 0, 23, 59, 59);
                 const toYM = d => { if (!d) return null; const dt = new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`; };
+
+                // テスト・0円プランを除外
+                const isRealSub = (s) => {
+                    if (s.monthlyPrice <= 0) return false;
+                    const pName = plans[s.planVariationId] ? plans[s.planVariationId].name : '';
+                    if (/テスト/i.test(pName)) return false;
+                    return true;
+                };
 
                 // インボイスをサブスクリプション単位でグループ化
                 const invBySub = {};
@@ -1086,7 +1118,8 @@
                     if (!invBySub[inv.subscriptionId]) invBySub[inv.subscriptionId] = [];
                     invBySub[inv.subscriptionId].push(inv);
                 }
-                const storeSubs = sqStore === 'all' ? sqData.subscriptions : sqData.subscriptions.filter(s => s.locationId === sqStore);
+                const allSubs = sqData.subscriptions.filter(isRealSub);
+                const storeSubs = sqStore === 'all' ? allSubs : allSubs.filter(s => s.locationId === sqStore);
 
                 const activeList = [];
                 const canceledList = [];
@@ -1139,11 +1172,11 @@
                     }
                 }
 
-                // 重複排除: 同一名前+同一プラン+同一開始日のサブスクをマージ
+                // 重複排除: 同一名前+同一プランのサブスクをマージ（startDate不問）
                 const dedup = (list) => {
                     const map = {};
                     for (const entry of list) {
-                        const key = `${entry.name}|${entry.plan}|${entry.startDate}`;
+                        const key = `${entry.name}|${entry.plan}`;
                         if (map[key]) {
                             map[key].paidCount += entry.paidCount;
                             map[key].paidTotal += entry.paidTotal;
@@ -1183,8 +1216,16 @@
                 const { month, type } = sqDrilldown;
                 const cust = sqData.customers || {};
                 const plans = sqData.plans || {};
-                const storeSubs = sqStore === 'all' ? sqData.subscriptions : sqData.subscriptions.filter(s => s.locationId === sqStore);
                 const toYM = d => { if (!d) return null; const dt = new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`; };
+                // テスト・0円プランを除外
+                const isRealSub = (s) => {
+                    if (s.monthlyPrice <= 0) return false;
+                    const pName = plans[s.planVariationId] ? plans[s.planVariationId].name : '';
+                    if (/テスト/i.test(pName)) return false;
+                    return true;
+                };
+                const allSubs = sqData.subscriptions.filter(isRealSub);
+                const storeSubs = sqStore === 'all' ? allSubs : allSubs.filter(s => s.locationId === sqStore);
                 const invBySub = {};
                 for (const inv of (sqData.invoices || [])) {
                     if (!inv.subscriptionId) continue;
@@ -1210,10 +1251,10 @@
                         monthlyPrice: sub.monthlyPrice,
                     };
                 });
-                // 重複排除
+                // 重複排除（名前+プランでマージ）
                 const map = {};
                 for (const entry of list) {
-                    const key = `${entry.name}|${entry.plan}|${entry.startDate}`;
+                    const key = `${entry.name}|${entry.plan}`;
                     if (map[key]) {
                         map[key].paidCount += entry.paidCount;
                         map[key].paidTotal += entry.paidTotal;

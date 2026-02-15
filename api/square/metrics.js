@@ -97,6 +97,40 @@ async function fetchPlanDetails(client, planVariationIds) {
   return plans;
 }
 
+// 全決済データ取得（売上サマリー用）
+async function fetchPayments(client, locationIds) {
+  const payments = [];
+  const beginTime = new Date();
+  beginTime.setMonth(beginTime.getMonth() - 13);
+  const beginStr = beginTime.toISOString();
+
+  for (const locId of locationIds) {
+    let cursor = undefined;
+    do {
+      try {
+        const params = { beginTime: beginStr, locationId: locId };
+        if (cursor) params.cursor = cursor;
+        const { result } = await client.paymentsApi.listPayments(params);
+        if (result.payments) {
+          for (const p of result.payments) {
+            if (p.status !== 'COMPLETED') continue;
+            payments.push({
+              amount: toNumber(p.totalMoney && p.totalMoney.amount),
+              createdAt: p.createdAt,
+              locationId: p.locationId,
+            });
+          }
+        }
+        cursor = result.cursor;
+      } catch (err) {
+        console.error('fetchPayments error (loc=' + locId + '):', err.message);
+        cursor = undefined;
+      }
+    } while (cursor);
+  }
+  return payments;
+}
+
 // 全顧客名を取得
 async function fetchAllCustomers(client) {
   const customers = {};
@@ -188,10 +222,11 @@ export default async function handler(req, res) {
     }
     const locationIds = stores.map(s => s.id);
 
-    // 2. サブスク＋インボイスを並列取得
-    const [rawSubs, invoices] = await Promise.all([
+    // 2. サブスク＋インボイス＋決済を並列取得
+    const [rawSubs, invoices, payments] = await Promise.all([
       fetchAllSubscriptions(client, locationIds),
       fetchInvoices(client, locationIds),
+      fetchPayments(client, locationIds),
     ]);
 
     // 3. 顧客名＋プラン詳細を並列取得
@@ -230,9 +265,11 @@ export default async function handler(req, res) {
       subscriptions,
       customers,
       invoices,
+      payments,
       meta: {
         totalSubscriptions: subscriptions.length,
         totalInvoices: invoices.length,
+        totalPayments: payments.length,
         generatedAt: new Date().toISOString(),
       },
     });

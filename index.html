@@ -1056,13 +1056,32 @@
                 }
             }, [sqData]);
 
-            // 店舗選択とSquare店舗フィルタの連動
+            // 店舗選択とSquare店舗フィルタの連動（柔軟な名前マッチング）
             useEffect(() => {
                 if (!sqData || !sqData.stores || sqData.stores.length <= 1) return;
                 // 選択店舗が1つだけ、かつSquare店舗名と一致する場合 → sqStoreを自動切替
                 if (selectedBranches.length === 1) {
                     const selected = selectedBranches[0];
-                    const matchStore = sqData.stores.find(s => s.name === selected);
+                    // 1. 完全一致
+                    let matchStore = sqData.stores.find(s => s.name === selected);
+                    if (!matchStore) {
+                        // 2. 「院」を除いた基本名で一致（例: 「千葉駅院」→「千葉駅」）
+                        const selectedBase = selected.replace(/院$/, '');
+                        matchStore = sqData.stores.find(s => {
+                            const storeBase = s.name.replace(/院$/, '').replace(/\s*\(.*\)$/, '');
+                            return storeBase === selectedBase;
+                        });
+                    }
+                    if (!matchStore) {
+                        // 3. 部分一致（Square店舗名にブランチ基本名が含まれる or 逆）
+                        const selectedBase = selected.replace(/院$/, '');
+                        if (selectedBase.length >= 2) {
+                            matchStore = sqData.stores.find(s => {
+                                const storeName = s.name.replace(/\s*\(.*\)$/, '');
+                                return storeName.includes(selectedBase) || selectedBase.includes(storeName.replace(/院$/, ''));
+                            });
+                        }
+                    }
                     if (matchStore) {
                         setSqStore(matchStore.id);
                         return;
@@ -1126,14 +1145,14 @@
 
                 let memberCount, prevMemberCount;
                 if (useInvoiceFallback) {
-                    // フォールバック: インボイスのユニーク顧客名で会員数を推定
+                    // フォールバック: インボイスのユニーク顧客IDで会員数を推定
                     const invRef = allInvoices.filter(inv => inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth && inv.locationId === sqStore);
                     const invPrev = allInvoices.filter(inv => inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === prevYM && inv.locationId === sqStore);
-                    memberCount = new Set(invRef.map(inv => getInvName(inv))).size;
-                    prevMemberCount = new Set(invPrev.map(inv => getInvName(inv))).size;
+                    memberCount = new Set(invRef.map(inv => inv.customerId || inv.subscriptionId)).size;
+                    prevMemberCount = new Set(invPrev.map(inv => inv.customerId || inv.subscriptionId)).size;
                 } else {
-                    memberCount = new Set(activeRef.map(s => getName(s))).size;
-                    prevMemberCount = new Set(activePrev.map(s => getName(s))).size;
+                    memberCount = new Set(activeRef.map(s => s.customerId)).size;
+                    prevMemberCount = new Set(activePrev.map(s => s.customerId)).size;
                 }
 
                 // MRR = 選択月のサブスク決済の合計（PAID invoices with subscriptionId）
@@ -1205,7 +1224,7 @@
                         // 通常パス: サブスクデータあり
                         const sa = ss.filter(s => isActiveAt(s, refEnd));
                         const sp = ss.filter(s => isActiveAt(s, prevEnd));
-                        smc = new Set(sa.map(s => getName(s))).size;
+                        smc = new Set(sa.map(s => s.customerId)).size;
                         const storeSubIdSet = new Set(ss.map(s => s.id));
                         // 店舗ごとのMRR: realSubIdsで直接フィルタ（useInvoiceFallbackの影響を受けない）
                         const storeSubInvs = allInvoices.filter(inv =>
@@ -1221,7 +1240,7 @@
                         // フォールバック: インボイスのlocationIdで直接計算
                         const storeInvsRef = allInvoices.filter(inv => inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth && inv.locationId === store.id);
                         const storeInvsPrev = allInvoices.filter(inv => inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === prevYM && inv.locationId === store.id);
-                        smc = new Set(storeInvsRef.map(inv => getInvName(inv))).size;
+                        smc = new Set(storeInvsRef.map(inv => inv.customerId || inv.subscriptionId)).size;
                         smrr = storeInvsRef.reduce((sum, inv) => sum + inv.amount, 0);
                         sn = []; sc = [];
                         sChurn = 0;
@@ -1235,13 +1254,13 @@
                     };
                 }
 
-                // コース別（アクティブ会員のみ・名前重複排除）
+                // コース別（アクティブ会員のみ・顧客ID重複排除）
                 const byPlan = {};
                 const byPlanSeen = {};
                 for (const s of activeRef) {
                     const name = getName(s);
                     const pn = plansMap[s.planVariationId] ? plansMap[s.planVariationId].name : '不明';
-                    const dedupKey = `${name}|${s.monthlyPrice}`;
+                    const dedupKey = `${s.customerId}|${s.monthlyPrice}`;
                     const subInvForThis = filteredSubInvs.filter(inv => inv.subscriptionId === s.id);
                     const subMrr = subInvForThis.reduce((sum, inv) => sum + inv.amount, 0);
                     if (!byPlan[pn]) byPlan[pn] = { count: 0, mrr: 0 };
@@ -1310,15 +1329,15 @@
                         : ymSubInvs;
                     let ymMemberCount, ymNewCount, ymCanceledCount;
                     if (useInvoiceFallback) {
-                        // フォールバック: インボイスのユニーク顧客名
-                        ymMemberCount = new Set(ymSubInvs.map(inv => getInvName(inv))).size;
+                        // フォールバック: インボイスのユニーク顧客ID
+                        ymMemberCount = new Set(ymSubInvs.map(inv => inv.customerId || inv.subscriptionId)).size;
                         ymNewCount = 0;
                         ymCanceledCount = 0;
                     } else {
                         const ma = filtered.filter(s => isActiveAt(s, eom));
-                        ymMemberCount = new Set(ma.map(s => getName(s))).size;
-                        ymNewCount = new Set(filtered.filter(s => toYM(s.startDate) === ym).map(s => getName(s))).size;
-                        ymCanceledCount = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === ym).map(s => getName(s))).size;
+                        ymMemberCount = new Set(ma.map(s => s.customerId)).size;
+                        ymNewCount = new Set(filtered.filter(s => toYM(s.startDate) === ym).map(s => s.customerId)).size;
+                        ymCanceledCount = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === ym).map(s => s.customerId)).size;
                     }
                     monthlyTrends.push({
                         month: ym,
@@ -1551,12 +1570,12 @@
                     }
                 }
 
-                // 重複排除: 同一名前+同一月額のサブスクをマージ（プラン名の微妙な違いに対応）
+                // 重複排除: 同一顧客ID+同一月額のサブスクをマージ（プラン名の微妙な違いに対応）
                 // 複数サブスクの重複月は1回分としてカウント（膨張を防止）
                 const dedup = (list) => {
                     const map = {};
                     for (const entry of list) {
-                        const key = `${entry.name}|${entry.monthlyPrice}`;
+                        const key = `${entry.customerId}|${entry.monthlyPrice}`;
                         if (map[key]) {
                             // 月別決済額をマージ（同月は最初の値を優先＝重複課金を排除）
                             const merged = { ...(map[key].paidByMonth || {}) };

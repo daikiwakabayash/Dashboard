@@ -327,13 +327,27 @@ function extractApiError(err) {
   return err.message || 'unknown error';
 }
 
-// ── ロケーション並列版: インボイス取得 ──
-async function fetchInvoices(client, locationIds, diag) {
+// ── インボイス取得（タイムアウト時は部分結果を返す・古いインボイスは打ち切り） ──
+async function fetchInvoices(client, locationIds, diag, timeoutMs = 55000) {
   const errors = [];
-  const allInvoices = await parallelWithLimit(locationIds, 3, async (locId) => {
-    const invoices = [];
+  const allInvoices = [];
+  const startTime = Date.now();
+  let timedOut = false;
+  // 13ヶ月前より古いインボイスは不要（ソートDESCなので打ち切り可能）
+  const cutoffDate = new Date();
+  cutoffDate.setMonth(cutoffDate.getMonth() - 13);
+  const cutoffStr = cutoffDate.toISOString();
+
+  await parallelWithLimit(locationIds, 3, async (locId) => {
     let cursor = undefined;
+    let locCount = 0;
+    let reachedCutoff = false;
     do {
+      if (Date.now() - startTime > timeoutMs) {
+        timedOut = true;
+        if (locCount > 0) errors.push(`${locId}: ページネーション途中 (${locCount}件取得済)`);
+        break;
+      }
       try {
         const { result } = await client.invoicesApi.searchInvoices({
           query: {
@@ -344,8 +358,13 @@ async function fetchInvoices(client, locationIds, diag) {
         });
         if (result.invoices) {
           for (const inv of result.invoices) {
+            // 13ヶ月以上前のインボイスはスキップ（DESCソートなので以降も古い）
+            if (inv.createdAt && inv.createdAt < cutoffStr) {
+              reachedCutoff = true;
+              break;
+            }
             const pr = inv.paymentRequests && inv.paymentRequests[0];
-            invoices.push({
+            allInvoices.push({
               id: inv.id,
               customerId: inv.primaryRecipient ? inv.primaryRecipient.customerId : null,
               subscriptionId: inv.subscriptionId || null,
@@ -355,9 +374,14 @@ async function fetchInvoices(client, locationIds, diag) {
               createdAt: inv.createdAt,
               locationId: locId,
             });
+            locCount++;
           }
         }
-        cursor = result.cursor;
+        if (reachedCutoff) {
+          cursor = undefined; // 打ち切り
+        } else {
+          cursor = result.cursor;
+        }
       } catch (err) {
         const errMsg = extractApiError(err);
         console.error(`  Invoices error (${locId}):`, errMsg);
@@ -365,17 +389,19 @@ async function fetchInvoices(client, locationIds, diag) {
         cursor = undefined;
       }
     } while (cursor);
-    return invoices;
   });
-  const flat = allInvoices.flat();
   if (diag) {
-    const withSubId = flat.filter(inv => inv.subscriptionId).length;
-    diag.invoicesApi = errors.length > 0
-      ? `${flat.length}件取得 (サブスク紐付: ${withSubId}件), エラー${errors.length}件: ${errors.join('; ')}`
-      : `ok: ${flat.length}件 (サブスク紐付: ${withSubId}件)`;
+    const withSubId = allInvoices.filter(inv => inv.subscriptionId).length;
+    if (timedOut) {
+      diag.invoicesApi = `${allInvoices.length}件取得 (部分結果・タイムアウト${timeoutMs / 1000}s, サブスク紐付: ${withSubId}件)`;
+    } else {
+      diag.invoicesApi = errors.length > 0
+        ? `${allInvoices.length}件取得 (サブスク紐付: ${withSubId}件), エラー${errors.length}件: ${errors.join('; ')}`
+        : `ok: ${allInvoices.length}件 (サブスク紐付: ${withSubId}件)`;
+    }
   }
-  console.log(`  Invoices API: ${flat.length}件取得${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
-  return flat;
+  console.log(`  Invoices API: ${allInvoices.length}件取得${timedOut ? ' (partial/timeout)' : ''}${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
+  return allInvoices;
 }
 
 // 全顧客名を取得
@@ -462,19 +488,19 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     // サブスク＋インボイス＋売上(Orders API)＋顧客を並列取得（各API個別タイムアウト付き）
     // Note: Payments API/Refunds APIはSquare SDK v39の@apimaticバグ(INVALID_URL)のため
     //       Orders API (searchOrders: POST body) で統一して取得する
-    const API_TIMEOUT = 55000; // 各API最大55秒（サブスク大量データ対応）
-    // サブスクは内部で部分結果を管理するため withTimeout を使わない
+    const API_TIMEOUT = 70000; // 各API最大70秒（Vercel maxDuration:120s に対応）
+    // サブスク・インボイスは内部で部分結果を管理するため withTimeout を使わない
     const [rawSubs, invoices, ordersData, customers] = await Promise.all([
       fetchAllSubscriptions(client, locationIds, diag, API_TIMEOUT),
-      withTimeout(fetchInvoices(client, locationIds, diag), API_TIMEOUT, [], 'Invoices'),
+      fetchInvoices(client, locationIds, diag, API_TIMEOUT),
       withTimeout(fetchSalesFromOrders(client, locationIds, diag), 30000, { payments: [], refunds: [] }, 'Orders'),
       withTimeout(fetchAllCustomers(client, diag), 20000, {}, 'Customers'),
     ]);
 
     // タイムアウト検出: withTimeoutがfallbackを返した場合、diagに記録がない
-    // Note: subscriptionsApiはfetchAllSubscriptions内部で設定済み
-    if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (55s)';
-    if (!diag.invoicesApi) diag.invoicesApi = 'timeout (55s)';
+    // Note: subscriptionsApi/invoicesApiは各関数内部で設定済み
+    if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (70s)';
+    if (!diag.invoicesApi) diag.invoicesApi = 'timeout (70s)';
     if (!diag.paymentsApi) diag.paymentsApi = 'timeout (30s)';
     if (!diag.refundsApi) diag.refundsApi = 'timeout (30s)';
     if (!diag.customersApi) diag.customersApi = 'timeout (20s)';
@@ -635,7 +661,7 @@ export default async function handler(req, res) {
     const failedAccounts = [];
     const allDiag = [];
 
-    // バッチ内アカウントを並列取得（最大3並列、1アカウント最大90秒タイムアウト）
+    // バッチ内アカウントを並列取得（最大3並列、1アカウント最大110秒タイムアウト）
     await parallelWithLimit(indices, 3, async (idx) => {
       const cfg = configs[idx];
       try {
@@ -646,7 +672,7 @@ export default async function handler(req, res) {
           // 内部API個別タイムアウト(25s) + Ordersフォールバック(15s) + プラン(10s) = 最大50sを考慮
           r = await Promise.race([
             fetchAccountData(cfg, true),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('アカウント取得タイムアウト (90秒)')), 90000)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('アカウント取得タイムアウト (110秒)')), 110000)),
           ]);
           if (r && !r._failed) setCachedAccount(idx, r);
         }
@@ -691,7 +717,7 @@ export default async function handler(req, res) {
       if (!r) {
         r = await Promise.race([
           fetchAccountData(cfg, configs.length > 1),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('アカウント取得タイムアウト (90秒)')), 90000)),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('アカウント取得タイムアウト (110秒)')), 110000)),
         ]);
         if (r && !r._failed) setCachedAccount(idx, r);
       }
@@ -737,7 +763,7 @@ export default async function handler(req, res) {
   const allDiag = [];
 
   let deadlineReached = false;
-  const deadlineTimer = setTimeout(() => { deadlineReached = true; }, 90000);
+  const deadlineTimer = setTimeout(() => { deadlineReached = true; }, 110000);
 
   try {
     // 全アカウント並列取得（最大5並列、75店舗対応）

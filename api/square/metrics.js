@@ -591,14 +591,18 @@ export default async function handler(req, res) {
     const failedAccounts = [];
     const allDiag = [];
 
-    // バッチ内アカウントを並列取得（最大3並列）
+    // バッチ内アカウントを並列取得（最大3並列、1アカウント最大45秒タイムアウト）
     await parallelWithLimit(indices, 3, async (idx) => {
       const cfg = configs[idx];
       try {
         // キャッシュ確認
         let r = getCachedAccount(idx);
         if (!r) {
-          r = await fetchAccountData(cfg, true);
+          // アカウント単位タイムアウト: バッチ全体を守る
+          r = await Promise.race([
+            fetchAccountData(cfg, true),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('アカウント取得タイムアウト (45秒)')), 45000)),
+          ]);
           if (r && !r._failed) setCachedAccount(idx, r);
         }
         if (!r || r._failed) {
@@ -640,7 +644,10 @@ export default async function handler(req, res) {
       // キャッシュ確認
       let r = getCachedAccount(idx);
       if (!r) {
-        r = await fetchAccountData(cfg, configs.length > 1);
+        r = await Promise.race([
+          fetchAccountData(cfg, configs.length > 1),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('アカウント取得タイムアウト (55秒)')), 55000)),
+        ]);
         if (r && !r._failed) setCachedAccount(idx, r);
       }
 

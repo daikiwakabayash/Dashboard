@@ -662,6 +662,37 @@
                     };
                     const failedAccounts = [];
 
+                    // 個別アカウント取得（バッチ失敗時のフォールバック）
+                    const fetchSingleAccount = async (acc) => {
+                        try {
+                            const res = await fetch(`${SQUARE_API_URL}?account=${acc.index}`);
+                            const ct = res.headers.get('content-type') || '';
+                            if (!ct.includes('application/json')) return null;
+                            const data = await res.json();
+                            if (!data.success) {
+                                failedAccounts.push({ name: acc.name, error: data.error || 'Unknown error' });
+                                failedCount++;
+                                return null;
+                            }
+                            return data;
+                        } catch (err) {
+                            failedAccounts.push({ name: acc.name, error: err.message });
+                            failedCount++;
+                            return null;
+                        }
+                    };
+
+                    const mergeData = (data) => {
+                        if (!data) return;
+                        merged.stores.push(...(data.stores || []));
+                        merged.subscriptions.push(...(data.subscriptions || []));
+                        Object.assign(merged.customers, data.customers || {});
+                        merged.invoices.push(...(data.invoices || []));
+                        merged.payments.push(...(data.payments || []));
+                        merged.refunds.push(...(data.refunds || []));
+                        Object.assign(merged.plans, data.plans || {});
+                    };
+
                     // 同時実行数制限付き並列処理
                     let batchIdx = 0;
                     const runBatch = async () => {
@@ -669,31 +700,29 @@
                             const bi = batchIdx++;
                             const batch = batches[bi];
                             const indices = batch.map(a => a.index).join(',');
+                            let batchOk = false;
                             try {
                                 const res = await fetch(`${SQUARE_API_URL}?accounts=${indices}`);
                                 const ct = res.headers.get('content-type') || '';
                                 if (!ct.includes('application/json')) {
-                                    throw new Error(`非JSONレスポンス (${ct.split(';')[0]})`);
+                                    throw new Error(`非JSONレスポンス`);
                                 }
                                 const data = await res.json();
                                 if (data.success) {
-                                    merged.stores.push(...(data.stores || []));
-                                    merged.subscriptions.push(...(data.subscriptions || []));
-                                    Object.assign(merged.customers, data.customers || {});
-                                    merged.invoices.push(...(data.invoices || []));
-                                    merged.payments.push(...(data.payments || []));
-                                    merged.refunds.push(...(data.refunds || []));
-                                    Object.assign(merged.plans, data.plans || {});
+                                    mergeData(data);
                                 }
                                 if (data.meta && data.meta.failedAccounts) {
                                     failedAccounts.push(...data.meta.failedAccounts);
                                     failedCount += data.meta.failedAccounts.length;
                                 }
+                                batchOk = true;
                             } catch (err) {
-                                batch.forEach(a => {
-                                    failedAccounts.push({ name: a.name, error: err.message });
-                                    failedCount++;
-                                });
+                                // バッチ失敗 → 個別アカウント取得にフォールバック
+                                console.log(`Batch [${indices}] failed (${err.message}), falling back to individual requests...`);
+                                for (const acc of batch) {
+                                    const data = await fetchSingleAccount(acc);
+                                    if (data) mergeData(data);
+                                }
                             }
                             completedBatches++;
                             const completedAccounts = Math.min(completedBatches * BATCH_SIZE, totalAccounts);

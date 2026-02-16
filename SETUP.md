@@ -245,7 +245,7 @@ https://script.google.com/macros/s/AKfycbxxx.../exec
 │                                                      │
 │  Squareアカウント1 → 恵比寿院, 渋谷院, ...  (10店舗)   │
 │  Squareアカウント2 → 千葉駅院, 船橋院, ...  (10店舗)   │
-│  Squareアカウント3 → 大森院, 品川院, ...    (10店舗)   │
+│  Squareアカウント3 → 池尻大橋院, 大森院, ...  (10店舗)  │
 │  ...                                                 │
 │  SquareアカウントN → ○○院, △△院, ...       (残り店舗)  │
 │                                                      │
@@ -287,6 +287,11 @@ Vercelの環境変数に `SQUARE_TOKENS` を設定します。
   {
     "name": "千葉駅院",
     "token": "sq_live_YYYYYYYYYYYYYY",
+    "env": "production"
+  },
+  {
+    "name": "池尻大橋院",
+    "token": "sq_live_AAAAAAAAAAAAAAA",
     "env": "production"
   },
   {

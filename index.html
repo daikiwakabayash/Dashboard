@@ -1077,13 +1077,21 @@
                 if (!sqData || !sqData.subscriptions || !sqMonth) return null;
                 const cust = sqData.customers || {};
                 const plansMap = sqData.plans || {};
-                // テスト・0円プランを除外（プラン未取得のサブスクは保持 = 部分データ消失を防止）
+                // PAIDインボイスがあるサブスクIDセット（実際に決済されたサブスクを識別）
+                const paidSubIds = new Set();
+                for (const inv of (sqData.invoices || [])) {
+                    if (inv.subscriptionId && inv.status === 'PAID') paidSubIds.add(inv.subscriptionId);
+                }
+                // テスト・0円プランを除外（価格抽出失敗 or PAID実績ありなら保持）
                 const isRealSub = (s) => {
                     const plan = plansMap[s.planVariationId];
-                    if (plan) {
-                        if (s.monthlyPrice <= 0) return false;
-                        if (/テスト/i.test(plan.name)) return false;
-                    }
+                    if (plan && /テスト/i.test(plan.name)) return false;
+                    if (s.monthlyPrice > 0) return true;
+                    // monthlyPrice=0: PAID実績があれば実サブスク（価格抽出失敗の可能性）
+                    if (paidSubIds.has(s.id)) return true;
+                    // プランの価格が正常に抽出されて0円 → 無料/テストプラン
+                    if (plan && plan.pricingExtracted && s.monthlyPrice <= 0) return false;
+                    // プラン未取得 or 価格未抽出 → 保守的に保持
                     return true;
                 };
                 const subs = sqData.subscriptions.filter(isRealSub);
@@ -1352,13 +1360,18 @@
                 const monthEnd = new Date(refY, refM, 0, 23, 59, 59);
                 const toYM = d => { if (!d) return null; const dt = new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`; };
 
-                // テスト・0円プランを除外（プラン未取得のサブスクは保持 = 部分データ消失を防止）
+                // PAIDインボイスがあるサブスクIDセット
+                const paidSubIds2 = new Set();
+                for (const inv of (sqData.invoices || [])) {
+                    if (inv.subscriptionId && inv.status === 'PAID') paidSubIds2.add(inv.subscriptionId);
+                }
+                // テスト・0円プランを除外（価格抽出失敗 or PAID実績ありなら保持）
                 const isRealSub = (s) => {
                     const plan = plans[s.planVariationId];
-                    if (plan) {
-                        if (s.monthlyPrice <= 0) return false;
-                        if (/テスト/i.test(plan.name)) return false;
-                    }
+                    if (plan && /テスト/i.test(plan.name)) return false;
+                    if (s.monthlyPrice > 0) return true;
+                    if (paidSubIds2.has(s.id)) return true;
+                    if (plan && plan.pricingExtracted && s.monthlyPrice <= 0) return false;
                     return true;
                 };
 
@@ -1522,13 +1535,18 @@
                 const cust = sqData.customers || {};
                 const plans = sqData.plans || {};
                 const toYM = d => { if (!d) return null; const dt = new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`; };
-                // テスト・0円プランを除外（プラン未取得のサブスクは保持 = 部分データ消失を防止）
+                // PAIDインボイスがあるサブスクIDセット
+                const paidSubIds3 = new Set();
+                for (const inv of (sqData.invoices || [])) {
+                    if (inv.subscriptionId && inv.status === 'PAID') paidSubIds3.add(inv.subscriptionId);
+                }
+                // テスト・0円プランを除外（価格抽出失敗 or PAID実績ありなら保持）
                 const isRealSub = (s) => {
                     const plan = plans[s.planVariationId];
-                    if (plan) {
-                        if (s.monthlyPrice <= 0) return false;
-                        if (/テスト/i.test(plan.name)) return false;
-                    }
+                    if (plan && /テスト/i.test(plan.name)) return false;
+                    if (s.monthlyPrice > 0) return true;
+                    if (paidSubIds3.has(s.id)) return true;
+                    if (plan && plan.pricingExtracted && s.monthlyPrice <= 0) return false;
                     return true;
                 };
                 const allSubs = sqData.subscriptions.filter(isRealSub);

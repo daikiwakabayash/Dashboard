@@ -168,23 +168,34 @@ async function fetchPlanDetails(client, planVariationIds) {
         }),
         new Promise((_, reject) => setTimeout(() => reject(new Error('Plan batch timeout (10s)')), 10000)),
       ]);
-      if (result.objects) {
-        for (const obj of result.objects) {
-          if (obj.subscriptionPlanVariationData) {
-            const data = obj.subscriptionPlanVariationData;
-            const phases = data.phases || [];
-            let amount = 0, cadence = 'MONTHLY', currency = 'JPY';
-            if (phases.length > 0 && phases[0].pricing && phases[0].pricing.priceMoney) {
-              amount = toNumber(phases[0].pricing.priceMoney.amount);
-              currency = phases[0].pricing.priceMoney.currency || 'JPY';
-              cadence = phases[0].cadence || 'MONTHLY';
+      // objects + relatedObjects の両方からプラン情報を抽出
+      const allObjects = [...(result.objects || []), ...(result.relatedObjects || [])];
+      for (const obj of allObjects) {
+        if (plans[obj.id]) continue; // 既に処理済み
+        if (obj.subscriptionPlanVariationData) {
+          const data = obj.subscriptionPlanVariationData;
+          const phases = data.phases || [];
+          let amount = 0, cadence = 'MONTHLY', currency = 'JPY';
+          let pricingExtracted = false;
+          // 全フェーズを走査し、最初の有料フェーズの価格を使用（トライアルフェーズをスキップ）
+          for (const phase of phases) {
+            if (phase.pricing && phase.pricing.priceMoney) {
+              const phaseAmount = toNumber(phase.pricing.priceMoney.amount);
+              if (phaseAmount > 0 || pricingExtracted === false) {
+                amount = phaseAmount;
+                currency = phase.pricing.priceMoney.currency || 'JPY';
+                cadence = phase.cadence || 'MONTHLY';
+                pricingExtracted = true;
+                if (phaseAmount > 0) break; // 有料フェーズが見つかればそこで終了
+              }
             }
-            plans[obj.id] = {
-              name: data.name || obj.id,
-              amount, currency, cadence,
-              monthlyPrice: Math.round(normalizeToMonthly(amount, cadence)),
-            };
           }
+          plans[obj.id] = {
+            name: data.name || obj.id,
+            amount, currency, cadence,
+            monthlyPrice: Math.round(normalizeToMonthly(amount, cadence)),
+            pricingExtracted, // 価格情報が正常に取得できたかのフラグ
+          };
         }
       }
     } catch (err) {

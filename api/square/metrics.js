@@ -453,13 +453,15 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     // 診断情報トラッキング
     const diag = {};
 
-    // サブスク＋インボイス＋売上＋返品を並列取得（各API個別タイムアウト付き）
+    // サブスク＋インボイス＋売上＋返品＋顧客を並列取得（各API個別タイムアウト付き）
+    // 顧客取得はサブスクに依存しないためフェーズ1で並列実行し、合計時間を短縮
     const API_TIMEOUT = 25000; // 各API最大25秒
-    const [rawSubs, invoices, paymentsApiData, refundsApiData] = await Promise.all([
+    const [rawSubs, invoices, paymentsApiData, refundsApiData, customers] = await Promise.all([
       withTimeout(fetchAllSubscriptions(client, locationIds), API_TIMEOUT, [], 'Subscriptions'),
       withTimeout(fetchInvoices(client, locationIds), API_TIMEOUT, [], 'Invoices'),
       withTimeout(fetchSalesPayments(client, locationIds, diag), API_TIMEOUT, null, 'Payments'),
       withTimeout(fetchRefundsFromApi(client, locationIds, diag), API_TIMEOUT, null, 'Refunds'),
+      withTimeout(fetchAllCustomers(client), 20000, {}, 'Customers'),
     ]);
 
     let payments = paymentsApiData;
@@ -480,12 +482,9 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     payments = payments || [];
     refunds = refunds || [];
 
-    // 顧客名＋プラン詳細を並列取得（タイムアウト付き）
+    // プラン詳細を取得（サブスクデータに依存するため順次実行）
     const planVariationIds = rawSubs.map(s => s.planVariationId).filter(Boolean);
-    const [customers, plans] = await Promise.all([
-      withTimeout(fetchAllCustomers(client), 15000, {}, 'Customers'),
-      withTimeout(fetchPlanDetails(client, planVariationIds), 10000, {}, 'Plans'),
-    ]);
+    const plans = await withTimeout(fetchPlanDetails(client, planVariationIds), 10000, {}, 'Plans');
 
     // サブスクリプションを整形
     const subscriptions = rawSubs.map(s => {
@@ -618,7 +617,7 @@ export default async function handler(req, res) {
     const failedAccounts = [];
     const allDiag = [];
 
-    // バッチ内アカウントを並列取得（最大3並列、1アカウント最大45秒タイムアウト）
+    // バッチ内アカウントを並列取得（最大3並列、1アカウント最大90秒タイムアウト）
     await parallelWithLimit(indices, 3, async (idx) => {
       const cfg = configs[idx];
       try {
@@ -626,9 +625,10 @@ export default async function handler(req, res) {
         let r = getCachedAccount(idx);
         if (!r) {
           // アカウント単位タイムアウト: バッチ全体を守る
+          // 内部API個別タイムアウト(25s) + Ordersフォールバック(15s) + プラン(10s) = 最大50sを考慮
           r = await Promise.race([
             fetchAccountData(cfg, true),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('アカウント取得タイムアウト (45秒)')), 45000)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('アカウント取得タイムアウト (90秒)')), 90000)),
           ]);
           if (r && !r._failed) setCachedAccount(idx, r);
         }
@@ -673,7 +673,7 @@ export default async function handler(req, res) {
       if (!r) {
         r = await Promise.race([
           fetchAccountData(cfg, configs.length > 1),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('アカウント取得タイムアウト (55秒)')), 55000)),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('アカウント取得タイムアウト (90秒)')), 90000)),
         ]);
         if (r && !r._failed) setCachedAccount(idx, r);
       }
@@ -719,7 +719,7 @@ export default async function handler(req, res) {
   const allDiag = [];
 
   let deadlineReached = false;
-  const deadlineTimer = setTimeout(() => { deadlineReached = true; }, 50000);
+  const deadlineTimer = setTimeout(() => { deadlineReached = true; }, 90000);
 
   try {
     // 全アカウント並列取得（最大5並列、75店舗対応）

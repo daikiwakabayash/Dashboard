@@ -133,37 +133,33 @@ async function fetchLocations(client, diag) {
   }
 }
 
-// ── ロケーション並列版: サブスクリプション取得 ──
+// ── サブスクリプション一括取得（全ロケーション同時検索でAPI呼出しを最小化） ──
 async function fetchAllSubscriptions(client, locationIds, diag) {
   const errors = [];
-  const allSubs = await parallelWithLimit(locationIds, 3, async (locId) => {
-    const subs = [];
-    let cursor = undefined;
-    do {
-      try {
-        const { result } = await client.subscriptionsApi.searchSubscriptions({
-          query: { filter: { locationIds: [locId] } },
-          cursor,
-        });
-        if (result.subscriptions) subs.push(...result.subscriptions);
-        cursor = result.cursor;
-      } catch (err) {
-        const errMsg = extractApiError(err);
-        console.error(`  Subscriptions error (${locId}):`, errMsg);
-        errors.push(`${locId}: ${errMsg}`);
-        cursor = undefined;
-      }
-    } while (cursor);
-    return subs;
-  });
-  const flat = allSubs.flat();
+  const subs = [];
+  let cursor = undefined;
+  do {
+    try {
+      const { result } = await client.subscriptionsApi.searchSubscriptions({
+        query: { filter: { locationIds } },
+        cursor,
+      });
+      if (result.subscriptions) subs.push(...result.subscriptions);
+      cursor = result.cursor;
+    } catch (err) {
+      const errMsg = extractApiError(err);
+      console.error(`  Subscriptions error:`, errMsg);
+      errors.push(errMsg);
+      cursor = undefined;
+    }
+  } while (cursor);
   if (diag) {
     diag.subscriptionsApi = errors.length > 0
-      ? `${flat.length}件取得, エラー${errors.length}件: ${errors.join('; ')}`
-      : `ok: ${flat.length}件`;
+      ? `${subs.length}件取得, エラー${errors.length}件: ${errors.join('; ')}`
+      : `ok: ${subs.length}件`;
   }
-  console.log(`  Subscriptions API: ${flat.length}件取得${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
-  return flat;
+  console.log(`  Subscriptions API: ${subs.length}件取得${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
+  return subs;
 }
 
 async function fetchPlanDetails(client, planVariationIds) {
@@ -220,102 +216,17 @@ async function fetchPlanDetails(client, planVariationIds) {
   return plans;
 }
 
-// ── ロケーション並列版: 売上データ取得 ──
-async function fetchSalesPayments(client, locationIds, diag) {
-  const beginTime = new Date();
-  beginTime.setMonth(beginTime.getMonth() - 13);
-  const beginStr = beginTime.toISOString();
-  let hasError = false;
-
-  const allPayments = await parallelWithLimit(locationIds, 3, async (locId) => {
-    const payments = [];
-    let cursor = undefined;
-    do {
-      try {
-        const { result } = await client.paymentsApi.listPayments(
-          beginStr, undefined, 'DESC', cursor, locId,
-        );
-        if (result.payments) {
-          for (const p of result.payments) {
-            if (p.status === 'COMPLETED') {
-              payments.push({
-                amount: toNumber(p.totalMoney && p.totalMoney.amount),
-                createdAt: p.createdAt,
-                locationId: p.locationId || locId,
-              });
-            }
-          }
-        }
-        cursor = result.cursor;
-      } catch (err) {
-        const errMsg = extractApiError(err);
-        console.error(`  Payments API error (${locId}):`, errMsg);
-        diag.paymentsApi = `error: ${errMsg}`;
-        hasError = true;
-        cursor = undefined;
-      }
-    } while (cursor);
-    return payments;
-  });
-
-  const flat = allPayments.flat();
-  if (hasError && flat.length === 0) return null;
-  diag.paymentsApi = `ok: ${flat.length}件`;
-  console.log(`  Payments API: ${flat.length}件取得`);
-  return flat;
-}
-
-// ── ロケーション並列版: 返品データ取得 ──
-async function fetchRefundsFromApi(client, locationIds, diag) {
-  const beginTime = new Date();
-  beginTime.setMonth(beginTime.getMonth() - 13);
-  const beginStr = beginTime.toISOString();
-  let hasError = false;
-
-  const allRefunds = await parallelWithLimit(locationIds, 3, async (locId) => {
-    const refunds = [];
-    let cursor = undefined;
-    do {
-      try {
-        const { result } = await client.refundsApi.listPaymentRefunds(
-          beginStr, undefined, 'DESC', cursor, locId,
-        );
-        if (result.refunds) {
-          for (const r of result.refunds) {
-            if (r.status === 'COMPLETED') {
-              refunds.push({
-                amount: toNumber(r.amountMoney && r.amountMoney.amount),
-                createdAt: r.createdAt,
-                locationId: r.locationId || locId,
-              });
-            }
-          }
-        }
-        cursor = result.cursor;
-      } catch (err) {
-        const errMsg = extractApiError(err);
-        console.error(`  Refunds API error (${locId}):`, errMsg);
-        diag.refundsApi = `error: ${errMsg}`;
-        hasError = true;
-        cursor = undefined;
-      }
-    } while (cursor);
-    return refunds;
-  });
-
-  const flat = allRefunds.flat();
-  if (hasError && flat.length === 0) return null;
-  diag.refundsApi = `ok: ${flat.length}件`;
-  console.log(`  Refunds API: ${flat.length}件取得`);
-  return flat;
-}
-
-// ── ロケーション並列版: Orders APIフォールバック ──
+// ── 売上・返品データ取得: Orders API (searchOrders) を使用 ──
+// Square SDK v39の@apimaticライブラリにバグがあり、listPayments/listPaymentRefundsの
+// 位置引数でundefinedがクエリ文字列に&&として直列化されINVALID_URLエラーが発生するため
+// POST bodyベースのsearchOrders APIを使用する
+// ──
 async function fetchSalesFromOrders(client, locationIds, diag) {
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
   const beginStr = beginTime.toISOString();
   const stateCount = {};
+  const errors = [];
 
   const allResults = await parallelWithLimit(locationIds, 3, async (locId) => {
     const payments = [];
@@ -359,7 +270,9 @@ async function fetchSalesFromOrders(client, locationIds, diag) {
         }
         cursor = result.cursor;
       } catch (err) {
-        console.error(`  Orders API error (${locId}):`, err.message);
+        const errMsg = extractApiError(err);
+        console.error(`  Orders API error (${locId}):`, errMsg);
+        errors.push(`${locId}: ${errMsg}`);
         cursor = undefined;
       }
     } while (cursor);
@@ -368,9 +281,15 @@ async function fetchSalesFromOrders(client, locationIds, diag) {
 
   const payments = allResults.flatMap(r => r.payments);
   const refunds = allResults.flatMap(r => r.refunds);
-  diag.ordersFallback = `${payments.length}件売上, ${refunds.length}件返品`;
-  diag.orderStates = stateCount;
-  console.log(`  Orders API fallback: ${payments.length}件売上, ${refunds.length}件返品`);
+  if (diag) {
+    diag.paymentsApi = errors.length > 0
+      ? `Orders API: ${payments.length}件売上, エラー${errors.length}件`
+      : `ok: ${payments.length}件 (Orders API)`;
+    diag.refundsApi = errors.length > 0
+      ? `Orders API: ${refunds.length}件返品, エラー${errors.length}件`
+      : `ok: ${refunds.length}件 (Orders API)`;
+  }
+  console.log(`  Orders API: ${payments.length}件売上, ${refunds.length}件返品${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
   return { payments, refunds };
 }
 
@@ -514,39 +433,26 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     }
     const locationIds = stores.map(s => s.id);
 
-    // サブスク＋インボイス＋売上＋返品＋顧客を並列取得（各API個別タイムアウト付き）
-    // 顧客取得はサブスクに依存しないためフェーズ1で並列実行し、合計時間を短縮
-    const API_TIMEOUT = 25000; // 各API最大25秒
-    const [rawSubs, invoices, paymentsApiData, refundsApiData, customers] = await Promise.all([
+    // サブスク＋インボイス＋売上(Orders API)＋顧客を並列取得（各API個別タイムアウト付き）
+    // Note: Payments API/Refunds APIはSquare SDK v39の@apimaticバグ(INVALID_URL)のため
+    //       Orders API (searchOrders: POST body) で統一して取得する
+    const API_TIMEOUT = 55000; // 各API最大55秒（サブスク大量データ対応）
+    const [rawSubs, invoices, ordersData, customers] = await Promise.all([
       withTimeout(fetchAllSubscriptions(client, locationIds, diag), API_TIMEOUT, [], 'Subscriptions'),
       withTimeout(fetchInvoices(client, locationIds, diag), API_TIMEOUT, [], 'Invoices'),
-      withTimeout(fetchSalesPayments(client, locationIds, diag), API_TIMEOUT, null, 'Payments'),
-      withTimeout(fetchRefundsFromApi(client, locationIds, diag), API_TIMEOUT, null, 'Refunds'),
+      withTimeout(fetchSalesFromOrders(client, locationIds, diag), 30000, { payments: [], refunds: [] }, 'Orders'),
       withTimeout(fetchAllCustomers(client, diag), 20000, {}, 'Customers'),
     ]);
 
     // タイムアウト検出: withTimeoutがfallbackを返した場合、diagに記録がない
-    if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (25s)';
-    if (!diag.invoicesApi) diag.invoicesApi = 'timeout (25s)';
+    if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (55s)';
+    if (!diag.invoicesApi) diag.invoicesApi = 'timeout (55s)';
+    if (!diag.paymentsApi) diag.paymentsApi = 'timeout (30s)';
+    if (!diag.refundsApi) diag.refundsApi = 'timeout (30s)';
     if (!diag.customersApi) diag.customersApi = 'timeout (20s)';
 
-    let payments = paymentsApiData;
-    let refunds = refundsApiData;
-
-    // Payments/Refunds APIが使えない場合、Orders APIフォールバック（タイムアウト付き）
-    if (payments === null || refunds === null) {
-      console.log(`  -> Orders APIフォールバック (payments=${payments === null ? '必要' : 'OK'}, refunds=${refunds === null ? '必要' : 'OK'})`);
-      const ordersData = await withTimeout(
-        fetchSalesFromOrders(client, locationIds, diag),
-        15000,
-        { payments: [], refunds: [] },
-        'Orders fallback'
-      );
-      if (payments === null) payments = ordersData.payments;
-      if (refunds === null) refunds = ordersData.refunds;
-    }
-    payments = payments || [];
-    refunds = refunds || [];
+    const payments = ordersData.payments || [];
+    const refunds = ordersData.refunds || [];
 
     // プラン詳細を取得（サブスクデータに依存するため順次実行・バッチ単位タイムアウトで部分結果を保持）
     const planVariationIds = rawSubs.map(s => s.planVariationId).filter(Boolean);

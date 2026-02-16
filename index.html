@@ -487,6 +487,7 @@
             const [sqDrilldown, setSqDrilldown] = useState(null); // { month, type: 'new'|'canceled' }
             const [sqStoreMenuOpen, setSqStoreMenuOpen] = useState(false);
             const [sqStoreSearch, setSqStoreSearch] = useState('');
+            const [sqLoadingProgress, setSqLoadingProgress] = useState(null);
             const sqStoreMenuRef = useRef(null);
 
             // ソート用 State
@@ -615,15 +616,84 @@
                     }
 
                     setSqLoading(true);
-                    const response = await fetch(SQUARE_API_URL);
-                    const contentType = response.headers.get('content-type') || '';
-                    if (!contentType.includes('application/json')) {
-                        throw new Error(`APIがJSONを返しませんでした (${contentType.split(';')[0] || 'unknown'})。Vercelの「Deployments」→最新デプロイの「Functions」タブでエラーログを確認してください。`);
-                    }
-                    const result = await response.json();
+                    setSqLoadingProgress({ total: 0, completed: 0, failed: 0 });
 
-                    if (!response.ok || !result.success) {
-                        throw new Error(result.error || `Square API HTTP ${response.status}`);
+                    // Step 1: アカウント一覧を取得
+                    const infoRes = await fetch(`${SQUARE_API_URL}?info=1`);
+                    const infoCt = infoRes.headers.get('content-type') || '';
+                    if (!infoCt.includes('application/json')) {
+                        throw new Error(`APIがJSONを返しませんでした (${infoCt.split(';')[0] || 'unknown'})。Vercelの「Deployments」→最新デプロイの「Functions」タブでエラーログを確認してください。`);
+                    }
+                    const infoData = await infoRes.json();
+                    if (!infoData.success || !infoData.accounts) {
+                        throw new Error(infoData.error || 'アカウント情報の取得に失敗しました');
+                    }
+
+                    const accounts = infoData.accounts;
+                    const total = accounts.length;
+                    let completedCount = 0;
+                    let failedCount = 0;
+                    setSqLoadingProgress({ total, completed: 0, failed: 0 });
+
+                    // Step 2: 全アカウントを並列取得
+                    const merged = {
+                        stores: [], subscriptions: [], customers: {},
+                        invoices: [], payments: [], refunds: [], plans: {},
+                    };
+                    const failedAccounts = [];
+
+                    await Promise.allSettled(accounts.map(async (acc) => {
+                        try {
+                            const res = await fetch(`${SQUARE_API_URL}?account=${acc.index}`);
+                            const ct = res.headers.get('content-type') || '';
+                            if (!ct.includes('application/json')) {
+                                throw new Error(`非JSONレスポンス (${ct.split(';')[0]})`);
+                            }
+                            const data = await res.json();
+                            if (!data.success) {
+                                failedAccounts.push({ name: acc.name, error: data.error || 'Unknown error' });
+                                failedCount++;
+                            } else {
+                                merged.stores.push(...(data.stores || []));
+                                merged.subscriptions.push(...(data.subscriptions || []));
+                                Object.assign(merged.customers, data.customers || {});
+                                merged.invoices.push(...(data.invoices || []));
+                                merged.payments.push(...(data.payments || []));
+                                merged.refunds.push(...(data.refunds || []));
+                                Object.assign(merged.plans, data.plans || {});
+                            }
+                        } catch (err) {
+                            failedAccounts.push({ name: acc.name, error: err.message });
+                            failedCount++;
+                        } finally {
+                            completedCount++;
+                            setSqLoadingProgress({ total, completed: completedCount, failed: failedCount });
+                        }
+                    }));
+
+                    // Step 3: 結果をマージ
+                    const result = {
+                        success: true,
+                        stores: merged.stores,
+                        subscriptions: merged.subscriptions,
+                        customers: merged.customers,
+                        invoices: merged.invoices,
+                        payments: merged.payments,
+                        refunds: merged.refunds,
+                        plans: merged.plans,
+                        meta: {
+                            totalSubscriptions: merged.subscriptions.length,
+                            totalInvoices: merged.invoices.length,
+                            totalPayments: merged.payments.length,
+                            totalRefunds: merged.refunds.length,
+                            totalAccounts: total,
+                            failedAccounts: failedAccounts.length > 0 ? failedAccounts : undefined,
+                            generatedAt: new Date().toISOString(),
+                        },
+                    };
+
+                    if (merged.stores.length === 0 && failedAccounts.length > 0) {
+                        throw new Error('全アカウントのデータ取得に失敗しました');
                     }
 
                     setSqData(result);
@@ -641,6 +711,7 @@
                     setSqError(err.message || 'Square データの取得に失敗しました');
                 } finally {
                     setSqLoading(false);
+                    setSqLoadingProgress(null);
                 }
             };
 
@@ -6031,6 +6102,18 @@
                                             <div className="text-center">
                                                 <Loader2 size={48} className="animate-spin text-blue-500 mx-auto mb-4" />
                                                 <p className="text-slate-500 font-bold">Square APIからデータを取得中...</p>
+                                                {sqLoadingProgress && sqLoadingProgress.total > 0 && (
+                                                    <div className="mt-3">
+                                                        <p className="text-slate-400 text-sm">
+                                                            {sqLoadingProgress.completed}/{sqLoadingProgress.total} アカウント完了
+                                                            {sqLoadingProgress.failed > 0 && ` (${sqLoadingProgress.failed} 失敗)`}
+                                                        </p>
+                                                        <div className="w-48 mx-auto mt-2 bg-slate-200 rounded-full h-2">
+                                                            <div className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                                                                style={{width: `${Math.round(sqLoadingProgress.completed / sqLoadingProgress.total * 100)}%`}} />
+                                                        </div>
+                                                    </div>
+                                                )}
                                             </div>
                                         </div>
                                     )}

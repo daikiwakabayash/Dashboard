@@ -603,7 +603,40 @@
                     setSqError(null);
                     setSqFailedDetails(null);
 
-                    // キャッシュ確認（stale-while-revalidate: 古いキャッシュをまず表示、裏で更新）
+                    // Step 1: アカウント一覧を取得（キャッシュ検証のため常に先に取得）
+                    let infoData = null;
+                    let totalAccounts = 0;
+                    try {
+                        const infoRes = await fetch(`${SQUARE_API_URL}?info=1`);
+                        const infoCt = infoRes.headers.get('content-type') || '';
+                        if (!infoCt.includes('application/json')) {
+                            throw new Error(`APIがJSONを返しませんでした (${infoCt.split(';')[0] || 'unknown'})。Vercelの「Deployments」→最新デプロイの「Functions」タブでエラーログを確認してください。`);
+                        }
+                        infoData = await infoRes.json();
+                        if (!infoData.success || !infoData.accounts) {
+                            throw new Error(infoData.error || 'アカウント情報の取得に失敗しました');
+                        }
+                        totalAccounts = infoData.accounts.length;
+                    } catch (infoErr) {
+                        // info取得失敗時はキャッシュがあれば使う（オフライン対応）
+                        if (!forceRefresh) {
+                            try {
+                                const cached = localStorage.getItem(SQUARE_CACHE_KEY);
+                                if (cached) {
+                                    const parsed = JSON.parse(cached);
+                                    if (parsed.data) {
+                                        console.log('Info fetch failed, using cached data');
+                                        setSqData(parsed.data);
+                                        setSqLastFetch(new Date(parsed.timestamp));
+                                        return;
+                                    }
+                                }
+                            } catch (e) { /* cache miss */ }
+                        }
+                        throw infoErr;
+                    }
+
+                    // キャッシュ確認（stale-while-revalidate + アカウント数変更検知）
                     let hasStaleCache = false;
                     if (!forceRefresh) {
                         try {
@@ -612,14 +645,19 @@
                                 const parsed = JSON.parse(cached);
                                 if (parsed.timestamp) {
                                     const age = Date.now() - parsed.timestamp;
-                                    if (age < CACHE_EXPIRY_MS) {
+                                    const cachedAccounts = parsed.data && parsed.data.meta ? parsed.data.meta.totalAccounts : 0;
+                                    const accountsChanged = cachedAccounts !== totalAccounts;
+                                    if (accountsChanged) {
+                                        console.log(`アカウント数変更検知 (${cachedAccounts} → ${totalAccounts}): キャッシュを無効化`);
+                                    }
+                                    if (age < CACHE_EXPIRY_MS && !accountsChanged) {
                                         console.log('Using cached Square data');
                                         setSqData(parsed.data);
                                         setSqLastFetch(new Date(parsed.timestamp));
                                         return;
                                     }
-                                    // 30分超〜60分以内: stale表示して裏で更新
-                                    if (age < CACHE_EXPIRY_MS * 2) {
+                                    // 30分超〜60分以内（アカウント数変更なし）: stale表示して裏で更新
+                                    if (age < CACHE_EXPIRY_MS * 2 && !accountsChanged) {
                                         console.log('Showing stale cache, refreshing in background...');
                                         setSqData(parsed.data);
                                         setSqLastFetch(new Date(parsed.timestamp));
@@ -633,19 +671,7 @@
                     setSqLoading(true);
                     setSqLoadingProgress({ total: 0, completed: 0, failed: 0 });
 
-                    // Step 1: アカウント一覧を取得
-                    const infoRes = await fetch(`${SQUARE_API_URL}?info=1`);
-                    const infoCt = infoRes.headers.get('content-type') || '';
-                    if (!infoCt.includes('application/json')) {
-                        throw new Error(`APIがJSONを返しませんでした (${infoCt.split(';')[0] || 'unknown'})。Vercelの「Deployments」→最新デプロイの「Functions」タブでエラーログを確認してください。`);
-                    }
-                    const infoData = await infoRes.json();
-                    if (!infoData.success || !infoData.accounts) {
-                        throw new Error(infoData.error || 'アカウント情報の取得に失敗しました');
-                    }
-
                     const accounts = infoData.accounts;
-                    const totalAccounts = accounts.length;
                     let completedBatches = 0;
                     let failedCount = 0;
 
@@ -1177,7 +1203,15 @@
                 const prevMrr = filteredPrevSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
                 const mrrChange = prevMrr > 0 ? Math.round((mrr - prevMrr) / prevMrr * 10000) / 100 : 0;
 
-                // 総売上高 = Orders API COMPLETED注文のtotalMoney合計（Square管理画面と一致）
+                // 返品額 = Orders API 返金の合計
+                const allRefunds = sqData.refunds || [];
+                const refundsFiltered = sqStore === 'all'
+                    ? allRefunds
+                    : allRefunds.filter(r => r.locationId === sqStore);
+                const monthRefunds = refundsFiltered.filter(r => toYM(r.createdAt) === sqMonth);
+                const totalRefunds = monthRefunds.reduce((sum, r) => sum + r.amount, 0);
+
+                // 総売上高 = COMPLETED注文の合計 - 返品額（Square管理画面の「売上合計」と一致）
                 const allPayments = sqData.payments || [];
                 const paymentsFiltered = sqStore === 'all'
                     ? allPayments
@@ -1194,14 +1228,8 @@
                         : paidInvsMonth.filter(inv => inv.locationId === sqStore);
                     totalSales = storeInvs.reduce((sum, inv) => sum + inv.amount, 0);
                 }
-
-                // 返品額 = Refunds API COMPLETED返金の合計（Square管理画面の「返品」と一致）
-                const allRefunds = sqData.refunds || [];
-                const refundsFiltered = sqStore === 'all'
-                    ? allRefunds
-                    : allRefunds.filter(r => r.locationId === sqStore);
-                const monthRefunds = refundsFiltered.filter(r => toYM(r.createdAt) === sqMonth);
-                const totalRefunds = monthRefunds.reduce((sum, r) => sum + r.amount, 0);
+                // 返品差引: Square管理画面の「売上合計」は返品差引後の純売上
+                totalSales = Math.max(0, totalSales - totalRefunds);
 
                 // 新規・解約（基準月）
                 const newInMonth = filtered.filter(s => toYM(s.startDate) === sqMonth);
@@ -1570,17 +1598,23 @@
                     }
                 }
 
-                // 重複排除: 同一顧客ID+同一月額のサブスクをマージ（プラン名の微妙な違いに対応）
-                // 複数サブスクの重複月は1回分としてカウント（膨張を防止）
+                // 重複排除: 同一顧客IDのサブスクをマージ（アクティブ会員数KPIと一致させる）
+                // 同一顧客の複数プランは1行にまとめ、決済額は合算
                 const dedup = (list) => {
                     const map = {};
                     for (const entry of list) {
-                        const key = `${entry.customerId}|${entry.monthlyPrice}`;
+                        const key = entry.customerId;
                         if (map[key]) {
-                            // 月別決済額をマージ（同月は最初の値を優先＝重複課金を排除）
+                            // プラン名をマージ（異なるプランは「/」で結合）
+                            if (entry.plan && map[key].plan && entry.plan !== map[key].plan && !map[key].plan.includes(entry.plan)) {
+                                map[key].plan += ` / ${entry.plan}`;
+                            }
+                            // 月額をマージ（異なるプランの合計）
+                            map[key].monthlyPrice = (map[key].monthlyPrice || 0) + (entry.monthlyPrice || 0);
+                            // 月別決済額をマージ（同月は合算＝複数プラン分を加算）
                             const merged = { ...(map[key].paidByMonth || {}) };
                             for (const [m, amt] of Object.entries(entry.paidByMonth || {})) {
-                                if (!merged[m]) merged[m] = amt;
+                                merged[m] = (merged[m] || 0) + amt;
                             }
                             map[key].paidByMonth = merged;
                             const months = Object.keys(merged);
@@ -6557,7 +6591,7 @@
                                                         { label: 'アクティブ会員数', value: `${sqMetrics.memberCount.toLocaleString()}名`, sub: sqMetrics.memberCount !== sqMetrics.prevMemberCount ? `前月比 ${sqMetrics.memberCount - sqMetrics.prevMemberCount >= 0 ? '+' : ''}${sqMetrics.memberCount - sqMetrics.prevMemberCount}名` : null, up: sqMetrics.memberCount >= sqMetrics.prevMemberCount, icon: <Users size={22} />, color: 'indigo' },
                                                         { label: '総MRR', value: `¥${sqMetrics.mrr.toLocaleString()}`, sub: sqMetrics.mrrChange !== 0 ? `前月比 ${sqMetrics.mrrChange >= 0 ? '+' : ''}${sqMetrics.mrrChange}%` : null, up: sqMetrics.mrrChange >= 0, icon: <Wallet size={22} />, color: 'blue' },
                                                         { label: 'ARPU', value: `¥${sqMetrics.arpu.toLocaleString()}`, sub: 'サブスク決済額÷会員数', icon: <DollarSign size={22} />, color: 'cyan', neutral: true },
-                                                        { label: '総売上高', value: sqMetrics.totalSales >= 10000 ? `¥${(sqMetrics.totalSales/10000).toFixed(1)}万` : `¥${sqMetrics.totalSales.toLocaleString()}`, sub: 'Square売上サマリー', icon: <TrendingUp size={22} />, color: 'emerald', neutral: true },
+                                                        { label: '総売上高', value: sqMetrics.totalSales >= 10000 ? `¥${(sqMetrics.totalSales/10000).toFixed(1)}万` : `¥${sqMetrics.totalSales.toLocaleString()}`, sub: 'Square売上合計（税込）', icon: <TrendingUp size={22} />, color: 'emerald', neutral: true },
                                                         { label: '返品', value: sqMetrics.totalRefunds > 0 ? (sqMetrics.totalRefunds >= 10000 ? `-¥${(sqMetrics.totalRefunds/10000).toFixed(1)}万` : `-¥${sqMetrics.totalRefunds.toLocaleString()}`) : '¥0', sub: '返金・払戻', icon: <RefreshCw size={22} />, color: 'rose', neutral: true, warn: sqMetrics.totalRefunds > 0 },
                                                         { label: 'LTV', value: sqMetrics.ltv >= 10000 ? `¥${(sqMetrics.ltv/10000).toFixed(1)}万` : `¥${sqMetrics.ltv.toLocaleString()}`, sub: '顧客生涯価値', icon: <DollarSign size={22} />, color: 'amber', neutral: true },
                                                     ].map((kpi, idx) => (

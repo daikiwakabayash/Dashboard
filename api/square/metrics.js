@@ -274,7 +274,7 @@ async function fetchSalesFromOrders(client, locationIds, diag) {
           for (const o of result.orders) {
             stateCount[o.state || 'UNKNOWN'] = (stateCount[o.state || 'UNKNOWN'] || 0) + 1;
             if (o.state === 'DRAFT' || o.state === 'CANCELED') continue;
-            if (o.state === 'COMPLETED' || (o.tenders && o.tenders.length > 0)) {
+            if (o.state === 'COMPLETED') {
               payments.push({
                 amount: toNumber(o.totalMoney && o.totalMoney.amount),
                 createdAt: o.closedAt || o.createdAt,

@@ -44,6 +44,27 @@ async function parallelWithLimit(items, limit, fn) {
   return results;
 }
 
+// ── タイムアウト付きPromise: 指定時間超過でfallback値を返す ──
+async function withTimeout(promise, ms, fallback, label) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label || 'API'} timeout (${ms}ms)`)), ms);
+      }),
+    ]);
+  } catch (e) {
+    if (e.message && e.message.includes('timeout')) {
+      console.warn(`[timeout] ${label || 'API'}: ${ms}ms超過 → fallback使用`);
+      return fallback;
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // 環境変数からトークン設定を取得
 // SQUARE_TOKENS: JSON配列 [{"name":"恵比寿院","token":"xxx","env":"production"}, ...]
 // SQUARE_ACCESS_TOKEN: 後方互換（単一アカウント用）
@@ -432,32 +453,38 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     // 診断情報トラッキング
     const diag = {};
 
-    // サブスク＋インボイス＋売上＋返品を並列取得（各API内でもロケーション並列）
+    // サブスク＋インボイス＋売上＋返品を並列取得（各API個別タイムアウト付き）
+    const API_TIMEOUT = 25000; // 各API最大25秒
     const [rawSubs, invoices, paymentsApiData, refundsApiData] = await Promise.all([
-      fetchAllSubscriptions(client, locationIds),
-      fetchInvoices(client, locationIds),
-      fetchSalesPayments(client, locationIds, diag),
-      fetchRefundsFromApi(client, locationIds, diag),
+      withTimeout(fetchAllSubscriptions(client, locationIds), API_TIMEOUT, [], 'Subscriptions'),
+      withTimeout(fetchInvoices(client, locationIds), API_TIMEOUT, [], 'Invoices'),
+      withTimeout(fetchSalesPayments(client, locationIds, diag), API_TIMEOUT, null, 'Payments'),
+      withTimeout(fetchRefundsFromApi(client, locationIds, diag), API_TIMEOUT, null, 'Refunds'),
     ]);
 
     let payments = paymentsApiData;
     let refunds = refundsApiData;
 
-    // Payments/Refunds APIが使えない場合、Orders APIフォールバック
+    // Payments/Refunds APIが使えない場合、Orders APIフォールバック（タイムアウト付き）
     if (payments === null || refunds === null) {
       console.log(`  -> Orders APIフォールバック (payments=${payments === null ? '必要' : 'OK'}, refunds=${refunds === null ? '必要' : 'OK'})`);
-      const ordersData = await fetchSalesFromOrders(client, locationIds, diag);
+      const ordersData = await withTimeout(
+        fetchSalesFromOrders(client, locationIds, diag),
+        15000,
+        { payments: [], refunds: [] },
+        'Orders fallback'
+      );
       if (payments === null) payments = ordersData.payments;
       if (refunds === null) refunds = ordersData.refunds;
     }
     payments = payments || [];
     refunds = refunds || [];
 
-    // 顧客名＋プラン詳細を並列取得
+    // 顧客名＋プラン詳細を並列取得（タイムアウト付き）
     const planVariationIds = rawSubs.map(s => s.planVariationId).filter(Boolean);
     const [customers, plans] = await Promise.all([
-      fetchAllCustomers(client),
-      fetchPlanDetails(client, planVariationIds),
+      withTimeout(fetchAllCustomers(client), 15000, {}, 'Customers'),
+      withTimeout(fetchPlanDetails(client, planVariationIds), 10000, {}, 'Plans'),
     ]);
 
     // サブスクリプションを整形

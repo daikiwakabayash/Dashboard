@@ -1103,6 +1103,7 @@
 
                 const toYM = d => { if (!d) return null; const dt = new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`; };
                 const getName = (s) => cust[s.customerId] ? cust[s.customerId].name : s.customerId;
+                const getInvName = (inv) => cust[inv.customerId] ? cust[inv.customerId].name : inv.customerId;
                 const isActiveAt = (s, date) => {
                     const start = s.startDate ? new Date(s.startDate) : null;
                     if (!start || start > date) return false;
@@ -1111,27 +1112,45 @@
                     return false;
                 };
 
+                const allInvoices = sqData.invoices || [];
+                const realSubIds = new Set(subs.map(s => s.id));
+
+                // サブスクデータがない店舗向けフォールバック判定
+                // （サブスクAPIがタイムアウトした場合、インボイスのlocationIdで直接フィルタ）
+                const useInvoiceFallback = sqStore !== 'all' && filtered.length === 0
+                    && allInvoices.some(inv => inv.subscriptionId && inv.locationId === sqStore);
+
                 // 基準月・前月のアクティブ
                 const activeRef = filtered.filter(s => isActiveAt(s, refEnd));
                 const activePrev = filtered.filter(s => isActiveAt(s, prevEnd));
-                // 同一名前で重複排除した会員数
-                const memberCount = new Set(activeRef.map(s => getName(s))).size;
-                const prevMemberCount = new Set(activePrev.map(s => getName(s))).size;
+
+                let memberCount, prevMemberCount;
+                if (useInvoiceFallback) {
+                    // フォールバック: インボイスのユニーク顧客名で会員数を推定
+                    const invRef = allInvoices.filter(inv => inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth && inv.locationId === sqStore);
+                    const invPrev = allInvoices.filter(inv => inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === prevYM && inv.locationId === sqStore);
+                    memberCount = new Set(invRef.map(inv => getInvName(inv))).size;
+                    prevMemberCount = new Set(invPrev.map(inv => getInvName(inv))).size;
+                } else {
+                    memberCount = new Set(activeRef.map(s => getName(s))).size;
+                    prevMemberCount = new Set(activePrev.map(s => getName(s))).size;
+                }
 
                 // MRR = 選択月のサブスク決済の合計（PAID invoices with subscriptionId）
-                const allInvoices = sqData.invoices || [];
-                const realSubIds = new Set(subs.map(s => s.id));
+                // フォールバック時はインボイスのlocationIdで直接フィルタ（realSubIdsチェック不要）
                 const subInvsMonth = allInvoices.filter(inv =>
-                    inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth && realSubIds.has(inv.subscriptionId)
+                    inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth
+                    && (useInvoiceFallback ? inv.locationId === sqStore : realSubIds.has(inv.subscriptionId))
                 );
-                const storeSubIds = sqStore === 'all' ? null : new Set(filtered.map(s => s.id));
+                const storeSubIds = (sqStore === 'all' || useInvoiceFallback) ? null : new Set(filtered.map(s => s.id));
                 const filteredSubInvs = storeSubIds
                     ? subInvsMonth.filter(inv => storeSubIds.has(inv.subscriptionId))
                     : subInvsMonth;
                 const mrr = filteredSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
 
                 const prevSubInvs = allInvoices.filter(inv =>
-                    inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === prevYM && realSubIds.has(inv.subscriptionId)
+                    inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === prevYM
+                    && (useInvoiceFallback ? inv.locationId === sqStore : realSubIds.has(inv.subscriptionId))
                 );
                 const filteredPrevSubInvs = storeSubIds
                     ? prevSubInvs.filter(inv => storeSubIds.has(inv.subscriptionId))
@@ -1148,19 +1167,12 @@
                 let totalSales = monthPayments.reduce((sum, p) => sum + p.amount, 0);
                 // フォールバック: Orders APIが空の場合、PAIDインボイス合計を使用
                 if (totalSales === 0 && allPayments.length === 0) {
-                    const allInvs = sqData.invoices || [];
-                    const paidInvsMonth = allInvs.filter(inv =>
+                    const paidInvsMonth = allInvoices.filter(inv =>
                         inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth
                     );
                     const storeInvs = sqStore === 'all'
                         ? paidInvsMonth
-                        : paidInvsMonth.filter(inv => {
-                            if (inv.subscriptionId) {
-                                const sub = subs.find(s => s.id === inv.subscriptionId);
-                                return sub && sub.locationId === sqStore;
-                            }
-                            return true;
-                        });
+                        : paidInvsMonth.filter(inv => inv.locationId === sqStore);
                     totalSales = storeInvs.reduce((sum, inv) => sum + inv.amount, 0);
                 }
 
@@ -1183,24 +1195,43 @@
                 const startActive = activePrev.length + newInMonth.length;
                 const churnRate = startActive > 0 ? Math.round(canceledInMonth.length / startActive * 10000) / 100 : 0;
 
-                // 店舗別
+                // 店舗別（各店舗ごとに独立して計算）
                 const byStore = {};
                 for (const store of (sqData.stores || [])) {
                     const ss = subs.filter(s => s.locationId === store.id);
-                    const sa = ss.filter(s => isActiveAt(s, refEnd));
-                    const sp = ss.filter(s => isActiveAt(s, prevEnd));
-                    const smc = new Set(sa.map(s => getName(s))).size;
-                    const storeSubIdSet = new Set(ss.map(s => s.id));
-                    const storeSubInvs = subInvsMonth.filter(inv => storeSubIdSet.has(inv.subscriptionId));
-                    const smrr = storeSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
-                    const sn = ss.filter(s => toYM(s.startDate) === sqMonth);
-                    const sc = ss.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === sqMonth);
-                    const sStartA = sp.length + sn.length;
+                    const storeHasSubs = ss.length > 0;
+                    let smc, smrr, sn, sc, sStartA, sChurn;
+                    if (storeHasSubs) {
+                        // 通常パス: サブスクデータあり
+                        const sa = ss.filter(s => isActiveAt(s, refEnd));
+                        const sp = ss.filter(s => isActiveAt(s, prevEnd));
+                        smc = new Set(sa.map(s => getName(s))).size;
+                        const storeSubIdSet = new Set(ss.map(s => s.id));
+                        // 店舗ごとのMRR: realSubIdsで直接フィルタ（useInvoiceFallbackの影響を受けない）
+                        const storeSubInvs = allInvoices.filter(inv =>
+                            inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth
+                            && realSubIds.has(inv.subscriptionId) && storeSubIdSet.has(inv.subscriptionId)
+                        );
+                        smrr = storeSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
+                        sn = ss.filter(s => toYM(s.startDate) === sqMonth);
+                        sc = ss.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === sqMonth);
+                        sStartA = sp.length + sn.length;
+                        sChurn = sStartA > 0 ? Math.round(sc.length / sStartA * 10000) / 100 : 0;
+                    } else {
+                        // フォールバック: インボイスのlocationIdで直接計算
+                        const storeInvsRef = allInvoices.filter(inv => inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth && inv.locationId === store.id);
+                        const storeInvsPrev = allInvoices.filter(inv => inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === prevYM && inv.locationId === store.id);
+                        smc = new Set(storeInvsRef.map(inv => getInvName(inv))).size;
+                        smrr = storeInvsRef.reduce((sum, inv) => sum + inv.amount, 0);
+                        sn = []; sc = [];
+                        sChurn = 0;
+                    }
                     byStore[store.id] = {
                         name: store.name, memberCount: smc, mrr: smrr,
                         arpu: smc > 0 ? Math.round(smrr / smc) : 0,
-                        churnRate: sStartA > 0 ? Math.round(sc.length / sStartA * 10000) / 100 : 0,
-                        newEnrolled: sn.length, canceled: sc.length,
+                        churnRate: sChurn,
+                        newEnrolled: storeHasSubs ? sn.length : 0, canceled: storeHasSubs ? sc.length : 0,
+                        isEstimated: !storeHasSubs && smc > 0,
                     };
                 }
 
@@ -1269,23 +1300,32 @@
                     const td = new Date(refY, refM - 1 - i, 1);
                     const ym = `${td.getFullYear()}-${String(td.getMonth()+1).padStart(2,'0')}`;
                     const eom = new Date(td.getFullYear(), td.getMonth()+1, 0);
-                    const ma = filtered.filter(s => isActiveAt(s, eom));
-                    // MRR = その月のPAIDサブスクインボイス合計（テスト除外済み）
+                    // MRR = その月のPAIDサブスクインボイス合計
                     const ymSubInvs = allInvoices.filter(inv =>
-                        inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === ym && realSubIds.has(inv.subscriptionId)
+                        inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === ym
+                        && (useInvoiceFallback ? inv.locationId === sqStore : realSubIds.has(inv.subscriptionId))
                     );
                     const ymFilteredSubInvs = storeSubIds
                         ? ymSubInvs.filter(inv => storeSubIds.has(inv.subscriptionId))
                         : ymSubInvs;
-                    // 名前で重複排除した入会・解約人数
-                    const newNames = new Set(filtered.filter(s => toYM(s.startDate) === ym).map(s => getName(s)));
-                    const canceledNames = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === ym).map(s => getName(s)));
+                    let ymMemberCount, ymNewCount, ymCanceledCount;
+                    if (useInvoiceFallback) {
+                        // フォールバック: インボイスのユニーク顧客名
+                        ymMemberCount = new Set(ymSubInvs.map(inv => getInvName(inv))).size;
+                        ymNewCount = 0;
+                        ymCanceledCount = 0;
+                    } else {
+                        const ma = filtered.filter(s => isActiveAt(s, eom));
+                        ymMemberCount = new Set(ma.map(s => getName(s))).size;
+                        ymNewCount = new Set(filtered.filter(s => toYM(s.startDate) === ym).map(s => getName(s))).size;
+                        ymCanceledCount = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === ym).map(s => getName(s))).size;
+                    }
                     monthlyTrends.push({
                         month: ym,
-                        memberCount: new Set(ma.map(s => getName(s))).size,
+                        memberCount: ymMemberCount,
                         mrr: ymFilteredSubInvs.reduce((sum, inv) => sum + inv.amount, 0),
-                        newEnrolled: newNames.size,
-                        canceled: canceledNames.size,
+                        newEnrolled: ymNewCount,
+                        canceled: ymCanceledCount,
                     });
                 }
 
@@ -1335,6 +1375,12 @@
                     if (s.startDate) allMonths.add(toYM(s.startDate));
                     if (s.canceledDate) allMonths.add(toYM(s.canceledDate));
                 }
+                // フォールバック時はインボイスの月も含める
+                if (useInvoiceFallback) {
+                    for (const inv of allInvoices) {
+                        if (inv.locationId === sqStore && inv.createdAt) allMonths.add(toYM(inv.createdAt));
+                    }
+                }
                 const now = new Date();
                 for (let i = 0; i < 12; i++) {
                     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
@@ -1348,6 +1394,7 @@
                     arpu, churnRate, firstMonthChurn, threeMonthChurn,
                     retention3m, retention6m, retention12m, ltv,
                     byStore, byPlan, monthlyTrends, cohort, availableMonths,
+                    isEstimated: useInvoiceFallback,
                 };
             }, [sqData, sqStore, sqMonth]);
 
@@ -1385,65 +1432,121 @@
                 const allSubs = sqData.subscriptions.filter(isRealSub);
                 const storeSubs = sqStore === 'all' ? allSubs : allSubs.filter(s => s.locationId === sqStore);
 
+                // サブスクデータがない店舗向けインボイスフォールバック判定
+                const allInvs = sqData.invoices || [];
+                const useInvFallback = sqStore !== 'all' && storeSubs.length === 0
+                    && allInvs.some(inv => inv.subscriptionId && inv.locationId === sqStore);
+
                 const activeList = [];
                 const canceledList = [];
                 const refundedList = [];
                 const overdueList = [];
                 const seenInv = {};
 
-                for (const sub of storeSubs) {
-                    const name = cust[sub.customerId] ? cust[sub.customerId].name : sub.customerId || '不明';
-                    const planName = plans[sub.planVariationId] ? plans[sub.planVariationId].name : '不明';
-                    const subInvs = invBySub[sub.id] || [];
-                    const paid = subInvs.filter(i => i.status === 'PAID');
-
-                    // 月別の決済額マップ（dedup時にユニーク月のみの金額を計算するため）
-                    const paidByMonth = {};
-                    for (const inv of paid) {
-                        const ym = toYM(inv.createdAt);
-                        if (ym && !paidByMonth[ym]) {
-                            paidByMonth[ym] = inv.amount;
+                if (useInvFallback) {
+                    // フォールバック: インボイスから顧客リストを構築
+                    const storeInvs = allInvs.filter(inv => inv.subscriptionId && inv.locationId === sqStore);
+                    // 顧客ごとにインボイスをグループ化
+                    const invByCustomer = {};
+                    for (const inv of storeInvs) {
+                        const custId = inv.customerId || inv.subscriptionId;
+                        if (!invByCustomer[custId]) invByCustomer[custId] = [];
+                        invByCustomer[custId].push(inv);
+                    }
+                    for (const [custId, custInvs] of Object.entries(invByCustomer)) {
+                        const name = cust[custId] ? cust[custId].name : custId || '不明';
+                        const paid = custInvs.filter(i => i.status === 'PAID');
+                        const paidByMonth = {};
+                        for (const inv of paid) {
+                            const ym = toYM(inv.createdAt);
+                            if (ym && !paidByMonth[ym]) paidByMonth[ym] = inv.amount;
+                        }
+                        const paidMonths = Object.keys(paidByMonth);
+                        const latestPaidAmount = paidMonths.length > 0 ? paidByMonth[paidMonths.sort().reverse()[0]] : 0;
+                        const entry = {
+                            id: custId, customerId: custId, name, plan: '(インボイスデータ)',
+                            paidCount: paidMonths.length,
+                            paidTotal: paidMonths.reduce((s, m) => s + paidByMonth[m], 0),
+                            paidByMonth, paidMonths,
+                            startDate: paid.length > 0 ? paid.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))[0].createdAt : null,
+                            canceledDate: null,
+                            monthlyPrice: latestPaidAmount,
+                        };
+                        // 当月にPAID決済がある → アクティブ
+                        if (paidByMonth[sqMonth]) {
+                            activeList.push(entry);
+                        }
+                        // 払戻し・期限超過
+                        for (const inv of custInvs) {
+                            if (seenInv[inv.id]) continue;
+                            const invYM = inv.createdAt ? toYM(inv.createdAt) : null;
+                            const dueYM = inv.dueDate ? toYM(inv.dueDate) : null;
+                            if ((inv.status === 'REFUNDED' || inv.status === 'PARTIALLY_REFUNDED') && invYM === sqMonth) {
+                                seenInv[inv.id] = true;
+                                refundedList.push({ ...inv, name, plan: '(インボイスデータ)' });
+                            }
+                            if ((inv.status === 'UNPAID' || inv.status === 'PAYMENT_PENDING') && dueYM === sqMonth) {
+                                seenInv[inv.id] = true;
+                                overdueList.push({ ...inv, name, plan: '(インボイスデータ)' });
+                            }
                         }
                     }
-                    const paidMonths = Object.keys(paidByMonth);
+                } else {
+                    // 通常パス: サブスクデータあり
+                    for (const sub of storeSubs) {
+                        const name = cust[sub.customerId] ? cust[sub.customerId].name : sub.customerId || '不明';
+                        const planName = plans[sub.planVariationId] ? plans[sub.planVariationId].name : '不明';
+                        const subInvs = invBySub[sub.id] || [];
+                        const paid = subInvs.filter(i => i.status === 'PAID');
 
-                    const entry = {
-                        id: sub.id, customerId: sub.customerId, name, plan: planName,
-                        paidCount: paidMonths.length,
-                        paidTotal: paidMonths.reduce((s, m) => s + paidByMonth[m], 0),
-                        paidByMonth,
-                        paidMonths,
-                        startDate: sub.startDate, canceledDate: sub.canceledDate,
-                        monthlyPrice: sub.monthlyPrice,
-                    };
-
-                    // アクティブ: 選択月末時点でアクティブなサブスク
-                    const start = sub.startDate ? new Date(sub.startDate) : null;
-                    const isActiveAtMonth = start && start <= monthEnd && (
-                        (sub.status === 'ACTIVE' || sub.status === 'PAUSED') ||
-                        (sub.canceledDate && new Date(sub.canceledDate) > monthEnd)
-                    );
-                    if (isActiveAtMonth) {
-                        activeList.push(entry);
-                    }
-
-                    // 解約: 選択月内に解約されたサブスクのみ
-                    if ((sub.status === 'CANCELED' || sub.status === 'DEACTIVATED') && toYM(sub.canceledDate) === sqMonth) {
-                        canceledList.push(entry);
-                    }
-
-                    // 払戻し・期限超過: 選択月のインボイスのみ
-                    for (const inv of subInvs) {
-                        if (seenInv[inv.id]) continue;
-                        const invYM = inv.createdAt ? toYM(inv.createdAt) : null;
-                        const dueYM = inv.dueDate ? toYM(inv.dueDate) : null;
-                        if ((inv.status === 'REFUNDED' || inv.status === 'PARTIALLY_REFUNDED') && invYM === sqMonth) {
-                            seenInv[inv.id] = true;
-                            refundedList.push({ ...inv, name, plan: planName });
+                        // 月別の決済額マップ（dedup時にユニーク月のみの金額を計算するため）
+                        const paidByMonth = {};
+                        for (const inv of paid) {
+                            const ym = toYM(inv.createdAt);
+                            if (ym && !paidByMonth[ym]) {
+                                paidByMonth[ym] = inv.amount;
+                            }
                         }
-                        if ((inv.status === 'UNPAID' || inv.status === 'PAYMENT_PENDING') && dueYM === sqMonth) {
-                            seenInv[inv.id] = true;
-                            overdueList.push({ ...inv, name, plan: planName });
+                        const paidMonths = Object.keys(paidByMonth);
+
+                        const entry = {
+                            id: sub.id, customerId: sub.customerId, name, plan: planName,
+                            paidCount: paidMonths.length,
+                            paidTotal: paidMonths.reduce((s, m) => s + paidByMonth[m], 0),
+                            paidByMonth,
+                            paidMonths,
+                            startDate: sub.startDate, canceledDate: sub.canceledDate,
+                            monthlyPrice: sub.monthlyPrice,
+                        };
+
+                        // アクティブ: 選択月末時点でアクティブなサブスク
+                        const start = sub.startDate ? new Date(sub.startDate) : null;
+                        const isActiveAtMonth = start && start <= monthEnd && (
+                            (sub.status === 'ACTIVE' || sub.status === 'PAUSED') ||
+                            (sub.canceledDate && new Date(sub.canceledDate) > monthEnd)
+                        );
+                        if (isActiveAtMonth) {
+                            activeList.push(entry);
+                        }
+
+                        // 解約: 選択月内に解約されたサブスクのみ
+                        if ((sub.status === 'CANCELED' || sub.status === 'DEACTIVATED') && toYM(sub.canceledDate) === sqMonth) {
+                            canceledList.push(entry);
+                        }
+
+                        // 払戻し・期限超過: 選択月のインボイスのみ
+                        for (const inv of subInvs) {
+                            if (seenInv[inv.id]) continue;
+                            const invYM = inv.createdAt ? toYM(inv.createdAt) : null;
+                            const dueYM = inv.dueDate ? toYM(inv.dueDate) : null;
+                            if ((inv.status === 'REFUNDED' || inv.status === 'PARTIALLY_REFUNDED') && invYM === sqMonth) {
+                                seenInv[inv.id] = true;
+                                refundedList.push({ ...inv, name, plan: planName });
+                            }
+                            if ((inv.status === 'UNPAID' || inv.status === 'PAYMENT_PENDING') && dueYM === sqMonth) {
+                                seenInv[inv.id] = true;
+                                overdueList.push({ ...inv, name, plan: planName });
+                            }
                         }
                     }
                 }
@@ -1481,28 +1584,30 @@
                     return Object.values(map);
                 };
 
-                // 新規入会: 選択月に入会したサブスク
+                // 新規入会: 選択月に入会したサブスク（フォールバック時は空）
                 const newMonthList = [];
-                for (const sub of storeSubs) {
-                    if (toYM(sub.startDate) !== sqMonth) continue;
-                    const name = cust[sub.customerId] ? cust[sub.customerId].name : sub.customerId || '不明';
-                    const planName = plans[sub.planVariationId] ? plans[sub.planVariationId].name : '不明';
-                    const subInvs = invBySub[sub.id] || [];
-                    const paid = subInvs.filter(i => i.status === 'PAID');
-                    const paidByMonth = {};
-                    for (const inv of paid) {
-                        const ym = toYM(inv.createdAt);
-                        if (ym && !paidByMonth[ym]) paidByMonth[ym] = inv.amount;
+                if (!useInvFallback) {
+                    for (const sub of storeSubs) {
+                        if (toYM(sub.startDate) !== sqMonth) continue;
+                        const name = cust[sub.customerId] ? cust[sub.customerId].name : sub.customerId || '不明';
+                        const planName = plans[sub.planVariationId] ? plans[sub.planVariationId].name : '不明';
+                        const subInvs = invBySub[sub.id] || [];
+                        const paid = subInvs.filter(i => i.status === 'PAID');
+                        const paidByMonth = {};
+                        for (const inv of paid) {
+                            const ym = toYM(inv.createdAt);
+                            if (ym && !paidByMonth[ym]) paidByMonth[ym] = inv.amount;
+                        }
+                        const paidMonths = Object.keys(paidByMonth);
+                        newMonthList.push({
+                            id: sub.id, customerId: sub.customerId, name, plan: planName,
+                            paidCount: paidMonths.length,
+                            paidTotal: paidMonths.reduce((s, m) => s + paidByMonth[m], 0),
+                            paidByMonth, paidMonths,
+                            startDate: sub.startDate, canceledDate: sub.canceledDate,
+                            monthlyPrice: sub.monthlyPrice,
+                        });
                     }
-                    const paidMonths = Object.keys(paidByMonth);
-                    newMonthList.push({
-                        id: sub.id, customerId: sub.customerId, name, plan: planName,
-                        paidCount: paidMonths.length,
-                        paidTotal: paidMonths.reduce((s, m) => s + paidByMonth[m], 0),
-                        paidByMonth, paidMonths,
-                        startDate: sub.startDate, canceledDate: sub.canceledDate,
-                        monthlyPrice: sub.monthlyPrice,
-                    });
                 }
 
                 return { activeList: dedup(activeList), newMonthList: dedup(newMonthList), canceledList: dedup(canceledList), refundedList, overdueList };
@@ -6333,6 +6438,17 @@
                                                 {sqData.meta.diagnostics.filter(d => d.plansPartial).map((d, idx) => (
                                                     <span key={idx} className="text-xs text-slate-400 mr-3">{d.account}: {d.plansPartial}</span>
                                                 ))}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Invoice Fallback Notice */}
+                                    {sqMetrics && sqMetrics.isEstimated && (
+                                        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2">
+                                            <AlertCircle size={16} className="text-amber-500 mt-0.5 flex-shrink-0" />
+                                            <div>
+                                                <p className="text-xs font-bold text-amber-700">この店舗のサブスクリプションAPIがタイムアウトしたため、インボイスデータから推定値を表示しています</p>
+                                                <p className="text-xs text-amber-500 mt-0.5">会員数・MRR・ARPUはPAID決済インボイスに基づく推定です。新規入会・解約・コホートデータは利用できません。</p>
                                             </div>
                                         </div>
                                     )}

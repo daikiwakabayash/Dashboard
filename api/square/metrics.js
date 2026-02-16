@@ -133,33 +133,58 @@ async function fetchLocations(client, diag) {
   }
 }
 
-// ── サブスクリプション一括取得（全ロケーション同時検索でAPI呼出しを最小化） ──
-async function fetchAllSubscriptions(client, locationIds, diag) {
+// ── サブスクリプション取得（ロケーション別・タイムアウト時は部分結果を返す） ──
+async function fetchAllSubscriptions(client, locationIds, diag, timeoutMs = 55000) {
+  const allSubs = [];
   const errors = [];
-  const subs = [];
-  let cursor = undefined;
-  do {
-    try {
-      const { result } = await client.subscriptionsApi.searchSubscriptions({
-        query: { filter: { locationIds } },
-        cursor,
-      });
-      if (result.subscriptions) subs.push(...result.subscriptions);
-      cursor = result.cursor;
-    } catch (err) {
-      const errMsg = extractApiError(err);
-      console.error(`  Subscriptions error:`, errMsg);
-      errors.push(errMsg);
-      cursor = undefined;
+  const startTime = Date.now();
+  let timedOut = false;
+
+  // ロケーション別に取得（部分結果を保持するため）
+  for (const locId of locationIds) {
+    if (Date.now() - startTime > timeoutMs) {
+      timedOut = true;
+      errors.push(`残りロケーション省略 (${timeoutMs / 1000}s超過)`);
+      break;
     }
-  } while (cursor);
-  if (diag) {
-    diag.subscriptionsApi = errors.length > 0
-      ? `${subs.length}件取得, エラー${errors.length}件: ${errors.join('; ')}`
-      : `ok: ${subs.length}件`;
+    let cursor = undefined;
+    let locCount = 0;
+    do {
+      if (Date.now() - startTime > timeoutMs) {
+        timedOut = true;
+        if (locCount > 0) errors.push(`${locId}: ページネーション途中 (${locCount}件取得済)`);
+        else errors.push(`${locId}: タイムアウト`);
+        break;
+      }
+      try {
+        const { result } = await client.subscriptionsApi.searchSubscriptions({
+          query: { filter: { locationIds: [locId] } },
+          cursor,
+        });
+        if (result.subscriptions) {
+          allSubs.push(...result.subscriptions);
+          locCount += result.subscriptions.length;
+        }
+        cursor = result.cursor;
+      } catch (err) {
+        const errMsg = extractApiError(err);
+        console.error(`  Subscriptions error (${locId}):`, errMsg);
+        errors.push(`${locId}: ${errMsg}`);
+        cursor = undefined;
+      }
+    } while (cursor);
   }
-  console.log(`  Subscriptions API: ${subs.length}件取得${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
-  return subs;
+  if (diag) {
+    if (timedOut) {
+      diag.subscriptionsApi = `${allSubs.length}件取得 (部分結果・タイムアウト${timeoutMs / 1000}s)`;
+    } else {
+      diag.subscriptionsApi = errors.length > 0
+        ? `${allSubs.length}件取得, エラー${errors.length}件: ${errors.join('; ')}`
+        : `ok: ${allSubs.length}件`;
+    }
+  }
+  console.log(`  Subscriptions API: ${allSubs.length}件取得${timedOut ? ' (partial/timeout)' : ''}${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
+  return allSubs;
 }
 
 async function fetchPlanDetails(client, planVariationIds) {
@@ -328,6 +353,7 @@ async function fetchInvoices(client, locationIds, diag) {
               amount: pr ? toNumber(pr.computedAmountMoney && pr.computedAmountMoney.amount) : 0,
               dueDate: pr ? pr.dueDate : null,
               createdAt: inv.createdAt,
+              locationId: locId,
             });
           }
         }
@@ -437,14 +463,16 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     // Note: Payments API/Refunds APIはSquare SDK v39の@apimaticバグ(INVALID_URL)のため
     //       Orders API (searchOrders: POST body) で統一して取得する
     const API_TIMEOUT = 55000; // 各API最大55秒（サブスク大量データ対応）
+    // サブスクは内部で部分結果を管理するため withTimeout を使わない
     const [rawSubs, invoices, ordersData, customers] = await Promise.all([
-      withTimeout(fetchAllSubscriptions(client, locationIds, diag), API_TIMEOUT, [], 'Subscriptions'),
+      fetchAllSubscriptions(client, locationIds, diag, API_TIMEOUT),
       withTimeout(fetchInvoices(client, locationIds, diag), API_TIMEOUT, [], 'Invoices'),
       withTimeout(fetchSalesFromOrders(client, locationIds, diag), 30000, { payments: [], refunds: [] }, 'Orders'),
       withTimeout(fetchAllCustomers(client, diag), 20000, {}, 'Customers'),
     ]);
 
     // タイムアウト検出: withTimeoutがfallbackを返した場合、diagに記録がない
+    // Note: subscriptionsApiはfetchAllSubscriptions内部で設定済み
     if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (55s)';
     if (!diag.invoicesApi) diag.invoicesApi = 'timeout (55s)';
     if (!diag.paymentsApi) diag.paymentsApi = 'timeout (30s)';

@@ -133,47 +133,57 @@ async function fetchLocations(client, diag) {
   }
 }
 
-// ── サブスクリプション取得（ロケーション別・タイムアウト時は部分結果を返す） ──
+// ── サブスクリプション取得（ロケーション並列・リトライ付き・タイムアウト時は部分結果を返す） ──
 async function fetchAllSubscriptions(client, locationIds, diag, timeoutMs = 55000) {
   const allSubs = [];
   const errors = [];
   const startTime = Date.now();
   let timedOut = false;
 
-  // ロケーション別に取得（部分結果を保持するため）
-  for (const locId of locationIds) {
-    if (Date.now() - startTime > timeoutMs) {
-      timedOut = true;
-      errors.push(`残りロケーション省略 (${timeoutMs / 1000}s超過)`);
-      break;
-    }
+  // ロケーション別に並列取得（最大3並列、fetchInvoicesと同じアプローチ）
+  await parallelWithLimit(locationIds, 3, async (locId) => {
     let cursor = undefined;
     let locCount = 0;
     do {
       if (Date.now() - startTime > timeoutMs) {
         timedOut = true;
         if (locCount > 0) errors.push(`${locId}: ページネーション途中 (${locCount}件取得済)`);
-        else errors.push(`${locId}: タイムアウト`);
         break;
       }
-      try {
-        const { result } = await client.subscriptionsApi.searchSubscriptions({
-          query: { filter: { locationIds: [locId] } },
-          cursor,
-        });
-        if (result.subscriptions) {
-          allSubs.push(...result.subscriptions);
-          locCount += result.subscriptions.length;
+      // 500系エラー時のリトライ（最大2回、指数バックオフ）
+      let succeeded = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const { result } = await client.subscriptionsApi.searchSubscriptions({
+            query: { filter: { locationIds: [locId] } },
+            cursor,
+          });
+          if (result.subscriptions) {
+            allSubs.push(...result.subscriptions);
+            locCount += result.subscriptions.length;
+          }
+          cursor = result.cursor;
+          succeeded = true;
+          break;
+        } catch (err) {
+          const is500 = err.statusCode >= 500 || (err.message && err.message.includes('500'));
+          if (is500 && attempt < 2) {
+            const delay = 1000 * (attempt + 1); // 1s, 2s
+            console.warn(`  Subscriptions 500 error (${locId}), retry ${attempt + 1}/2 in ${delay}ms...`);
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
+          const errMsg = extractApiError(err);
+          console.error(`  Subscriptions error (${locId}):`, errMsg);
+          errors.push(`${locId}: ${errMsg}`);
+          cursor = undefined;
+          succeeded = true; // エラー処理完了、リトライループ脱出
+          break;
         }
-        cursor = result.cursor;
-      } catch (err) {
-        const errMsg = extractApiError(err);
-        console.error(`  Subscriptions error (${locId}):`, errMsg);
-        errors.push(`${locId}: ${errMsg}`);
-        cursor = undefined;
       }
+      if (!succeeded) cursor = undefined;
     } while (cursor);
-  }
+  });
   if (diag) {
     if (timedOut) {
       diag.subscriptionsApi = `${allSubs.length}件取得 (部分結果・タイムアウト${timeoutMs / 1000}s)`;

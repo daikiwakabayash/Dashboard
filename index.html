@@ -6337,6 +6337,70 @@
                                         </div>
                                     )}
 
+                                    {/* API Diagnostics Panel - データがあるのにサブスク0件の場合に表示 */}
+                                    {sqData && sqData.meta && sqData.meta.diagnostics && sqData.meta.diagnostics.length > 0 && (
+                                        <details className="bg-slate-50 border border-slate-200 rounded-xl overflow-hidden"
+                                            open={sqData.subscriptions && sqData.subscriptions.length === 0 || sqData.meta.diagnostics.some(d => d.subscriptionsApi && !d.subscriptionsApi.startsWith('ok'))}>
+                                            <summary className="px-4 py-3 cursor-pointer flex items-center gap-2 text-xs font-black text-slate-500 hover:bg-slate-100 transition-colors">
+                                                <Info size={14} className="text-slate-400" />
+                                                API診断情報
+                                                {sqData.subscriptions && sqData.subscriptions.length === 0 && (
+                                                    <span className="ml-2 px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full text-xs font-bold">サブスク0件</span>
+                                                )}
+                                                {sqData.meta.diagnostics.some(d => d.subscriptionsApi && !d.subscriptionsApi.startsWith('ok')) && (
+                                                    <span className="ml-1 px-2 py-0.5 bg-red-100 text-red-700 rounded-full text-xs font-bold">APIエラーあり</span>
+                                                )}
+                                            </summary>
+                                            <div className="px-4 pb-3 space-y-2">
+                                                {sqData.meta.diagnostics.map((d, idx) => (
+                                                    <div key={idx} className="bg-white rounded-lg p-3 border border-slate-100">
+                                                        <p className="text-xs font-black text-slate-700 mb-2">{d.account || `アカウント${idx + 1}`}</p>
+                                                        <div className="grid grid-cols-2 md:grid-cols-3 gap-1.5">
+                                                            {d.locationsApi && (
+                                                                <span className={`text-xs px-2 py-1 rounded ${d.locationsApi.startsWith('ok') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'} font-mono`}>
+                                                                    Locations: {d.locationsApi}
+                                                                </span>
+                                                            )}
+                                                            {d.subscriptionsApi && (
+                                                                <span className={`text-xs px-2 py-1 rounded ${d.subscriptionsApi.startsWith('ok') ? 'bg-emerald-50 text-emerald-700' : d.subscriptionsApi.startsWith('timeout') ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-700'} font-mono`}>
+                                                                    Subs: {d.subscriptionsApi}
+                                                                </span>
+                                                            )}
+                                                            {d.invoicesApi && (
+                                                                <span className={`text-xs px-2 py-1 rounded ${d.invoicesApi.startsWith('ok') ? 'bg-emerald-50 text-emerald-700' : d.invoicesApi.startsWith('timeout') ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-700'} font-mono`}>
+                                                                    Invoices: {d.invoicesApi}
+                                                                </span>
+                                                            )}
+                                                            {d.paymentsApi && (
+                                                                <span className={`text-xs px-2 py-1 rounded ${d.paymentsApi.startsWith('ok') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'} font-mono`}>
+                                                                    Payments: {d.paymentsApi}
+                                                                </span>
+                                                            )}
+                                                            {d.refundsApi && (
+                                                                <span className={`text-xs px-2 py-1 rounded ${d.refundsApi.startsWith('ok') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'} font-mono`}>
+                                                                    Refunds: {d.refundsApi}
+                                                                </span>
+                                                            )}
+                                                            {d.customersApi && (
+                                                                <span className={`text-xs px-2 py-1 rounded ${d.customersApi.startsWith('ok') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'} font-mono`}>
+                                                                    Customers: {d.customersApi}
+                                                                </span>
+                                                            )}
+                                                            {d.subscriptionStatuses && (
+                                                                <span className="text-xs px-2 py-1 rounded bg-blue-50 text-blue-700 font-mono col-span-2">
+                                                                    Status: {Object.entries(d.subscriptionStatuses).map(([k,v]) => `${k}=${v}`).join(', ')}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                                <p className="text-xs text-slate-400 mt-1">
+                                                    エラーやtimeoutがある場合: Square Developer Dashboardでトークンのスコープ（SUBSCRIPTIONS_READ, INVOICES_READ等）を確認してください
+                                                </p>
+                                            </div>
+                                        </details>
+                                    )}
+
                                     {/* No Data */}
                                     {!sqLoading && !sqError && !sqData && (
                                         <div className="bg-blue-50 border-2 border-blue-200 rounded-3xl p-8 text-center">

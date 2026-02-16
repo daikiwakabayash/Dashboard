@@ -116,21 +116,26 @@ function normalizeToMonthly(amount, cadence) {
   }
 }
 
-async function fetchLocations(client) {
+async function fetchLocations(client, diag) {
   try {
     const { result } = await client.locationsApi.listLocations();
-    return (result.locations || []).map(loc => ({
+    const locs = (result.locations || []).map(loc => ({
       id: loc.id,
       name: loc.name || loc.id,
     }));
+    if (diag) diag.locationsApi = `ok: ${locs.length}件`;
+    return locs;
   } catch (err) {
-    console.error('Failed to fetch locations:', err.message);
+    const errMsg = extractApiError(err);
+    console.error('Failed to fetch locations:', errMsg);
+    if (diag) diag.locationsApi = `error: ${errMsg}`;
     return [];
   }
 }
 
 // ── ロケーション並列版: サブスクリプション取得 ──
-async function fetchAllSubscriptions(client, locationIds) {
+async function fetchAllSubscriptions(client, locationIds, diag) {
+  const errors = [];
   const allSubs = await parallelWithLimit(locationIds, 3, async (locId) => {
     const subs = [];
     let cursor = undefined;
@@ -143,13 +148,22 @@ async function fetchAllSubscriptions(client, locationIds) {
         if (result.subscriptions) subs.push(...result.subscriptions);
         cursor = result.cursor;
       } catch (err) {
-        console.error(`  Subscriptions error (${locId}):`, err.message);
+        const errMsg = extractApiError(err);
+        console.error(`  Subscriptions error (${locId}):`, errMsg);
+        errors.push(`${locId}: ${errMsg}`);
         cursor = undefined;
       }
     } while (cursor);
     return subs;
   });
-  return allSubs.flat();
+  const flat = allSubs.flat();
+  if (diag) {
+    diag.subscriptionsApi = errors.length > 0
+      ? `${flat.length}件取得, エラー${errors.length}件: ${errors.join('; ')}`
+      : `ok: ${flat.length}件`;
+  }
+  console.log(`  Subscriptions API: ${flat.length}件取得${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
+  return flat;
 }
 
 async function fetchPlanDetails(client, planVariationIds) {
@@ -370,7 +384,8 @@ function extractApiError(err) {
 }
 
 // ── ロケーション並列版: インボイス取得 ──
-async function fetchInvoices(client, locationIds) {
+async function fetchInvoices(client, locationIds, diag) {
+  const errors = [];
   const allInvoices = await parallelWithLimit(locationIds, 3, async (locId) => {
     const invoices = [];
     let cursor = undefined;
@@ -399,19 +414,31 @@ async function fetchInvoices(client, locationIds) {
         }
         cursor = result.cursor;
       } catch (err) {
-        console.error(`  Invoices error (${locId}):`, err.message);
+        const errMsg = extractApiError(err);
+        console.error(`  Invoices error (${locId}):`, errMsg);
+        errors.push(`${locId}: ${errMsg}`);
         cursor = undefined;
       }
     } while (cursor);
     return invoices;
   });
-  return allInvoices.flat();
+  const flat = allInvoices.flat();
+  if (diag) {
+    const withSubId = flat.filter(inv => inv.subscriptionId).length;
+    diag.invoicesApi = errors.length > 0
+      ? `${flat.length}件取得 (サブスク紐付: ${withSubId}件), エラー${errors.length}件: ${errors.join('; ')}`
+      : `ok: ${flat.length}件 (サブスク紐付: ${withSubId}件)`;
+  }
+  console.log(`  Invoices API: ${flat.length}件取得${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
+  return flat;
 }
 
 // 全顧客名を取得
-async function fetchAllCustomers(client) {
+async function fetchAllCustomers(client, diag) {
   const customers = {};
   let cursor = undefined;
+  let hasError = false;
+  let errorMsg = '';
   do {
     try {
       const { result } = cursor
@@ -426,10 +453,18 @@ async function fetchAllCustomers(client) {
       }
       cursor = result.cursor;
     } catch (err) {
-      console.error('  Customers API error:', err.message);
+      errorMsg = extractApiError(err);
+      console.error('  Customers API error:', errorMsg);
+      hasError = true;
       cursor = undefined;
     }
   } while (cursor);
+  const count = Object.keys(customers).length;
+  if (diag) {
+    diag.customersApi = hasError
+      ? `${count}件取得, error: ${errorMsg}`
+      : `ok: ${count}件`;
+  }
   return customers;
 }
 
@@ -444,7 +479,10 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     }
     const client = await createClient(tokenConfig);
 
-    let stores = await fetchLocations(client);
+    // 診断情報トラッキング（早期初期化）
+    const diag = {};
+
+    let stores = await fetchLocations(client, diag);
     console.log(`[${accountName || 'main'}] ロケーション取得: ${stores.length}件`, stores.map(s => s.name));
     if (stores.length === 0) {
       stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];
@@ -476,19 +514,21 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     }
     const locationIds = stores.map(s => s.id);
 
-    // 診断情報トラッキング
-    const diag = {};
-
     // サブスク＋インボイス＋売上＋返品＋顧客を並列取得（各API個別タイムアウト付き）
     // 顧客取得はサブスクに依存しないためフェーズ1で並列実行し、合計時間を短縮
     const API_TIMEOUT = 25000; // 各API最大25秒
     const [rawSubs, invoices, paymentsApiData, refundsApiData, customers] = await Promise.all([
-      withTimeout(fetchAllSubscriptions(client, locationIds), API_TIMEOUT, [], 'Subscriptions'),
-      withTimeout(fetchInvoices(client, locationIds), API_TIMEOUT, [], 'Invoices'),
+      withTimeout(fetchAllSubscriptions(client, locationIds, diag), API_TIMEOUT, [], 'Subscriptions'),
+      withTimeout(fetchInvoices(client, locationIds, diag), API_TIMEOUT, [], 'Invoices'),
       withTimeout(fetchSalesPayments(client, locationIds, diag), API_TIMEOUT, null, 'Payments'),
       withTimeout(fetchRefundsFromApi(client, locationIds, diag), API_TIMEOUT, null, 'Refunds'),
-      withTimeout(fetchAllCustomers(client), 20000, {}, 'Customers'),
+      withTimeout(fetchAllCustomers(client, diag), 20000, {}, 'Customers'),
     ]);
+
+    // タイムアウト検出: withTimeoutがfallbackを返した場合、diagに記録がない
+    if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (25s)';
+    if (!diag.invoicesApi) diag.invoicesApi = 'timeout (25s)';
+    if (!diag.customersApi) diag.customersApi = 'timeout (20s)';
 
     let payments = paymentsApiData;
     let refunds = refundsApiData;
@@ -541,7 +581,17 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
       };
     });
 
+    // サブスクリプション状態別集計を診断情報に追加
+    if (subscriptions.length > 0) {
+      const statusCounts = {};
+      for (const s of subscriptions) {
+        statusCounts[s.status] = (statusCounts[s.status] || 0) + 1;
+      }
+      diag.subscriptionStatuses = statusCounts;
+    }
+
     console.log(`[${accountName || 'main'}] ${stores.length} stores, ${subscriptions.length} subs, ${invoices.length} inv, ${payments.length} payments, ${refunds.length} refunds`);
+    console.log(`[${accountName || 'main'}] diag:`, JSON.stringify(diag));
     return { stores, subscriptions, customers, invoices, payments, refunds, plans, _diag: diag };
   } catch (err) {
     let detail = err.message;

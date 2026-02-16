@@ -661,6 +661,7 @@
                     const merged = {
                         stores: [], subscriptions: [], customers: {},
                         invoices: [], payments: [], refunds: [], plans: {},
+                        diagnostics: [],
                     };
                     const failedAccounts = [];
 
@@ -693,6 +694,7 @@
                         merged.payments.push(...(data.payments || []));
                         merged.refunds.push(...(data.refunds || []));
                         Object.assign(merged.plans, data.plans || {});
+                        if (data.meta && data.meta.diagnostics) merged.diagnostics.push(...data.meta.diagnostics);
                     };
 
                     // 同時実行数制限付き並列処理
@@ -755,6 +757,7 @@
                                             totalStores: merged.stores.length,
                                             totalAccounts: totalAccounts,
                                             failedAccounts: failedAccounts.length > 0 ? [...failedAccounts] : undefined,
+                                            diagnostics: merged.diagnostics.length > 0 ? [...merged.diagnostics] : undefined,
                                             partial: completedBatches < totalBatches,
                                             generatedAt: new Date().toISOString(),
                                         },
@@ -786,6 +789,7 @@
                             totalStores: merged.stores.length,
                             totalAccounts: totalAccounts,
                             failedAccounts: failedAccounts.length > 0 ? failedAccounts : undefined,
+                            diagnostics: merged.diagnostics.length > 0 ? merged.diagnostics : undefined,
                             generatedAt: new Date().toISOString(),
                         },
                     };
@@ -1073,13 +1077,13 @@
                 if (!sqData || !sqData.subscriptions || !sqMonth) return null;
                 const cust = sqData.customers || {};
                 const plansMap = sqData.plans || {};
-                const plansLoaded = Object.keys(plansMap).length > 0;
-
-                // テスト・0円プランを除外（プランデータ未取得時はmonthlyPriceフィルタをスキップ）
+                // テスト・0円プランを除外（プラン未取得のサブスクは保持 = 部分データ消失を防止）
                 const isRealSub = (s) => {
-                    if (plansLoaded && s.monthlyPrice <= 0) return false;
-                    const pName = plansMap[s.planVariationId] ? plansMap[s.planVariationId].name : '';
-                    if (/テスト/i.test(pName)) return false;
+                    const plan = plansMap[s.planVariationId];
+                    if (plan) {
+                        if (s.monthlyPrice <= 0) return false;
+                        if (/テスト/i.test(plan.name)) return false;
+                    }
                     return true;
                 };
                 const subs = sqData.subscriptions.filter(isRealSub);
@@ -1344,16 +1348,17 @@
                 if (!sqData || !sqData.subscriptions || !sqData.invoices || !sqMonth) return null;
                 const cust = sqData.customers || {};
                 const plans = sqData.plans || {};
-                const plansLoaded = Object.keys(plans).length > 0;
                 const [refY, refM] = sqMonth.split('-').map(Number);
                 const monthEnd = new Date(refY, refM, 0, 23, 59, 59);
                 const toYM = d => { if (!d) return null; const dt = new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`; };
 
-                // テスト・0円プランを除外（プランデータ未取得時はmonthlyPriceフィルタをスキップ）
+                // テスト・0円プランを除外（プラン未取得のサブスクは保持 = 部分データ消失を防止）
                 const isRealSub = (s) => {
-                    if (plansLoaded && s.monthlyPrice <= 0) return false;
-                    const pName = plans[s.planVariationId] ? plans[s.planVariationId].name : '';
-                    if (/テスト/i.test(pName)) return false;
+                    const plan = plans[s.planVariationId];
+                    if (plan) {
+                        if (s.monthlyPrice <= 0) return false;
+                        if (/テスト/i.test(plan.name)) return false;
+                    }
                     return true;
                 };
 
@@ -1516,13 +1521,14 @@
                 const { month, type } = sqDrilldown;
                 const cust = sqData.customers || {};
                 const plans = sqData.plans || {};
-                const plansLoaded = Object.keys(plans).length > 0;
                 const toYM = d => { if (!d) return null; const dt = new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`; };
-                // テスト・0円プランを除外（プランデータ未取得時はmonthlyPriceフィルタをスキップ）
+                // テスト・0円プランを除外（プラン未取得のサブスクは保持 = 部分データ消失を防止）
                 const isRealSub = (s) => {
-                    if (plansLoaded && s.monthlyPrice <= 0) return false;
-                    const pName = plans[s.planVariationId] ? plans[s.planVariationId].name : '';
-                    if (/テスト/i.test(pName)) return false;
+                    const plan = plans[s.planVariationId];
+                    if (plan) {
+                        if (s.monthlyPrice <= 0) return false;
+                        if (/テスト/i.test(plan.name)) return false;
+                    }
                     return true;
                 };
                 const allSubs = sqData.subscriptions.filter(isRealSub);
@@ -6296,6 +6302,19 @@
                                                 <p className="text-xs text-amber-500 mt-2">
                                                     確認事項: トークンの有効期限切れ、env（sandbox/production）の設定ミス、Square Developer Dashboardでのアクセス権限
                                                 </p>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Partial Plans Warning */}
+                                    {sqData && sqData.meta && sqData.meta.diagnostics && sqData.meta.diagnostics.some(d => d.plansPartial) && (
+                                        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex items-start gap-2">
+                                            <AlertCircle size={16} className="text-slate-400 mt-0.5 flex-shrink-0" />
+                                            <div>
+                                                <p className="text-xs font-bold text-slate-500">一部アカウントのプランデータが不完全です（データは表示されますが、0円プランの除外が不完全な場合があります）</p>
+                                                {sqData.meta.diagnostics.filter(d => d.plansPartial).map((d, idx) => (
+                                                    <span key={idx} className="text-xs text-slate-400 mr-3">{d.account}: {d.plansPartial}</span>
+                                                ))}
                                             </div>
                                         </div>
                                     )}

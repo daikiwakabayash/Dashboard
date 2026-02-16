@@ -160,10 +160,14 @@ async function fetchPlanDetails(client, planVariationIds) {
   for (let i = 0; i < uniqueIds.length; i += 100) {
     const batch = uniqueIds.slice(i, i + 100);
     try {
-      const { result } = await client.catalogApi.batchRetrieveCatalogObjects({
-        objectIds: batch,
-        includeRelatedObjects: true,
-      });
+      // バッチ単位タイムアウト: 全体タイムアウトで部分結果を失わないよう各バッチに10秒上限
+      const { result } = await Promise.race([
+        client.catalogApi.batchRetrieveCatalogObjects({
+          objectIds: batch,
+          includeRelatedObjects: true,
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Plan batch timeout (10s)')), 10000)),
+      ]);
       if (result.objects) {
         for (const obj of result.objects) {
           if (obj.subscriptionPlanVariationData) {
@@ -184,7 +188,8 @@ async function fetchPlanDetails(client, planVariationIds) {
         }
       }
     } catch (err) {
-      console.error('Catalog batch fetch error:', err.message);
+      console.error(`Catalog batch fetch error (batch ${i / 100 + 1}):`, err.message);
+      // 部分結果を保持して続行（タイムアウトでも取得済みプランは失わない）
     }
   }
   return plans;
@@ -492,9 +497,17 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     payments = payments || [];
     refunds = refunds || [];
 
-    // プラン詳細を取得（サブスクデータに依存するため順次実行）
+    // プラン詳細を取得（サブスクデータに依存するため順次実行・バッチ単位タイムアウトで部分結果を保持）
     const planVariationIds = rawSubs.map(s => s.planVariationId).filter(Boolean);
-    const plans = await withTimeout(fetchPlanDetails(client, planVariationIds), API_TIMEOUT, {}, 'Plans');
+    const plans = await fetchPlanDetails(client, planVariationIds);
+    const plansLoadedCount = Object.keys(plans).length;
+    const plansRequestedCount = [...new Set(planVariationIds)].length;
+    if (plansRequestedCount > 0) {
+      console.log(`[${accountName || 'main'}] Plans: ${plansLoadedCount}/${plansRequestedCount} loaded`);
+      if (plansLoadedCount < plansRequestedCount) {
+        diag.plansPartial = `${plansLoadedCount}/${plansRequestedCount}`;
+      }
+    }
 
     // サブスクリプションを整形
     const subscriptions = rawSubs.map(s => {

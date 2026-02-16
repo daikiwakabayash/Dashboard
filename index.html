@@ -173,9 +173,11 @@
         const SQUARE_API_URL = '/api/square/metrics';
         const CACHE_KEY = 'dashboard_data_cache';
         const MARKETING_CACHE_KEY = 'marketing_data_cache';
-        const SQUARE_CACHE_KEY = 'square_data_cache_v3'; // v3: Payments API切替で総売上高・返品の正確性向上
+        const SQUARE_CACHE_KEY = 'square_data_cache_v4'; // v4: 75店舗対応・バッチ取得+プログレッシブ表示
         const UI_STATE_KEY = 'dashboard_ui_state';
         const CACHE_EXPIRY_MS = 30 * 60 * 1000; // 30分（GASタイムアウト対策）
+        const BATCH_SIZE = 3; // バッチあたりのアカウント数
+        const MAX_CONCURRENT_BATCHES = 3; // 同時バッチリクエスト数
 
         // リトライ付きfetch（タイムアウト + エクスポネンシャルバックオフ）
         const fetchWithRetry = async (url, options = {}) => {
@@ -593,23 +595,34 @@
                 }
             };
 
-            // Square データ取得
+            // Square データ取得（75店舗対応: バッチ取得 + プログレッシブ表示 + stale-while-revalidate）
             const fetchSquareData = async (forceRefresh = false) => {
-                console.log('📡 Fetching Square data...');
+                console.log('Fetching Square data...');
                 try {
                     setSqError(null);
 
-                    // キャッシュ確認
+                    // キャッシュ確認（stale-while-revalidate: 古いキャッシュをまず表示、裏で更新）
+                    let hasStaleCache = false;
                     if (!forceRefresh) {
                         try {
                             const cached = localStorage.getItem(SQUARE_CACHE_KEY);
                             if (cached) {
                                 const parsed = JSON.parse(cached);
-                                if (parsed.timestamp && Date.now() - parsed.timestamp < CACHE_EXPIRY_MS) {
-                                    console.log('💾 Using cached Square data');
-                                    setSqData(parsed.data);
-                                    setSqLastFetch(new Date(parsed.timestamp));
-                                    return;
+                                if (parsed.timestamp) {
+                                    const age = Date.now() - parsed.timestamp;
+                                    if (age < CACHE_EXPIRY_MS) {
+                                        console.log('Using cached Square data');
+                                        setSqData(parsed.data);
+                                        setSqLastFetch(new Date(parsed.timestamp));
+                                        return;
+                                    }
+                                    // 30分超〜60分以内: stale表示して裏で更新
+                                    if (age < CACHE_EXPIRY_MS * 2) {
+                                        console.log('Showing stale cache, refreshing in background...');
+                                        setSqData(parsed.data);
+                                        setSqLastFetch(new Date(parsed.timestamp));
+                                        hasStaleCache = true;
+                                    }
                                 }
                             }
                         } catch (e) { /* cache miss */ }
@@ -630,48 +643,97 @@
                     }
 
                     const accounts = infoData.accounts;
-                    const total = accounts.length;
-                    let completedCount = 0;
+                    const totalAccounts = accounts.length;
+                    let completedBatches = 0;
                     let failedCount = 0;
-                    setSqLoadingProgress({ total, completed: 0, failed: 0 });
 
-                    // Step 2: 全アカウントを並列取得
+                    // Step 2: アカウントをバッチに分割（BATCH_SIZE件ずつ）
+                    const batches = [];
+                    for (let i = 0; i < accounts.length; i += BATCH_SIZE) {
+                        batches.push(accounts.slice(i, i + BATCH_SIZE));
+                    }
+                    const totalBatches = batches.length;
+                    setSqLoadingProgress({ total: totalAccounts, completed: 0, failed: 0, batches: totalBatches, batchesDone: 0 });
+
+                    // Step 3: バッチ取得（同時MAX_CONCURRENT_BATCHESリクエスト + プログレッシブ更新）
                     const merged = {
                         stores: [], subscriptions: [], customers: {},
                         invoices: [], payments: [], refunds: [], plans: {},
                     };
                     const failedAccounts = [];
 
-                    await Promise.allSettled(accounts.map(async (acc) => {
-                        try {
-                            const res = await fetch(`${SQUARE_API_URL}?account=${acc.index}`);
-                            const ct = res.headers.get('content-type') || '';
-                            if (!ct.includes('application/json')) {
-                                throw new Error(`非JSONレスポンス (${ct.split(';')[0]})`);
+                    // 同時実行数制限付き並列処理
+                    let batchIdx = 0;
+                    const runBatch = async () => {
+                        while (batchIdx < batches.length) {
+                            const bi = batchIdx++;
+                            const batch = batches[bi];
+                            const indices = batch.map(a => a.index).join(',');
+                            try {
+                                const res = await fetch(`${SQUARE_API_URL}?accounts=${indices}`);
+                                const ct = res.headers.get('content-type') || '';
+                                if (!ct.includes('application/json')) {
+                                    throw new Error(`非JSONレスポンス (${ct.split(';')[0]})`);
+                                }
+                                const data = await res.json();
+                                if (data.success) {
+                                    merged.stores.push(...(data.stores || []));
+                                    merged.subscriptions.push(...(data.subscriptions || []));
+                                    Object.assign(merged.customers, data.customers || {});
+                                    merged.invoices.push(...(data.invoices || []));
+                                    merged.payments.push(...(data.payments || []));
+                                    merged.refunds.push(...(data.refunds || []));
+                                    Object.assign(merged.plans, data.plans || {});
+                                }
+                                if (data.meta && data.meta.failedAccounts) {
+                                    failedAccounts.push(...data.meta.failedAccounts);
+                                    failedCount += data.meta.failedAccounts.length;
+                                }
+                            } catch (err) {
+                                batch.forEach(a => {
+                                    failedAccounts.push({ name: a.name, error: err.message });
+                                    failedCount++;
+                                });
                             }
-                            const data = await res.json();
-                            if (!data.success) {
-                                failedAccounts.push({ name: acc.name, error: data.error || 'Unknown error' });
-                                failedCount++;
-                            } else {
-                                merged.stores.push(...(data.stores || []));
-                                merged.subscriptions.push(...(data.subscriptions || []));
-                                Object.assign(merged.customers, data.customers || {});
-                                merged.invoices.push(...(data.invoices || []));
-                                merged.payments.push(...(data.payments || []));
-                                merged.refunds.push(...(data.refunds || []));
-                                Object.assign(merged.plans, data.plans || {});
-                            }
-                        } catch (err) {
-                            failedAccounts.push({ name: acc.name, error: err.message });
-                            failedCount++;
-                        } finally {
-                            completedCount++;
-                            setSqLoadingProgress({ total, completed: completedCount, failed: failedCount });
-                        }
-                    }));
+                            completedBatches++;
+                            const completedAccounts = Math.min(completedBatches * BATCH_SIZE, totalAccounts);
+                            setSqLoadingProgress({ total: totalAccounts, completed: completedAccounts, failed: failedCount, batches: totalBatches, batchesDone: completedBatches });
 
-                    // Step 3: 結果をマージ
+                            // プログレッシブ更新: バッチ完了ごとに中間結果を表示
+                            if (merged.stores.length > 0) {
+                                setSqData(prev => {
+                                    // staleキャッシュがある場合は最新データで上書き
+                                    return {
+                                        success: true,
+                                        stores: [...merged.stores],
+                                        subscriptions: [...merged.subscriptions],
+                                        customers: { ...merged.customers },
+                                        invoices: [...merged.invoices],
+                                        payments: [...merged.payments],
+                                        refunds: [...merged.refunds],
+                                        plans: { ...merged.plans },
+                                        meta: {
+                                            totalSubscriptions: merged.subscriptions.length,
+                                            totalInvoices: merged.invoices.length,
+                                            totalPayments: merged.payments.length,
+                                            totalRefunds: merged.refunds.length,
+                                            totalStores: merged.stores.length,
+                                            totalAccounts: totalAccounts,
+                                            failedAccounts: failedAccounts.length > 0 ? [...failedAccounts] : undefined,
+                                            partial: completedBatches < totalBatches,
+                                            generatedAt: new Date().toISOString(),
+                                        },
+                                    };
+                                });
+                            }
+                        }
+                    };
+
+                    await Promise.all(
+                        Array.from({ length: Math.min(MAX_CONCURRENT_BATCHES, batches.length) }, () => runBatch())
+                    );
+
+                    // Step 4: 最終結果
                     const result = {
                         success: true,
                         stores: merged.stores,
@@ -686,7 +748,8 @@
                             totalInvoices: merged.invoices.length,
                             totalPayments: merged.payments.length,
                             totalRefunds: merged.refunds.length,
-                            totalAccounts: total,
+                            totalStores: merged.stores.length,
+                            totalAccounts: totalAccounts,
                             failedAccounts: failedAccounts.length > 0 ? failedAccounts : undefined,
                             generatedAt: new Date().toISOString(),
                         },
@@ -707,7 +770,7 @@
                         }));
                     } catch (e) { /* ignore cache write error */ }
                 } catch (err) {
-                    console.error('❌ Square fetch error:', err);
+                    console.error('Square fetch error:', err);
                     setSqError(err.message || 'Square データの取得に失敗しました');
                 } finally {
                     setSqLoading(false);
@@ -6108,6 +6171,11 @@
                                                             {sqLoadingProgress.completed}/{sqLoadingProgress.total} アカウント完了
                                                             {sqLoadingProgress.failed > 0 && ` (${sqLoadingProgress.failed} 失敗)`}
                                                         </p>
+                                                        {sqLoadingProgress.batches && (
+                                                            <p className="text-slate-300 text-xs mt-1">
+                                                                バッチ {sqLoadingProgress.batchesDone}/{sqLoadingProgress.batches}
+                                                            </p>
+                                                        )}
                                                         <div className="w-48 mx-auto mt-2 bg-slate-200 rounded-full h-2">
                                                             <div className="bg-blue-500 h-2 rounded-full transition-all duration-300"
                                                                 style={{width: `${Math.round(sqLoadingProgress.completed / sqLoadingProgress.total * 100)}%`}} />
@@ -6115,6 +6183,20 @@
                                                     </div>
                                                 )}
                                             </div>
+                                        </div>
+                                    )}
+                                    {/* Loading indicator when refreshing with existing data */}
+                                    {sqLoading && sqData && (
+                                        <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 mb-4 flex items-center gap-3">
+                                            <Loader2 size={16} className="animate-spin text-blue-500" />
+                                            <span className="text-blue-600 text-sm font-bold">
+                                                データを更新中...
+                                                {sqLoadingProgress && sqLoadingProgress.total > 0 && (
+                                                    <span className="text-blue-400 ml-2">
+                                                        {sqLoadingProgress.completed}/{sqLoadingProgress.total} アカウント
+                                                    </span>
+                                                )}
+                                            </span>
                                         </div>
                                     )}
 

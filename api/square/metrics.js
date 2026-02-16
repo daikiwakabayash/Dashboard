@@ -1,10 +1,47 @@
 // Square API からサブスクリプションデータを取得
 // 複数Squareアカウント対応・全店舗・顧客名＋インボイス付き
+// 75店舗対応: 並列処理 + インメモリキャッシュ + バッチ取得
 
 let _squareModule = null;
 async function getSquareModule() {
   if (!_squareModule) _squareModule = await import('square');
   return _squareModule;
+}
+
+// ── インメモリキャッシュ（Vercel serverless: コールドスタート間で共有） ──
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5分
+const accountCache = new Map(); // key: accountIndex, value: { data, timestamp }
+
+function getCachedAccount(idx) {
+  const entry = accountCache.get(idx);
+  if (entry && Date.now() - entry.timestamp < CACHE_TTL_MS) {
+    console.log(`[cache] アカウント${idx} キャッシュヒット (${Math.round((Date.now() - entry.timestamp) / 1000)}秒前)`);
+    return entry.data;
+  }
+  return null;
+}
+
+function setCachedAccount(idx, data) {
+  accountCache.set(idx, { data, timestamp: Date.now() });
+  // キャッシュサイズ制限（100エントリ超で古いものを削除）
+  if (accountCache.size > 100) {
+    const oldest = [...accountCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp)[0];
+    if (oldest) accountCache.delete(oldest[0]);
+  }
+}
+
+// ── 並列実行ユーティリティ（同時実行数制限付き） ──
+async function parallelWithLimit(items, limit, fn) {
+  const results = [];
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (idx < items.length) {
+      const i = idx++;
+      results[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 // 環境変数からトークン設定を取得
@@ -71,21 +108,27 @@ async function fetchLocations(client) {
   }
 }
 
+// ── ロケーション並列版: サブスクリプション取得 ──
 async function fetchAllSubscriptions(client, locationIds) {
-  const subscriptions = [];
-  // Square APIはlocationIds を1つずつしか受け付けない
-  for (const locId of locationIds) {
+  const allSubs = await parallelWithLimit(locationIds, 3, async (locId) => {
+    const subs = [];
     let cursor = undefined;
     do {
-      const { result } = await client.subscriptionsApi.searchSubscriptions({
-        query: { filter: { locationIds: [locId] } },
-        cursor,
-      });
-      if (result.subscriptions) subscriptions.push(...result.subscriptions);
-      cursor = result.cursor;
+      try {
+        const { result } = await client.subscriptionsApi.searchSubscriptions({
+          query: { filter: { locationIds: [locId] } },
+          cursor,
+        });
+        if (result.subscriptions) subs.push(...result.subscriptions);
+        cursor = result.cursor;
+      } catch (err) {
+        console.error(`  Subscriptions error (${locId}):`, err.message);
+        cursor = undefined;
+      }
     } while (cursor);
-  }
-  return subscriptions;
+    return subs;
+  });
+  return allSubs.flat();
 }
 
 async function fetchPlanDetails(client, planVariationIds) {
@@ -126,23 +169,20 @@ async function fetchPlanDetails(client, planVariationIds) {
   return plans;
 }
 
-// 売上データ取得（Payments API - Square管理画面の「総売上高」と一致）
+// ── ロケーション並列版: 売上データ取得 ──
 async function fetchSalesPayments(client, locationIds, diag) {
-  const payments = [];
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
   const beginStr = beginTime.toISOString();
+  let hasError = false;
 
-  for (const locId of locationIds) {
+  const allPayments = await parallelWithLimit(locationIds, 3, async (locId) => {
+    const payments = [];
     let cursor = undefined;
     do {
       try {
         const { result } = await client.paymentsApi.listPayments(
-          beginStr,     // beginTime
-          undefined,    // endTime
-          'DESC',       // sortOrder
-          cursor,       // cursor
-          locId,        // locationId
+          beginStr, undefined, 'DESC', cursor, locId,
         );
         if (result.payments) {
           for (const p of result.payments) {
@@ -160,33 +200,34 @@ async function fetchSalesPayments(client, locationIds, diag) {
         const errMsg = extractApiError(err);
         console.error(`  Payments API error (${locId}):`, errMsg);
         diag.paymentsApi = `error: ${errMsg}`;
-        if (payments.length === 0) return null;
+        hasError = true;
         cursor = undefined;
       }
     } while (cursor);
-  }
-  diag.paymentsApi = `ok: ${payments.length}件`;
-  console.log(`  Payments API: ${payments.length}件取得`);
-  return payments;
+    return payments;
+  });
+
+  const flat = allPayments.flat();
+  if (hasError && flat.length === 0) return null;
+  diag.paymentsApi = `ok: ${flat.length}件`;
+  console.log(`  Payments API: ${flat.length}件取得`);
+  return flat;
 }
 
-// 返品データ取得（Refunds API）
+// ── ロケーション並列版: 返品データ取得 ──
 async function fetchRefundsFromApi(client, locationIds, diag) {
-  const refunds = [];
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
   const beginStr = beginTime.toISOString();
+  let hasError = false;
 
-  for (const locId of locationIds) {
+  const allRefunds = await parallelWithLimit(locationIds, 3, async (locId) => {
+    const refunds = [];
     let cursor = undefined;
     do {
       try {
         const { result } = await client.refundsApi.listPaymentRefunds(
-          beginStr,     // beginTime
-          undefined,    // endTime
-          'DESC',       // sortOrder
-          cursor,       // cursor
-          locId,        // locationId
+          beginStr, undefined, 'DESC', cursor, locId,
         );
         if (result.refunds) {
           for (const r of result.refunds) {
@@ -204,28 +245,30 @@ async function fetchRefundsFromApi(client, locationIds, diag) {
         const errMsg = extractApiError(err);
         console.error(`  Refunds API error (${locId}):`, errMsg);
         diag.refundsApi = `error: ${errMsg}`;
-        if (refunds.length === 0) return null;
+        hasError = true;
         cursor = undefined;
       }
     } while (cursor);
-  }
-  diag.refundsApi = `ok: ${refunds.length}件`;
-  console.log(`  Refunds API: ${refunds.length}件取得`);
-  return refunds;
+    return refunds;
+  });
+
+  const flat = allRefunds.flat();
+  if (hasError && flat.length === 0) return null;
+  diag.refundsApi = `ok: ${flat.length}件`;
+  console.log(`  Refunds API: ${flat.length}件取得`);
+  return flat;
 }
 
-// Orders APIフォールバック（売上＋返品を同時取得）
-// stateFilterなし → COMPLETED + 支払い済みOPEN注文を含む
+// ── ロケーション並列版: Orders APIフォールバック ──
 async function fetchSalesFromOrders(client, locationIds, diag) {
-  const payments = [];
-  const refunds = [];
-  const stateCount = {};
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
   const beginStr = beginTime.toISOString();
+  const stateCount = {};
 
-  // ロケーションごとにクエリ（複数渡すとエラーになる場合がある）
-  for (const locId of locationIds) {
+  const allResults = await parallelWithLimit(locationIds, 3, async (locId) => {
+    const payments = [];
+    const refunds = [];
     let cursor = undefined;
     do {
       try {
@@ -243,9 +286,7 @@ async function fetchSalesFromOrders(client, locationIds, diag) {
         if (result.orders) {
           for (const o of result.orders) {
             stateCount[o.state || 'UNKNOWN'] = (stateCount[o.state || 'UNKNOWN'] || 0) + 1;
-
             if (o.state === 'DRAFT' || o.state === 'CANCELED') continue;
-
             if (o.state === 'COMPLETED' || (o.tenders && o.tenders.length > 0)) {
               payments.push({
                 amount: toNumber(o.totalMoney && o.totalMoney.amount),
@@ -253,7 +294,6 @@ async function fetchSalesFromOrders(client, locationIds, diag) {
                 locationId: o.locationId,
               });
             }
-
             if (o.returnAmounts && o.returnAmounts.totalMoney) {
               const returnAmt = toNumber(o.returnAmounts.totalMoney.amount);
               if (returnAmt > 0) {
@@ -272,10 +312,14 @@ async function fetchSalesFromOrders(client, locationIds, diag) {
         cursor = undefined;
       }
     } while (cursor);
-  }
+    return { payments, refunds };
+  });
+
+  const payments = allResults.flatMap(r => r.payments);
+  const refunds = allResults.flatMap(r => r.refunds);
   diag.ordersFallback = `${payments.length}件売上, ${refunds.length}件返品`;
   diag.orderStates = stateCount;
-  console.log(`  Orders API fallback: ${payments.length}件売上, ${refunds.length}件返品, states:`, JSON.stringify(stateCount));
+  console.log(`  Orders API fallback: ${payments.length}件売上, ${refunds.length}件返品`);
   return { payments, refunds };
 }
 
@@ -288,58 +332,68 @@ function extractApiError(err) {
   return err.message || 'unknown error';
 }
 
+// ── ロケーション並列版: インボイス取得 ──
+async function fetchInvoices(client, locationIds) {
+  const allInvoices = await parallelWithLimit(locationIds, 3, async (locId) => {
+    const invoices = [];
+    let cursor = undefined;
+    do {
+      try {
+        const { result } = await client.invoicesApi.searchInvoices({
+          query: {
+            filter: { locationIds: [locId] },
+            sort: { field: 'INVOICE_SORT_DATE', order: 'DESC' },
+          },
+          cursor,
+        });
+        if (result.invoices) {
+          for (const inv of result.invoices) {
+            const pr = inv.paymentRequests && inv.paymentRequests[0];
+            invoices.push({
+              id: inv.id,
+              customerId: inv.primaryRecipient ? inv.primaryRecipient.customerId : null,
+              subscriptionId: inv.subscriptionId || null,
+              status: inv.status,
+              amount: pr ? toNumber(pr.computedAmountMoney && pr.computedAmountMoney.amount) : 0,
+              dueDate: pr ? pr.dueDate : null,
+              createdAt: inv.createdAt,
+            });
+          }
+        }
+        cursor = result.cursor;
+      } catch (err) {
+        console.error(`  Invoices error (${locId}):`, err.message);
+        cursor = undefined;
+      }
+    } while (cursor);
+    return invoices;
+  });
+  return allInvoices.flat();
+}
+
 // 全顧客名を取得
 async function fetchAllCustomers(client) {
   const customers = {};
   let cursor = undefined;
   do {
-    const { result } = cursor
-      ? await client.customersApi.listCustomers(cursor)
-      : await client.customersApi.listCustomers();
-    if (result.customers) {
-      for (const c of result.customers) {
-        customers[c.id] = {
-          name: `${c.familyName || ''} ${c.givenName || ''}`.trim() || c.id,
-        };
-      }
-    }
-    cursor = result.cursor;
-  } while (cursor);
-  return customers;
-}
-
-// インボイス取得（全ステータス）
-async function fetchInvoices(client, locationIds) {
-  const invoices = [];
-  // Square APIはlocationIds を1つずつしか受け付けない
-  for (const locId of locationIds) {
-    let cursor = undefined;
-    do {
-      const { result } = await client.invoicesApi.searchInvoices({
-        query: {
-          filter: { locationIds: [locId] },
-          sort: { field: 'INVOICE_SORT_DATE', order: 'DESC' },
-        },
-        cursor,
-      });
-      if (result.invoices) {
-        for (const inv of result.invoices) {
-          const pr = inv.paymentRequests && inv.paymentRequests[0];
-          invoices.push({
-            id: inv.id,
-            customerId: inv.primaryRecipient ? inv.primaryRecipient.customerId : null,
-            subscriptionId: inv.subscriptionId || null,
-            status: inv.status,
-            amount: pr ? toNumber(pr.computedAmountMoney && pr.computedAmountMoney.amount) : 0,
-            dueDate: pr ? pr.dueDate : null,
-            createdAt: inv.createdAt,
-          });
+    try {
+      const { result } = cursor
+        ? await client.customersApi.listCustomers(cursor)
+        : await client.customersApi.listCustomers();
+      if (result.customers) {
+        for (const c of result.customers) {
+          customers[c.id] = {
+            name: `${c.familyName || ''} ${c.givenName || ''}`.trim() || c.id,
+          };
         }
       }
       cursor = result.cursor;
-    } while (cursor);
-  }
-  return invoices;
+    } catch (err) {
+      console.error('  Customers API error:', err.message);
+      cursor = undefined;
+    }
+  } while (cursor);
+  return customers;
 }
 
 // 1つのSquareアカウントの全データを取得
@@ -378,7 +432,7 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     // 診断情報トラッキング
     const diag = {};
 
-    // サブスク＋インボイス＋売上＋返品を並列取得
+    // サブスク＋インボイス＋売上＋返品を並列取得（各API内でもロケーション並列）
     const [rawSubs, invoices, paymentsApiData, refundsApiData] = await Promise.all([
       fetchAllSubscriptions(client, locationIds),
       fetchInvoices(client, locationIds),
@@ -391,7 +445,7 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
 
     // Payments/Refunds APIが使えない場合、Orders APIフォールバック
     if (payments === null || refunds === null) {
-      console.log(`  → Orders APIフォールバック (payments=${payments === null ? '必要' : 'OK'}, refunds=${refunds === null ? '必要' : 'OK'})`);
+      console.log(`  -> Orders APIフォールバック (payments=${payments === null ? '必要' : 'OK'}, refunds=${refunds === null ? '必要' : 'OK'})`);
       const ordersData = await fetchSalesFromOrders(client, locationIds, diag);
       if (payments === null) payments = ordersData.payments;
       if (refunds === null) refunds = ordersData.refunds;
@@ -436,7 +490,7 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
         detail = err.result.errors.map(e => `${e.code}: ${e.detail}`).join('; ');
       }
     } catch (_) {}
-    console.error(`❌ Account "${accountName}" error:`, detail);
+    console.error(`Account "${accountName}" error:`, detail);
     console.error(`   Token prefix: ${tokenConfig.token ? tokenConfig.token.slice(0, 12) + '...' : 'EMPTY'}`);
     console.error(`   Environment: ${tokenConfig.env}`);
     return { _failed: true, _errorDetail: detail, _accountName: accountName };
@@ -459,6 +513,7 @@ function buildResponse(merged, failedAccounts, allDiag, configs, summaryMode, pa
     totalInvoices: merged.invoices.length,
     totalPayments: merged.payments.length,
     totalRefunds: merged.refunds.length,
+    totalStores: merged.stores.length,
     totalAccounts: configs.length,
     failedAccounts: failedAccounts.length > 0 ? failedAccounts : undefined,
     diagnostics: allDiag,
@@ -518,7 +573,59 @@ export default async function handler(req, res) {
     return sendJson(res, 200, {
       success: true,
       accounts: configs.map((cfg, i) => ({ index: i, name: cfg.name || `アカウント${i + 1}` })),
+      totalAccounts: configs.length,
     });
+  }
+
+  // ── バッチアカウントモード: ?accounts=0,1,2,3 (複数アカウントを1リクエストで取得) ──
+  if (req.query && req.query.accounts !== undefined) {
+    const indices = req.query.accounts.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n >= 0 && n < configs.length);
+    if (indices.length === 0) {
+      return sendJson(res, 400, { success: false, error: 'アカウントインデックスが無効です' });
+    }
+
+    const merged = {
+      stores: [], subscriptions: [], customers: {},
+      invoices: [], payments: [], refunds: [], plans: {},
+    };
+    const failedAccounts = [];
+    const allDiag = [];
+
+    // バッチ内アカウントを並列取得（最大3並列）
+    await parallelWithLimit(indices, 3, async (idx) => {
+      const cfg = configs[idx];
+      try {
+        // キャッシュ確認
+        let r = getCachedAccount(idx);
+        if (!r) {
+          r = await fetchAccountData(cfg, true);
+          if (r && !r._failed) setCachedAccount(idx, r);
+        }
+        if (!r || r._failed) {
+          failedAccounts.push({ name: cfg.name || `アカウント${idx + 1}`, error: r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です' });
+          return;
+        }
+        merged.stores.push(...r.stores);
+        merged.subscriptions.push(...r.subscriptions);
+        Object.assign(merged.customers, r.customers);
+        merged.invoices.push(...r.invoices);
+        merged.payments.push(...r.payments);
+        merged.refunds.push(...(r.refunds || []));
+        Object.assign(merged.plans, r.plans);
+        if (r._diag) allDiag.push({ account: cfg.name, ...r._diag });
+      } catch (err) {
+        failedAccounts.push({ name: cfg.name || `アカウント${idx + 1}`, error: err.message });
+      }
+    });
+
+    const summaryMode = req.query && req.query.summary === '1';
+    if (merged.stores.length === 0 && failedAccounts.length > 0) {
+      return sendJson(res, 200, {
+        success: false, error: 'バッチ内の全アカウントのデータ取得に失敗しました',
+        stores: [], meta: { failedAccounts, generatedAt: new Date().toISOString() },
+      });
+    }
+    return sendJson(res, 200, buildResponse(merged, failedAccounts, allDiag, configs, summaryMode, false));
   }
 
   // ── 単一アカウントモード: ?account=N ──
@@ -529,7 +636,14 @@ export default async function handler(req, res) {
     }
     try {
       const cfg = configs[idx];
-      const r = await fetchAccountData(cfg, configs.length > 1);
+
+      // キャッシュ確認
+      let r = getCachedAccount(idx);
+      if (!r) {
+        r = await fetchAccountData(cfg, configs.length > 1);
+        if (r && !r._failed) setCachedAccount(idx, r);
+      }
+
       if (!r || r._failed) {
         return sendJson(res, 200, {
           success: false,
@@ -574,17 +688,22 @@ export default async function handler(req, res) {
   const deadlineTimer = setTimeout(() => { deadlineReached = true; }, 50000);
 
   try {
-    for (let j = 0; j < configs.length; j++) {
-      const cfg = configs[j];
+    // 全アカウント並列取得（最大5並列、75店舗対応）
+    await parallelWithLimit(configs, 5, async (cfg, j) => {
       if (deadlineReached) {
         failedAccounts.push({ name: cfg.name || `アカウント${j + 1}`, error: 'タイムアウト: 処理時間超過' });
-        continue;
+        return;
       }
       try {
-        const r = await fetchAccountData(cfg, isMultiAccount);
+        // キャッシュ確認
+        let r = getCachedAccount(j);
+        if (!r) {
+          r = await fetchAccountData(cfg, isMultiAccount);
+          if (r && !r._failed) setCachedAccount(j, r);
+        }
         if (!r || r._failed) {
           failedAccounts.push({ name: cfg.name || `アカウント${j + 1}`, error: r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です' });
-          continue;
+          return;
         }
         merged.stores.push(...r.stores);
         merged.subscriptions.push(...r.subscriptions);
@@ -597,7 +716,7 @@ export default async function handler(req, res) {
       } catch (err) {
         failedAccounts.push({ name: cfg.name || `アカウント${j + 1}`, error: err.message });
       }
-    }
+    });
     clearTimeout(deadlineTimer);
 
     if (merged.stores.length === 0) {

@@ -1165,18 +1165,27 @@
                 const useInvoiceFallback = sqStore !== 'all' && filtered.length === 0
                     && allInvoices.some(inv => inv.subscriptionId && inv.locationId === sqStore);
 
-                // 基準月・前月のアクティブ
+                // 基準月・前月のアクティブ（解約率・継続率・コホート用に保持）
                 const activeRef = filtered.filter(s => isActiveAt(s, refEnd));
                 const activePrev = filtered.filter(s => isActiveAt(s, prevEnd));
 
+                // アクティブ会員数: PAID subscription invoicesベース（Square管理画面の注文数と一致）
+                // サブスクステータスではなく、実際に決済されたインボイスの顧客数を使用
                 let memberCount, prevMemberCount;
-                if (useInvoiceFallback) {
-                    // フォールバック: インボイスのユニーク顧客IDで会員数を推定
-                    const invRef = allInvoices.filter(inv => inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth && inv.locationId === sqStore);
-                    const invPrev = allInvoices.filter(inv => inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === prevYM && inv.locationId === sqStore);
-                    memberCount = new Set(invRef.map(inv => inv.customerId || inv.subscriptionId)).size;
-                    prevMemberCount = new Set(invPrev.map(inv => inv.customerId || inv.subscriptionId)).size;
-                } else {
+                const memberInvRef = allInvoices.filter(inv =>
+                    inv.subscriptionId && inv.status === 'PAID'
+                    && toYM(inv.createdAt) === sqMonth
+                    && (sqStore === 'all' || inv.locationId === sqStore)
+                );
+                const memberInvPrev = allInvoices.filter(inv =>
+                    inv.subscriptionId && inv.status === 'PAID'
+                    && toYM(inv.createdAt) === prevYM
+                    && (sqStore === 'all' || inv.locationId === sqStore)
+                );
+                memberCount = new Set(memberInvRef.map(inv => inv.customerId || inv.subscriptionId)).size;
+                prevMemberCount = new Set(memberInvPrev.map(inv => inv.customerId || inv.subscriptionId)).size;
+                // フォールバック: インボイスデータがない場合はサブスクステータスベース
+                if (memberCount === 0 && activeRef.length > 0) {
                     memberCount = new Set(activeRef.map(s => s.customerId)).size;
                     prevMemberCount = new Set(activePrev.map(s => s.customerId)).size;
                 }
@@ -1249,10 +1258,19 @@
                     const storeHasSubs = ss.length > 0;
                     let smc, smrr, sn, sc, sStartA, sChurn;
                     if (storeHasSubs) {
-                        // 通常パス: サブスクデータあり
+                        // 通常パス: PAIDインボイスベースで会員数を計算
                         const sa = ss.filter(s => isActiveAt(s, refEnd));
                         const sp = ss.filter(s => isActiveAt(s, prevEnd));
-                        smc = new Set(sa.map(s => s.customerId)).size;
+                        // 会員数: PAID subscription invoicesの顧客数（Square管理画面と一致）
+                        const storeMemberInvs = allInvoices.filter(inv =>
+                            inv.subscriptionId && inv.status === 'PAID'
+                            && toYM(inv.createdAt) === sqMonth && inv.locationId === store.id
+                        );
+                        smc = new Set(storeMemberInvs.map(inv => inv.customerId || inv.subscriptionId)).size;
+                        // フォールバック: インボイスがない場合はサブスクステータスベース
+                        if (smc === 0 && sa.length > 0) {
+                            smc = new Set(sa.map(s => s.customerId)).size;
+                        }
                         const storeSubIdSet = new Set(ss.map(s => s.id));
                         // 店舗ごとのMRR: realSubIdsで直接フィルタ（useInvoiceFallbackの影響を受けない）
                         const storeSubInvs = allInvoices.filter(inv =>
@@ -1356,12 +1374,21 @@
                         ? ymSubInvs.filter(inv => storeSubIds.has(inv.subscriptionId))
                         : ymSubInvs;
                     let ymMemberCount, ymNewCount, ymCanceledCount;
-                    if (useInvoiceFallback) {
-                        // フォールバック: インボイスのユニーク顧客ID
-                        ymMemberCount = new Set(ymSubInvs.map(inv => inv.customerId || inv.subscriptionId)).size;
+                    // 会員数: PAIDインボイスベース（Square管理画面と一致）
+                    const ymMemberInvs = allInvoices.filter(inv =>
+                        inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === ym
+                        && (sqStore === 'all' || inv.locationId === sqStore)
+                    );
+                    ymMemberCount = new Set(ymMemberInvs.map(inv => inv.customerId || inv.subscriptionId)).size;
+                    if (useInvoiceFallback || ymMemberCount === 0) {
                         ymNewCount = 0;
                         ymCanceledCount = 0;
                     } else {
+                        ymNewCount = new Set(filtered.filter(s => toYM(s.startDate) === ym).map(s => s.customerId)).size;
+                        ymCanceledCount = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === ym).map(s => s.customerId)).size;
+                    }
+                    // フォールバック: インボイスがない月はサブスクステータスベース
+                    if (ymMemberCount === 0 && !useInvoiceFallback) {
                         const ma = filtered.filter(s => isActiveAt(s, eom));
                         ymMemberCount = new Set(ma.map(s => s.customerId)).size;
                         ymNewCount = new Set(filtered.filter(s => toYM(s.startDate) === ym).map(s => s.customerId)).size;

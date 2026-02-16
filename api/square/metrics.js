@@ -277,7 +277,7 @@ async function fetchSalesFromOrders(client, locationIds, diag) {
             if (o.state === 'COMPLETED') {
               payments.push({
                 amount: toNumber(o.totalMoney && o.totalMoney.amount),
-                createdAt: o.closedAt || o.createdAt,
+                createdAt: o.createdAt,
                 locationId: o.locationId,
               });
             }

@@ -438,11 +438,21 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
       const before = stores.length;
       stores = stores.filter(s => !tokenConfig.excludeLocations.some(ex => s.name && s.name.includes(ex)));
       if (stores.length < before) {
-        console.log(`[${accountName}] ${before - stores.length}件のロケーションを除外`);
+        console.log(`[${accountName}] ${before - stores.length}件のロケーションを除外 (excludeLocations)`);
       }
-      if (stores.length === 0) {
-        stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];
+    }
+    // 複数ロケーション時: 法人名ロケーション（株式会社・合同会社等）を自動除外
+    // Squareがビジネスエンティティ用に自動作成するデフォルトロケーションを除外
+    if (stores.length > 1) {
+      const corpPatterns = ['株式会社', '合同会社', '有限会社', '一般社団法人'];
+      const nonCorpStores = stores.filter(s => !corpPatterns.some(p => s.name && s.name.startsWith(p)));
+      if (nonCorpStores.length > 0 && nonCorpStores.length < stores.length) {
+        console.log(`[${accountName}] ${stores.length - nonCorpStores.length}件の法人ロケーションを自動除外`);
+        stores = nonCorpStores;
       }
+    }
+    if (stores.length === 0) {
+      stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];
     }
     // アカウント名が設定されている場合は常に店舗名として使用
     if (accountName) {
@@ -484,7 +494,7 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
 
     // プラン詳細を取得（サブスクデータに依存するため順次実行）
     const planVariationIds = rawSubs.map(s => s.planVariationId).filter(Boolean);
-    const plans = await withTimeout(fetchPlanDetails(client, planVariationIds), 10000, {}, 'Plans');
+    const plans = await withTimeout(fetchPlanDetails(client, planVariationIds), API_TIMEOUT, {}, 'Plans');
 
     // サブスクリプションを整形
     const subscriptions = rawSubs.map(s => {

@@ -182,7 +182,7 @@
         // リトライ付きfetch（タイムアウト + エクスポネンシャルバックオフ）
         const fetchWithRetry = async (url, options = {}) => {
             const maxRetries = 3;
-            const timeoutMs = 120000; // 120秒（大量データアカウント対応）
+            const timeoutMs = 310000; // 310秒（Vercel maxDuration:300s + マージン）
             let lastError;
             for (let attempt = 0; attempt < maxRetries; attempt++) {
                 const controller = new AbortController();
@@ -1167,10 +1167,12 @@
                 const allInvoices = sqData.invoices || [];
                 const realSubIds = new Set(subs.map(s => s.id));
 
-                // 決済実績チェック: 金額0・回数0の会員をアクティブカウントから除外
+                // 決済実績チェック: 実際にPAIDインボイスがない会員をアクティブカウントから除外
+                // monthlyPrice > 0 でも実際に決済されていなければ除外（PAUSED即時停止等）
+                // ただし当月入会者は初回インボイス未発行の可能性があるため保持
                 const hasPaymentActivity = (s) => {
-                    if (s.monthlyPrice > 0) return true;
                     if (paidSubIds.has(s.id)) return true;
+                    if (s.monthlyPrice > 0 && toYM(s.startDate) === sqMonth) return true;
                     return false;
                 };
 
@@ -1602,9 +1604,9 @@
                             monthlyPrice: sub.monthlyPrice,
                         };
 
-                        // アクティブ: 選択月末時点でアクティブなサブスク（金額0・回数0は除外）
+                        // アクティブ: 選択月末時点でアクティブなサブスク（実際の決済実績がない会員は除外）
                         const start = sub.startDate ? new Date(sub.startDate) : null;
-                        const hasActivity = sub.monthlyPrice > 0 || paidSubIds2.has(sub.id);
+                        const hasActivity = paidSubIds2.has(sub.id) || (sub.monthlyPrice > 0 && toYM(sub.startDate) === sqMonth);
                         const isActiveAtMonth = hasActivity && start && start <= monthEnd && (
                             (sub.status === 'ACTIVE' || sub.status === 'PAUSED') ||
                             (sub.canceledDate && new Date(sub.canceledDate) > monthEnd)

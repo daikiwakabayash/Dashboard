@@ -23,21 +23,45 @@ function getCachedAccount(idx) {
 
 function setCachedAccount(idx, data) {
   accountCache.set(idx, { data, timestamp: Date.now() });
-  // キャッシュサイズ制限（100エントリ超で古いものを削除）
+  // キャッシュサイズ制限（100エントリ超で古いものをバッチ削除）
   if (accountCache.size > 100) {
-    const oldest = [...accountCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp)[0];
-    if (oldest) accountCache.delete(oldest[0]);
+    const now = Date.now();
+    // 期限切れエントリを優先削除
+    for (const [key, entry] of accountCache) {
+      if (now - entry.timestamp >= CACHE_TTL_MS) accountCache.delete(key);
+    }
+    // まだ多い場合は最も古い10件を削除
+    if (accountCache.size > 100) {
+      let oldest = null;
+      let oldestTs = Infinity;
+      const toDelete = [];
+      for (const [key, entry] of accountCache) {
+        if (entry.timestamp < oldestTs) {
+          oldestTs = entry.timestamp;
+          oldest = key;
+        }
+        if (toDelete.length < 10 || entry.timestamp < oldestTs) {
+          toDelete.push(key);
+        }
+      }
+      toDelete.slice(0, 10).forEach(key => accountCache.delete(key));
+    }
   }
 }
 
-// ── 並列実行ユーティリティ（同時実行数制限付き） ──
+// ── 並列実行ユーティリティ（同時実行数制限付き・エラー耐性あり） ──
 async function parallelWithLimit(items, limit, fn) {
   const results = [];
   let idx = 0;
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
     while (idx < items.length) {
       const i = idx++;
-      results[i] = await fn(items[i], i);
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (err) {
+        console.error(`[parallelWithLimit] item ${i} failed:`, err.message);
+        results[i] = undefined;
+      }
     }
   });
   await Promise.all(workers);
@@ -323,8 +347,8 @@ async function fetchSalesFromOrders(client, locationIds, diag, timeoutMs = 25000
     return { payments, refunds };
   });
 
-  const payments = allResults.flatMap(r => r.payments);
-  const refunds = allResults.flatMap(r => r.refunds);
+  const payments = allResults.filter(Boolean).flatMap(r => r.payments);
+  const refunds = allResults.filter(Boolean).flatMap(r => r.refunds);
   if (diag) {
     const suffix = timedOut ? ` (部分結果・タイムアウト${timeoutMs / 1000}s)` : '';
     diag.paymentsApi = errors.length > 0

@@ -23,21 +23,45 @@ function getCachedAccount(idx) {
 
 function setCachedAccount(idx, data) {
   accountCache.set(idx, { data, timestamp: Date.now() });
-  // キャッシュサイズ制限（100エントリ超で古いものを削除）
+  // キャッシュサイズ制限（100エントリ超で古いものをバッチ削除）
   if (accountCache.size > 100) {
-    const oldest = [...accountCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp)[0];
-    if (oldest) accountCache.delete(oldest[0]);
+    const now = Date.now();
+    // 期限切れエントリを優先削除
+    for (const [key, entry] of accountCache) {
+      if (now - entry.timestamp >= CACHE_TTL_MS) accountCache.delete(key);
+    }
+    // まだ多い場合は最も古い10件を削除
+    if (accountCache.size > 100) {
+      let oldest = null;
+      let oldestTs = Infinity;
+      const toDelete = [];
+      for (const [key, entry] of accountCache) {
+        if (entry.timestamp < oldestTs) {
+          oldestTs = entry.timestamp;
+          oldest = key;
+        }
+        if (toDelete.length < 10 || entry.timestamp < oldestTs) {
+          toDelete.push(key);
+        }
+      }
+      toDelete.slice(0, 10).forEach(key => accountCache.delete(key));
+    }
   }
 }
 
-// ── 並列実行ユーティリティ（同時実行数制限付き） ──
+// ── 並列実行ユーティリティ（同時実行数制限付き・エラー耐性あり） ──
 async function parallelWithLimit(items, limit, fn) {
   const results = [];
   let idx = 0;
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
     while (idx < items.length) {
       const i = idx++;
-      results[i] = await fn(items[i], i);
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (err) {
+        console.error(`[parallelWithLimit] item ${i} failed:`, err.message);
+        results[i] = undefined;
+      }
     }
   });
   await Promise.all(workers);
@@ -206,13 +230,16 @@ async function fetchPlanDetails(client, planVariationIds) {
     const batch = uniqueIds.slice(i, i + 100);
     try {
       // バッチ単位タイムアウト: 全体タイムアウトで部分結果を失わないよう各バッチに10秒上限
+      let timer;
       const { result } = await Promise.race([
         client.catalogApi.batchRetrieveCatalogObjects({
           objectIds: batch,
           includeRelatedObjects: true,
         }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Plan batch timeout (10s)')), 10000)),
-      ]);
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Plan batch timeout (10s)')), 10000);
+        }),
+      ]).finally(() => clearTimeout(timer));
       // objects + relatedObjects の両方からプラン情報を抽出
       const allObjects = [...(result.objects || []), ...(result.relatedObjects || [])];
       for (const obj of allObjects) {
@@ -256,18 +283,24 @@ async function fetchPlanDetails(client, planVariationIds) {
 // 位置引数でundefinedがクエリ文字列に&&として直列化されINVALID_URLエラーが発生するため
 // POST bodyベースのsearchOrders APIを使用する
 // ──
-async function fetchSalesFromOrders(client, locationIds, diag) {
+async function fetchSalesFromOrders(client, locationIds, diag, timeoutMs = 25000) {
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
   const beginStr = beginTime.toISOString();
   const stateCount = {};
   const errors = [];
+  const startTime = Date.now();
+  let timedOut = false;
 
   const allResults = await parallelWithLimit(locationIds, 3, async (locId) => {
     const payments = [];
     const refunds = [];
     let cursor = undefined;
     do {
+      if (Date.now() - startTime > timeoutMs) {
+        timedOut = true;
+        break;
+      }
       try {
         const body = {
           locationIds: [locId],
@@ -314,17 +347,18 @@ async function fetchSalesFromOrders(client, locationIds, diag) {
     return { payments, refunds };
   });
 
-  const payments = allResults.flatMap(r => r.payments);
-  const refunds = allResults.flatMap(r => r.refunds);
+  const payments = allResults.filter(Boolean).flatMap(r => r.payments);
+  const refunds = allResults.filter(Boolean).flatMap(r => r.refunds);
   if (diag) {
+    const suffix = timedOut ? ` (部分結果・タイムアウト${timeoutMs / 1000}s)` : '';
     diag.paymentsApi = errors.length > 0
-      ? `Orders API: ${payments.length}件売上, エラー${errors.length}件`
-      : `ok: ${payments.length}件 (Orders API)`;
+      ? `Orders API: ${payments.length}件売上, エラー${errors.length}件${suffix}`
+      : `ok: ${payments.length}件 (Orders API)${suffix}`;
     diag.refundsApi = errors.length > 0
-      ? `Orders API: ${refunds.length}件返品, エラー${errors.length}件`
-      : `ok: ${refunds.length}件 (Orders API)`;
+      ? `Orders API: ${refunds.length}件返品, エラー${errors.length}件${suffix}`
+      : `ok: ${refunds.length}件 (Orders API)${suffix}`;
   }
-  console.log(`  Orders API: ${payments.length}件売上, ${refunds.length}件返品${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
+  console.log(`  Orders API: ${payments.length}件売上, ${refunds.length}件返品${timedOut ? ' (partial/timeout)' : ''}${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
   return { payments, refunds };
 }
 
@@ -452,7 +486,7 @@ async function fetchAllCustomers(client, diag) {
 // 1つのSquareアカウントの全データを取得
 async function fetchAccountData(tokenConfig, isMultiAccount) {
   const accountName = tokenConfig.name || '';
-  console.log(`[${accountName || 'main'}] データ取得開始... (token: ${tokenConfig.token ? tokenConfig.token.slice(0, 8) + '...' : 'EMPTY'})`);
+  console.log(`[${accountName || 'main'}] データ取得開始...`);
   try {
     if (!tokenConfig.token) {
       console.error(`[${accountName}] トークンが空です`);
@@ -503,7 +537,7 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     const [rawSubs, invoices, ordersData, customers] = await Promise.all([
       fetchAllSubscriptions(client, locationIds, diag, API_TIMEOUT),
       fetchInvoices(client, locationIds, diag, API_TIMEOUT),
-      withTimeout(fetchSalesFromOrders(client, locationIds, diag), 30000, { payments: [], refunds: [] }, 'Orders'),
+      fetchSalesFromOrders(client, locationIds, diag, 25000),
       withTimeout(fetchAllCustomers(client, diag), 20000, {}, 'Customers'),
     ]);
 
@@ -511,8 +545,8 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     // Note: subscriptionsApi/invoicesApiは各関数内部で設定済み
     if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (70s)';
     if (!diag.invoicesApi) diag.invoicesApi = 'timeout (70s)';
-    if (!diag.paymentsApi) diag.paymentsApi = 'timeout (30s)';
-    if (!diag.refundsApi) diag.refundsApi = 'timeout (30s)';
+    if (!diag.paymentsApi) diag.paymentsApi = 'timeout (25s)';
+    if (!diag.refundsApi) diag.refundsApi = 'timeout (25s)';
     if (!diag.customersApi) diag.customersApi = 'timeout (20s)';
 
     const payments = ordersData.payments || [];
@@ -571,7 +605,6 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
       }
     } catch (_) {}
     console.error(`Account "${accountName}" error:`, detail);
-    console.error(`   Token prefix: ${tokenConfig.token ? tokenConfig.token.slice(0, 12) + '...' : 'EMPTY'}`);
     console.error(`   Environment: ${tokenConfig.env}`);
     return { _failed: true, _errorDetail: detail, _accountName: accountName };
   }
@@ -648,12 +681,23 @@ export default async function handler(req, res) {
     });
   }
 
+  // ── キャッシュクリアモード: ?clearCache=1 ──
+  if (req.query && req.query.clearCache === '1') {
+    const size = accountCache.size;
+    accountCache.clear();
+    return sendJson(res, 200, {
+      success: true,
+      message: `${size}件のキャッシュをクリアしました`,
+    });
+  }
+
   // ── アカウント一覧モード: ?info=1 ──
   if (req.query && req.query.info === '1') {
     return sendJson(res, 200, {
       success: true,
       accounts: configs.map((cfg, i) => ({ index: i, name: cfg.name || `アカウント${i + 1}` })),
       totalAccounts: configs.length,
+      cacheSize: accountCache.size,
     });
   }
 
@@ -679,11 +723,13 @@ export default async function handler(req, res) {
         let r = getCachedAccount(idx);
         if (!r) {
           // アカウント単位タイムアウト: バッチ全体を守る
-          // 内部API個別タイムアウト(25s) + Ordersフォールバック(15s) + プラン(10s) = 最大50sを考慮
+          let batchTimer;
           r = await Promise.race([
             fetchAccountData(cfg, true),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('アカウント取得タイムアウト (110秒)')), 110000)),
-          ]);
+            new Promise((_, reject) => {
+              batchTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (110秒)')), 110000);
+            }),
+          ]).finally(() => clearTimeout(batchTimer));
           if (r && !r._failed) setCachedAccount(idx, r);
         }
         if (!r || r._failed) {
@@ -725,10 +771,13 @@ export default async function handler(req, res) {
       // キャッシュ確認
       let r = getCachedAccount(idx);
       if (!r) {
+        let singleTimer;
         r = await Promise.race([
           fetchAccountData(cfg, configs.length > 1),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('アカウント取得タイムアウト (110秒)')), 110000)),
-        ]);
+          new Promise((_, reject) => {
+            singleTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (110秒)')), 110000);
+          }),
+        ]).finally(() => clearTimeout(singleTimer));
         if (r && !r._failed) setCachedAccount(idx, r);
       }
 

@@ -952,8 +952,12 @@
                 // Square店舗名を店舗検索に表示するため、起動時にSquareデータも取得
                 fetchSquareData();
 
-                // Auto-refresh every 5 minutes
+                // Auto-refresh every 5 minutes (only when tab is visible)
                 const autoRefreshInterval = setInterval(() => {
+                    if (document.hidden) {
+                        console.log('🔄 Auto-refresh skipped (tab hidden)');
+                        return;
+                    }
                     console.log('🔄 Auto-refresh triggered');
                     fetchDataFromSpreadsheet(true);
                     fetchMarketingData(true);
@@ -1139,7 +1143,10 @@
                     // プラン未取得 or 価格未抽出 → 保守的に保持
                     return true;
                 };
-                const subs = sqData.subscriptions.filter(isRealSub);
+                const subsRaw = sqData.subscriptions.filter(isRealSub);
+                // サブスクリプションID重複排除（複数ロケーション取得時の重複防止）
+                const seenSubIds1 = new Set();
+                const subs = subsRaw.filter(s => { if (seenSubIds1.has(s.id)) return false; seenSubIds1.add(s.id); return true; });
                 const filtered = sqStore === 'all' ? subs : subs.filter(s => s.locationId === sqStore);
                 const [refY, refM] = sqMonth.split('-').map(Number);
                 const refEnd = new Date(refY, refM, 0);
@@ -1169,25 +1176,25 @@
                 const activeRef = filtered.filter(s => isActiveAt(s, refEnd));
                 const activePrev = filtered.filter(s => isActiveAt(s, prevEnd));
 
-                // アクティブ会員数: PAID subscription invoicesベース（Square管理画面の注文数と一致）
-                // サブスクステータスではなく、実際に決済されたインボイスの顧客数を使用
+                // アクティブ会員数: 月末時点のアクティブサブスク顧客数（顧客ID重複排除）
+                // アクティブタブの表示と一致させるため、サブスクステータスベースで計算
                 let memberCount, prevMemberCount;
-                const memberInvRef = allInvoices.filter(inv =>
-                    inv.subscriptionId && inv.status === 'PAID'
-                    && toYM(inv.createdAt) === sqMonth
-                    && (sqStore === 'all' || inv.locationId === sqStore)
-                );
-                const memberInvPrev = allInvoices.filter(inv =>
-                    inv.subscriptionId && inv.status === 'PAID'
-                    && toYM(inv.createdAt) === prevYM
-                    && (sqStore === 'all' || inv.locationId === sqStore)
-                );
-                memberCount = new Set(memberInvRef.map(inv => inv.customerId || inv.subscriptionId)).size;
-                prevMemberCount = new Set(memberInvPrev.map(inv => inv.customerId || inv.subscriptionId)).size;
-                // フォールバック: インボイスデータがない場合はサブスクステータスベース
-                if (memberCount === 0 && activeRef.length > 0) {
-                    memberCount = new Set(activeRef.map(s => s.customerId)).size;
-                    prevMemberCount = new Set(activePrev.map(s => s.customerId)).size;
+                memberCount = new Set(activeRef.map(s => s.customerId)).size;
+                prevMemberCount = new Set(activePrev.map(s => s.customerId)).size;
+                // フォールバック: サブスクデータがない場合はPAIDインボイスベース
+                if (memberCount === 0) {
+                    const memberInvRef = allInvoices.filter(inv =>
+                        inv.subscriptionId && inv.status === 'PAID'
+                        && toYM(inv.createdAt) === sqMonth
+                        && (sqStore === 'all' || inv.locationId === sqStore)
+                    );
+                    const memberInvPrev = allInvoices.filter(inv =>
+                        inv.subscriptionId && inv.status === 'PAID'
+                        && toYM(inv.createdAt) === prevYM
+                        && (sqStore === 'all' || inv.locationId === sqStore)
+                    );
+                    memberCount = new Set(memberInvRef.map(inv => inv.customerId || inv.subscriptionId)).size;
+                    prevMemberCount = new Set(memberInvPrev.map(inv => inv.customerId || inv.subscriptionId)).size;
                 }
 
                 // MRR = 選択月のサブスク決済の合計（PAID invoices with subscriptionId）
@@ -1258,19 +1265,10 @@
                     const storeHasSubs = ss.length > 0;
                     let smc, smrr, sn, sc, sStartA, sChurn;
                     if (storeHasSubs) {
-                        // 通常パス: PAIDインボイスベースで会員数を計算
+                        // 通常パス: サブスクステータスベースで会員数を計算（アクティブタブと一致）
                         const sa = ss.filter(s => isActiveAt(s, refEnd));
                         const sp = ss.filter(s => isActiveAt(s, prevEnd));
-                        // 会員数: PAID subscription invoicesの顧客数（Square管理画面と一致）
-                        const storeMemberInvs = allInvoices.filter(inv =>
-                            inv.subscriptionId && inv.status === 'PAID'
-                            && toYM(inv.createdAt) === sqMonth && inv.locationId === store.id
-                        );
-                        smc = new Set(storeMemberInvs.map(inv => inv.customerId || inv.subscriptionId)).size;
-                        // フォールバック: インボイスがない場合はサブスクステータスベース
-                        if (smc === 0 && sa.length > 0) {
-                            smc = new Set(sa.map(s => s.customerId)).size;
-                        }
+                        smc = new Set(sa.map(s => s.customerId)).size;
                         const storeSubIdSet = new Set(ss.map(s => s.id));
                         // 店舗ごとのMRR: realSubIdsで直接フィルタ（useInvoiceFallbackの影響を受けない）
                         const storeSubInvs = allInvoices.filter(inv =>
@@ -1374,25 +1372,23 @@
                         ? ymSubInvs.filter(inv => storeSubIds.has(inv.subscriptionId))
                         : ymSubInvs;
                     let ymMemberCount, ymNewCount, ymCanceledCount;
-                    // 会員数: PAIDインボイスベース（Square管理画面と一致）
-                    const ymMemberInvs = allInvoices.filter(inv =>
-                        inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === ym
-                        && (sqStore === 'all' || inv.locationId === sqStore)
-                    );
-                    ymMemberCount = new Set(ymMemberInvs.map(inv => inv.customerId || inv.subscriptionId)).size;
-                    if (useInvoiceFallback || ymMemberCount === 0) {
-                        ymNewCount = 0;
-                        ymCanceledCount = 0;
-                    } else {
-                        ymNewCount = new Set(filtered.filter(s => toYM(s.startDate) === ym).map(s => s.customerId)).size;
-                        ymCanceledCount = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === ym).map(s => s.customerId)).size;
-                    }
-                    // フォールバック: インボイスがない月はサブスクステータスベース
-                    if (ymMemberCount === 0 && !useInvoiceFallback) {
-                        const ma = filtered.filter(s => isActiveAt(s, eom));
-                        ymMemberCount = new Set(ma.map(s => s.customerId)).size;
-                        ymNewCount = new Set(filtered.filter(s => toYM(s.startDate) === ym).map(s => s.customerId)).size;
-                        ymCanceledCount = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === ym).map(s => s.customerId)).size;
+                    // 会員数: サブスクステータスベース（月末時点のアクティブ顧客数）
+                    const ymActive = filtered.filter(s => isActiveAt(s, eom));
+                    ymMemberCount = new Set(ymActive.map(s => s.customerId)).size;
+                    ymNewCount = new Set(filtered.filter(s => toYM(s.startDate) === ym).map(s => s.customerId)).size;
+                    ymCanceledCount = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === ym).map(s => s.customerId)).size;
+                    // フォールバック: サブスクデータがない場合はPAIDインボイスベース
+                    if (ymMemberCount === 0) {
+                        const ymMemberInvs = allInvoices.filter(inv =>
+                            inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === ym
+                            && (sqStore === 'all' || inv.locationId === sqStore)
+                        );
+                        const invCount = new Set(ymMemberInvs.map(inv => inv.customerId || inv.subscriptionId)).size;
+                        if (invCount > 0) {
+                            ymMemberCount = invCount;
+                            ymNewCount = 0;
+                            ymCanceledCount = 0;
+                        }
                     }
                     monthlyTrends.push({
                         month: ym,
@@ -1503,7 +1499,10 @@
                     if (!invBySub[inv.subscriptionId]) invBySub[inv.subscriptionId] = [];
                     invBySub[inv.subscriptionId].push(inv);
                 }
-                const allSubs = sqData.subscriptions.filter(isRealSub);
+                const allSubsRaw2 = sqData.subscriptions.filter(isRealSub);
+                // サブスクリプションID重複排除（複数ロケーション取得時の重複防止）
+                const seenIds2 = new Set();
+                const allSubs = allSubsRaw2.filter(s => { if (seenIds2.has(s.id)) return false; seenIds2.add(s.id); return true; });
                 const storeSubs = sqStore === 'all' ? allSubs : allSubs.filter(s => s.locationId === sqStore);
 
                 // サブスクデータがない店舗向けインボイスフォールバック判定
@@ -1734,7 +1733,10 @@
                     if (plan && plan.pricingExtracted && s.monthlyPrice <= 0) return false;
                     return true;
                 };
-                const allSubs = sqData.subscriptions.filter(isRealSub);
+                const allSubsRaw3 = sqData.subscriptions.filter(isRealSub);
+                // サブスクリプションID重複排除
+                const seenIds3 = new Set();
+                const allSubs = allSubsRaw3.filter(s => { if (seenIds3.has(s.id)) return false; seenIds3.add(s.id); return true; });
                 const storeSubs = sqStore === 'all' ? allSubs : allSubs.filter(s => s.locationId === sqStore);
                 const invBySub = {};
                 for (const inv of (sqData.invoices || [])) {
@@ -2271,7 +2273,7 @@
             // 業界ベンチマーク評価関数
             const benchmarkGrade = (metric, value, isLowerBetter) => {
                 const bm = SEITAI_BENCHMARKS[metric];
-                if (!bm || !value) return { grade: '-', color: 'slate', label: '' };
+                if (!bm || value === null || value === undefined) return { grade: '-', color: 'slate', label: '' };
                 if (isLowerBetter) {
                     if (value <= bm.excellent) return { grade: 'S', color: 'emerald', label: '業界トップ' };
                     if (value <= bm.good) return { grade: 'A', color: 'blue', label: '良好' };

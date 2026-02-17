@@ -659,6 +659,7 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
         status: s.status,
         startDate: s.startDate || (s.createdAt ? s.createdAt.split('T')[0] : null),
         canceledDate: s.canceledDate || null,
+        pausedDate: s.status === 'PAUSED' ? (s.chargedThroughDate || null) : null,
         monthlyPrice,
       };
     });

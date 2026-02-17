@@ -1161,8 +1161,10 @@
                 const isActiveAt = (s, date) => {
                     const start = s.startDate ? new Date(s.startDate) : null;
                     if (!start || start > date) return false;
+                    // PAUSED は一時停止中としてアクティブ会員にカウントしない
+                    if (s.status === 'PAUSED') return false;
                     if (s.status === 'ACTIVE') return true;
-                    // PAUSED・CANCELED・DEACTIVATEDは解約扱い（実効日で判定）
+                    // CANCELED・DEACTIVATEDは解約扱い（実効日で判定）
                     const endDate = getEndDate(s);
                     if (endDate) return new Date(endDate) > date;
                     return false;
@@ -1580,6 +1582,7 @@
 
                 const activeList = [];
                 const canceledList = [];
+                const pausedList = [];
                 const refundedList = [];
                 const overdueList = [];
                 const seenInv = {};
@@ -1664,9 +1667,10 @@
                         const subEndDate = sub.canceledDate || sub.pausedDate || null;
 
                         // アクティブ: 選択月末時点でアクティブなサブスク（直近決済実績がない会員は除外）
+                        // PAUSED は一時停止中タブに振り分けるためアクティブから除外
                         const start = sub.startDate ? new Date(sub.startDate) : null;
                         const hasActivity = recentPaidSubIds2.has(sub.id) || (sub.monthlyPrice > 0 && toYM(sub.startDate) === sqMonth);
-                        const isActiveAtMonth = hasActivity && start && start <= monthEnd && (
+                        const isActiveAtMonth = hasActivity && start && start <= monthEnd && sub.status !== 'PAUSED' && (
                             sub.status === 'ACTIVE' ||
                             (subEndDate && new Date(subEndDate) > monthEnd)
                         );
@@ -1674,9 +1678,14 @@
                             activeList.push(entry);
                         }
 
-                        // 解約・一時停止: 選択月内に解約/停止されたサブスクのみ
-                        if ((sub.status === 'CANCELED' || sub.status === 'DEACTIVATED' || sub.status === 'PAUSED') && toYM(subEndDate) === sqMonth) {
+                        // 解約: 選択月内に解約されたサブスクのみ（PAUSED除外）
+                        if ((sub.status === 'CANCELED' || sub.status === 'DEACTIVATED') && toYM(subEndDate) === sqMonth) {
                             canceledList.push(entry);
+                        }
+
+                        // 一時停止: 選択月内に一時停止されたサブスク
+                        if (sub.status === 'PAUSED' && toYM(subEndDate) === sqMonth) {
+                            pausedList.push(entry);
                         }
 
                         // 払戻し・期限超過: 選択月のインボイスのみ
@@ -1761,12 +1770,12 @@
                     }
                 }
 
-                return { activeList: dedup(activeList), newMonthList: dedup(newMonthList), canceledList: dedup(canceledList), refundedList, overdueList };
+                return { activeList: dedup(activeList), newMonthList: dedup(newMonthList), canceledList: dedup(canceledList), pausedList: dedup(pausedList), refundedList, overdueList };
             }, [sqData, sqStore, sqMonth]);
 
             const sqSortedList = useMemo(() => {
                 if (!sqCustomerData) return [];
-                const lists = { active: sqCustomerData.activeList, newMonth: sqCustomerData.newMonthList, canceled: sqCustomerData.canceledList, refunded: sqCustomerData.refundedList, overdue: sqCustomerData.overdueList };
+                const lists = { active: sqCustomerData.activeList, newMonth: sqCustomerData.newMonthList, canceled: sqCustomerData.canceledList, paused: sqCustomerData.pausedList, refunded: sqCustomerData.refundedList, overdue: sqCustomerData.overdueList };
                 const list = [...(lists[sqTab] || [])];
                 const { key, dir } = sqSort;
                 list.sort((a, b) => {
@@ -1831,8 +1840,9 @@
                         id: sub.id, name, plan: planName,
                         paidCount: paid.length,
                         paidTotal: paid.reduce((s, i) => s + i.amount, 0),
-                        startDate: sub.startDate, canceledDate: sub.canceledDate,
+                        startDate: sub.startDate, canceledDate: sub.canceledDate || sub.pausedDate,
                         monthlyPrice: sub.monthlyPrice,
+                        isPaused: sub.status === 'PAUSED',
                     };
                 });
                 // 重複排除（名前+月額でマージ）
@@ -6720,6 +6730,7 @@
                                                             { key: 'active', label: 'アクティブ', count: sqCustomerData.activeList.length, color: 'emerald' },
                                                             { key: 'newMonth', label: '新規入会', count: sqCustomerData.newMonthList.length, color: 'blue' },
                                                             { key: 'canceled', label: '解約済み', count: sqCustomerData.canceledList.length, color: 'rose' },
+                                                            { key: 'paused', label: '一時停止中', count: sqCustomerData.pausedList.length, color: 'orange' },
                                                             { key: 'refunded', label: '払戻し', count: sqCustomerData.refundedList.length, color: 'amber' },
                                                             { key: 'overdue', label: '期限超過', count: sqCustomerData.overdueList.length, color: 'red' },
                                                         ].map(t => (
@@ -6733,13 +6744,14 @@
                                                         <table className="w-full text-sm">
                                                             <thead className="sticky top-0 z-10">
                                                                 <tr className="bg-slate-50">
-                                                                    {(sqTab === 'active' || sqTab === 'newMonth' || sqTab === 'canceled' ? [
+                                                                    {(sqTab === 'active' || sqTab === 'newMonth' || sqTab === 'canceled' || sqTab === 'paused' ? [
                                                                         { k: 'name', label: '氏名' },
                                                                         { k: 'plan', label: 'コース' },
                                                                         { k: 'paidCount', label: '決済回数' },
                                                                         { k: 'paidTotal', label: '合計金額' },
                                                                         { k: 'startDate', label: '開始日' },
-                                                                        ...(sqTab === 'canceled' ? [{ k: 'canceledDate', label: '解約/停止日' }] : []),
+                                                                        ...(sqTab === 'canceled' ? [{ k: 'canceledDate', label: '解約日' }] : []),
+                                                                        ...(sqTab === 'paused' ? [{ k: 'canceledDate', label: '停止日' }] : []),
                                                                     ] : [
                                                                         { k: 'name', label: '氏名' },
                                                                         { k: 'amount', label: '金額' },
@@ -6760,7 +6772,7 @@
                                                                 {sqSortedList.length === 0 && (
                                                                     <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400 font-bold">データがありません</td></tr>
                                                                 )}
-                                                                {(sqTab === 'active' || sqTab === 'newMonth' || sqTab === 'canceled') && sqSortedList.map((row, i) => (
+                                                                {(sqTab === 'active' || sqTab === 'newMonth' || sqTab === 'canceled' || sqTab === 'paused') && sqSortedList.map((row, i) => (
                                                                     <tr key={row.id || i} className="hover:bg-slate-50">
                                                                         <td className="px-4 py-2.5 font-bold text-slate-800 whitespace-nowrap">{row.name}</td>
                                                                         <td className="px-4 py-2.5 text-slate-600">{row.plan}</td>
@@ -6768,6 +6780,7 @@
                                                                         <td className="px-4 py-2.5 font-bold text-right">¥{row.paidTotal.toLocaleString()}</td>
                                                                         <td className="px-4 py-2.5 text-slate-500 text-xs">{row.startDate || '-'}</td>
                                                                         {sqTab === 'canceled' && <td className="px-4 py-2.5 text-rose-500 text-xs font-bold">{row.canceledDate || '-'}</td>}
+                                                                        {sqTab === 'paused' && <td className="px-4 py-2.5 text-orange-500 text-xs font-bold">{row.canceledDate || '-'}</td>}
                                                                     </tr>
                                                                 ))}
                                                                 {(sqTab === 'refunded' || sqTab === 'overdue') && sqSortedList.map((row, i) => (
@@ -6893,7 +6906,7 @@
                                                         <div className={`p-5 border-b border-slate-200 flex items-center justify-between ${sqDrilldown.type === 'new' ? 'bg-gradient-to-r from-emerald-50 to-green-50' : 'bg-gradient-to-r from-rose-50 to-red-50'}`}>
                                                             <div>
                                                                 <h3 className="text-lg font-black text-slate-900">
-                                                                    {sqDrilldown.month.split('-')[1]}月 {sqDrilldown.type === 'new' ? '入会' : '解約'}者一覧
+                                                                    {sqDrilldown.month.split('-')[1]}月 {sqDrilldown.type === 'new' ? '入会' : '解約・一時停止'}者一覧
                                                                 </h3>
                                                                 <p className="text-sm text-slate-500 font-bold mt-1">{sqDrilldownList.length}名</p>
                                                             </div>
@@ -6909,12 +6922,13 @@
                                                                         <th className="px-4 py-3 text-left text-xs font-black text-slate-500">コース</th>
                                                                         <th className="px-4 py-3 text-right text-xs font-black text-slate-500">決済回数</th>
                                                                         <th className="px-4 py-3 text-right text-xs font-black text-slate-500">合計金額</th>
-                                                                        <th className="px-4 py-3 text-left text-xs font-black text-slate-500">{sqDrilldown.type === 'new' ? '開始日' : '解約日'}</th>
+                                                                        <th className="px-4 py-3 text-left text-xs font-black text-slate-500">{sqDrilldown.type === 'new' ? '開始日' : '解約/停止日'}</th>
+                                                                        {sqDrilldown.type === 'canceled' && <th className="px-4 py-3 text-left text-xs font-black text-slate-500">状態</th>}
                                                                     </tr>
                                                                 </thead>
                                                                 <tbody className="divide-y divide-slate-100">
                                                                     {sqDrilldownList.length === 0 && (
-                                                                        <tr><td colSpan={5} className="px-4 py-8 text-center text-slate-400 font-bold">データがありません</td></tr>
+                                                                        <tr><td colSpan={sqDrilldown.type === 'canceled' ? 6 : 5} className="px-4 py-8 text-center text-slate-400 font-bold">データがありません</td></tr>
                                                                     )}
                                                                     {sqDrilldownList.map((row, i) => (
                                                                         <tr key={row.id || i} className="hover:bg-slate-50">
@@ -6923,6 +6937,13 @@
                                                                             <td className="px-4 py-2.5 font-bold text-right">{row.paidCount}回</td>
                                                                             <td className="px-4 py-2.5 font-bold text-right">¥{row.paidTotal.toLocaleString()}</td>
                                                                             <td className="px-4 py-2.5 text-slate-500 text-xs">{sqDrilldown.type === 'new' ? (row.startDate || '-') : (row.canceledDate || '-')}</td>
+                                                                            {sqDrilldown.type === 'canceled' && (
+                                                                                <td className="px-4 py-2.5">
+                                                                                    <span className={`px-2 py-1 rounded-full text-xs font-bold ${row.isPaused ? 'bg-orange-100 text-orange-700' : 'bg-rose-100 text-rose-700'}`}>
+                                                                                        {row.isPaused ? '一時停止' : '解約'}
+                                                                                    </span>
+                                                                                </td>
+                                                                            )}
                                                                         </tr>
                                                                     ))}
                                                                 </tbody>

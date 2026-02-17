@@ -164,8 +164,8 @@ async function fetchAllSubscriptions(client, locationIds, diag, timeoutMs = 1800
   const startTime = Date.now();
   let timedOut = false;
 
-  // ロケーション別に並列取得（最大3並列、fetchInvoicesと同じアプローチ）
-  await parallelWithLimit(locationIds, 3, async (locId) => {
+  // ロケーション別に並列取得（最大5並列、大規模アカウント対応）
+  await parallelWithLimit(locationIds, 5, async (locId) => {
     let cursor = undefined;
     let locCount = 0;
     do {
@@ -297,7 +297,7 @@ async function fetchSalesFromPayments(token, env, locationIds, diag, timeoutMs =
   const startTime = Date.now();
   let timedOut = false;
 
-  const allResults = await parallelWithLimit(locationIds, 3, async (locId) => {
+  const allResults = await parallelWithLimit(locationIds, 5, async (locId) => {
     const payments = [];
     const refunds = [];
 
@@ -461,7 +461,7 @@ async function fetchInvoices(client, locationIds, diag, timeoutMs = 180000) {
   cutoffDate.setMonth(cutoffDate.getMonth() - 13);
   const cutoffStr = cutoffDate.toISOString();
 
-  await parallelWithLimit(locationIds, 3, async (locId) => {
+  await parallelWithLimit(locationIds, 5, async (locId) => {
     let cursor = undefined;
     let locCount = 0;
     let reachedCutoff = false;
@@ -610,22 +610,22 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
 
     // サブスク＋インボイス＋売上(Payments REST API)＋顧客を並列取得（各API個別タイムアウト付き）
     // Payments/Refunds APIはSDKバグ回避のためREST APIを直接呼び出す
-    const API_TIMEOUT = 180000; // 各API最大180秒（Vercel maxDuration:300s に対応）
+    const API_TIMEOUT = 240000; // 各API最大240秒（Vercel maxDuration:300s に対応、大規模アカウント向け）
     // サブスク・インボイスは内部で部分結果を管理するため withTimeout を使わない
     const [rawSubs, invoices, paymentsData, customers] = await Promise.all([
       fetchAllSubscriptions(client, locationIds, diag, API_TIMEOUT),
       fetchInvoices(client, locationIds, diag, API_TIMEOUT),
       fetchSalesFromPayments(tokenConfig.token, tokenConfig.env, locationIds, diag, API_TIMEOUT),
-      withTimeout(fetchAllCustomers(client, diag), 20000, {}, 'Customers'),
+      withTimeout(fetchAllCustomers(client, diag), 60000, {}, 'Customers'),
     ]);
 
     // タイムアウト検出: withTimeoutがfallbackを返した場合、diagに記録がない
     // Note: subscriptionsApi/invoicesApiは各関数内部で設定済み
-    if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (180s)';
-    if (!diag.invoicesApi) diag.invoicesApi = 'timeout (180s)';
-    if (!diag.paymentsApi) diag.paymentsApi = 'timeout (180s)';
-    if (!diag.refundsApi) diag.refundsApi = 'timeout (180s)';
-    if (!diag.customersApi) diag.customersApi = 'timeout (20s)';
+    if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (240s)';
+    if (!diag.invoicesApi) diag.invoicesApi = 'timeout (240s)';
+    if (!diag.paymentsApi) diag.paymentsApi = 'timeout (240s)';
+    if (!diag.refundsApi) diag.refundsApi = 'timeout (240s)';
+    if (!diag.customersApi) diag.customersApi = 'timeout (60s)';
 
     const payments = paymentsData.payments || [];
     const refunds = paymentsData.refunds || [];

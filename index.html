@@ -1156,11 +1156,15 @@
                 const toYM = d => { if (!d) return null; const dt = new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`; };
                 const getName = (s) => cust[s.customerId] ? cust[s.customerId].name : s.customerId;
                 const getInvName = (inv) => cust[inv.customerId] ? cust[inv.customerId].name : inv.customerId;
+                // 解約・一時停止の実効日（PAUSED: pausedDate, CANCELED/DEACTIVATED: canceledDate）
+                const getEndDate = (s) => s.canceledDate || s.pausedDate || null;
                 const isActiveAt = (s, date) => {
                     const start = s.startDate ? new Date(s.startDate) : null;
                     if (!start || start > date) return false;
-                    if (s.status === 'ACTIVE' || s.status === 'PAUSED') return true;
-                    if (s.canceledDate) return new Date(s.canceledDate) > date;
+                    if (s.status === 'ACTIVE') return true;
+                    // PAUSED・CANCELED・DEACTIVATEDは解約扱い（実効日で判定）
+                    const endDate = getEndDate(s);
+                    if (endDate) return new Date(endDate) > date;
                     return false;
                 };
 
@@ -1286,7 +1290,7 @@
 
                 // 新規・解約（基準月、金額0を除外）
                 const newInMonth = filtered.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s));
-                const canceledInMonth = filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === sqMonth && hasPaymentActivity(s));
+                const canceledInMonth = filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') && toYM(getEndDate(s)) === sqMonth && hasPaymentActivity(s));
 
                 // ARPU = サブスク決済合計 / アクティブ人数
                 const arpu = memberCount > 0 ? Math.round(mrr / memberCount) : 0;
@@ -1314,7 +1318,7 @@
                         );
                         smrr = storeSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
                         sn = ss.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s));
-                        sc = ss.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === sqMonth && hasPaymentActivity(s));
+                        sc = ss.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') && toYM(getEndDate(s)) === sqMonth && hasPaymentActivity(s));
                         sStartA = sp.length + sn.length;
                         sChurn = sStartA > 0 ? Math.round(sc.length / sStartA * 10000) / 100 : 0;
                     } else {
@@ -1372,9 +1376,10 @@
                         return (refEnd - new Date(s.startDate)) / 86400000 >= days;
                     });
                     const churned = eligible.filter(s => {
-                        if (s.status !== 'CANCELED' && s.status !== 'DEACTIVATED') return false;
-                        if (!s.canceledDate || !s.startDate) return false;
-                        return (new Date(s.canceledDate) - new Date(s.startDate)) / 86400000 <= days;
+                        if (s.status !== 'CANCELED' && s.status !== 'DEACTIVATED' && s.status !== 'PAUSED') return false;
+                        const endD = getEndDate(s);
+                        if (!endD || !s.startDate) return false;
+                        return (new Date(endD) - new Date(s.startDate)) / 86400000 <= days;
                     });
                     return eligible.length > 0 ? Math.round(churned.length / eligible.length * 1000) / 10 : 0;
                 };
@@ -1386,10 +1391,11 @@
                     const cutoff = new Date(refY, refM - 1 - months, 1);
                     const eligible = filtered.filter(s => s.startDate && new Date(s.startDate) <= cutoff && hasAnyPayment(s));
                     const survived = eligible.filter(s => {
-                        if (s.status === 'ACTIVE' || s.status === 'PAUSED') return true;
-                        if (s.canceledDate && s.startDate) {
-                            const dm = (new Date(s.canceledDate).getFullYear() - new Date(s.startDate).getFullYear()) * 12
-                                + new Date(s.canceledDate).getMonth() - new Date(s.startDate).getMonth();
+                        if (s.status === 'ACTIVE') return true;
+                        const endD = getEndDate(s);
+                        if (endD && s.startDate) {
+                            const dm = (new Date(endD).getFullYear() - new Date(s.startDate).getFullYear()) * 12
+                                + new Date(endD).getMonth() - new Date(s.startDate).getMonth();
                             return dm >= months;
                         }
                         return false;
@@ -1423,7 +1429,7 @@
                     const ymActive = filtered.filter(s => isActiveAt(s, eom) && hasPaymentActivity(s, ym));
                     ymMemberCount = new Set(ymActive.map(s => s.customerId)).size;
                     ymNewCount = new Set(filtered.filter(s => toYM(s.startDate) === ym && hasPaymentActivity(s, ym)).map(s => s.customerId)).size;
-                    ymCanceledCount = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === ym && hasPaymentActivity(s, ym)).map(s => s.customerId)).size;
+                    ymCanceledCount = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') && toYM(getEndDate(s)) === ym && hasPaymentActivity(s, ym)).map(s => s.customerId)).size;
                     // フォールバック: サブスクデータがない場合はPAIDインボイスベース
                     if (ymMemberCount === 0) {
                         const ymMemberInvs = allInvoices.filter(inv =>
@@ -1474,11 +1480,12 @@
                             // まだ判定日が来ていないメンバーはスキップ
                             if (billingDate > today) continue;
                             eligible++;
-                            // 解約していない or 解約日がiヶ月目の決済日以降 → 生存
-                            if (s.status === 'ACTIVE' || s.status === 'PAUSED') {
+                            // 解約・一時停止していない or 終了日がiヶ月目の決済日以降 → 生存
+                            if (s.status === 'ACTIVE') {
                                 survived++;
-                            } else if (s.canceledDate) {
-                                if (new Date(s.canceledDate) >= billingDate) survived++;
+                            } else {
+                                const endD = getEndDate(s);
+                                if (endD && new Date(endD) >= billingDate) survived++;
                             }
                         }
                         if (eligible === 0) break;
@@ -1491,7 +1498,8 @@
                 const allMonths = new Set();
                 for (const s of subs) {
                     if (s.startDate) allMonths.add(toYM(s.startDate));
-                    if (s.canceledDate) allMonths.add(toYM(s.canceledDate));
+                    const endD = getEndDate(s);
+                    if (endD) allMonths.add(toYM(endD));
                 }
                 // フォールバック時はインボイスの月も含める
                 if (useInvoiceFallback) {
@@ -1648,23 +1656,26 @@
                             paidTotal: paidMonths.reduce((s, m) => s + paidByMonth[m], 0),
                             paidByMonth,
                             paidMonths,
-                            startDate: sub.startDate, canceledDate: sub.canceledDate,
+                            startDate: sub.startDate, canceledDate: sub.canceledDate || sub.pausedDate,
                             monthlyPrice: sub.monthlyPrice,
                         };
+
+                        // 解約・一時停止の実効日
+                        const subEndDate = sub.canceledDate || sub.pausedDate || null;
 
                         // アクティブ: 選択月末時点でアクティブなサブスク（直近決済実績がない会員は除外）
                         const start = sub.startDate ? new Date(sub.startDate) : null;
                         const hasActivity = recentPaidSubIds2.has(sub.id) || (sub.monthlyPrice > 0 && toYM(sub.startDate) === sqMonth);
                         const isActiveAtMonth = hasActivity && start && start <= monthEnd && (
-                            (sub.status === 'ACTIVE' || sub.status === 'PAUSED') ||
-                            (sub.canceledDate && new Date(sub.canceledDate) > monthEnd)
+                            sub.status === 'ACTIVE' ||
+                            (subEndDate && new Date(subEndDate) > monthEnd)
                         );
                         if (isActiveAtMonth) {
                             activeList.push(entry);
                         }
 
-                        // 解約: 選択月内に解約されたサブスクのみ
-                        if ((sub.status === 'CANCELED' || sub.status === 'DEACTIVATED') && toYM(sub.canceledDate) === sqMonth) {
+                        // 解約・一時停止: 選択月内に解約/停止されたサブスクのみ
+                        if ((sub.status === 'CANCELED' || sub.status === 'DEACTIVATED' || sub.status === 'PAUSED') && toYM(subEndDate) === sqMonth) {
                             canceledList.push(entry);
                         }
 
@@ -1809,7 +1820,7 @@
                 if (type === 'new') {
                     matched = storeSubs.filter(s => toYM(s.startDate) === month);
                 } else {
-                    matched = storeSubs.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === month);
+                    matched = storeSubs.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') && toYM(s.canceledDate || s.pausedDate) === month);
                 }
                 const list = matched.map(sub => {
                     const name = cust[sub.customerId] ? cust[sub.customerId].name : sub.customerId || '不明';
@@ -6728,7 +6739,7 @@
                                                                         { k: 'paidCount', label: '決済回数' },
                                                                         { k: 'paidTotal', label: '合計金額' },
                                                                         { k: 'startDate', label: '開始日' },
-                                                                        ...(sqTab === 'canceled' ? [{ k: 'canceledDate', label: '解約日' }] : []),
+                                                                        ...(sqTab === 'canceled' ? [{ k: 'canceledDate', label: '解約/停止日' }] : []),
                                                                     ] : [
                                                                         { k: 'name', label: '氏名' },
                                                                         { k: 'amount', label: '金額' },

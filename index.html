@@ -1242,6 +1242,17 @@
                 };
                 const currentYM = `${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
 
+                // 月別の決済実績のある顧客IDセット（初月解約率・継続率・コホート分析用）
+                const globalCustomerPaidByMonth = {};
+                for (const inv of allInvoices) {
+                    if (!inv.subscriptionId || inv.status !== 'PAID' || !inv.customerId) continue;
+                    if (!realSubIds.has(inv.subscriptionId)) continue;
+                    const iym = toYM(inv.createdAt);
+                    if (!iym) continue;
+                    if (!globalCustomerPaidByMonth[iym]) globalCustomerPaidByMonth[iym] = new Set();
+                    globalCustomerPaidByMonth[iym].add(inv.customerId);
+                }
+
                 // アクティブ会員ベース解約率: 前月のアクティブ会員のうち、当月にアクティブでなくなった会員 = 解約
                 // 分母はアクティブ会員数と同じ定義（サブスクステータス+決済実績+重複排除）
                 const calcMemberChurn = (prevMemberIds, currentGlobalMemberIds) => {

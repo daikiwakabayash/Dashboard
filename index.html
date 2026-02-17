@@ -1229,7 +1229,7 @@
                 const prevMrr = filteredPrevSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
                 const mrrChange = prevMrr > 0 ? Math.round((mrr - prevMrr) / prevMrr * 10000) / 100 : 0;
 
-                // 返品額 = Orders API 返金の合計
+                // 返品額 = Refunds API 返金の合計
                 const allRefunds = sqData.refunds || [];
                 const refundsFiltered = sqStore === 'all'
                     ? allRefunds
@@ -1237,14 +1237,15 @@
                 const monthRefunds = refundsFiltered.filter(r => toYM(r.createdAt) === sqMonth);
                 const totalRefunds = monthRefunds.reduce((sum, r) => sum + r.amount, 0);
 
-                // 総売上高 = COMPLETED注文の合計 - 返品額（Square管理画面の「売上合計」と一致）
+                // 総売上高 = Payments API COMPLETED決済の合計 - 返品額
+                // Square管理画面の「売上合計」と一致（POS・端末・カードオンファイル等すべての決済を含む）
                 const allPayments = sqData.payments || [];
                 const paymentsFiltered = sqStore === 'all'
                     ? allPayments
                     : allPayments.filter(p => p.locationId === sqStore);
                 const monthPayments = paymentsFiltered.filter(p => toYM(p.createdAt) === sqMonth);
                 let totalSales = monthPayments.reduce((sum, p) => sum + p.amount, 0);
-                // フォールバック: Orders APIが空の場合、PAIDインボイス合計を使用
+                // フォールバック: Payments APIが空の場合、PAIDインボイス合計を使用
                 if (totalSales === 0 && allPayments.length === 0) {
                     const paidInvsMonth = allInvoices.filter(inv =>
                         inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth
@@ -1254,7 +1255,7 @@
                         : paidInvsMonth.filter(inv => inv.locationId === sqStore);
                     totalSales = storeInvs.reduce((sum, inv) => sum + inv.amount, 0);
                 }
-                // 返品差引: Square管理画面の「売上合計」は返品差引後の純売上
+                // 返品差引: 純売上 = 売上合計 - 返金額
                 totalSales = Math.max(0, totalSales - totalRefunds);
 
                 // 新規・解約（基準月、金額0を除外）
@@ -1299,9 +1300,18 @@
                         sn = []; sc = [];
                         sChurn = 0;
                     }
+                    // 店舗別総売上高: Payments APIの決済額から返品を差し引き
+                    const storePayments = allPayments.filter(p => p.locationId === store.id);
+                    const storeMonthPayments = storePayments.filter(p => toYM(p.createdAt) === sqMonth);
+                    const storeSales = storeMonthPayments.reduce((sum, p) => sum + p.amount, 0);
+                    const storeRefunds = allRefunds.filter(r => r.locationId === store.id && toYM(r.createdAt) === sqMonth);
+                    const storeRefundTotal = storeRefunds.reduce((sum, r) => sum + r.amount, 0);
+
                     byStore[store.id] = {
                         name: store.name, memberCount: smc, mrr: smrr,
                         arpu: smc > 0 ? Math.round(smrr / smc) : 0,
+                        totalSales: Math.max(0, storeSales - storeRefundTotal),
+                        totalRefunds: storeRefundTotal,
                         churnRate: sChurn,
                         newEnrolled: storeHasSubs ? sn.length : 0, canceled: storeHasSubs ? sc.length : 0,
                         isEstimated: !storeHasSubs && smc > 0,
@@ -6768,6 +6778,7 @@
                                                             <table className="w-full text-sm">
                                                                 <thead><tr className="bg-slate-50 text-left">
                                                                     <th className="px-4 py-3 font-black text-slate-500 text-xs">店舗</th>
+                                                                    <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">総売上高</th>
                                                                     <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">会員数</th>
                                                                     <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">MRR</th>
                                                                     <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">ARPU</th>
@@ -6777,6 +6788,7 @@
                                                                     {Object.entries(sqMetrics.byStore).map(([id, s]) => (
                                                                         <tr key={id} className="hover:bg-slate-50">
                                                                             <td className="px-4 py-3 font-bold text-slate-700">{s.name}</td>
+                                                                            <td className="px-4 py-3 font-bold text-right text-emerald-700">¥{(s.totalSales || 0) >= 10000 ? `${((s.totalSales || 0)/10000).toFixed(1)}万` : (s.totalSales || 0).toLocaleString()}</td>
                                                                             <td className="px-4 py-3 font-bold text-right">{s.memberCount}名</td>
                                                                             <td className="px-4 py-3 font-bold text-right">¥{s.mrr >= 10000 ? `${(s.mrr/10000).toFixed(1)}万` : s.mrr.toLocaleString()}</td>
                                                                             <td className="px-4 py-3 font-bold text-right">¥{s.arpu.toLocaleString()}</td>

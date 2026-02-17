@@ -610,22 +610,22 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
 
     // サブスク＋インボイス＋売上(Payments REST API)＋顧客を並列取得（各API個別タイムアウト付き）
     // Payments/Refunds APIはSDKバグ回避のためREST APIを直接呼び出す
-    const API_TIMEOUT = 240000; // 各API最大240秒（Vercel maxDuration:300s に対応、大規模アカウント向け）
+    const API_TIMEOUT = 45000; // 各API最大45秒（Vercel maxDuration:60s に対応、フロントエンドがバッチ分割するため十分）
     // サブスク・インボイスは内部で部分結果を管理するため withTimeout を使わない
     const [rawSubs, invoices, paymentsData, customers] = await Promise.all([
       fetchAllSubscriptions(client, locationIds, diag, API_TIMEOUT),
       fetchInvoices(client, locationIds, diag, API_TIMEOUT),
       fetchSalesFromPayments(tokenConfig.token, tokenConfig.env, locationIds, diag, API_TIMEOUT),
-      withTimeout(fetchAllCustomers(client, diag), 60000, {}, 'Customers'),
+      withTimeout(fetchAllCustomers(client, diag), 30000, {}, 'Customers'),
     ]);
 
     // タイムアウト検出: withTimeoutがfallbackを返した場合、diagに記録がない
     // Note: subscriptionsApi/invoicesApiは各関数内部で設定済み
-    if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (240s)';
-    if (!diag.invoicesApi) diag.invoicesApi = 'timeout (240s)';
-    if (!diag.paymentsApi) diag.paymentsApi = 'timeout (240s)';
-    if (!diag.refundsApi) diag.refundsApi = 'timeout (240s)';
-    if (!diag.customersApi) diag.customersApi = 'timeout (60s)';
+    if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (45s)';
+    if (!diag.invoicesApi) diag.invoicesApi = 'timeout (45s)';
+    if (!diag.paymentsApi) diag.paymentsApi = 'timeout (45s)';
+    if (!diag.refundsApi) diag.refundsApi = 'timeout (45s)';
+    if (!diag.customersApi) diag.customersApi = 'timeout (30s)';
 
     const payments = paymentsData.payments || [];
     const refunds = paymentsData.refunds || [];
@@ -806,7 +806,7 @@ export default async function handler(req, res) {
           r = await Promise.race([
             fetchAccountData(cfg, true),
             new Promise((_, reject) => {
-              batchTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (280秒)')), 280000);
+              batchTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (50秒)')), 50000);
             }),
           ]).finally(() => clearTimeout(batchTimer));
           if (r && !r._failed) setCachedAccount(idx, r);
@@ -854,7 +854,7 @@ export default async function handler(req, res) {
         r = await Promise.race([
           fetchAccountData(cfg, configs.length > 1),
           new Promise((_, reject) => {
-            singleTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (280秒)')), 280000);
+            singleTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (50秒)')), 50000);
           }),
         ]).finally(() => clearTimeout(singleTimer));
         if (r && !r._failed) setCachedAccount(idx, r);
@@ -901,7 +901,7 @@ export default async function handler(req, res) {
   const allDiag = [];
 
   let deadlineReached = false;
-  const deadlineTimer = setTimeout(() => { deadlineReached = true; }, 280000);
+  const deadlineTimer = setTimeout(() => { deadlineReached = true; }, 50000);
 
   try {
     // 全アカウント並列取得（最大5並列、75店舗対応）

@@ -1167,17 +1167,25 @@
                 const allInvoices = sqData.invoices || [];
                 const realSubIds = new Set(subs.map(s => s.id));
 
+                // 決済実績チェック: 金額0・回数0の会員をアクティブカウントから除外
+                const hasPaymentActivity = (s) => {
+                    if (s.monthlyPrice > 0) return true;
+                    if (paidSubIds.has(s.id)) return true;
+                    return false;
+                };
+
                 // サブスクデータがない店舗向けフォールバック判定
                 // （サブスクAPIがタイムアウトした場合、インボイスのlocationIdで直接フィルタ）
                 const useInvoiceFallback = sqStore !== 'all' && filtered.length === 0
                     && allInvoices.some(inv => inv.subscriptionId && inv.locationId === sqStore);
 
                 // 基準月・前月のアクティブ（解約率・継続率・コホート用に保持）
-                const activeRef = filtered.filter(s => isActiveAt(s, refEnd));
-                const activePrev = filtered.filter(s => isActiveAt(s, prevEnd));
+                const activeRef = filtered.filter(s => isActiveAt(s, refEnd) && hasPaymentActivity(s));
+                const activePrev = filtered.filter(s => isActiveAt(s, prevEnd) && hasPaymentActivity(s));
 
                 // アクティブ会員数: 月末時点のアクティブサブスク顧客数（顧客ID重複排除）
                 // アクティブタブの表示と一致させるため、サブスクステータスベースで計算
+                // 金額0・回数0の会員は除外
                 let memberCount, prevMemberCount;
                 memberCount = new Set(activeRef.map(s => s.customerId)).size;
                 prevMemberCount = new Set(activePrev.map(s => s.customerId)).size;
@@ -1247,9 +1255,9 @@
                 // 返品差引: Square管理画面の「売上合計」は返品差引後の純売上
                 totalSales = Math.max(0, totalSales - totalRefunds);
 
-                // 新規・解約（基準月）
-                const newInMonth = filtered.filter(s => toYM(s.startDate) === sqMonth);
-                const canceledInMonth = filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === sqMonth);
+                // 新規・解約（基準月、金額0を除外）
+                const newInMonth = filtered.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s));
+                const canceledInMonth = filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === sqMonth && hasPaymentActivity(s));
 
                 // ARPU = サブスク決済合計 / アクティブ人数
                 const arpu = memberCount > 0 ? Math.round(mrr / memberCount) : 0;
@@ -1265,9 +1273,9 @@
                     const storeHasSubs = ss.length > 0;
                     let smc, smrr, sn, sc, sStartA, sChurn;
                     if (storeHasSubs) {
-                        // 通常パス: サブスクステータスベースで会員数を計算（アクティブタブと一致）
-                        const sa = ss.filter(s => isActiveAt(s, refEnd));
-                        const sp = ss.filter(s => isActiveAt(s, prevEnd));
+                        // 通常パス: サブスクステータスベースで会員数を計算（金額0を除外）
+                        const sa = ss.filter(s => isActiveAt(s, refEnd) && hasPaymentActivity(s));
+                        const sp = ss.filter(s => isActiveAt(s, prevEnd) && hasPaymentActivity(s));
                         smc = new Set(sa.map(s => s.customerId)).size;
                         const storeSubIdSet = new Set(ss.map(s => s.id));
                         // 店舗ごとのMRR: realSubIdsで直接フィルタ（useInvoiceFallbackの影響を受けない）
@@ -1276,8 +1284,8 @@
                             && realSubIds.has(inv.subscriptionId) && storeSubIdSet.has(inv.subscriptionId)
                         );
                         smrr = storeSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
-                        sn = ss.filter(s => toYM(s.startDate) === sqMonth);
-                        sc = ss.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === sqMonth);
+                        sn = ss.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s));
+                        sc = ss.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === sqMonth && hasPaymentActivity(s));
                         sStartA = sp.length + sn.length;
                         sChurn = sStartA > 0 ? Math.round(sc.length / sStartA * 10000) / 100 : 0;
                     } else {
@@ -1322,6 +1330,7 @@
                 const calcEarlyChurn = (days) => {
                     const eligible = filtered.filter(s => {
                         if (!s.startDate) return false;
+                        if (!hasPaymentActivity(s)) return false;
                         return (refEnd - new Date(s.startDate)) / 86400000 >= days;
                     });
                     const churned = eligible.filter(s => {
@@ -1337,7 +1346,7 @@
                 // 継続率 (3/6/12ヶ月)
                 const calcRetention = (months) => {
                     const cutoff = new Date(refY, refM - 1 - months, 1);
-                    const eligible = filtered.filter(s => s.startDate && new Date(s.startDate) <= cutoff);
+                    const eligible = filtered.filter(s => s.startDate && new Date(s.startDate) <= cutoff && hasPaymentActivity(s));
                     const survived = eligible.filter(s => {
                         if (s.status === 'ACTIVE' || s.status === 'PAUSED') return true;
                         if (s.canceledDate && s.startDate) {
@@ -1372,11 +1381,11 @@
                         ? ymSubInvs.filter(inv => storeSubIds.has(inv.subscriptionId))
                         : ymSubInvs;
                     let ymMemberCount, ymNewCount, ymCanceledCount;
-                    // 会員数: サブスクステータスベース（月末時点のアクティブ顧客数）
-                    const ymActive = filtered.filter(s => isActiveAt(s, eom));
+                    // 会員数: サブスクステータスベース（月末時点のアクティブ顧客数、金額0を除外）
+                    const ymActive = filtered.filter(s => isActiveAt(s, eom) && hasPaymentActivity(s));
                     ymMemberCount = new Set(ymActive.map(s => s.customerId)).size;
-                    ymNewCount = new Set(filtered.filter(s => toYM(s.startDate) === ym).map(s => s.customerId)).size;
-                    ymCanceledCount = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === ym).map(s => s.customerId)).size;
+                    ymNewCount = new Set(filtered.filter(s => toYM(s.startDate) === ym && hasPaymentActivity(s)).map(s => s.customerId)).size;
+                    ymCanceledCount = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && toYM(s.canceledDate) === ym && hasPaymentActivity(s)).map(s => s.customerId)).size;
                     // フォールバック: サブスクデータがない場合はPAIDインボイスベース
                     if (ymMemberCount === 0) {
                         const ymMemberInvs = allInvoices.filter(inv =>
@@ -1405,6 +1414,7 @@
                 const cohortMap = {};
                 for (const s of filtered) {
                     if (!s.startDate) continue;
+                    if (!hasPaymentActivity(s)) continue;
                     const ym = toYM(s.startDate);
                     if (!cohortMap[ym]) cohortMap[ym] = [];
                     cohortMap[ym].push(s);
@@ -1592,9 +1602,10 @@
                             monthlyPrice: sub.monthlyPrice,
                         };
 
-                        // アクティブ: 選択月末時点でアクティブなサブスク
+                        // アクティブ: 選択月末時点でアクティブなサブスク（金額0・回数0は除外）
                         const start = sub.startDate ? new Date(sub.startDate) : null;
-                        const isActiveAtMonth = start && start <= monthEnd && (
+                        const hasActivity = sub.monthlyPrice > 0 || paidSubIds2.has(sub.id);
+                        const isActiveAtMonth = hasActivity && start && start <= monthEnd && (
                             (sub.status === 'ACTIVE' || sub.status === 'PAUSED') ||
                             (sub.canceledDate && new Date(sub.canceledDate) > monthEnd)
                         );

@@ -1242,37 +1242,16 @@
                 };
                 const currentYM = `${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
 
-                // 決済ベース解約率計算用: 月別の決済実績のある顧客IDセット（全店舗横断）
-                // 解約定義: 前月に決済あり → 当月にどのプランでも決済なし = 解約
-                const globalCustomerPaidByMonth = {};
-                for (const inv of allInvoices) {
-                    if (!inv.subscriptionId || inv.status !== 'PAID' || !inv.customerId) continue;
-                    if (!realSubIds.has(inv.subscriptionId)) continue;
-                    const iym = toYM(inv.createdAt);
-                    if (!iym) continue;
-                    if (!globalCustomerPaidByMonth[iym]) globalCustomerPaidByMonth[iym] = new Set();
-                    globalCustomerPaidByMonth[iym].add(inv.customerId);
-                }
-                // 店舗別の月別顧客セット（店舗別解約率計算用: その店舗で決済があった顧客）
-                const storeCustomerPaidByMonth = {};
-                for (const inv of allInvoices) {
-                    if (!inv.subscriptionId || inv.status !== 'PAID' || !inv.customerId) continue;
-                    if (!realSubIds.has(inv.subscriptionId)) continue;
-                    const iym = toYM(inv.createdAt);
-                    if (!iym || !inv.locationId) continue;
-                    const locKey = `${inv.locationId}|${iym}`;
-                    if (!storeCustomerPaidByMonth[locKey]) storeCustomerPaidByMonth[locKey] = new Set();
-                    storeCustomerPaidByMonth[locKey].add(inv.customerId);
-                }
-                // 決済ベース解約率の計算: 前月顧客のうち、当月に全店舗横断で決済がない顧客 = 解約
-                const calcPaymentChurn = (prevCustomers, currentGlobalCustomers) => {
-                    if (!prevCustomers || prevCustomers.size === 0) return { rate: 0, churned: 0, base: 0 };
+                // アクティブ会員ベース解約率: 前月のアクティブ会員のうち、当月にアクティブでなくなった会員 = 解約
+                // 分母はアクティブ会員数と同じ定義（サブスクステータス+決済実績+重複排除）
+                const calcMemberChurn = (prevMemberIds, currentGlobalMemberIds) => {
+                    if (!prevMemberIds || prevMemberIds.size === 0) return { rate: 0, churned: 0, base: 0 };
                     let churned = 0;
-                    for (const custId of prevCustomers) {
-                        if (!currentGlobalCustomers || !currentGlobalCustomers.has(custId)) churned++;
+                    for (const custId of prevMemberIds) {
+                        if (!currentGlobalMemberIds || !currentGlobalMemberIds.has(custId)) churned++;
                     }
-                    const rate = Math.round(churned / prevCustomers.size * 10000) / 100;
-                    return { rate, churned, base: prevCustomers.size };
+                    const rate = Math.round(churned / prevMemberIds.size * 10000) / 100;
+                    return { rate, churned, base: prevMemberIds.size };
                 };
 
                 // 全期間の決済実績チェック（テスト・0円プラン除外用: 解約率・継続率・コホート分析向け）
@@ -1305,14 +1284,13 @@
                 // アクティブ会員数: 月末時点のアクティブサブスク顧客数（顧客ID+名前重複排除）
                 // アクティブタブの表示と一致させるため、サブスクステータスベースで計算
                 // 金額0・回数0の会員は除外
-                const countUniqueMembers = (subsList) => {
+                const getUniqueCustomerIds = (subsList) => {
                     const seen = new Set();
                     const nameKeys = new Set();
-                    let count = 0;
+                    const result = new Set();
                     for (const s of subsList) {
                         if (seen.has(s.customerId)) continue;
                         seen.add(s.customerId);
-                        // 名前+プラン+月額で同一人物判定（異なるcustomerIdの重複対応）
                         const name = cust[s.customerId] ? cust[s.customerId].name : null;
                         if (name) {
                             const pn = plansMap[s.planVariationId] ? plansMap[s.planVariationId].name : '';
@@ -1320,10 +1298,11 @@
                             if (nameKeys.has(nameKey)) continue;
                             nameKeys.add(nameKey);
                         }
-                        count++;
+                        result.add(s.customerId);
                     }
-                    return count;
+                    return result;
                 };
+                const countUniqueMembers = (subsList) => getUniqueCustomerIds(subsList).size;
                 let memberCount, prevMemberCount;
                 memberCount = countUniqueMembers(activeRef);
                 prevMemberCount = countUniqueMembers(activePrev);
@@ -1400,13 +1379,13 @@
                 // ARPU = サブスク決済合計 / アクティブ人数
                 const arpu = memberCount > 0 ? Math.round(mrr / memberCount) : 0;
 
-                // 月間解約率（決済ベース: 前月に決済あり → 当月にどのプランでも決済なし = 解約）
-                // 店舗フィルタ時: その店舗の前月顧客のうち、全店舗横断で当月決済がない顧客を解約とカウント
-                const churnPrevCustomers = sqStore === 'all'
-                    ? (globalCustomerPaidByMonth[prevYM] || new Set())
-                    : (storeCustomerPaidByMonth[`${sqStore}|${prevYM}`] || new Set());
-                const churnCurrentGlobalCustomers = globalCustomerPaidByMonth[sqMonth] || new Set();
-                const { rate: churnRate, churned: churnedCount, base: churnBase } = calcPaymentChurn(churnPrevCustomers, churnCurrentGlobalCustomers);
+                // 月間解約率（アクティブ会員ベース: 前月のアクティブ会員のうち、当月に全店舗横断でアクティブでなくなった会員 = 解約）
+                // 全店舗横断のアクティブ会員顧客IDセット（店舗間移動を解約とカウントしない）
+                const globalActiveRefIds = new Set(
+                    subs.filter(s => isActiveAt(s, refEnd) && hasPaymentActivity(s)).map(s => s.customerId)
+                );
+                const activePrevIds = getUniqueCustomerIds(activePrev);
+                const { rate: churnRate, churned: churnedCount, base: churnBase } = calcMemberChurn(activePrevIds, globalActiveRefIds);
 
                 // 店舗別（各店舗ごとに独立して計算）
                 const byStore = {};
@@ -1433,9 +1412,10 @@
                         smrr = storeInvsRef.reduce((sum, inv) => sum + inv.amount, 0);
                         sn = [];
                     }
-                    // 店舗別解約率（決済ベース: この店舗の前月顧客のうち、全店舗横断で当月決済なし = 解約）
-                    const storePrevCust = storeCustomerPaidByMonth[`${store.id}|${prevYM}`] || new Set();
-                    const { rate: sChurn, churned: sCanceled } = calcPaymentChurn(storePrevCust, churnCurrentGlobalCustomers);
+                    // 店舗別解約率（アクティブ会員ベース: この店舗の前月アクティブ会員のうち、全店舗横断で当月非アクティブ = 解約）
+                    const storePrevActive = ss.filter(s => isActiveAt(s, prevEnd) && hasPaymentActivity(s, prevYM));
+                    const storePrevIds = new Set(storePrevActive.map(s => s.customerId));
+                    const { rate: sChurn, churned: sCanceled } = calcMemberChurn(storePrevIds, globalActiveRefIds);
                     // 店舗別総売上高: Payments APIの決済額から返品を差し引き
                     const storePayments = allPayments.filter(p => p.locationId === store.id);
                     const storeMonthPayments = storePayments.filter(p => toYM(p.createdAt) === sqMonth);
@@ -1567,13 +1547,14 @@
                     // 新規: 開始月マップから取得（O(1)ルックアップ）
                     const ymNewSubs = (subsByStartYM[ym] || []).filter(s => hasPaymentActivity(s, ym));
                     ymNewCount = new Set(ymNewSubs.map(s => s.customerId)).size;
-                    // 解約（決済ベース）: 前月に決済あり → 当月にどのプランでも決済なし = 解約
+                    // 解約（アクティブ会員ベース）: 前月のアクティブ会員のうち、当月に全店舗横断でアクティブでなくなった会員
                     const ymPrevYM = getPrevYM(ym);
-                    const ymChurnPrev = sqStore === 'all'
-                        ? (globalCustomerPaidByMonth[ymPrevYM] || new Set())
-                        : (storeCustomerPaidByMonth[`${sqStore}|${ymPrevYM}`] || new Set());
-                    const ymChurnCurrent = globalCustomerPaidByMonth[ym] || new Set();
-                    ymCanceledCount = calcPaymentChurn(ymChurnPrev, ymChurnCurrent).churned;
+                    const prevEom = new Date(td.getFullYear(), td.getMonth(), 0);
+                    const ymPrevActive = filtered.filter(s => isActiveAt(s, prevEom) && hasPaymentActivity(s, ymPrevYM));
+                    const ymPrevActiveIds = new Set(ymPrevActive.map(s => s.customerId));
+                    const ymGlobalActive = subs.filter(s => isActiveAt(s, eom) && hasPaymentActivity(s, ym));
+                    const ymGlobalActiveIds = new Set(ymGlobalActive.map(s => s.customerId));
+                    ymCanceledCount = calcMemberChurn(ymPrevActiveIds, ymGlobalActiveIds).churned;
                     // フォールバック: サブスクデータがない場合はPAIDインボイスベース
                     if (ymMemberCount === 0) {
                         const ymAllPaidInvs = paidInvsByYM[ym] || [];

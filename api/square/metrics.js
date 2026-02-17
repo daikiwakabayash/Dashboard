@@ -279,16 +279,20 @@ async function fetchPlanDetails(client, planVariationIds) {
   return plans;
 }
 
-// ── 売上・返品データ取得: Orders API (searchOrders) を使用 ──
+// ── 売上・返品データ取得: Payments REST API を直接使用 ──
 // Square SDK v39の@apimaticライブラリにバグがあり、listPayments/listPaymentRefundsの
 // 位置引数でundefinedがクエリ文字列に&&として直列化されINVALID_URLエラーが発生するため
-// POST bodyベースのsearchOrders APIを使用する
+// SDKを使わずREST APIを直接呼び出す。
+// また、Orders APIはPOS以外の決済（端末直接・カードオンファイル等）を含まないため
+// Payments APIの方がSquare管理画面の売上合計と一致する。
 // ──
-async function fetchSalesFromOrders(client, locationIds, diag, timeoutMs = 180000) {
+async function fetchSalesFromPayments(token, env, locationIds, diag, timeoutMs = 180000) {
+  const baseUrl = env === 'production'
+    ? 'https://connect.squareup.com'
+    : 'https://connect.squareupsandbox.com';
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
   const beginStr = beginTime.toISOString();
-  const stateCount = {};
   const errors = [];
   const startTime = Date.now();
   let timedOut = false;
@@ -296,55 +300,129 @@ async function fetchSalesFromOrders(client, locationIds, diag, timeoutMs = 18000
   const allResults = await parallelWithLimit(locationIds, 3, async (locId) => {
     const payments = [];
     const refunds = [];
-    let cursor = undefined;
+
+    // ── Payments取得 ──
+    let cursor = null;
     do {
-      if (Date.now() - startTime > timeoutMs) {
-        timedOut = true;
-        break;
-      }
-      try {
-        const body = {
-          locationIds: [locId],
-          query: {
-            filter: {
-              dateTimeFilter: { createdAt: { startAt: beginStr } },
+      if (Date.now() - startTime > timeoutMs) { timedOut = true; break; }
+      let succeeded = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const params = new URLSearchParams({
+            begin_time: beginStr,
+            location_id: locId,
+            sort_order: 'DESC',
+            limit: '100',
+          });
+          if (cursor) params.set('cursor', cursor);
+          const resp = await fetch(`${baseUrl}/v2/payments?${params}`, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Square-Version': '2025-01-23',
+              'Content-Type': 'application/json',
             },
-            sort: { sortField: 'CREATED_AT', sortOrder: 'DESC' },
-          },
-        };
-        if (cursor) body.cursor = cursor;
-        const { result } = await client.ordersApi.searchOrders(body);
-        if (result.orders) {
-          for (const o of result.orders) {
-            stateCount[o.state || 'UNKNOWN'] = (stateCount[o.state || 'UNKNOWN'] || 0) + 1;
-            if (o.state === 'DRAFT' || o.state === 'CANCELED') continue;
-            if (o.state === 'COMPLETED') {
-              payments.push({
-                amount: toNumber(o.totalMoney && o.totalMoney.amount),
-                createdAt: o.createdAt,
-                locationId: o.locationId,
-              });
-            }
-            if (o.returnAmounts && o.returnAmounts.totalMoney) {
-              const returnAmt = toNumber(o.returnAmounts.totalMoney.amount);
-              if (returnAmt > 0) {
-                refunds.push({
-                  amount: returnAmt,
-                  createdAt: o.updatedAt || o.closedAt || o.createdAt,
-                  locationId: o.locationId,
+          });
+          if (resp.status >= 500) {
+            throw Object.assign(new Error(`HTTP ${resp.status}`), { statusCode: resp.status });
+          }
+          if (!resp.ok) {
+            const errText = await resp.text().catch(() => '');
+            throw new Error(`HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+          }
+          const data = await resp.json();
+          if (data.payments) {
+            for (const p of data.payments) {
+              if (p.status === 'COMPLETED') {
+                payments.push({
+                  amount: toNumber(p.total_money && p.total_money.amount),
+                  createdAt: p.created_at,
+                  locationId: p.location_id || locId,
                 });
               }
             }
           }
+          cursor = data.cursor || null;
+          succeeded = true;
+          break;
+        } catch (err) {
+          const is500 = err.statusCode >= 500;
+          if (is500 && attempt < 2) {
+            const delay = 1000 * (attempt + 1);
+            console.warn(`  Payments API 500 error (${locId}), retry ${attempt + 1}/2 in ${delay}ms...`);
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
+          console.error(`  Payments API error (${locId}):`, err.message);
+          errors.push(`payments ${locId}: ${err.message}`);
+          cursor = null;
+          succeeded = true;
+          break;
         }
-        cursor = result.cursor;
-      } catch (err) {
-        const errMsg = extractApiError(err);
-        console.error(`  Orders API error (${locId}):`, errMsg);
-        errors.push(`${locId}: ${errMsg}`);
-        cursor = undefined;
       }
+      if (!succeeded) cursor = null;
     } while (cursor);
+
+    // ── Refunds取得 ──
+    cursor = null;
+    do {
+      if (Date.now() - startTime > timeoutMs) { timedOut = true; break; }
+      let succeeded = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const params = new URLSearchParams({
+            begin_time: beginStr,
+            location_id: locId,
+            sort_order: 'DESC',
+            limit: '100',
+          });
+          if (cursor) params.set('cursor', cursor);
+          const resp = await fetch(`${baseUrl}/v2/refunds?${params}`, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Square-Version': '2025-01-23',
+              'Content-Type': 'application/json',
+            },
+          });
+          if (resp.status >= 500) {
+            throw Object.assign(new Error(`HTTP ${resp.status}`), { statusCode: resp.status });
+          }
+          if (!resp.ok) {
+            const errText = await resp.text().catch(() => '');
+            throw new Error(`HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+          }
+          const data = await resp.json();
+          if (data.refunds) {
+            for (const r of data.refunds) {
+              if (r.status === 'COMPLETED') {
+                refunds.push({
+                  amount: toNumber(r.amount_money && r.amount_money.amount),
+                  createdAt: r.created_at,
+                  locationId: r.location_id || locId,
+                });
+              }
+            }
+          }
+          cursor = data.cursor || null;
+          succeeded = true;
+          break;
+        } catch (err) {
+          const is500 = err.statusCode >= 500;
+          if (is500 && attempt < 2) {
+            const delay = 1000 * (attempt + 1);
+            console.warn(`  Refunds API 500 error (${locId}), retry ${attempt + 1}/2 in ${delay}ms...`);
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
+          console.error(`  Refunds API error (${locId}):`, err.message);
+          errors.push(`refunds ${locId}: ${err.message}`);
+          cursor = null;
+          succeeded = true;
+          break;
+        }
+      }
+      if (!succeeded) cursor = null;
+    } while (cursor);
+
     return { payments, refunds };
   });
 
@@ -353,13 +431,13 @@ async function fetchSalesFromOrders(client, locationIds, diag, timeoutMs = 18000
   if (diag) {
     const suffix = timedOut ? ` (部分結果・タイムアウト${timeoutMs / 1000}s)` : '';
     diag.paymentsApi = errors.length > 0
-      ? `Orders API: ${payments.length}件売上, エラー${errors.length}件${suffix}`
-      : `ok: ${payments.length}件 (Orders API)${suffix}`;
+      ? `Payments API: ${payments.length}件売上, エラー${errors.length}件${suffix}`
+      : `ok: ${payments.length}件 (Payments API)${suffix}`;
     diag.refundsApi = errors.length > 0
-      ? `Orders API: ${refunds.length}件返品, エラー${errors.length}件${suffix}`
-      : `ok: ${refunds.length}件 (Orders API)${suffix}`;
+      ? `Refunds API: ${refunds.length}件返品, エラー${errors.length}件${suffix}`
+      : `ok: ${refunds.length}件 (Refunds API)${suffix}`;
   }
-  console.log(`  Orders API: ${payments.length}件売上, ${refunds.length}件返品${timedOut ? ' (partial/timeout)' : ''}${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
+  console.log(`  Payments API: ${payments.length}件売上, ${refunds.length}件返品${timedOut ? ' (partial/timeout)' : ''}${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
   return { payments, refunds };
 }
 
@@ -530,15 +608,14 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     }
     const locationIds = stores.map(s => s.id);
 
-    // サブスク＋インボイス＋売上(Orders API)＋顧客を並列取得（各API個別タイムアウト付き）
-    // Note: Payments API/Refunds APIはSquare SDK v39の@apimaticバグ(INVALID_URL)のため
-    //       Orders API (searchOrders: POST body) で統一して取得する
+    // サブスク＋インボイス＋売上(Payments REST API)＋顧客を並列取得（各API個別タイムアウト付き）
+    // Payments/Refunds APIはSDKバグ回避のためREST APIを直接呼び出す
     const API_TIMEOUT = 180000; // 各API最大180秒（Vercel maxDuration:300s に対応）
     // サブスク・インボイスは内部で部分結果を管理するため withTimeout を使わない
-    const [rawSubs, invoices, ordersData, customers] = await Promise.all([
+    const [rawSubs, invoices, paymentsData, customers] = await Promise.all([
       fetchAllSubscriptions(client, locationIds, diag, API_TIMEOUT),
       fetchInvoices(client, locationIds, diag, API_TIMEOUT),
-      fetchSalesFromOrders(client, locationIds, diag, API_TIMEOUT),
+      fetchSalesFromPayments(tokenConfig.token, tokenConfig.env, locationIds, diag, API_TIMEOUT),
       withTimeout(fetchAllCustomers(client, diag), 20000, {}, 'Customers'),
     ]);
 
@@ -550,8 +627,8 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     if (!diag.refundsApi) diag.refundsApi = 'timeout (180s)';
     if (!diag.customersApi) diag.customersApi = 'timeout (20s)';
 
-    const payments = ordersData.payments || [];
-    const refunds = ordersData.refunds || [];
+    const payments = paymentsData.payments || [];
+    const refunds = paymentsData.refunds || [];
 
     // プラン詳細を取得（サブスクデータに依存するため順次実行・バッチ単位タイムアウトで部分結果を保持）
     const planVariationIds = rawSubs.map(s => s.planVariationId).filter(Boolean);

@@ -1454,6 +1454,18 @@
                     });
                 }
 
+                // 会員数推移の整合性修正: 最新月の会員数を基準に、入会・解約数から過去月を逆算
+                // isActiveAtの独立計算では、hasPaymentActivityの月別ウィンドウ差異や
+                // PAUSEDステータスの扱いにより、入会・解約数と会員数推移が矛盾するため
+                if (monthlyTrends.length > 1) {
+                    for (let i = monthlyTrends.length - 2; i >= 0; i--) {
+                        const derived = monthlyTrends[i + 1].memberCount
+                            - monthlyTrends[i + 1].newEnrolled
+                            + monthlyTrends[i + 1].canceled;
+                        monthlyTrends[i].memberCount = Math.max(0, derived);
+                    }
+                }
+
                 // コホート分析（入会日基準・最低1ヶ月）
                 // 1ヶ月 = 入会日〜次回決済日前日の残存率
                 // 例: 2月15日入会 → 1ヶ月=2/15〜3/14、2ヶ月=3/15〜4/14

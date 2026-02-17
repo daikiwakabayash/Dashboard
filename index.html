@@ -1235,6 +1235,45 @@
                     const pd = new Date(y, m - 2, 1);
                     return `${pd.getFullYear()}-${String(pd.getMonth()+1).padStart(2,'0')}`;
                 };
+                const getYMOffset = (ym, offset) => {
+                    const [y, m] = ym.split('-').map(Number);
+                    const d = new Date(y, m - 1 + offset, 1);
+                    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+                };
+                const currentYM = `${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
+
+                // 決済ベース解約率計算用: 月別の決済実績のある顧客IDセット（全店舗横断）
+                // 解約定義: 前月に決済あり → 当月にどのプランでも決済なし = 解約
+                const globalCustomerPaidByMonth = {};
+                for (const inv of allInvoices) {
+                    if (!inv.subscriptionId || inv.status !== 'PAID' || !inv.customerId) continue;
+                    if (!realSubIds.has(inv.subscriptionId)) continue;
+                    const iym = toYM(inv.createdAt);
+                    if (!iym) continue;
+                    if (!globalCustomerPaidByMonth[iym]) globalCustomerPaidByMonth[iym] = new Set();
+                    globalCustomerPaidByMonth[iym].add(inv.customerId);
+                }
+                // 店舗別の月別顧客セット（店舗別解約率計算用: その店舗で決済があった顧客）
+                const storeCustomerPaidByMonth = {};
+                for (const inv of allInvoices) {
+                    if (!inv.subscriptionId || inv.status !== 'PAID' || !inv.customerId) continue;
+                    if (!realSubIds.has(inv.subscriptionId)) continue;
+                    const iym = toYM(inv.createdAt);
+                    if (!iym || !inv.locationId) continue;
+                    const locKey = `${inv.locationId}|${iym}`;
+                    if (!storeCustomerPaidByMonth[locKey]) storeCustomerPaidByMonth[locKey] = new Set();
+                    storeCustomerPaidByMonth[locKey].add(inv.customerId);
+                }
+                // 決済ベース解約率の計算: 前月顧客のうち、当月に全店舗横断で決済がない顧客 = 解約
+                const calcPaymentChurn = (prevCustomers, currentGlobalCustomers) => {
+                    if (!prevCustomers || prevCustomers.size === 0) return { rate: 0, churned: 0, base: 0 };
+                    let churned = 0;
+                    for (const custId of prevCustomers) {
+                        if (!currentGlobalCustomers || !currentGlobalCustomers.has(custId)) churned++;
+                    }
+                    const rate = Math.round(churned / prevCustomers.size * 10000) / 100;
+                    return { rate, churned, base: prevCustomers.size };
+                };
 
                 // 全期間の決済実績チェック（テスト・0円プラン除外用: 解約率・継続率・コホート分析向け）
                 const hasAnyPayment = (s) => {
@@ -1355,45 +1394,29 @@
                 // 返品差引: 純売上 = 売上合計 - 返金額
                 totalSales = Math.max(0, totalSales - totalRefunds);
 
-                // プラン変更検出: 同一顧客が別サブスクをACTIVEで持つ、または同月に別サブスク開始の場合
-                // → 実質的な解約ではないため、解約カウントから除外（一覧表示には引き続き掲載）
-                const subsByCustomerId = {};
-                for (const s of subs) {
-                    if (!subsByCustomerId[s.customerId]) subsByCustomerId[s.customerId] = [];
-                    subsByCustomerId[s.customerId].push(s);
-                }
-                const isPlanChange = (canceledSub, endYM) => {
-                    const customerSubs = subsByCustomerId[canceledSub.customerId];
-                    if (!customerSubs || customerSubs.length <= 1) return false;
-                    return customerSubs.some(s =>
-                        s.id !== canceledSub.id && (
-                            s.status === 'ACTIVE' ||
-                            toYM(s.startDate) === endYM
-                        )
-                    );
-                };
-
-                // 新規・解約（基準月、金額0を除外）
+                // 新規（基準月、金額0を除外）
                 const newInMonth = filtered.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s));
-                const canceledInMonth = filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') && toYM(getEndDate(s)) === sqMonth && hasPaymentActivity(s) && !isPlanChange(s, sqMonth));
 
                 // ARPU = サブスク決済合計 / アクティブ人数
                 const arpu = memberCount > 0 ? Math.round(mrr / memberCount) : 0;
 
-                // 月間解約率
-                const startActive = activePrev.length + newInMonth.length;
-                const churnRate = startActive > 0 ? Math.round(canceledInMonth.length / startActive * 10000) / 100 : 0;
+                // 月間解約率（決済ベース: 前月に決済あり → 当月にどのプランでも決済なし = 解約）
+                // 店舗フィルタ時: その店舗の前月顧客のうち、全店舗横断で当月決済がない顧客を解約とカウント
+                const churnPrevCustomers = sqStore === 'all'
+                    ? (globalCustomerPaidByMonth[prevYM] || new Set())
+                    : (storeCustomerPaidByMonth[`${sqStore}|${prevYM}`] || new Set());
+                const churnCurrentGlobalCustomers = globalCustomerPaidByMonth[sqMonth] || new Set();
+                const { rate: churnRate, churned: churnedCount, base: churnBase } = calcPaymentChurn(churnPrevCustomers, churnCurrentGlobalCustomers);
 
                 // 店舗別（各店舗ごとに独立して計算）
                 const byStore = {};
                 for (const store of (sqData.stores || [])) {
                     const ss = subs.filter(s => s.locationId === store.id);
                     const storeHasSubs = ss.length > 0;
-                    let smc, smrr, sn, sc, sStartA, sChurn;
+                    let smc, smrr, sn;
                     if (storeHasSubs) {
                         // 通常パス: サブスクステータスベースで会員数を計算（金額0を除外）
                         const sa = ss.filter(s => isActiveAt(s, refEnd) && hasPaymentActivity(s));
-                        const sp = ss.filter(s => isActiveAt(s, prevEnd) && hasPaymentActivity(s, prevYM));
                         smc = new Set(sa.map(s => s.customerId)).size;
                         const storeSubIdSet = new Set(ss.map(s => s.id));
                         // 店舗ごとのMRR: realSubIdsで直接フィルタ（useInvoiceFallbackの影響を受けない）
@@ -1403,18 +1426,16 @@
                         );
                         smrr = storeSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
                         sn = ss.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s));
-                        sc = ss.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') && toYM(getEndDate(s)) === sqMonth && hasPaymentActivity(s) && !isPlanChange(s, sqMonth));
-                        sStartA = sp.length + sn.length;
-                        sChurn = sStartA > 0 ? Math.round(sc.length / sStartA * 10000) / 100 : 0;
                     } else {
                         // フォールバック: インボイスのlocationIdで直接計算
                         const storeInvsRef = allInvoices.filter(inv => inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth && inv.locationId === store.id);
-                        const storeInvsPrev = allInvoices.filter(inv => inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === prevYM && inv.locationId === store.id);
                         smc = new Set(storeInvsRef.map(inv => inv.customerId || inv.subscriptionId)).size;
                         smrr = storeInvsRef.reduce((sum, inv) => sum + inv.amount, 0);
-                        sn = []; sc = [];
-                        sChurn = 0;
+                        sn = [];
                     }
+                    // 店舗別解約率（決済ベース: この店舗の前月顧客のうち、全店舗横断で当月決済なし = 解約）
+                    const storePrevCust = storeCustomerPaidByMonth[`${store.id}|${prevYM}`] || new Set();
+                    const { rate: sChurn, churned: sCanceled } = calcPaymentChurn(storePrevCust, churnCurrentGlobalCustomers);
                     // 店舗別総売上高: Payments APIの決済額から返品を差し引き
                     const storePayments = allPayments.filter(p => p.locationId === store.id);
                     const storeMonthPayments = storePayments.filter(p => toYM(p.createdAt) === sqMonth);
@@ -1428,7 +1449,7 @@
                         totalSales: Math.max(0, storeSales - storeRefundTotal),
                         totalRefunds: storeRefundTotal,
                         churnRate: sChurn,
-                        newEnrolled: storeHasSubs ? sn.length : 0, canceled: storeHasSubs ? sc.length : 0,
+                        newEnrolled: storeHasSubs ? sn.length : 0, canceled: sCanceled,
                         isEstimated: !storeHasSubs && smc > 0,
                     };
                 }
@@ -1456,37 +1477,47 @@
                     }
                 }
 
-                // 初月解約率・3ヶ月以内解約率
-                const calcEarlyChurn = (days) => {
-                    const eligible = filtered.filter(s => {
-                        if (!s.startDate) return false;
-                        if (!hasAnyPayment(s)) return false;
-                        return (refEnd - new Date(s.startDate)) / 86400000 >= days;
-                    });
+                // 初月解約率・3ヶ月以内解約率（決済ベース: 入会後Nヶ月以内に決済が途切れた割合）
+                const calcEarlyChurn = (months) => {
+                    const eligible = [];
+                    for (const s of filtered) {
+                        if (!s.startDate || !s.customerId) continue;
+                        if (!hasAnyPayment(s)) continue;
+                        const startYM = toYM(s.startDate);
+                        if (!startYM) continue;
+                        if (getYMOffset(startYM, months) > currentYM) continue;
+                        eligible.push(s);
+                    }
                     const churned = eligible.filter(s => {
-                        if (s.status !== 'CANCELED' && s.status !== 'DEACTIVATED' && s.status !== 'PAUSED') return false;
-                        const endD = getEndDate(s);
-                        if (!endD || !s.startDate) return false;
-                        return (new Date(endD) - new Date(s.startDate)) / 86400000 <= days;
+                        const startYM = toYM(s.startDate);
+                        for (let i = 1; i <= months; i++) {
+                            const checkYM = getYMOffset(startYM, i);
+                            if (!(globalCustomerPaidByMonth[checkYM] && globalCustomerPaidByMonth[checkYM].has(s.customerId))) {
+                                return true;
+                            }
+                        }
+                        return false;
                     });
                     return eligible.length > 0 ? Math.round(churned.length / eligible.length * 1000) / 10 : 0;
                 };
-                const firstMonthChurn = calcEarlyChurn(30);
-                const threeMonthChurn = calcEarlyChurn(90);
+                const firstMonthChurn = calcEarlyChurn(1);
+                const threeMonthChurn = calcEarlyChurn(3);
 
-                // 継続率 (3/6/12ヶ月)
+                // 継続率 (3/6/12ヶ月)（決済ベース: 入会後Nヶ月目に決済があるかで判定）
                 const calcRetention = (months) => {
-                    const cutoff = new Date(refY, refM - 1 - months, 1);
-                    const eligible = filtered.filter(s => s.startDate && new Date(s.startDate) <= cutoff && hasAnyPayment(s));
+                    const eligible = [];
+                    for (const s of filtered) {
+                        if (!s.startDate || !s.customerId) continue;
+                        if (!hasAnyPayment(s)) continue;
+                        const startYM = toYM(s.startDate);
+                        if (!startYM) continue;
+                        if (getYMOffset(startYM, months) > currentYM) continue;
+                        eligible.push(s);
+                    }
                     const survived = eligible.filter(s => {
-                        if (s.status === 'ACTIVE') return true;
-                        const endD = getEndDate(s);
-                        if (endD && s.startDate) {
-                            const dm = (new Date(endD).getFullYear() - new Date(s.startDate).getFullYear()) * 12
-                                + new Date(endD).getMonth() - new Date(s.startDate).getMonth();
-                            return dm >= months;
-                        }
-                        return false;
+                        const startYM = toYM(s.startDate);
+                        const checkYM = getYMOffset(startYM, months);
+                        return globalCustomerPaidByMonth[checkYM] && globalCustomerPaidByMonth[checkYM].has(s.customerId);
                     });
                     return eligible.length > 0 ? Math.round(survived.length / eligible.length * 100) : 0;
                 };
@@ -1499,16 +1530,11 @@
                 const ltv = mChurn > 0 ? Math.round(arpu / mChurn) : arpu * 24;
 
                 // 月別推移（12ヶ月）- ルックアップマップで高速化（O(n×12) → O(n+12)）
-                // サブスクを開始月・終了月でグループ化（ループ内の繰り返しフィルタを排除）
+                // サブスクを開始月でグループ化（新規カウント用）
                 const subsByStartYM = {};
-                const canceledSubsByEndYM = {};
                 for (const s of filtered) {
                     const sym = toYM(s.startDate);
                     if (sym) { if (!subsByStartYM[sym]) subsByStartYM[sym] = []; subsByStartYM[sym].push(s); }
-                    if (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') {
-                        const eym = toYM(getEndDate(s));
-                        if (eym) { if (!canceledSubsByEndYM[eym]) canceledSubsByEndYM[eym] = []; canceledSubsByEndYM[eym].push(s); }
-                    }
                 }
                 // インボイスを月別にグループ化
                 const paidSubInvsByYM = {};
@@ -1541,9 +1567,13 @@
                     // 新規: 開始月マップから取得（O(1)ルックアップ）
                     const ymNewSubs = (subsByStartYM[ym] || []).filter(s => hasPaymentActivity(s, ym));
                     ymNewCount = new Set(ymNewSubs.map(s => s.customerId)).size;
-                    // 解約: 終了月マップから取得（O(1)ルックアップ、プラン変更除外済み）
-                    const ymCanceledSubs = (canceledSubsByEndYM[ym] || []).filter(s => hasPaymentActivity(s, ym) && !isPlanChange(s, ym));
-                    ymCanceledCount = new Set(ymCanceledSubs.map(s => s.customerId)).size;
+                    // 解約（決済ベース）: 前月に決済あり → 当月にどのプランでも決済なし = 解約
+                    const ymPrevYM = getPrevYM(ym);
+                    const ymChurnPrev = sqStore === 'all'
+                        ? (globalCustomerPaidByMonth[ymPrevYM] || new Set())
+                        : (storeCustomerPaidByMonth[`${sqStore}|${ymPrevYM}`] || new Set());
+                    const ymChurnCurrent = globalCustomerPaidByMonth[ym] || new Set();
+                    ymCanceledCount = calcPaymentChurn(ymChurnPrev, ymChurnCurrent).churned;
                     // フォールバック: サブスクデータがない場合はPAIDインボイスベース
                     if (ymMemberCount === 0) {
                         const ymAllPaidInvs = paidInvsByYM[ym] || [];
@@ -1576,9 +1606,8 @@
                     }
                 }
 
-                // コホート分析（入会日基準・最低1ヶ月）
-                // 1ヶ月 = 入会日〜次回決済日前日の残存率
-                // 例: 2月15日入会 → 1ヶ月=2/15〜3/14、2ヶ月=3/15〜4/14
+                // コホート分析（決済ベース: 入会月基準・月別の決済有無で継続判定）
+                // iヶ月目の継続率 = 入会月+iヶ月にどのプランでも決済がある顧客の割合
                 const cohortMap = {};
                 for (const s of filtered) {
                     if (!s.startDate) continue;
@@ -1587,33 +1616,21 @@
                     if (!cohortMap[ym]) cohortMap[ym] = [];
                     cohortMap[ym].push(s);
                 }
-                const today = new Date();
                 const cohort = Object.keys(cohortMap).sort().map(cm => {
                     const cs = cohortMap[cm];
                     const sc = cs.length;
                     const ret = [];
                     for (let i = 1; i <= 12; i++) {
-                        // 各メンバーの入会日 + iヶ月の日付を基準に判定
-                        // iヶ月目の残存 = 入会日+iヶ月時点でまだアクティブな人の割合
-                        let eligible = 0;
+                        const targetYM = getYMOffset(cm, i);
+                        // まだ到来していない月はスキップ
+                        if (targetYM > currentYM) break;
+                        const targetGlobalCust = globalCustomerPaidByMonth[targetYM] || new Set();
                         let survived = 0;
                         for (const s of cs) {
-                            const sd = new Date(s.startDate);
-                            // 入会日 + iヶ月 = 次回決済日（iヶ月目の開始）
-                            const billingDate = new Date(sd.getFullYear(), sd.getMonth() + i, sd.getDate());
-                            // まだ判定日が来ていないメンバーはスキップ
-                            if (billingDate > today) continue;
-                            eligible++;
-                            // 解約・一時停止していない or 終了日がiヶ月目の決済日以降 → 生存
-                            if (s.status === 'ACTIVE') {
-                                survived++;
-                            } else {
-                                const endD = getEndDate(s);
-                                if (endD && new Date(endD) >= billingDate) survived++;
-                            }
+                            // どのプランでも決済があれば継続とみなす（全店舗横断）
+                            if (targetGlobalCust.has(s.customerId)) survived++;
                         }
-                        if (eligible === 0) break;
-                        ret.push(Math.round(survived / eligible * 100));
+                        ret.push(Math.round(survived / sc * 100));
                     }
                     return { month: cm, startCount: sc, retention: ret };
                 });
@@ -1640,7 +1657,8 @@
 
                 return {
                     memberCount, prevMemberCount, mrr, prevMrr, mrrChange,
-                    totalSales, totalRefunds, newEnrolled: newInMonth.length, canceled: canceledInMonth.length,
+                    totalSales, totalRefunds, newEnrolled: newInMonth.length,
+                    canceled: churnedCount, churnedCount, churnBase,
                     arpu, churnRate, firstMonthChurn, threeMonthChurn,
                     retention3m, retention6m, retention12m, ltv,
                     byStore, byPlan, monthlyTrends, cohort, availableMonths,
@@ -6861,13 +6879,14 @@
                                             {/* ① 会員 & 収益 KPI */}
                                             <div>
                                                 <h2 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-2 md:mb-3 flex items-center gap-2"><Users size={14} /> 会員 & 収益</h2>
-                                                <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-2 md:gap-4">
+                                                <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-2 md:gap-4">
                                                     {[
                                                         { label: 'アクティブ会員数', value: `${sqMetrics.memberCount.toLocaleString()}名`, sub: sqMetrics.memberCount !== sqMetrics.prevMemberCount ? `前月比 ${sqMetrics.memberCount - sqMetrics.prevMemberCount >= 0 ? '+' : ''}${sqMetrics.memberCount - sqMetrics.prevMemberCount}名` : null, up: sqMetrics.memberCount >= sqMetrics.prevMemberCount, icon: <Users size={22} />, color: 'indigo' },
                                                         { label: '総MRR', value: `¥${sqMetrics.mrr.toLocaleString()}`, sub: sqMetrics.mrrChange !== 0 ? `前月比 ${sqMetrics.mrrChange >= 0 ? '+' : ''}${sqMetrics.mrrChange}%` : null, up: sqMetrics.mrrChange >= 0, icon: <Wallet size={22} />, color: 'blue' },
                                                         { label: 'ARPU', value: `¥${sqMetrics.arpu.toLocaleString()}`, sub: 'サブスク決済額÷会員数', icon: <DollarSign size={22} />, color: 'cyan', neutral: true },
                                                         { label: '総売上高', value: sqMetrics.totalSales >= 10000 ? `¥${(sqMetrics.totalSales/10000).toFixed(1)}万` : `¥${sqMetrics.totalSales.toLocaleString()}`, sub: 'Square売上合計（税込）', icon: <TrendingUp size={22} />, color: 'emerald', neutral: true },
                                                         { label: '返品', value: sqMetrics.totalRefunds > 0 ? (sqMetrics.totalRefunds >= 10000 ? `-¥${(sqMetrics.totalRefunds/10000).toFixed(1)}万` : `-¥${sqMetrics.totalRefunds.toLocaleString()}`) : '¥0', sub: '返金・払戻', icon: <RefreshCw size={22} />, color: 'rose', neutral: true, warn: sqMetrics.totalRefunds > 0 },
+                                                        { label: '解約率', value: `${sqMetrics.churnRate}%`, sub: `${sqMetrics.churnedCount}名 / 前月${sqMetrics.churnBase}名`, icon: <UserMinus size={22} />, color: 'orange', neutral: true, warn: sqMetrics.churnRate > 5 },
                                                         { label: 'LTV', value: sqMetrics.ltv >= 10000 ? `¥${(sqMetrics.ltv/10000).toFixed(1)}万` : `¥${sqMetrics.ltv.toLocaleString()}`, sub: '顧客生涯価値', icon: <DollarSign size={22} />, color: 'amber', neutral: true },
                                                     ].map((kpi, idx) => (
                                                         <div key={idx} className={`p-3 md:p-5 rounded-xl md:rounded-2xl shadow-sm border hover:shadow-md transition-all ${kpi.warn ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200'}`}>

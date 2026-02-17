@@ -537,7 +537,7 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     const [rawSubs, invoices, ordersData, customers] = await Promise.all([
       fetchAllSubscriptions(client, locationIds, diag, API_TIMEOUT),
       fetchInvoices(client, locationIds, diag, API_TIMEOUT),
-      fetchSalesFromOrders(client, locationIds, diag, 25000),
+      fetchSalesFromOrders(client, locationIds, diag, API_TIMEOUT),
       withTimeout(fetchAllCustomers(client, diag), 20000, {}, 'Customers'),
     ]);
 

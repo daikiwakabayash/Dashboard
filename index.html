@@ -182,7 +182,7 @@
         // リトライ付きfetch（タイムアウト + エクスポネンシャルバックオフ）
         const fetchWithRetry = async (url, options = {}) => {
             const maxRetries = 3;
-            const timeoutMs = 130000; // 130秒（Vercel maxDuration:120s + マージン）
+            const timeoutMs = 310000; // 310秒（Vercel maxDuration:300s + マージン）
             let lastError;
             for (let attempt = 0; attempt < maxRetries; attempt++) {
                 const controller = new AbortController();
@@ -1217,12 +1217,31 @@
                 const activeRef = filtered.filter(s => isActiveAt(s, refEnd) && hasPaymentActivity(s));
                 const activePrev = filtered.filter(s => isActiveAt(s, prevEnd) && hasPaymentActivity(s, prevYM));
 
-                // アクティブ会員数: 月末時点のアクティブサブスク顧客数（顧客ID重複排除）
+                // アクティブ会員数: 月末時点のアクティブサブスク顧客数（顧客ID+名前重複排除）
                 // アクティブタブの表示と一致させるため、サブスクステータスベースで計算
                 // 金額0・回数0の会員は除外
+                const countUniqueMembers = (subsList) => {
+                    const seen = new Set();
+                    const nameKeys = new Set();
+                    let count = 0;
+                    for (const s of subsList) {
+                        if (seen.has(s.customerId)) continue;
+                        seen.add(s.customerId);
+                        // 名前+プラン+月額で同一人物判定（異なるcustomerIdの重複対応）
+                        const name = cust[s.customerId] ? cust[s.customerId].name : null;
+                        if (name) {
+                            const pn = plansMap[s.planVariationId] ? plansMap[s.planVariationId].name : '';
+                            const nameKey = `${name}|${pn}|${s.monthlyPrice}`;
+                            if (nameKeys.has(nameKey)) continue;
+                            nameKeys.add(nameKey);
+                        }
+                        count++;
+                    }
+                    return count;
+                };
                 let memberCount, prevMemberCount;
-                memberCount = new Set(activeRef.map(s => s.customerId)).size;
-                prevMemberCount = new Set(activePrev.map(s => s.customerId)).size;
+                memberCount = countUniqueMembers(activeRef);
+                prevMemberCount = countUniqueMembers(activePrev);
                 // フォールバック: サブスクデータがない場合はPAIDインボイスベース
                 if (memberCount === 0) {
                     const memberInvRef = allInvoices.filter(inv =>
@@ -1350,21 +1369,24 @@
                     };
                 }
 
-                // コース別（アクティブ会員のみ・顧客ID重複排除）
+                // コース別（アクティブ会員のみ・顧客ID+名前重複排除）
                 const byPlan = {};
                 const byPlanSeen = {};
                 for (const s of activeRef) {
                     const name = getName(s);
                     const pn = plansMap[s.planVariationId] ? plansMap[s.planVariationId].name : '不明';
+                    // customerIdベースの重複排除 + 名前ベースの重複排除（異なるcustomerIdで同一人物のケース対応）
                     const dedupKey = `${s.customerId}|${s.monthlyPrice}`;
+                    const nameDedupKey = `${name}|${pn}|${s.monthlyPrice}`;
                     const subInvForThis = filteredSubInvs.filter(inv => inv.subscriptionId === s.id);
                     const subMrr = subInvForThis.reduce((sum, inv) => sum + inv.amount, 0);
                     if (!byPlan[pn]) byPlan[pn] = { count: 0, mrr: 0 };
-                    if (byPlanSeen[dedupKey]) {
+                    if (byPlanSeen[dedupKey] || byPlanSeen[nameDedupKey]) {
                         // 同一人物・同一プラン → 人数は加算しない、MRRのみ加算
                         byPlan[pn].mrr += subMrr;
                     } else {
                         byPlanSeen[dedupKey] = true;
+                        byPlanSeen[nameDedupKey] = true;
                         byPlan[pn].count++;
                         byPlan[pn].mrr += subMrr;
                     }
@@ -1720,40 +1742,77 @@
                 // 重複排除: 同一顧客IDのサブスクをマージ（アクティブ会員数KPIと一致させる）
                 // 同一顧客の複数プランは1行にまとめ、決済額は合算
                 const dedup = (list) => {
+                    const mergeEntry = (existing, entry) => {
+                        // プラン名をマージ（異なるプランは「/」で結合）
+                        if (entry.plan && existing.plan && entry.plan !== existing.plan && !existing.plan.includes(entry.plan)) {
+                            existing.plan += ` / ${entry.plan}`;
+                        }
+                        // 月額をマージ（異なるプランの合計）
+                        existing.monthlyPrice = (existing.monthlyPrice || 0) + (entry.monthlyPrice || 0);
+                        // 月別決済額をマージ（同月は合算＝複数プラン分を加算）
+                        const merged = { ...(existing.paidByMonth || {}) };
+                        for (const [m, amt] of Object.entries(entry.paidByMonth || {})) {
+                            merged[m] = (merged[m] || 0) + amt;
+                        }
+                        existing.paidByMonth = merged;
+                        const months = Object.keys(merged);
+                        existing.paidMonths = months;
+                        existing.paidCount = months.length;
+                        existing.paidTotal = months.reduce((s, m) => s + merged[m], 0);
+                        // 最も早い入会日を採用
+                        if (entry.startDate && (!existing.startDate || entry.startDate < existing.startDate)) {
+                            existing.startDate = entry.startDate;
+                        }
+                        // アクティブなサブスクがあれば解約日をクリア
+                        if (!entry.canceledDate) {
+                            existing.canceledDate = null;
+                        }
+                        existing.subCount = (existing.subCount || 1) + 1;
+                    };
+
+                    // 第1パス: customerIdで重複排除
                     const map = {};
                     for (const entry of list) {
                         const key = entry.customerId;
                         if (map[key]) {
-                            // プラン名をマージ（異なるプランは「/」で結合）
-                            if (entry.plan && map[key].plan && entry.plan !== map[key].plan && !map[key].plan.includes(entry.plan)) {
-                                map[key].plan += ` / ${entry.plan}`;
-                            }
-                            // 月額をマージ（異なるプランの合計）
-                            map[key].monthlyPrice = (map[key].monthlyPrice || 0) + (entry.monthlyPrice || 0);
-                            // 月別決済額をマージ（同月は合算＝複数プラン分を加算）
-                            const merged = { ...(map[key].paidByMonth || {}) };
-                            for (const [m, amt] of Object.entries(entry.paidByMonth || {})) {
-                                merged[m] = (merged[m] || 0) + amt;
-                            }
-                            map[key].paidByMonth = merged;
-                            const months = Object.keys(merged);
-                            map[key].paidMonths = months;
-                            map[key].paidCount = months.length;
-                            map[key].paidTotal = months.reduce((s, m) => s + merged[m], 0);
-                            // 最も早い入会日を採用
-                            if (entry.startDate && (!map[key].startDate || entry.startDate < map[key].startDate)) {
-                                map[key].startDate = entry.startDate;
-                            }
-                            // アクティブなサブスクがあれば解約日をクリア
-                            if (!entry.canceledDate) {
-                                map[key].canceledDate = null;
-                            }
-                            map[key].subCount = (map[key].subCount || 1) + 1;
+                            mergeEntry(map[key], entry);
                         } else {
                             map[key] = { ...entry, subCount: 1 };
                         }
                     }
-                    return Object.values(map);
+                    const firstPass = Object.values(map);
+
+                    // 第2パス: 同一名前+同一プラン+同一月額の重複排除
+                    // （異なるcustomerIdで同一人物が登録されているケースに対応）
+                    const nameMap = {};
+                    for (const entry of firstPass) {
+                        const nameKey = `${entry.name}|${entry.plan}|${entry.monthlyPrice}`;
+                        if (nameMap[nameKey]) {
+                            // 同名・同プラン・同月額 → 重複とみなしマージ（月額は加算しない＝同一プランの重複）
+                            const existing = nameMap[nameKey];
+                            // 月別決済額: 既存のデータを優先（同じ月は上書きしない）
+                            const merged = { ...(existing.paidByMonth || {}) };
+                            for (const [m, amt] of Object.entries(entry.paidByMonth || {})) {
+                                if (!merged[m]) merged[m] = amt;
+                            }
+                            existing.paidByMonth = merged;
+                            const months = Object.keys(merged);
+                            existing.paidMonths = months;
+                            existing.paidCount = months.length;
+                            existing.paidTotal = months.reduce((s, m) => s + merged[m], 0);
+                            // 最も早い入会日を採用
+                            if (entry.startDate && (!existing.startDate || entry.startDate < existing.startDate)) {
+                                existing.startDate = entry.startDate;
+                            }
+                            if (!entry.canceledDate) {
+                                existing.canceledDate = null;
+                            }
+                            existing.subCount = (existing.subCount || 1) + (entry.subCount || 1);
+                        } else {
+                            nameMap[nameKey] = { ...entry };
+                        }
+                    }
+                    return Object.values(nameMap);
                 };
 
                 // 新規入会: 選択月に入会したサブスク（フォールバック時は空）

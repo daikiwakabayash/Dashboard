@@ -157,54 +157,59 @@ async function fetchLocations(client, diag) {
   }
 }
 
-// ── サブスクリプション取得（全ロケーション一括クエリ・リトライ付き・タイムアウト時は部分結果を返す） ──
+// ── サブスクリプション取得（ロケーション別並列クエリ・リトライ付き） ──
+// 全ロケーション一括の逐次ページネーションでは大規模アカウント（1800件超）でタイムアウトするため
+// ロケーション別に並列取得（fetchInvoicesと同じパターン）
 async function fetchAllSubscriptions(client, locationIds, diag, timeoutMs = 180000) {
-  const allSubs = [];
   const errors = [];
   const startTime = Date.now();
   let timedOut = false;
 
-  // 全ロケーションを一括クエリ（ロケーション別並列より効率的・API呼出し回数削減）
-  let cursor = undefined;
-  do {
-    if (Date.now() - startTime > timeoutMs) {
-      timedOut = true;
-      break;
-    }
-    // 500系エラー時のリトライ（最大2回、指数バックオフ）
-    let succeeded = false;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const { result } = await client.subscriptionsApi.searchSubscriptions({
-          query: { filter: { locationIds } },
-          limit: 200,
-          cursor,
-        });
-        if (result.subscriptions) {
-          allSubs.push(...result.subscriptions);
-        }
-        cursor = result.cursor;
-        succeeded = true;
-        break;
-      } catch (err) {
-        const is500 = err.statusCode >= 500 || (err.message && err.message.includes('500'));
-        if (is500 && attempt < 2) {
-          const delay = 1000 * (attempt + 1); // 1s, 2s
-          console.warn(`  Subscriptions 500 error, retry ${attempt + 1}/2 in ${delay}ms...`);
-          await new Promise(r => setTimeout(r, delay));
-          continue;
-        }
-        const errMsg = extractApiError(err);
-        console.error(`  Subscriptions error:`, errMsg);
-        errors.push(errMsg);
-        cursor = undefined;
-        succeeded = true; // エラー処理完了、リトライループ脱出
+  const results = await parallelWithLimit(locationIds, 8, async (locId) => {
+    const locSubs = [];
+    let cursor = undefined;
+    do {
+      if (Date.now() - startTime > timeoutMs) {
+        timedOut = true;
         break;
       }
-    }
-    if (!succeeded) cursor = undefined;
-  } while (cursor);
+      // 500系エラー時のリトライ（最大2回、指数バックオフ）
+      let succeeded = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const { result } = await client.subscriptionsApi.searchSubscriptions({
+            query: { filter: { locationIds: [locId] } },
+            limit: 200,
+            cursor,
+          });
+          if (result.subscriptions) {
+            locSubs.push(...result.subscriptions);
+          }
+          cursor = result.cursor;
+          succeeded = true;
+          break;
+        } catch (err) {
+          const is500 = err.statusCode >= 500 || (err.message && err.message.includes('500'));
+          if (is500 && attempt < 2) {
+            const delay = 1000 * (attempt + 1); // 1s, 2s
+            console.warn(`  Subscriptions 500 error (${locId}), retry ${attempt + 1}/2 in ${delay}ms...`);
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
+          const errMsg = extractApiError(err);
+          console.error(`  Subscriptions error (${locId}):`, errMsg);
+          errors.push(`${locId}: ${errMsg}`);
+          cursor = undefined;
+          succeeded = true; // エラー処理完了、リトライループ脱出
+          break;
+        }
+      }
+      if (!succeeded) cursor = undefined;
+    } while (cursor);
+    return locSubs;
+  });
 
+  const allSubs = results.filter(Boolean).flat();
   if (diag) {
     if (timedOut) {
       diag.subscriptionsApi = `${allSubs.length}件取得 (部分結果・タイムアウト${timeoutMs / 1000}s)`;

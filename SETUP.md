@@ -243,11 +243,14 @@ https://script.google.com/macros/s/AKfycbxxx.../exec
 ┌──────────────────────────────────────────────────────┐
 │  75店舗の構成例                                        │
 │                                                      │
-│  Squareアカウント1 → 恵比寿院, 渋谷院, ...  (10店舗)   │
-│  Squareアカウント2 → 千葉駅院, 船橋院, ...  (10店舗)   │
-│  Squareアカウント3 → 池尻大橋院, 大森院, ...  (10店舗)  │
-│  ...                                                 │
-│  SquareアカウントN → ○○院, △△院, ...       (残り店舗)  │
+│  Squareアカウント1 → 恵比寿院                          │
+│  Squareアカウント2 → 千葉駅院                          │
+│  Squareアカウント3 → 池尻大橋院                        │
+│  Squareアカウント4 → 関内院                            │
+│  Squareアカウント5 → 溝の口院                          │
+│  Squareアカウント6 → 上大岡院                          │
+│  Squareアカウント7 → 山形天童院                        │
+│  Squareアカウント8 → 山形院                            │
 │                                                      │
 │  → 全アカウントを SQUARE_TOKENS に登録               │
 │  → フロントエンドがバッチ並列で高速取得              │
@@ -295,8 +298,28 @@ Vercelの環境変数に `SQUARE_TOKENS` を設定します。
     "env": "production"
   },
   {
-    "name": "大森院",
-    "token": "sq_live_ZZZZZZZZZZZZZZ",
+    "name": "関内院",
+    "token": "sq_live_BBBBBBBBBBBBBB",
+    "env": "production"
+  },
+  {
+    "name": "溝の口院",
+    "token": "sq_live_CCCCCCCCCCCCCC",
+    "env": "production"
+  },
+  {
+    "name": "上大岡院",
+    "token": "sq_live_DDDDDDDDDDDDDD",
+    "env": "production"
+  },
+  {
+    "name": "山形天童院",
+    "token": "sq_live_EEEEEEEEEEEEEE",
+    "env": "production"
+  },
+  {
+    "name": "山形院",
+    "token": "sq_live_FFFFFFFFFFFFFF",
     "env": "production",
     "excludeLocations": ["株式会社SSiM", "テスト店舗"]
   }

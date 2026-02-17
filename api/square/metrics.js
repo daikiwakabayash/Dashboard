@@ -158,7 +158,7 @@ async function fetchLocations(client, diag) {
 }
 
 // ── サブスクリプション取得（ロケーション並列・リトライ付き・タイムアウト時は部分結果を返す） ──
-async function fetchAllSubscriptions(client, locationIds, diag, timeoutMs = 55000) {
+async function fetchAllSubscriptions(client, locationIds, diag, timeoutMs = 180000) {
   const allSubs = [];
   const errors = [];
   const startTime = Date.now();
@@ -180,6 +180,7 @@ async function fetchAllSubscriptions(client, locationIds, diag, timeoutMs = 5500
         try {
           const { result } = await client.subscriptionsApi.searchSubscriptions({
             query: { filter: { locationIds: [locId] } },
+            limit: 200,
             cursor,
           });
           if (result.subscriptions) {
@@ -283,7 +284,7 @@ async function fetchPlanDetails(client, planVariationIds) {
 // 位置引数でundefinedがクエリ文字列に&&として直列化されINVALID_URLエラーが発生するため
 // POST bodyベースのsearchOrders APIを使用する
 // ──
-async function fetchSalesFromOrders(client, locationIds, diag, timeoutMs = 25000) {
+async function fetchSalesFromOrders(client, locationIds, diag, timeoutMs = 180000) {
   const beginTime = new Date();
   beginTime.setMonth(beginTime.getMonth() - 13);
   const beginStr = beginTime.toISOString();
@@ -372,7 +373,7 @@ function extractApiError(err) {
 }
 
 // ── インボイス取得（タイムアウト時は部分結果を返す・古いインボイスは打ち切り） ──
-async function fetchInvoices(client, locationIds, diag, timeoutMs = 55000) {
+async function fetchInvoices(client, locationIds, diag, timeoutMs = 180000) {
   const errors = [];
   const allInvoices = [];
   const startTime = Date.now();
@@ -532,7 +533,7 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     // サブスク＋インボイス＋売上(Orders API)＋顧客を並列取得（各API個別タイムアウト付き）
     // Note: Payments API/Refunds APIはSquare SDK v39の@apimaticバグ(INVALID_URL)のため
     //       Orders API (searchOrders: POST body) で統一して取得する
-    const API_TIMEOUT = 70000; // 各API最大70秒（Vercel maxDuration:120s に対応）
+    const API_TIMEOUT = 180000; // 各API最大180秒（Vercel maxDuration:300s に対応）
     // サブスク・インボイスは内部で部分結果を管理するため withTimeout を使わない
     const [rawSubs, invoices, ordersData, customers] = await Promise.all([
       fetchAllSubscriptions(client, locationIds, diag, API_TIMEOUT),
@@ -543,10 +544,10 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
 
     // タイムアウト検出: withTimeoutがfallbackを返した場合、diagに記録がない
     // Note: subscriptionsApi/invoicesApiは各関数内部で設定済み
-    if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (70s)';
-    if (!diag.invoicesApi) diag.invoicesApi = 'timeout (70s)';
-    if (!diag.paymentsApi) diag.paymentsApi = 'timeout (25s)';
-    if (!diag.refundsApi) diag.refundsApi = 'timeout (25s)';
+    if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (180s)';
+    if (!diag.invoicesApi) diag.invoicesApi = 'timeout (180s)';
+    if (!diag.paymentsApi) diag.paymentsApi = 'timeout (180s)';
+    if (!diag.refundsApi) diag.refundsApi = 'timeout (180s)';
     if (!diag.customersApi) diag.customersApi = 'timeout (20s)';
 
     const payments = ordersData.payments || [];
@@ -727,7 +728,7 @@ export default async function handler(req, res) {
           r = await Promise.race([
             fetchAccountData(cfg, true),
             new Promise((_, reject) => {
-              batchTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (110秒)')), 110000);
+              batchTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (280秒)')), 280000);
             }),
           ]).finally(() => clearTimeout(batchTimer));
           if (r && !r._failed) setCachedAccount(idx, r);
@@ -775,7 +776,7 @@ export default async function handler(req, res) {
         r = await Promise.race([
           fetchAccountData(cfg, configs.length > 1),
           new Promise((_, reject) => {
-            singleTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (110秒)')), 110000);
+            singleTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (280秒)')), 280000);
           }),
         ]).finally(() => clearTimeout(singleTimer));
         if (r && !r._failed) setCachedAccount(idx, r);
@@ -822,7 +823,7 @@ export default async function handler(req, res) {
   const allDiag = [];
 
   let deadlineReached = false;
-  const deadlineTimer = setTimeout(() => { deadlineReached = true; }, 110000);
+  const deadlineTimer = setTimeout(() => { deadlineReached = true; }, 280000);
 
   try {
     // 全アカウント並列取得（最大5並列、75店舗対応）

@@ -1258,6 +1258,21 @@
                 };
                 const currentYM = `${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
 
+                // プラン変更検出: 顧客ごとの最初のサブスク開始日を全店舗横断で構築
+                const customerFirstStartDate = {};
+                for (const s of subs) {
+                    if (!s.startDate || !s.customerId) continue;
+                    if (!customerFirstStartDate[s.customerId] || s.startDate < customerFirstStartDate[s.customerId]) {
+                        customerFirstStartDate[s.customerId] = s.startDate;
+                    }
+                }
+                // プラン変更判定: 顧客の最初のサブスク開始月と異なる月に新たにサブスクを開始した場合
+                const isPlanChange = (s) => {
+                    if (!s.customerId || !s.startDate) return false;
+                    const firstDate = customerFirstStartDate[s.customerId];
+                    return firstDate && toYM(firstDate) !== toYM(s.startDate);
+                };
+
                 // 月別の決済実績のある顧客IDセット（初月解約率・継続率・コホート分析用）
                 const globalCustomerPaidByMonth = {};
                 for (const inv of allInvoices) {
@@ -1400,8 +1415,9 @@
                 // 返品差引: 純売上 = 売上合計 - 返金額
                 totalSales = Math.max(0, totalSales - totalRefunds);
 
-                // 新規（基準月、金額0を除外）
-                const newInMonth = filtered.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s));
+                // 新規（基準月、金額0を除外、プラン変更を除外）
+                const newInMonth = filtered.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s) && !isPlanChange(s));
+                const planChangedInMonth = filtered.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s) && isPlanChange(s));
 
                 // ARPU = サブスク決済合計 / アクティブ人数
                 const arpu = memberCount > 0 ? Math.round(mrr / memberCount) : 0;
@@ -1467,7 +1483,7 @@
                                 for (const inv of subInvs) smrr += inv.amount;
                             }
                         }
-                        sn = ss.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s));
+                        sn = ss.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s) && !isPlanChange(s));
                     } else {
                         // フォールバック: ロケーション別グループから取得
                         const storeInvsRef = monthPaidInvByLoc[store.id] || [];
@@ -1519,48 +1535,49 @@
                     }
                 }
 
-                // 初月解約率・3ヶ月以内解約率（アクティブ会員ベース: 入会後Nヶ月以内に決済が途切れた会員の割合）
-                // 顧客IDで重複排除（同一顧客の複数サブスクは最も早い入会日で判定）
+                // 初月解約率・3ヶ月以内解約率
+                // 初月解約: N月にサブスク決済した人がN+1月には解約してる場合が対象
+                // 3ヶ月解約: N月にサブスク決済した人がN+3月には解約してる場合が対象
+                // プラン変更がある場合でもスタートは最初に入会した日時からカウント
                 const calcEarlyChurn = (months) => {
                     const custMap = {};
                     for (const s of filtered) {
                         if (!s.startDate || !s.customerId) continue;
                         if (!hasAnyPayment(s)) continue;
-                        const startYM = toYM(s.startDate);
+                        // プラン変更がある場合でもスタートは最初に入会した日時からカウント
+                        const firstStart = customerFirstStartDate[s.customerId] || s.startDate;
+                        const startYM = toYM(firstStart);
                         if (!startYM) continue;
                         if (getYMOffset(startYM, months) > currentYM) continue;
-                        if (!custMap[s.customerId] || s.startDate < custMap[s.customerId].startDate) {
-                            custMap[s.customerId] = s;
+                        if (!custMap[s.customerId]) {
+                            custMap[s.customerId] = { ...s, startDate: firstStart };
                         }
                     }
                     const eligible = Object.values(custMap);
+                    // Nヶ月目に決済がない = 解約とみなす（途中の月はチェックしない）
                     const churned = eligible.filter(s => {
                         const startYM = toYM(s.startDate);
-                        for (let i = 1; i <= months; i++) {
-                            const checkYM = getYMOffset(startYM, i);
-                            if (!(globalCustomerPaidByMonth[checkYM] && globalCustomerPaidByMonth[checkYM].has(s.customerId))) {
-                                return true;
-                            }
-                        }
-                        return false;
+                        const checkYM = getYMOffset(startYM, months);
+                        return !(globalCustomerPaidByMonth[checkYM] && globalCustomerPaidByMonth[checkYM].has(s.customerId));
                     });
                     return eligible.length > 0 ? Math.round(churned.length / eligible.length * 1000) / 10 : 0;
                 };
                 const firstMonthChurn = calcEarlyChurn(1);
                 const threeMonthChurn = calcEarlyChurn(3);
 
-                // 継続率 (3/6/12ヶ月)（アクティブ会員ベース: 入会後Nヶ月目に決済があるかで判定）
-                // 顧客IDで重複排除（同一顧客の複数サブスクは最も早い入会日で判定）
+                // 継続率 (3/6/12ヶ月)（入会後Nヶ月目に決済があるかで判定）
+                // プラン変更がある場合でもスタートは最初に入会した日時からカウント
                 const calcRetention = (months) => {
                     const custMap = {};
                     for (const s of filtered) {
                         if (!s.startDate || !s.customerId) continue;
                         if (!hasAnyPayment(s)) continue;
-                        const startYM = toYM(s.startDate);
+                        const firstStart = customerFirstStartDate[s.customerId] || s.startDate;
+                        const startYM = toYM(firstStart);
                         if (!startYM) continue;
                         if (getYMOffset(startYM, months) > currentYM) continue;
-                        if (!custMap[s.customerId] || s.startDate < custMap[s.customerId].startDate) {
-                            custMap[s.customerId] = s;
+                        if (!custMap[s.customerId]) {
+                            custMap[s.customerId] = { ...s, startDate: firstStart };
                         }
                     }
                     const eligible = Object.values(custMap);
@@ -1614,25 +1631,29 @@
                     const ymFilteredSubInvs = storeSubIds
                         ? ymSubInvs.filter(inv => storeSubIds.has(inv.subscriptionId))
                         : ymSubInvs;
-                    let ymMemberCount, ymNewCount, ymCanceledCount;
-                    // 会員数: サブスクステータスベース（月末時点のアクティブ顧客数、直近決済実績で絞込）
-                    const ymActive = filtered.filter(s => isActiveAt(s, eom) && hasPaymentActivity(s, ym));
+                    let ymMemberCount, ymNewCount, ymPlanChangeCount, ymCanceledCount;
+                    // 会員数: サブスクステータスベース（月末時点のアクティブ顧客数）
+                    // 過去月の会員推移が欠落しないよう、決済実績チェックは全期間ベース（paidSubIds）
+                    const ymActive = filtered.filter(s => isActiveAt(s, eom) && (paidSubIds.has(s.id) || s.monthlyPrice > 0));
                     const ymActiveIds = new Set(ymActive.map(s => s.customerId));
                     ymMemberCount = ymActiveIds.size;
-                    // 新規: 開始月マップから取得（O(1)ルックアップ）
-                    const ymNewSubs = (subsByStartYM[ym] || []).filter(s => hasPaymentActivity(s, ym));
+                    // 新規: 開始月マップから取得（プラン変更は除外）
+                    const ymAllStartSubs = (subsByStartYM[ym] || []).filter(s => paidSubIds.has(s.id) || s.monthlyPrice > 0);
+                    const ymNewSubs = ymAllStartSubs.filter(s => !isPlanChange(s));
                     ymNewCount = new Set(ymNewSubs.map(s => s.customerId)).size;
+                    // プラン変更: 同月開始だが初回入会ではないサブスク
+                    const ymPlanChangeSubs = ymAllStartSubs.filter(s => isPlanChange(s));
+                    ymPlanChangeCount = new Set(ymPlanChangeSubs.map(s => s.customerId)).size;
                     // 解約（アクティブ会員ベース）: 前月のアクティブ会員のうち、当月に全店舗横断でアクティブでなくなった会員
-                    // 前月アクティブ: 前回イテレーションでキャッシュ済みなら再利用（filtered.filter省略）
+                    // 前月アクティブ: 前回イテレーションでキャッシュ済みなら再利用
                     const ymPrevActiveIds = cachedFilteredActiveIds || (() => {
-                        const ymPrevYM = getPrevYM(ym);
                         const prevEom = new Date(td.getFullYear(), td.getMonth(), 0);
-                        const ymPrevActive = filtered.filter(s => isActiveAt(s, prevEom) && hasPaymentActivity(s, ymPrevYM));
+                        const ymPrevActive = filtered.filter(s => isActiveAt(s, prevEom) && (paidSubIds.has(s.id) || s.monthlyPrice > 0));
                         return new Set(ymPrevActive.map(s => s.customerId));
                     })();
                     // 全店舗横断アクティブ: 全店舗モードならymActiveIdsをそのまま使用
                     const ymGlobalActiveIds = isAllStores ? ymActiveIds : (() => {
-                        const ymGlobalActive = subs.filter(s => isActiveAt(s, eom) && hasPaymentActivity(s, ym));
+                        const ymGlobalActive = subs.filter(s => isActiveAt(s, eom) && (paidSubIds.has(s.id) || s.monthlyPrice > 0));
                         return new Set(ymGlobalActive.map(s => s.customerId));
                     })();
                     ymCanceledCount = calcMemberChurn(ymPrevActiveIds, ymGlobalActiveIds).churned;
@@ -1654,30 +1675,20 @@
                         memberCount: ymMemberCount,
                         mrr: ymFilteredSubInvs.reduce((sum, inv) => sum + inv.amount, 0),
                         newEnrolled: ymNewCount,
+                        planChanged: ymPlanChangeCount,
                         canceled: ymCanceledCount,
                     });
                 }
 
-                // 会員数推移の整合性修正: 最新月の会員数を基準に、入会・解約数から過去月を逆算
-                // isActiveAtの独立計算では、hasPaymentActivityの月別ウィンドウ差異や
-                // PAUSEDステータスの扱いにより、入会・解約数と会員数推移が矛盾するため
-                if (monthlyTrends.length > 1) {
-                    for (let i = monthlyTrends.length - 2; i >= 0; i--) {
-                        const derived = monthlyTrends[i + 1].memberCount
-                            - monthlyTrends[i + 1].newEnrolled
-                            + monthlyTrends[i + 1].canceled;
-                        monthlyTrends[i].memberCount = Math.max(0, derived);
-                    }
-                }
-
-                // コホート分析（アクティブ会員ベース: 入会月基準・月別の決済有無で継続判定）
-                // 顧客IDで重複排除（同一顧客の複数サブスクは最も早い入会日で判定）
+                // コホート分析（入会月基準・月別の決済有無で継続判定）
+                // プラン変更がある場合でもスタートは最初に入会した日時からカウント
                 const cohortCustMap = {};
                 for (const s of filtered) {
                     if (!s.startDate) continue;
                     if (!hasAnyPayment(s)) continue;
-                    if (!cohortCustMap[s.customerId] || s.startDate < cohortCustMap[s.customerId].startDate) {
-                        cohortCustMap[s.customerId] = s;
+                    const firstStart = customerFirstStartDate[s.customerId] || s.startDate;
+                    if (!cohortCustMap[s.customerId]) {
+                        cohortCustMap[s.customerId] = { ...s, startDate: firstStart };
                     }
                 }
                 const cohortMap = {};
@@ -1728,6 +1739,7 @@
                 return {
                     memberCount, prevMemberCount, mrr, prevMrr, mrrChange,
                     totalSales, totalRefunds, newEnrolled: newInMonth.length,
+                    planChanged: planChangedInMonth.length,
                     canceled: churnedCount, churnedCount, churnBase,
                     arpu, churnRate, firstMonthChurn, threeMonthChurn,
                     retention3m, retention6m, retention12m, ltv,
@@ -1949,8 +1961,18 @@
                     return Object.values(nameMap);
                 };
 
-                // 新規入会: 選択月に入会したサブスク（フォールバック時は空）
+                // プラン変更検出: 顧客ごとの最初のサブスク開始日を全店舗横断で構築
+                const custFirstStart = {};
+                for (const s of allSubs) {
+                    if (!s.startDate || !s.customerId) continue;
+                    if (!custFirstStart[s.customerId] || s.startDate < custFirstStart[s.customerId]) {
+                        custFirstStart[s.customerId] = s.startDate;
+                    }
+                }
+
+                // 新規入会・プラン変更: 選択月に入会したサブスク（フォールバック時は空）
                 const newMonthList = [];
+                const planChangeList = [];
                 if (!useInvFallback) {
                     for (const sub of storeSubs) {
                         if (toYM(sub.startDate) !== sqMonth) continue;
@@ -1964,23 +1986,31 @@
                             if (ym && !paidByMonth[ym]) paidByMonth[ym] = inv.amount;
                         }
                         const paidMonths = Object.keys(paidByMonth);
-                        newMonthList.push({
+                        const entry = {
                             id: sub.id, customerId: sub.customerId, name, plan: planName,
                             paidCount: paidMonths.length,
                             paidTotal: paidMonths.reduce((s, m) => s + paidByMonth[m], 0),
                             paidByMonth, paidMonths,
                             startDate: sub.startDate, canceledDate: sub.canceledDate,
                             monthlyPrice: sub.monthlyPrice,
-                        });
+                        };
+                        // プラン変更判定: 顧客の最初のサブスク開始月と異なる場合
+                        const firstDate = custFirstStart[sub.customerId];
+                        const isChange = firstDate && toYM(firstDate) !== toYM(sub.startDate);
+                        if (isChange) {
+                            planChangeList.push(entry);
+                        } else {
+                            newMonthList.push(entry);
+                        }
                     }
                 }
 
-                return { activeList: dedup(activeList), newMonthList: dedup(newMonthList), canceledList: dedup(canceledList), pausedList: dedup(pausedList), refundedList, overdueList };
+                return { activeList: dedup(activeList), newMonthList: dedup(newMonthList), planChangeList: dedup(planChangeList), canceledList: dedup(canceledList), pausedList: dedup(pausedList), refundedList, overdueList };
             }, [sqPreprocessed, sqStore, sqMonth]);
 
             const sqSortedList = useMemo(() => {
                 if (!sqCustomerData) return [];
-                const lists = { active: sqCustomerData.activeList, newMonth: sqCustomerData.newMonthList, canceled: sqCustomerData.canceledList, paused: sqCustomerData.pausedList, refunded: sqCustomerData.refundedList, overdue: sqCustomerData.overdueList };
+                const lists = { active: sqCustomerData.activeList, newMonth: sqCustomerData.newMonthList, planChange: sqCustomerData.planChangeList, canceled: sqCustomerData.canceledList, paused: sqCustomerData.pausedList, refunded: sqCustomerData.refundedList, overdue: sqCustomerData.overdueList };
                 const list = [...(lists[sqTab] || [])];
                 const { key, dir } = sqSort;
                 list.sort((a, b) => {
@@ -2002,11 +2032,24 @@
             const sqDrilldownList = useMemo(() => {
                 if (!sqDrilldown || !sqPreprocessed) return [];
                 const { month, type } = sqDrilldown;
-                const { cust, plansMap: plans, invBySub, filtered: storeSubs } = sqPreprocessed;
+                const { cust, plansMap: plans, invBySub, subs: allSubs, filtered: storeSubs } = sqPreprocessed;
                 const toYM = d => { if (!d) return null; const dt = new Date(d); return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`; };
+                // プラン変更検出用: 顧客ごとの最初のサブスク開始日
+                const custFirst = {};
+                for (const s of allSubs) {
+                    if (!s.startDate || !s.customerId) continue;
+                    if (!custFirst[s.customerId] || s.startDate < custFirst[s.customerId]) {
+                        custFirst[s.customerId] = s.startDate;
+                    }
+                }
                 let matched;
                 if (type === 'new') {
-                    matched = storeSubs.filter(s => toYM(s.startDate) === month);
+                    // 新規入会のみ（プラン変更を除外）
+                    matched = storeSubs.filter(s => {
+                        if (toYM(s.startDate) !== month) return false;
+                        const firstDate = custFirst[s.customerId];
+                        return !firstDate || toYM(firstDate) === toYM(s.startDate);
+                    });
                 } else {
                     matched = storeSubs.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') && toYM(s.canceledDate || s.pausedDate) === month);
                 }
@@ -6914,6 +6957,7 @@
                                                         {[
                                                             { key: 'active', label: 'アクティブ', count: sqCustomerData.activeList.length, color: 'emerald' },
                                                             { key: 'newMonth', label: '新規入会', count: sqCustomerData.newMonthList.length, color: 'blue' },
+                                                            { key: 'planChange', label: 'プラン変更', count: sqCustomerData.planChangeList.length, color: 'purple' },
                                                             { key: 'canceled', label: '解約済み', count: sqCustomerData.canceledList.length, color: 'rose' },
                                                             { key: 'paused', label: '一時停止', count: sqCustomerData.pausedList.length, color: 'orange' },
                                                             { key: 'refunded', label: '払戻し', count: sqCustomerData.refundedList.length, color: 'amber' },

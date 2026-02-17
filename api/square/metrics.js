@@ -794,7 +794,7 @@ export default async function handler(req, res) {
     const failedAccounts = [];
     const allDiag = [];
 
-    // バッチ内アカウントを並列取得（最大3並列、1アカウント最大110秒タイムアウト）
+    // バッチ内アカウントを並列取得（最大3並列、1アカウント最大100秒タイムアウト）
     await parallelWithLimit(indices, 3, async (idx) => {
       const cfg = configs[idx];
       try {
@@ -806,7 +806,7 @@ export default async function handler(req, res) {
           r = await Promise.race([
             fetchAccountData(cfg, true),
             new Promise((_, reject) => {
-              batchTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (50秒)')), 50000);
+              batchTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (100秒)')), 100000);
             }),
           ]).finally(() => clearTimeout(batchTimer));
           if (r && !r._failed) setCachedAccount(idx, r);
@@ -854,7 +854,7 @@ export default async function handler(req, res) {
         r = await Promise.race([
           fetchAccountData(cfg, configs.length > 1),
           new Promise((_, reject) => {
-            singleTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (50秒)')), 50000);
+            singleTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (100秒)')), 100000);
           }),
         ]).finally(() => clearTimeout(singleTimer));
         if (r && !r._failed) setCachedAccount(idx, r);
@@ -901,7 +901,7 @@ export default async function handler(req, res) {
   const allDiag = [];
 
   let deadlineReached = false;
-  const deadlineTimer = setTimeout(() => { deadlineReached = true; }, 50000);
+  const deadlineTimer = setTimeout(() => { deadlineReached = true; }, 110000);
 
   try {
     // 全アカウント並列取得（最大5並列、75店舗対応）

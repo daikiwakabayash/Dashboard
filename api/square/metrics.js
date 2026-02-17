@@ -521,8 +521,8 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     // Note: subscriptionsApi/invoicesApiは各関数内部で設定済み
     if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (70s)';
     if (!diag.invoicesApi) diag.invoicesApi = 'timeout (70s)';
-    if (!diag.paymentsApi) diag.paymentsApi = 'timeout (30s)';
-    if (!diag.refundsApi) diag.refundsApi = 'timeout (30s)';
+    if (!diag.paymentsApi) diag.paymentsApi = 'timeout (25s)';
+    if (!diag.refundsApi) diag.refundsApi = 'timeout (25s)';
     if (!diag.customersApi) diag.customersApi = 'timeout (20s)';
 
     const payments = ordersData.payments || [];

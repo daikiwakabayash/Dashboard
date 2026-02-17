@@ -1325,9 +1325,27 @@
                 // 返品差引: 純売上 = 売上合計 - 返金額
                 totalSales = Math.max(0, totalSales - totalRefunds);
 
+                // プラン変更検出: 同一顧客が別サブスクをACTIVEで持つ、または同月に別サブスク開始の場合
+                // → 実質的な解約ではないため、解約カウントから除外（一覧表示には引き続き掲載）
+                const subsByCustomerId = {};
+                for (const s of subs) {
+                    if (!subsByCustomerId[s.customerId]) subsByCustomerId[s.customerId] = [];
+                    subsByCustomerId[s.customerId].push(s);
+                }
+                const isPlanChange = (canceledSub, endYM) => {
+                    const customerSubs = subsByCustomerId[canceledSub.customerId];
+                    if (!customerSubs || customerSubs.length <= 1) return false;
+                    return customerSubs.some(s =>
+                        s.id !== canceledSub.id && (
+                            s.status === 'ACTIVE' ||
+                            toYM(s.startDate) === endYM
+                        )
+                    );
+                };
+
                 // 新規・解約（基準月、金額0を除外）
                 const newInMonth = filtered.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s));
-                const canceledInMonth = filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') && toYM(getEndDate(s)) === sqMonth && hasPaymentActivity(s));
+                const canceledInMonth = filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') && toYM(getEndDate(s)) === sqMonth && hasPaymentActivity(s) && !isPlanChange(s, sqMonth));
 
                 // ARPU = サブスク決済合計 / アクティブ人数
                 const arpu = memberCount > 0 ? Math.round(mrr / memberCount) : 0;
@@ -1355,7 +1373,7 @@
                         );
                         smrr = storeSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
                         sn = ss.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s));
-                        sc = ss.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') && toYM(getEndDate(s)) === sqMonth && hasPaymentActivity(s));
+                        sc = ss.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') && toYM(getEndDate(s)) === sqMonth && hasPaymentActivity(s) && !isPlanChange(s, sqMonth));
                         sStartA = sp.length + sn.length;
                         sChurn = sStartA > 0 ? Math.round(sc.length / sStartA * 10000) / 100 : 0;
                     } else {
@@ -1469,7 +1487,7 @@
                     const ymActive = filtered.filter(s => isActiveAt(s, eom) && hasPaymentActivity(s, ym));
                     ymMemberCount = new Set(ymActive.map(s => s.customerId)).size;
                     ymNewCount = new Set(filtered.filter(s => toYM(s.startDate) === ym && hasPaymentActivity(s, ym)).map(s => s.customerId)).size;
-                    ymCanceledCount = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') && toYM(getEndDate(s)) === ym && hasPaymentActivity(s, ym)).map(s => s.customerId)).size;
+                    ymCanceledCount = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') && toYM(getEndDate(s)) === ym && hasPaymentActivity(s, ym) && !isPlanChange(s, ym)).map(s => s.customerId)).size;
                     // フォールバック: サブスクデータがない場合はPAIDインボイスベース
                     if (ymMemberCount === 0) {
                         const ymMemberInvs = allInvoices.filter(inv =>

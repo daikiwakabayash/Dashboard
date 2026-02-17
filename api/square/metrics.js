@@ -226,7 +226,7 @@ async function fetchPlanDetails(client, planVariationIds) {
   for (let i = 0; i < uniqueIds.length; i += 100) {
     const batch = uniqueIds.slice(i, i + 100);
     try {
-      // バッチ単位タイムアウト: 全体タイムアウトで部分結果を失わないよう各バッチに10秒上限
+      // バッチ単位タイムアウト: 全体タイムアウトで部分結果を失わないよう各バッチに20秒上限
       let timer;
       const { result } = await Promise.race([
         client.catalogApi.batchRetrieveCatalogObjects({
@@ -234,7 +234,7 @@ async function fetchPlanDetails(client, planVariationIds) {
           includeRelatedObjects: true,
         }),
         new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error('Plan batch timeout (10s)')), 10000);
+          timer = setTimeout(() => reject(new Error('Plan batch timeout (20s)')), 20000);
         }),
       ]).finally(() => clearTimeout(timer));
       // objects + relatedObjects の両方からプラン情報を抽出
@@ -293,7 +293,7 @@ async function fetchSalesFromPayments(token, env, locationIds, diag, timeoutMs =
   const startTime = Date.now();
   let timedOut = false;
 
-  const allResults = await parallelWithLimit(locationIds, 5, async (locId) => {
+  const allResults = await parallelWithLimit(locationIds, 8, async (locId) => {
     const payments = [];
     const refunds = [];
 
@@ -308,7 +308,7 @@ async function fetchSalesFromPayments(token, env, locationIds, diag, timeoutMs =
             begin_time: beginStr,
             location_id: locId,
             sort_order: 'DESC',
-            limit: '100',
+            limit: '200',
           });
           if (cursor) params.set('cursor', cursor);
           const resp = await fetch(`${baseUrl}/v2/payments?${params}`, {
@@ -369,7 +369,7 @@ async function fetchSalesFromPayments(token, env, locationIds, diag, timeoutMs =
             begin_time: beginStr,
             location_id: locId,
             sort_order: 'DESC',
-            limit: '100',
+            limit: '200',
           });
           if (cursor) params.set('cursor', cursor);
           const resp = await fetch(`${baseUrl}/v2/refunds?${params}`, {
@@ -457,7 +457,7 @@ async function fetchInvoices(client, locationIds, diag, timeoutMs = 180000) {
   cutoffDate.setMonth(cutoffDate.getMonth() - 13);
   const cutoffStr = cutoffDate.toISOString();
 
-  await parallelWithLimit(locationIds, 5, async (locId) => {
+  await parallelWithLimit(locationIds, 8, async (locId) => {
     let cursor = undefined;
     let locCount = 0;
     let reachedCutoff = false;
@@ -608,8 +608,15 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     // Payments/Refunds APIはSDKバグ回避のためREST APIを直接呼び出す
     const API_TIMEOUT = 240000; // 各API最大240秒（Vercel maxDuration:300s、大規模アカウントのページネーション完走用）
     // サブスク・インボイスは内部で部分結果を管理するため withTimeout を使わない
+    // プラン詳細はサブスクデータに依存するため、サブスク取得完了後に即座にチェーン実行
+    // （他APIの完了を待たずに並列で開始することで10-30秒短縮）
+    let plans = {};
     const [rawSubs, invoices, paymentsData, customers] = await Promise.all([
-      fetchAllSubscriptions(client, locationIds, diag, API_TIMEOUT),
+      fetchAllSubscriptions(client, locationIds, diag, API_TIMEOUT).then(async (subs) => {
+        const planVariationIds = subs.map(s => s.planVariationId).filter(Boolean);
+        plans = await fetchPlanDetails(client, planVariationIds);
+        return subs;
+      }),
       fetchInvoices(client, locationIds, diag, API_TIMEOUT),
       fetchSalesFromPayments(tokenConfig.token, tokenConfig.env, locationIds, diag, API_TIMEOUT),
       withTimeout(fetchAllCustomers(client, diag), 120000, {}, 'Customers'),
@@ -625,11 +632,8 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
 
     const payments = paymentsData.payments || [];
     const refunds = paymentsData.refunds || [];
-
-    // プラン詳細を取得（サブスクデータに依存するため順次実行・バッチ単位タイムアウトで部分結果を保持）
-    const planVariationIds = rawSubs.map(s => s.planVariationId).filter(Boolean);
-    const plans = await fetchPlanDetails(client, planVariationIds);
     const plansLoadedCount = Object.keys(plans).length;
+    const planVariationIds = rawSubs.map(s => s.planVariationId).filter(Boolean);
     const plansRequestedCount = [...new Set(planVariationIds)].length;
     if (plansRequestedCount > 0) {
       console.log(`[${accountName || 'main'}] Plans: ${plansLoadedCount}/${plansRequestedCount} loaded`);

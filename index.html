@@ -192,13 +192,13 @@
         const SQUARE_CACHE_KEY = 'square_data_cache_v4'; // v4: 75店舗対応・バッチ取得+プログレッシブ表示
         const UI_STATE_KEY = 'dashboard_ui_state';
         const CACHE_EXPIRY_MS = 30 * 60 * 1000; // 30分（GASタイムアウト対策）
-        const BATCH_SIZE = 3; // バッチあたりのアカウント数
-        const MAX_CONCURRENT_BATCHES = 3; // 同時バッチリクエスト数
+        const BATCH_SIZE = 5; // バッチあたりのアカウント数（5アカウント×5並列で75店舗を3ラウンドで完走）
+        const MAX_CONCURRENT_BATCHES = 5; // 同時バッチリクエスト数
 
         // リトライ付きfetch（タイムアウト + エクスポネンシャルバックオフ）
         const fetchWithRetry = async (url, options = {}) => {
             const maxRetries = 3;
-            const timeoutMs = 310000; // 310秒（Vercel maxDuration:300s + マージン）
+            const timeoutMs = 60000; // 60秒（GAS APIは通常5-15秒で応答、異常時は早期リトライ）
             let lastError;
             for (let attempt = 0; attempt < maxRetries; attempt++) {
                 const controller = new AbortController();
@@ -351,12 +351,17 @@
         };
 
         // マーケティングキャッシュヘルパー
-        const getMarketingCachedData = () => {
+        const getMarketingCachedData = (allowStale = false) => {
             try {
                 const cached = localStorage.getItem(MARKETING_CACHE_KEY);
                 if (!cached) return null;
                 const { data, timestamp } = JSON.parse(cached);
-                if (Date.now() - timestamp > CACHE_EXPIRY_MS) {
+                const age = Date.now() - timestamp;
+                if (age > CACHE_EXPIRY_MS) {
+                    if (allowStale && age < CACHE_EXPIRY_MS * 2 && data) {
+                        console.log('📦 Using stale marketing cache (age:', Math.round(age / 1000), 's)');
+                        return data;
+                    }
                     localStorage.removeItem(MARKETING_CACHE_KEY);
                     return null;
                 }
@@ -378,21 +383,27 @@
         };
 
         // キャッシュヘルパー関数
-        const getCachedData = () => {
+        const getCachedData = (allowStale = false) => {
             try {
                 const cached = localStorage.getItem(CACHE_KEY);
                 if (!cached) return null;
 
                 const { data, timestamp } = JSON.parse(cached);
                 const now = Date.now();
+                const age = now - timestamp;
 
                 // キャッシュが期限切れかチェック
-                if (now - timestamp > CACHE_EXPIRY_MS) {
+                if (age > CACHE_EXPIRY_MS) {
+                    // stale許容時: 60分以内なら期限切れデータも返す（裏で更新）
+                    if (allowStale && age < CACHE_EXPIRY_MS * 2 && data) {
+                        console.log('📦 Using stale cached data (age:', Math.round(age / 1000), 'seconds) - will refresh');
+                        return data;
+                    }
                     localStorage.removeItem(CACHE_KEY);
                     return null;
                 }
 
-                console.log('📦 Using cached data (age:', Math.round((now - timestamp) / 1000), 'seconds)');
+                console.log('📦 Using cached data (age:', Math.round(age / 1000), 'seconds)');
                 return data;
             } catch (e) {
                 console.error('❌ Cache read error:', e);
@@ -537,17 +548,19 @@
                 try {
                     setMktError(null);
 
-                    // キャッシュファースト: キャッシュがあれば即座に表示し、バックグラウンドで更新
+                    // キャッシュファースト: stale-while-revalidate対応
                     const cached = getMarketingCachedData();
-                    const hasCachedData = cached && cached.length > 0;
+                    const staleCached = !cached ? getMarketingCachedData(true) : null;
+                    const displayMkt = cached || staleCached;
+                    const hasCachedData = displayMkt && displayMkt.length > 0;
 
-                    if (!forceRefresh && hasCachedData) {
-                        console.log('💾 Using cached marketing data:', cached.length, 'records');
-                        setMktData(cached);
+                    if (hasCachedData) {
+                        console.log('💾 Using cached marketing data:', displayMkt.length, 'records', staleCached ? '(stale)' : '(fresh)');
+                        setMktData(displayMkt);
                         if (!mktInitialized && !savedUIState?.mktSelectedMonth) {
-                            const branches = Array.from(new Set(cached.map(d => d.branch).filter(Boolean)));
+                            const branches = Array.from(new Set(displayMkt.map(d => d.branch).filter(Boolean)));
                             setMktSelectedBranches(branches);
-                            const months = sortMonths(Array.from(new Set(cached.map(d => d.month).filter(Boolean))));
+                            const months = sortMonths(Array.from(new Set(displayMkt.map(d => d.month).filter(Boolean))));
                             if (months.length > 0) {
                                 setMktSelectedMonth(months[0]);
                                 setMktEndMonth(months[months.length - 1]);
@@ -556,10 +569,11 @@
                         }
                         setMktLoading(false);
                         setMktLastFetch(new Date());
-                        return;
+                        if (cached && !forceRefresh) return;
+                        // staleまたはforceRefresh: 表示したまま裏で更新を続行
                     }
 
-                    // キャッシュがあればローディング非表示で裏で更新、なければローディング表示
+                    // キャッシュがなければローディング表示
                     if (!hasCachedData) setMktLoading(true);
 
                     let result;
@@ -619,7 +633,34 @@
                     setSqError(null);
                     setSqFailedDetails(null);
 
-                    // Step 1: アカウント一覧を取得（キャッシュ検証のため常に先に取得）
+                    // Step 0: キャッシュを先にチェック（ネットワーク呼び出し前に即座に表示）
+                    let hasStaleCache = false;
+                    if (!forceRefresh) {
+                        try {
+                            const cached = localStorage.getItem(SQUARE_CACHE_KEY);
+                            if (cached) {
+                                const parsed = JSON.parse(cached);
+                                if (parsed.timestamp && parsed.data) {
+                                    const age = Date.now() - parsed.timestamp;
+                                    if (age < CACHE_EXPIRY_MS) {
+                                        console.log('Using cached Square data (skip info fetch)');
+                                        setSqData(parsed.data);
+                                        setSqLastFetch(new Date(parsed.timestamp));
+                                        return;
+                                    }
+                                    // 30分超〜60分以内: stale表示して裏で更新（info取得を並列で進める）
+                                    if (age < CACHE_EXPIRY_MS * 2) {
+                                        console.log('Showing stale cache, refreshing in background...');
+                                        setSqData(parsed.data);
+                                        setSqLastFetch(new Date(parsed.timestamp));
+                                        hasStaleCache = true;
+                                    }
+                                }
+                            }
+                        } catch (e) { /* cache miss */ }
+                    }
+
+                    // Step 1: アカウント一覧を取得
                     let infoData = null;
                     let totalAccounts = 0;
                     try {
@@ -652,36 +693,19 @@
                         throw infoErr;
                     }
 
-                    // キャッシュ確認（stale-while-revalidate + アカウント数変更検知）
-                    let hasStaleCache = false;
-                    if (!forceRefresh) {
+                    // アカウント数変更検知: キャッシュのアカウント数と一致しなければキャッシュ無効化
+                    if (hasStaleCache) {
                         try {
                             const cached = localStorage.getItem(SQUARE_CACHE_KEY);
                             if (cached) {
                                 const parsed = JSON.parse(cached);
-                                if (parsed.timestamp) {
-                                    const age = Date.now() - parsed.timestamp;
-                                    const cachedAccounts = parsed.data && parsed.data.meta ? parsed.data.meta.totalAccounts : 0;
-                                    const accountsChanged = cachedAccounts !== totalAccounts;
-                                    if (accountsChanged) {
-                                        console.log(`アカウント数変更検知 (${cachedAccounts} → ${totalAccounts}): キャッシュを無効化`);
-                                    }
-                                    if (age < CACHE_EXPIRY_MS && !accountsChanged) {
-                                        console.log('Using cached Square data');
-                                        setSqData(parsed.data);
-                                        setSqLastFetch(new Date(parsed.timestamp));
-                                        return;
-                                    }
-                                    // 30分超〜60分以内（アカウント数変更なし）: stale表示して裏で更新
-                                    if (age < CACHE_EXPIRY_MS * 2 && !accountsChanged) {
-                                        console.log('Showing stale cache, refreshing in background...');
-                                        setSqData(parsed.data);
-                                        setSqLastFetch(new Date(parsed.timestamp));
-                                        hasStaleCache = true;
-                                    }
+                                const cachedAccounts = parsed.data && parsed.data.meta ? parsed.data.meta.totalAccounts : 0;
+                                if (cachedAccounts !== totalAccounts) {
+                                    console.log(`アカウント数変更検知 (${cachedAccounts} → ${totalAccounts}): staleキャッシュを無効化`);
+                                    hasStaleCache = false;
                                 }
                             }
-                        } catch (e) { /* cache miss */ }
+                        } catch (e) { /* ignore */ }
                     }
 
                     setSqLoading(true);
@@ -872,15 +896,17 @@
                 console.log('📡 Fetching data from GAS API... (forceRefresh:', forceRefresh, ')');
 
                 try {
-                    // キャッシュファースト: キャッシュがあれば即座に表示
+                    // キャッシュファースト: キャッシュがあれば即座に表示（stale-while-revalidate対応）
                     const cachedData = getCachedData();
-                    const hasCachedData = cachedData && cachedData.length > 0;
+                    const staleCachedData = !cachedData ? getCachedData(true) : null;
+                    const displayData = cachedData || staleCachedData;
+                    const hasCachedData = displayData && displayData.length > 0;
 
-                    if (!forceRefresh && hasCachedData) {
-                        console.log('💾 Using cached data:', cachedData.length, 'records');
-                        setRawData(cachedData);
+                    if (hasCachedData) {
+                        console.log('💾 Using cached data:', displayData.length, 'records', staleCachedData ? '(stale)' : '(fresh)');
+                        setRawData(displayData);
                         if (!savedUIState) {
-                            const sortedMonths = Array.from(new Set(cachedData.map(d => d.month))).sort((a, b) => {
+                            const sortedMonths = Array.from(new Set(displayData.map(d => d.month))).sort((a, b) => {
                                 const [ay, am] = a.replace('年', '-').replace('月', '').split('-');
                                 const [by, bm] = b.replace('年', '-').replace('月', '').split('-');
                                 return new Date(by, bm - 1) - new Date(ay, am - 1);
@@ -893,12 +919,14 @@
                                 setStartDate(new Date(parseInt(year), parseInt(month) - 1, 1));
                                 setEndDate(new Date(parseInt(year), parseInt(month), 0));
                             }
-                            const allBranches = Array.from(new Set(cachedData.map(d => d.branch)));
+                            const allBranches = Array.from(new Set(displayData.map(d => d.branch)));
                             if (selectedBranches.length === 0) setSelectedBranches(allBranches);
                         }
                         setLoading(false);
                         setLastFetchTime(new Date());
-                        return;
+                        // フレッシュキャッシュかつforceRefreshでなければ、ここで完了
+                        if (cachedData && !forceRefresh) return;
+                        // staleキャッシュまたはforceRefresh: 表示したまま裏で更新を続行
                     }
 
                     // キャッシュがなければローディング表示
@@ -967,6 +995,8 @@
                 fetchDataFromSpreadsheet();
                 // Square店舗名を店舗検索に表示するため、起動時にSquareデータも取得
                 fetchSquareData();
+                // マーケティングデータもプリロード（タブ切り替え時の待ち時間を削減）
+                fetchMarketingData();
 
                 // Auto-refresh every 5 minutes (only when tab is visible)
                 const autoRefreshInterval = setInterval(() => {
@@ -1468,17 +1498,39 @@
                 const mChurn = churnRate / 100;
                 const ltv = mChurn > 0 ? Math.round(arpu / mChurn) : arpu * 24;
 
-                // 月別推移（12ヶ月）
+                // 月別推移（12ヶ月）- ルックアップマップで高速化（O(n×12) → O(n+12)）
+                // サブスクを開始月・終了月でグループ化（ループ内の繰り返しフィルタを排除）
+                const subsByStartYM = {};
+                const canceledSubsByEndYM = {};
+                for (const s of filtered) {
+                    const sym = toYM(s.startDate);
+                    if (sym) { if (!subsByStartYM[sym]) subsByStartYM[sym] = []; subsByStartYM[sym].push(s); }
+                    if (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') {
+                        const eym = toYM(getEndDate(s));
+                        if (eym) { if (!canceledSubsByEndYM[eym]) canceledSubsByEndYM[eym] = []; canceledSubsByEndYM[eym].push(s); }
+                    }
+                }
+                // インボイスを月別にグループ化
+                const paidSubInvsByYM = {};
+                const paidInvsByYM = {};
+                for (const inv of allInvoices) {
+                    if (!inv.subscriptionId || inv.status !== 'PAID') continue;
+                    const iym = toYM(inv.createdAt);
+                    if (!iym) continue;
+                    if (!paidInvsByYM[iym]) paidInvsByYM[iym] = [];
+                    paidInvsByYM[iym].push(inv);
+                    if (useInvoiceFallback ? inv.locationId === sqStore : realSubIds.has(inv.subscriptionId)) {
+                        if (!paidSubInvsByYM[iym]) paidSubInvsByYM[iym] = [];
+                        paidSubInvsByYM[iym].push(inv);
+                    }
+                }
                 const monthlyTrends = [];
                 for (let i = 11; i >= 0; i--) {
                     const td = new Date(refY, refM - 1 - i, 1);
                     const ym = `${td.getFullYear()}-${String(td.getMonth()+1).padStart(2,'0')}`;
                     const eom = new Date(td.getFullYear(), td.getMonth()+1, 0);
-                    // MRR = その月のPAIDサブスクインボイス合計
-                    const ymSubInvs = allInvoices.filter(inv =>
-                        inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === ym
-                        && (useInvoiceFallback ? inv.locationId === sqStore : realSubIds.has(inv.subscriptionId))
-                    );
+                    // MRR = その月のPAIDサブスクインボイス合計（プリコンピュート済みマップから取得）
+                    const ymSubInvs = paidSubInvsByYM[ym] || [];
                     const ymFilteredSubInvs = storeSubIds
                         ? ymSubInvs.filter(inv => storeSubIds.has(inv.subscriptionId))
                         : ymSubInvs;
@@ -1486,14 +1538,16 @@
                     // 会員数: サブスクステータスベース（月末時点のアクティブ顧客数、直近決済実績で絞込）
                     const ymActive = filtered.filter(s => isActiveAt(s, eom) && hasPaymentActivity(s, ym));
                     ymMemberCount = new Set(ymActive.map(s => s.customerId)).size;
-                    ymNewCount = new Set(filtered.filter(s => toYM(s.startDate) === ym && hasPaymentActivity(s, ym)).map(s => s.customerId)).size;
-                    ymCanceledCount = new Set(filtered.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED') && toYM(getEndDate(s)) === ym && hasPaymentActivity(s, ym) && !isPlanChange(s, ym)).map(s => s.customerId)).size;
+                    // 新規: 開始月マップから取得（O(1)ルックアップ）
+                    const ymNewSubs = (subsByStartYM[ym] || []).filter(s => hasPaymentActivity(s, ym));
+                    ymNewCount = new Set(ymNewSubs.map(s => s.customerId)).size;
+                    // 解約: 終了月マップから取得（O(1)ルックアップ、プラン変更除外済み）
+                    const ymCanceledSubs = (canceledSubsByEndYM[ym] || []).filter(s => hasPaymentActivity(s, ym) && !isPlanChange(s, ym));
+                    ymCanceledCount = new Set(ymCanceledSubs.map(s => s.customerId)).size;
                     // フォールバック: サブスクデータがない場合はPAIDインボイスベース
                     if (ymMemberCount === 0) {
-                        const ymMemberInvs = allInvoices.filter(inv =>
-                            inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === ym
-                            && (sqStore === 'all' || inv.locationId === sqStore)
-                        );
+                        const ymAllPaidInvs = paidInvsByYM[ym] || [];
+                        const ymMemberInvs = sqStore === 'all' ? ymAllPaidInvs : ymAllPaidInvs.filter(inv => inv.locationId === sqStore);
                         const invCount = new Set(ymMemberInvs.map(inv => inv.customerId || inv.subscriptionId)).size;
                         if (invCount > 0) {
                             ymMemberCount = invCount;

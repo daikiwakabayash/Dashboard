@@ -157,58 +157,54 @@ async function fetchLocations(client, diag) {
   }
 }
 
-// ── サブスクリプション取得（ロケーション並列・リトライ付き・タイムアウト時は部分結果を返す） ──
+// ── サブスクリプション取得（全ロケーション一括クエリ・リトライ付き・タイムアウト時は部分結果を返す） ──
 async function fetchAllSubscriptions(client, locationIds, diag, timeoutMs = 180000) {
   const allSubs = [];
   const errors = [];
   const startTime = Date.now();
   let timedOut = false;
 
-  // ロケーション別に並列取得（最大5並列、大規模アカウント対応）
-  await parallelWithLimit(locationIds, 5, async (locId) => {
-    let cursor = undefined;
-    let locCount = 0;
-    do {
-      if (Date.now() - startTime > timeoutMs) {
-        timedOut = true;
-        if (locCount > 0) errors.push(`${locId}: ページネーション途中 (${locCount}件取得済)`);
+  // 全ロケーションを一括クエリ（ロケーション別並列より効率的・API呼出し回数削減）
+  let cursor = undefined;
+  do {
+    if (Date.now() - startTime > timeoutMs) {
+      timedOut = true;
+      break;
+    }
+    // 500系エラー時のリトライ（最大2回、指数バックオフ）
+    let succeeded = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const { result } = await client.subscriptionsApi.searchSubscriptions({
+          query: { filter: { locationIds } },
+          limit: 200,
+          cursor,
+        });
+        if (result.subscriptions) {
+          allSubs.push(...result.subscriptions);
+        }
+        cursor = result.cursor;
+        succeeded = true;
+        break;
+      } catch (err) {
+        const is500 = err.statusCode >= 500 || (err.message && err.message.includes('500'));
+        if (is500 && attempt < 2) {
+          const delay = 1000 * (attempt + 1); // 1s, 2s
+          console.warn(`  Subscriptions 500 error, retry ${attempt + 1}/2 in ${delay}ms...`);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        const errMsg = extractApiError(err);
+        console.error(`  Subscriptions error:`, errMsg);
+        errors.push(errMsg);
+        cursor = undefined;
+        succeeded = true; // エラー処理完了、リトライループ脱出
         break;
       }
-      // 500系エラー時のリトライ（最大2回、指数バックオフ）
-      let succeeded = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const { result } = await client.subscriptionsApi.searchSubscriptions({
-            query: { filter: { locationIds: [locId] } },
-            limit: 200,
-            cursor,
-          });
-          if (result.subscriptions) {
-            allSubs.push(...result.subscriptions);
-            locCount += result.subscriptions.length;
-          }
-          cursor = result.cursor;
-          succeeded = true;
-          break;
-        } catch (err) {
-          const is500 = err.statusCode >= 500 || (err.message && err.message.includes('500'));
-          if (is500 && attempt < 2) {
-            const delay = 1000 * (attempt + 1); // 1s, 2s
-            console.warn(`  Subscriptions 500 error (${locId}), retry ${attempt + 1}/2 in ${delay}ms...`);
-            await new Promise(r => setTimeout(r, delay));
-            continue;
-          }
-          const errMsg = extractApiError(err);
-          console.error(`  Subscriptions error (${locId}):`, errMsg);
-          errors.push(`${locId}: ${errMsg}`);
-          cursor = undefined;
-          succeeded = true; // エラー処理完了、リトライループ脱出
-          break;
-        }
-      }
-      if (!succeeded) cursor = undefined;
-    } while (cursor);
-  });
+    }
+    if (!succeeded) cursor = undefined;
+  } while (cursor);
+
   if (diag) {
     if (timedOut) {
       diag.subscriptionsApi = `${allSubs.length}件取得 (部分結果・タイムアウト${timeoutMs / 1000}s)`;
@@ -610,22 +606,22 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
 
     // サブスク＋インボイス＋売上(Payments REST API)＋顧客を並列取得（各API個別タイムアウト付き）
     // Payments/Refunds APIはSDKバグ回避のためREST APIを直接呼び出す
-    const API_TIMEOUT = 45000; // 各API最大45秒（Vercel maxDuration:60s に対応、フロントエンドがバッチ分割するため十分）
+    const API_TIMEOUT = 90000; // 各API最大90秒（Vercel maxDuration:120s、大規模アカウントのページネーション完走用）
     // サブスク・インボイスは内部で部分結果を管理するため withTimeout を使わない
     const [rawSubs, invoices, paymentsData, customers] = await Promise.all([
       fetchAllSubscriptions(client, locationIds, diag, API_TIMEOUT),
       fetchInvoices(client, locationIds, diag, API_TIMEOUT),
       fetchSalesFromPayments(tokenConfig.token, tokenConfig.env, locationIds, diag, API_TIMEOUT),
-      withTimeout(fetchAllCustomers(client, diag), 30000, {}, 'Customers'),
+      withTimeout(fetchAllCustomers(client, diag), 45000, {}, 'Customers'),
     ]);
 
     // タイムアウト検出: withTimeoutがfallbackを返した場合、diagに記録がない
     // Note: subscriptionsApi/invoicesApiは各関数内部で設定済み
-    if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (45s)';
-    if (!diag.invoicesApi) diag.invoicesApi = 'timeout (45s)';
-    if (!diag.paymentsApi) diag.paymentsApi = 'timeout (45s)';
-    if (!diag.refundsApi) diag.refundsApi = 'timeout (45s)';
-    if (!diag.customersApi) diag.customersApi = 'timeout (30s)';
+    if (!diag.subscriptionsApi) diag.subscriptionsApi = 'timeout (90s)';
+    if (!diag.invoicesApi) diag.invoicesApi = 'timeout (90s)';
+    if (!diag.paymentsApi) diag.paymentsApi = 'timeout (90s)';
+    if (!diag.refundsApi) diag.refundsApi = 'timeout (90s)';
+    if (!diag.customersApi) diag.customersApi = 'timeout (45s)';
 
     const payments = paymentsData.payments || [];
     const refunds = paymentsData.refunds || [];
@@ -806,7 +802,7 @@ export default async function handler(req, res) {
           r = await Promise.race([
             fetchAccountData(cfg, true),
             new Promise((_, reject) => {
-              batchTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (100秒)')), 100000);
+              batchTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (115秒)')), 115000);
             }),
           ]).finally(() => clearTimeout(batchTimer));
           if (r && !r._failed) setCachedAccount(idx, r);
@@ -854,7 +850,7 @@ export default async function handler(req, res) {
         r = await Promise.race([
           fetchAccountData(cfg, configs.length > 1),
           new Promise((_, reject) => {
-            singleTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (100秒)')), 100000);
+            singleTimer = setTimeout(() => reject(new Error('アカウント取得タイムアウト (115秒)')), 115000);
           }),
         ]).finally(() => clearTimeout(singleTimer));
         if (r && !r._failed) setCachedAccount(idx, r);

@@ -457,9 +457,10 @@ async function fetchInvoices(client, locationIds, diag, timeoutMs = 180000) {
   const allInvoices = [];
   const startTime = Date.now();
   let timedOut = false;
-  // 13ヶ月前より古いインボイスは不要（ソートDESCなので打ち切り可能）
+  // 25ヶ月前より古いインボイスは不要（ソートDESCなので打ち切り可能）
+  // 選択可能月12ヶ月 + チャート表示12ヶ月 + バッファ1ヶ月 = 25ヶ月
   const cutoffDate = new Date();
-  cutoffDate.setMonth(cutoffDate.getMonth() - 13);
+  cutoffDate.setMonth(cutoffDate.getMonth() - 25);
   const cutoffStr = cutoffDate.toISOString();
 
   await parallelWithLimit(locationIds, 8, async (locId) => {
@@ -482,7 +483,7 @@ async function fetchInvoices(client, locationIds, diag, timeoutMs = 180000) {
         });
         if (result.invoices) {
           for (const inv of result.invoices) {
-            // 13ヶ月以上前のインボイスはスキップ（DESCソートなので以降も古い）
+            // 25ヶ月以上前のインボイスはスキップ（DESCソートなので以降も古い）
             if (inv.createdAt && inv.createdAt < cutoffStr) {
               reachedCutoff = true;
               break;

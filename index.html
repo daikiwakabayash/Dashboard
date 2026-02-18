@@ -1773,9 +1773,11 @@
                 const activeList = [];
                 const canceledList = [];
                 const pausedList = [];
+                const resumedList = [];
                 const refundedList = [];
                 const overdueList = [];
                 const seenInv = {};
+                const prevYM = (() => { const [y, m] = sqMonth.split('-').map(Number); const pd = new Date(y, m - 2, 1); return `${pd.getFullYear()}-${String(pd.getMonth()+1).padStart(2,'0')}`; })();
 
                 if (useInvFallback) {
                     // フォールバック: インボイスから顧客リストを構築
@@ -1876,6 +1878,17 @@
                         // 一時停止: 選択月内に一時停止されたサブスク
                         if (sub.status === 'PAUSED' && toYM(subEndDate) === sqMonth) {
                             pausedList.push(entry);
+                        }
+
+                        // 一時停止からの復帰: ACTIVEで、選択月にPAID請求があり、前月にPAID請求がなく、
+                        // それ以前にPAID実績がある（＝一時停止期間を経て復帰した）サブスク
+                        if (sub.status === 'ACTIVE' && paidByMonth[sqMonth] && !paidByMonth[prevYM] && paidMonths.length > 1) {
+                            const sortedMonths = [...paidMonths].sort();
+                            const firstPaidMonth = sortedMonths[0];
+                            // 新規ではなく過去に決済実績がある（初回決済月が選択月より前）
+                            if (firstPaidMonth < sqMonth) {
+                                resumedList.push({ ...entry, resumedDate: sqMonth });
+                            }
                         }
 
                         // 払戻し・期限超過: 選択月のインボイスのみ
@@ -2015,12 +2028,12 @@
                     }
                 }
 
-                return { activeList: dedup(activeList), newMonthList: dedup(newMonthList), planChangeList: dedup(planChangeList), canceledList: dedup(canceledList), pausedList: dedup(pausedList), refundedList, overdueList };
+                return { activeList: dedup(activeList), newMonthList: dedup(newMonthList), planChangeList: dedup(planChangeList), canceledList: dedup(canceledList), pausedList: dedup(pausedList), resumedList: dedup(resumedList), refundedList, overdueList };
             }, [sqPreprocessed, sqStore, sqMonth]);
 
             const sqSortedList = useMemo(() => {
                 if (!sqCustomerData) return [];
-                const lists = { active: sqCustomerData.activeList, newMonth: sqCustomerData.newMonthList, planChange: sqCustomerData.planChangeList, canceled: sqCustomerData.canceledList, paused: sqCustomerData.pausedList, refunded: sqCustomerData.refundedList, overdue: sqCustomerData.overdueList };
+                const lists = { active: sqCustomerData.activeList, newMonth: sqCustomerData.newMonthList, planChange: sqCustomerData.planChangeList, canceled: sqCustomerData.canceledList, paused: sqCustomerData.pausedList, resumed: sqCustomerData.resumedList, refunded: sqCustomerData.refundedList, overdue: sqCustomerData.overdueList };
                 const list = [...(lists[sqTab] || [])];
                 const { key, dir } = sqSort;
                 list.sort((a, b) => {
@@ -6970,6 +6983,7 @@
                                                             { key: 'planChange', label: 'プラン変更', count: sqCustomerData.planChangeList.length, color: 'purple' },
                                                             { key: 'canceled', label: '解約済み', count: sqCustomerData.canceledList.length, color: 'rose' },
                                                             { key: 'paused', label: '一時停止', count: sqCustomerData.pausedList.length, color: 'orange' },
+                                                            { key: 'resumed', label: '復帰', count: sqCustomerData.resumedList.length, color: 'teal' },
                                                             { key: 'refunded', label: '払戻し', count: sqCustomerData.refundedList.length, color: 'amber' },
                                                             { key: 'overdue', label: '期限超過', count: sqCustomerData.overdueList.length, color: 'red' },
                                                         ].map(t => (
@@ -6983,7 +6997,7 @@
                                                         <table className="w-full text-sm">
                                                             <thead className="sticky top-0 z-10">
                                                                 <tr className="bg-slate-50">
-                                                                    {(sqTab === 'active' || sqTab === 'newMonth' || sqTab === 'planChange' || sqTab === 'canceled' || sqTab === 'paused' ? [
+                                                                    {(sqTab === 'active' || sqTab === 'newMonth' || sqTab === 'planChange' || sqTab === 'canceled' || sqTab === 'paused' || sqTab === 'resumed' ? [
                                                                         { k: 'name', label: '氏名' },
                                                                         { k: 'plan', label: 'コース' },
                                                                         { k: 'paidCount', label: '決済回数' },
@@ -6991,6 +7005,7 @@
                                                                         { k: 'startDate', label: '開始日' },
                                                                         ...(sqTab === 'canceled' ? [{ k: 'canceledDate', label: '解約日' }] : []),
                                                                         ...(sqTab === 'paused' ? [{ k: 'canceledDate', label: '停止日' }] : []),
+                                                                        ...(sqTab === 'resumed' ? [{ k: 'resumedDate', label: '復帰月' }] : []),
                                                                     ] : [
                                                                         { k: 'name', label: '氏名' },
                                                                         { k: 'amount', label: '金額' },
@@ -7011,7 +7026,7 @@
                                                                 {sqSortedList.length === 0 && (
                                                                     <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400 font-bold">データがありません</td></tr>
                                                                 )}
-                                                                {(sqTab === 'active' || sqTab === 'newMonth' || sqTab === 'planChange' || sqTab === 'canceled' || sqTab === 'paused') && sqSortedList.map((row, i) => (
+                                                                {(sqTab === 'active' || sqTab === 'newMonth' || sqTab === 'planChange' || sqTab === 'canceled' || sqTab === 'paused' || sqTab === 'resumed') && sqSortedList.map((row, i) => (
                                                                     <tr key={row.id || i} className="hover:bg-slate-50">
                                                                         <td className="px-4 py-2.5 font-bold text-slate-800 whitespace-nowrap">{row.name}</td>
                                                                         <td className="px-4 py-2.5 text-slate-600">{row.plan}</td>
@@ -7020,6 +7035,7 @@
                                                                         <td className="px-4 py-2.5 text-slate-500 text-xs">{row.startDate || '-'}</td>
                                                                         {sqTab === 'canceled' && <td className="px-4 py-2.5 text-rose-500 text-xs font-bold">{row.canceledDate || '-'}</td>}
                                                                         {sqTab === 'paused' && <td className="px-4 py-2.5 text-orange-500 text-xs font-bold">{row.canceledDate || '-'}</td>}
+                                                                        {sqTab === 'resumed' && <td className="px-4 py-2.5 text-teal-500 text-xs font-bold">{row.resumedDate || '-'}</td>}
                                                                     </tr>
                                                                 ))}
                                                                 {(sqTab === 'refunded' || sqTab === 'overdue') && sqSortedList.map((row, i) => (

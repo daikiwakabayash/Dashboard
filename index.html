@@ -1535,26 +1535,28 @@
                     }
                 }
 
-                // 初月解約率・3ヶ月以内解約率
-                // 初月解約: N月にサブスク決済した人がN+1月には解約してる場合が対象
-                // 3ヶ月解約: N月にサブスク決済した人がN+3月には解約してる場合が対象
+                // 初月解約率・3ヶ月以内解約率（選択月の入会者が対象）
+                // 初月解約: 選択月にサブスク登録してアクティブ会員になった人で翌月にアクティブでなくなった人
+                // 3ヶ月解約: 選択月にサブスク登録した人が3ヶ月後にアクティブでなくなった人
                 // プラン変更がある場合でもスタートは最初に入会した日時からカウント
                 const calcEarlyChurn = (months) => {
+                    // 測定期間が到来していない場合はnullを返す
+                    if (getYMOffset(sqMonth, months) > currentYM) return null;
                     const custMap = {};
                     for (const s of filtered) {
                         if (!s.startDate || !s.customerId) continue;
                         if (!hasAnyPayment(s)) continue;
-                        // プラン変更がある場合でもスタートは最初に入会した日時からカウント
                         const firstStart = customerFirstStartDate[s.customerId] || s.startDate;
                         const startYM = toYM(firstStart);
                         if (!startYM) continue;
-                        if (getYMOffset(startYM, months) > currentYM) continue;
+                        // 選択月の入会者のみ対象
+                        if (startYM !== sqMonth) continue;
                         if (!custMap[s.customerId]) {
                             custMap[s.customerId] = { ...s, startDate: firstStart };
                         }
                     }
                     const eligible = Object.values(custMap);
-                    // Nヶ月目に決済がない = 解約とみなす（途中の月はチェックしない）
+                    // Nヶ月目に決済がない = 解約とみなす
                     const churned = eligible.filter(s => {
                         const startYM = toYM(s.startDate);
                         const checkYM = getYMOffset(startYM, months);
@@ -1701,10 +1703,17 @@
                     const cs = cohortMap[cm];
                     const sc = cs.length;
                     const ret = [];
-                    for (let i = 1; i <= 12; i++) {
+                    // 1ヶ月目 = 入会月は必ず100%（決済が発生しているため）
+                    // 入会月内に解約手続きをしても、コホート分析では翌月の解約として扱う
+                    for (let i = 0; i <= 11; i++) {
                         const targetYM = getYMOffset(cm, i);
                         // まだ到来していない月はスキップ
                         if (targetYM > currentYM) break;
+                        if (i === 0) {
+                            // 入会月は全員継続（決済が必ず発生しているため）
+                            ret.push(100);
+                            continue;
+                        }
                         const targetGlobalCust = globalCustomerPaidByMonth[targetYM] || new Set();
                         let survived = 0;
                         for (const s of cs) {
@@ -6973,7 +6982,7 @@
                                                         <table className="w-full text-sm">
                                                             <thead className="sticky top-0 z-10">
                                                                 <tr className="bg-slate-50">
-                                                                    {(sqTab === 'active' || sqTab === 'newMonth' || sqTab === 'canceled' || sqTab === 'paused' ? [
+                                                                    {(sqTab === 'active' || sqTab === 'newMonth' || sqTab === 'planChange' || sqTab === 'canceled' || sqTab === 'paused' ? [
                                                                         { k: 'name', label: '氏名' },
                                                                         { k: 'plan', label: 'コース' },
                                                                         { k: 'paidCount', label: '決済回数' },
@@ -7001,7 +7010,7 @@
                                                                 {sqSortedList.length === 0 && (
                                                                     <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-400 font-bold">データがありません</td></tr>
                                                                 )}
-                                                                {(sqTab === 'active' || sqTab === 'newMonth' || sqTab === 'canceled' || sqTab === 'paused') && sqSortedList.map((row, i) => (
+                                                                {(sqTab === 'active' || sqTab === 'newMonth' || sqTab === 'planChange' || sqTab === 'canceled' || sqTab === 'paused') && sqSortedList.map((row, i) => (
                                                                     <tr key={row.id || i} className="hover:bg-slate-50">
                                                                         <td className="px-4 py-2.5 font-bold text-slate-800 whitespace-nowrap">{row.name}</td>
                                                                         <td className="px-4 py-2.5 text-slate-600">{row.plan}</td>
@@ -7041,8 +7050,8 @@
                                                 <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-2 md:gap-4">
                                                     {[
                                                         { label: '月間解約率', value: `${sqMetrics.churnRate}%`, warn: sqMetrics.churnRate > 5 },
-                                                        { label: '初月解約率', value: `${sqMetrics.firstMonthChurn}%`, warn: sqMetrics.firstMonthChurn > 10 },
-                                                        { label: '3ヶ月以内解約率', value: `${sqMetrics.threeMonthChurn}%`, warn: sqMetrics.threeMonthChurn > 20 },
+                                                        { label: '初月解約率', value: sqMetrics.firstMonthChurn === null ? '-' : `${sqMetrics.firstMonthChurn}%`, warn: sqMetrics.firstMonthChurn !== null && sqMetrics.firstMonthChurn > 10 },
+                                                        { label: '3ヶ月以内解約率', value: sqMetrics.threeMonthChurn === null ? '-' : `${sqMetrics.threeMonthChurn}%`, warn: sqMetrics.threeMonthChurn !== null && sqMetrics.threeMonthChurn > 20 },
                                                         { label: '3ヶ月継続率', value: `${sqMetrics.retention3m}%`, good: sqMetrics.retention3m >= 80 },
                                                         { label: '6ヶ月継続率', value: `${sqMetrics.retention6m}%`, good: sqMetrics.retention6m >= 70 },
                                                         { label: '12ヶ月継続率', value: `${sqMetrics.retention12m}%`, good: sqMetrics.retention12m >= 60 },

@@ -753,7 +753,17 @@
 
                     const mergeData = (data) => {
                         if (!data) return;
-                        merged.stores.push(...(data.stores || []));
+                        // 店舗を名前で重複排除（同名店舗が複数アカウントに存在する場合にlocationIdsを統合）
+                        for (const store of (data.stores || [])) {
+                            const existing = merged.stores.find(s => s.name === store.name);
+                            if (existing) {
+                                const existingLocIds = existing.locationIds || [existing.id];
+                                const newLocIds = store.locationIds || [store.id];
+                                existing.locationIds = [...new Set([...existingLocIds, ...newLocIds])];
+                            } else {
+                                merged.stores.push({ ...store, locationIds: store.locationIds || [store.id] });
+                            }
+                        }
                         merged.subscriptions.push(...(data.subscriptions || []));
                         Object.assign(merged.customers, data.customers || {});
                         merged.invoices.push(...(data.invoices || []));

@@ -826,7 +826,17 @@ export default async function handler(req, res) {
           failedAccounts.push({ name: cfg.name || `アカウント${idx + 1}`, error: r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です' });
           return;
         }
-        merged.stores.push(...r.stores);
+        // 店舗を名前で重複排除（同名店舗が複数アカウントに存在する場合にlocationIdsを統合）
+        for (const store of r.stores) {
+          const existing = merged.stores.find(s => s.name === store.name);
+          if (existing) {
+            const existingLocIds = existing.locationIds || [existing.id];
+            const newLocIds = store.locationIds || [store.id];
+            existing.locationIds = [...new Set([...existingLocIds, ...newLocIds])];
+          } else {
+            merged.stores.push({ ...store, locationIds: store.locationIds || [store.id] });
+          }
+        }
         merged.subscriptions.push(...r.subscriptions);
         Object.assign(merged.customers, r.customers);
         merged.invoices.push(...r.invoices);
@@ -932,7 +942,17 @@ export default async function handler(req, res) {
           failedAccounts.push({ name: cfg.name || `アカウント${j + 1}`, error: r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です' });
           return;
         }
-        merged.stores.push(...r.stores);
+        // 店舗を名前で重複排除（同名店舗が複数アカウントに存在する場合にlocationIdsを統合）
+        for (const store of r.stores) {
+          const existing = merged.stores.find(s => s.name === store.name);
+          if (existing) {
+            const existingLocIds = existing.locationIds || [existing.id];
+            const newLocIds = store.locationIds || [store.id];
+            existing.locationIds = [...new Set([...existingLocIds, ...newLocIds])];
+          } else {
+            merged.stores.push({ ...store, locationIds: store.locationIds || [store.id] });
+          }
+        }
         merged.subscriptions.push(...r.subscriptions);
         Object.assign(merged.customers, r.customers);
         merged.invoices.push(...r.invoices);

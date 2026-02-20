@@ -2161,8 +2161,19 @@
 
             const allBranches = useMemo(() => {
                 const spreadsheetBranches = rawData.map(d => d.branch);
+                const spreadsheetSet = new Set(spreadsheetBranches);
                 const squareBranches = (sqData && sqData.stores) ? sqData.stores.map(s => s.name) : [];
-                return Array.from(new Set([...spreadsheetBranches, ...squareBranches]));
+                // Square店舗名がスプレッドシートの支店名と重複する場合は除外（「XXX院」vs「XXX」の名前揺れ対応）
+                const uniqueSquareBranches = squareBranches.filter(sqName => {
+                    if (spreadsheetSet.has(sqName)) return false;
+                    const sqBase = sqName.replace(/院$/, '');
+                    for (const spName of spreadsheetSet) {
+                        const spBase = spName.replace(/院$/, '');
+                        if (sqBase === spBase || sqBase === spName || sqName === spBase) return false;
+                    }
+                    return true;
+                });
+                return Array.from(new Set([...spreadsheetBranches, ...uniqueSquareBranches]));
             }, [rawData, sqData]);
 
             const filteredBranches = useMemo(() => {

@@ -3209,6 +3209,21 @@
                     return 'performance_summary';
                 }
 
+                // 指標別ランキング・フィルタリング要求（「CPA悪い店舗は？」「入会率低い店舗」等）
+                const metricRankingKeywords = [
+                    'cpa', 'roas', 'cvr', 'ctr', '入会率', '退会率', '離反率', 'キャンセル率',
+                    '売上', '新規', '生産性', '口コミ', 'レビュー', '広告費', '客単価'
+                ];
+                const evalKeywords = ['悪い', '良い', '高い', '低い', 'いい', 'ワースト', 'ベスト',
+                                      '最悪', '最高', '一番悪い', '一番良い', '一番高い', '一番低い'];
+                const storeKeywords = ['店舗', '院', '店', 'どこ'];
+                const hasMetric = metricRankingKeywords.some(kw => lowerQ.includes(kw));
+                const hasEval = evalKeywords.some(kw => lowerQ.includes(kw));
+                const hasStoreRef = storeKeywords.some(kw => lowerQ.includes(kw));
+                if (hasMetric && (hasEval || hasStoreRef)) {
+                    return 'metric_ranking';
+                }
+
                 // 比較要求
                 if (lowerQ.includes('比較') || lowerQ.includes('どっち') || lowerQ.includes('vs')) {
                     return 'comparison';
@@ -3396,6 +3411,16 @@
                     console.log('Sample record:', JSON.stringify(filteredAnalysisData[0]));
                 }
 
+                // metric_ranking の場合、店舗未指定でも全店舗データで処理するためスキップ
+                if (questionType === 'metric_ranking' && filteredAnalysisData.length === 0 && !targetBranch) {
+                    // 月未指定の場合は最新月のデータを使用
+                    const availableMonths = Array.from(new Set(data.map(d => d.month).filter(Boolean))).sort().reverse();
+                    if (availableMonths.length > 0 && !targetMonth) {
+                        targetMonth = availableMonths[0];
+                    }
+                    filteredAnalysisData = data.filter(d => !targetMonth || d.month === targetMonth);
+                }
+
                 // データが見つからない場合、明確化のための質問またはエラーメッセージ
                 if (filteredAnalysisData.length === 0) {
                     const availableBranches = Array.from(new Set(data.map(d => d.branch).filter(Boolean)));
@@ -3403,6 +3428,7 @@
 
                     // 店舗も月も指定されていない場合、質問で返す
                     if (!targetBranch && !targetMonth) {
+                        // metric_ranking以外の場合のみ明確化を求める
                         let clarifyMsg = `質問の内容を詳しく教えてください。\n\n`;
                         clarifyMsg += `どの店舗について知りたいですか？\n`;
                         clarifyMsg += availableBranches.slice(0, 8).map(b => `・${b}`).join('\n');
@@ -3459,7 +3485,18 @@
                 // 質問タイプに応じた分析実行
                 let result;
 
-                if (questionType === 'staff_list') {
+                if (questionType === 'metric_ranking') {
+                    // 指標別店舗ランキング（全店舗比較）
+                    // 店舗指定がない場合は全店舗データを使う
+                    let rankingData = filteredAnalysisData;
+                    if (!targetBranch && !isAllBranches) {
+                        // 月だけでフィルタリング（全店舗を対象に）
+                        rankingData = data.filter(d => {
+                            return !targetMonth || d.month === targetMonth;
+                        });
+                    }
+                    result = generateMetricRankingResponse(rankingData, question, targetMonth);
+                } else if (questionType === 'staff_list') {
                     // スタッフリストを返す（経営データのみ）
                     result = generateStaffListResponse(filteredAnalysisData, targetBranch, targetMonth);
                 } else if (questionType === 'sales_query') {
@@ -3819,6 +3856,246 @@
                 return {
                     success: true,
                     message: summary
+                };
+            };
+
+            // 質問から対象指標と評価方向を抽出する
+            const extractMetricInfo = (question) => {
+                const lowerQ = question.toLowerCase();
+
+                // 指標の定義: { key, label, higher_is_better }
+                const metrics = [
+                    { key: 'cpa', label: 'CPA（顧客獲得単価）', keywords: ['cpa', '顧客獲得単価', '獲得単価'], higher_is_better: false },
+                    { key: 'roas', label: 'ROAS（広告費用対効果）', keywords: ['roas', '広告費用対効果'], higher_is_better: true },
+                    { key: 'cvr', label: 'CVR（コンバージョン率）', keywords: ['cvr', 'コンバージョン'], higher_is_better: true },
+                    { key: 'ctr', label: 'CTR（クリック率）', keywords: ['ctr', 'クリック率'], higher_is_better: true },
+                    { key: 'enrollRate', label: '入会率', keywords: ['入会率'], higher_is_better: true },
+                    { key: 'churnRate', label: '退会率', keywords: ['退会率', '離反率'], higher_is_better: false },
+                    { key: 'cancelRate', label: 'キャンセル率', keywords: ['キャンセル率'], higher_is_better: false },
+                    { key: 'sales', label: '売上', keywords: ['売上'], higher_is_better: true },
+                    { key: 'newCount', label: '新規数', keywords: ['新規'], higher_is_better: true },
+                    { key: 'productivity', label: '生産性', keywords: ['生産性'], higher_is_better: true },
+                    { key: 'adSpend', label: '広告費', keywords: ['広告費'], higher_is_better: false },
+                    { key: 'reviews', label: '口コミ数', keywords: ['口コミ', 'レビュー'], higher_is_better: true },
+                ];
+
+                let targetMetric = null;
+                for (const m of metrics) {
+                    if (m.keywords.some(kw => lowerQ.includes(kw))) {
+                        targetMetric = m;
+                        break;
+                    }
+                }
+
+                // 評価方向の判定（「悪い」「高い」「低い」「良い」）
+                let wantBad = true; // デフォルトは「悪い方を知りたい」
+                if (lowerQ.includes('良い') || lowerQ.includes('いい') || lowerQ.includes('ベスト') || lowerQ.includes('最高') || lowerQ.includes('一番良い')) {
+                    wantBad = false;
+                } else if (lowerQ.includes('悪い') || lowerQ.includes('ワースト') || lowerQ.includes('最悪') || lowerQ.includes('一番悪い')) {
+                    wantBad = true;
+                } else if (lowerQ.includes('高い') || lowerQ.includes('一番高い')) {
+                    // 「高い」は指標によって良い/悪いが変わる
+                    wantBad = targetMetric ? !targetMetric.higher_is_better : false;
+                } else if (lowerQ.includes('低い') || lowerQ.includes('一番低い')) {
+                    // 「低い」は指標によって良い/悪いが変わる
+                    wantBad = targetMetric ? targetMetric.higher_is_better : true;
+                }
+
+                return { metric: targetMetric, wantBad };
+            };
+
+            // マーケティングデータの指標別店舗ランキング
+            const generateMetricRankingResponse = (data, question, month) => {
+                const { metric, wantBad } = extractMetricInfo(question);
+
+                if (!metric) {
+                    return {
+                        success: false,
+                        message: '指標を特定できませんでした。具体的な指標名（CPA、入会率、売上など）を含めて質問してください。'
+                    };
+                }
+
+                // 店舗ごとにデータを集計
+                const branchMap = {};
+                data.forEach(d => {
+                    const branch = d.branch;
+                    if (!branch) return;
+                    if (!branchMap[branch]) {
+                        branchMap[branch] = {
+                            branch,
+                            newCount: 0, enrollCount: 0, cancelCount: 0,
+                            adSpend: 0, revenue: 0, reservationCount: 0,
+                            clicks: 0, impressions: 0, cvCount: 0,
+                            reviewCount: 0, records: 0,
+                            // 経営データ用
+                            individualSales: 0, recurringSales: 0,
+                            newEnroll: 0, churnCount: 0, prevMembers: 0,
+                            productivity: 0, gReviews: 0, hReviews: 0,
+                        };
+                    }
+                    const b = branchMap[branch];
+                    b.newCount += (d.newCount || 0);
+                    b.enrollCount += (d.enrollCount || 0);
+                    b.cancelCount += (d.cancelCount || 0);
+                    b.adSpend += (d.adSpend || 0);
+                    b.revenue += (d.revenue || 0);
+                    b.reservationCount += (d.reservationCount || 0);
+                    b.clicks += (d.clicks || 0);
+                    b.impressions += (d.impressions || 0);
+                    b.cvCount += (d.cvCount || 0);
+                    b.reviewCount += (d.reviewCount || 0);
+                    b.records++;
+                    // 経営データ用
+                    b.individualSales += (d.individualSales || 0);
+                    b.recurringSales += (d.recurringSales || 0);
+                    b.newEnroll += (d.newEnroll || 0);
+                    b.churnCount += (d.churnCount || 0);
+                    b.prevMembers += (d.prevMembers || 0);
+                    b.productivity += (d.productivity || 0);
+                    b.gReviews += (d.gReviews || 0);
+                    b.hReviews += (d.hReviews || 0);
+                });
+
+                // 各店舗の指標値を計算
+                const branchMetrics = Object.values(branchMap).map(b => {
+                    let value = 0;
+                    let displayValue = '';
+
+                    switch (metric.key) {
+                        case 'cpa':
+                            value = b.newCount > 0 ? Math.round(b.adSpend / b.newCount) : 0;
+                            displayValue = `¥${value.toLocaleString()}`;
+                            break;
+                        case 'roas':
+                            value = b.adSpend > 0 ? Math.round((b.revenue / b.adSpend) * 100) : 0;
+                            displayValue = `${value}%`;
+                            break;
+                        case 'cvr':
+                            value = b.clicks > 0 ? Math.round((b.cvCount / b.clicks) * 1000) / 10 : 0;
+                            displayValue = `${value}%`;
+                            break;
+                        case 'ctr':
+                            value = b.impressions > 0 ? Math.round((b.clicks / b.impressions) * 1000) / 10 : 0;
+                            displayValue = `${value}%`;
+                            break;
+                        case 'enrollRate':
+                            const nc = b.newCount || b.newEnroll + b.churnCount;
+                            const ec = b.enrollCount || b.newEnroll;
+                            value = nc > 0 ? Math.round((ec / nc) * 100) : 0;
+                            displayValue = `${value}%`;
+                            break;
+                        case 'churnRate':
+                            value = b.prevMembers > 0 ? Math.round((b.churnCount / b.prevMembers) * 1000) / 10 : 0;
+                            displayValue = `${value}%`;
+                            break;
+                        case 'cancelRate':
+                            const denom = b.reservationCount > 0 ? b.reservationCount : b.newCount;
+                            value = denom > 0 ? Math.round((b.cancelCount / denom) * 100) : 0;
+                            displayValue = `${value}%`;
+                            break;
+                        case 'sales':
+                            value = b.individualSales || b.revenue || 0;
+                            displayValue = `¥${value.toLocaleString()}`;
+                            break;
+                        case 'newCount':
+                            value = b.newCount;
+                            displayValue = `${value}人`;
+                            break;
+                        case 'productivity':
+                            value = b.records > 0 ? Math.round(b.productivity / b.records) : 0;
+                            displayValue = `¥${value.toLocaleString()}`;
+                            break;
+                        case 'adSpend':
+                            value = b.adSpend;
+                            displayValue = `¥${value.toLocaleString()}`;
+                            break;
+                        case 'reviews':
+                            value = b.reviewCount || (b.gReviews + b.hReviews) || 0;
+                            displayValue = `${value}件`;
+                            break;
+                        default:
+                            value = 0;
+                            displayValue = '-';
+                    }
+
+                    return { branch: b.branch, value, displayValue };
+                }).filter(b => b.value > 0);
+
+                if (branchMetrics.length === 0) {
+                    return {
+                        success: false,
+                        message: `${metric.label}のデータが見つかりませんでした。`
+                    };
+                }
+
+                // ソート: wantBad の場合、悪い順（higher_is_better なら昇順、そうでなければ降順）
+                const sortAsc = wantBad ? metric.higher_is_better : !metric.higher_is_better;
+                branchMetrics.sort((a, b) => sortAsc ? a.value - b.value : b.value - a.value);
+
+                const evalWord = wantBad ? '悪い' : '良い';
+                const evalEmoji = wantBad ? '⚠️' : '✅';
+
+                // 閾値判定
+                const thresholds = {
+                    cpa: { bad: 18000, good: 12000, unit: '¥' },
+                    roas: { bad: 200, good: 300, unit: '%' },
+                    cvr: { bad: 1.5, good: 3, unit: '%' },
+                    enrollRate: { bad: 35, good: 60, unit: '%' },
+                    churnRate: { bad: 15, good: 8, unit: '%' },
+                    cancelRate: { bad: 15, good: 10, unit: '%' },
+                };
+
+                let response = `${month || '該当期間'}の${metric.label}が${evalWord}い店舗ランキング:\n\n`;
+
+                branchMetrics.forEach((b, i) => {
+                    const rank = i + 1;
+                    let icon = '';
+                    const th = thresholds[metric.key];
+                    if (th) {
+                        const isBad = metric.higher_is_better ? b.value < th.bad : b.value > th.bad;
+                        const isGood = metric.higher_is_better ? b.value >= th.good : b.value <= th.good;
+                        icon = isBad ? ' ⚠️' : isGood ? ' ✅' : '';
+                    }
+                    response += `${rank}. ${b.branch}: ${metric.label} ${b.displayValue}${icon}\n`;
+                });
+
+                // 悪い店舗への具体的アドバイス
+                const worstBranches = branchMetrics.slice(0, 3);
+                const th = thresholds[metric.key];
+                const needsAttention = th ? worstBranches.filter(b => {
+                    return metric.higher_is_better ? b.value < th.bad : b.value > th.bad;
+                }) : worstBranches;
+
+                if (wantBad && needsAttention.length > 0) {
+                    response += `\n【要改善店舗】\n`;
+                    needsAttention.forEach(b => {
+                        response += `⚠️ ${b.branch}（${metric.label}: ${b.displayValue}）\n`;
+                    });
+
+                    // 指標別のアドバイス
+                    const adviceMap = {
+                        cpa: '→ 広告クリエイティブの改善、ターゲティングの見直し、効率の良い媒体への予算シフトを検討してください',
+                        roas: '→ 広告配信の最適化と入会率向上施策の実施が必要です',
+                        cvr: '→ ランディングページの改善と訴求内容の見直しを実施してください',
+                        enrollRate: '→ カウンセリング品質の向上と初回体験の改善が必要です',
+                        churnRate: '→ 顧客満足度調査とフォローアップ体制の強化を実施してください',
+                        cancelRate: '→ リマインド施策の強化と予約時のコミュニケーション改善が必要です',
+                    };
+                    if (adviceMap[metric.key]) {
+                        response += `\n${adviceMap[metric.key]}`;
+                    }
+                } else if (!wantBad) {
+                    const bestBranches = branchMetrics.slice(0, 3);
+                    response += `\n【優秀な店舗】\n`;
+                    bestBranches.forEach(b => {
+                        response += `✅ ${b.branch}（${metric.label}: ${b.displayValue}）\n`;
+                    });
+                    response += `\n→ これらの店舗の運用ノウハウを他店舗に展開することを推奨します`;
+                }
+
+                return {
+                    success: true,
+                    message: response.trim()
                 };
             };
 
@@ -7320,8 +7597,9 @@
                                             <div className="text-xs text-slate-400 space-y-1 max-w-xs mx-auto">
                                                 <p className="font-bold">例:</p>
                                                 <p>• 千葉駅院の26年1月を分析して</p>
-                                                <p>• 全店舗の広告効率を教えて</p>
+                                                <p>• CPA悪い店舗は？</p>
                                                 <p>• 入会率が低い店舗は？</p>
+                                                <p>• 全店舗の広告効率を教えて</p>
                                             </div>
                                         </div>
                                     )}

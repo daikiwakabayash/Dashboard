@@ -604,11 +604,15 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     if (stores.length === 0) {
       stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];
     }
-    // アカウント名が設定されている場合は常に店舗名として使用
+    // アカウント名が設定されている場合は全ロケーションを1店舗として統合
+    // （1アカウント = 1店舗。複数ロケーションがあっても1つの店舗として扱う）
     if (accountName) {
-      stores = stores.map(s => ({ ...s, name: `${accountName}` + (stores.length > 1 ? ` (${s.name})` : '') }));
+      const allLocIds = stores.map(s => s.id);
+      stores = [{ id: allLocIds[0], name: accountName, locationIds: allLocIds }];
+    } else {
+      stores = stores.map(s => ({ ...s, locationIds: [s.id] }));
     }
-    const locationIds = stores.map(s => s.id);
+    const locationIds = stores.flatMap(s => s.locationIds);
 
     // サブスク＋インボイス＋売上(Payments REST API)＋顧客を並列取得（各API個別タイムアウト付き）
     // Payments/Refunds APIはSDKバグ回避のためREST APIを直接呼び出す

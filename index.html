@@ -1171,6 +1171,14 @@
                 setSqStore('all');
             }, [selectedBranches, sqData]);
 
+            // 選択中の店舗に属する全ロケーションIDのセット（複数ロケーション統合対応）
+            const sqStoreLocationIds = useMemo(() => {
+                if (sqStore === 'all' || !sqData || !sqData.stores) return null;
+                const store = sqData.stores.find(s => s.id === sqStore);
+                if (store && store.locationIds && store.locationIds.length > 0) return new Set(store.locationIds);
+                return new Set([sqStore]);
+            }, [sqStore, sqData]);
+
             // Square 共通前処理（sqMetrics・sqCustomerData間の重複計算を排除）
             const sqPreprocessed = useMemo(() => {
                 if (!sqData || !sqData.subscriptions || !sqMonth) return null;
@@ -1214,11 +1222,11 @@
                 const subsRaw = sqData.subscriptions.filter(isRealSub);
                 const seenSubIds = new Set();
                 const subs = subsRaw.filter(s => { if (seenSubIds.has(s.id)) return false; seenSubIds.add(s.id); return true; });
-                const filtered = sqStore === 'all' ? subs : subs.filter(s => s.locationId === sqStore);
+                const filtered = sqStore === 'all' ? subs : subs.filter(s => sqStoreLocationIds && sqStoreLocationIds.has(s.locationId));
                 const realSubIds = new Set(subs.map(s => s.id));
 
                 return { cust, plansMap, allInvoices, paidSubIds, paidSubIdsByMonth, invBySub, recentPaidSubIds, subs, filtered, realSubIds };
-            }, [sqData, sqStore, sqMonth]);
+            }, [sqData, sqStore, sqMonth, sqStoreLocationIds]);
 
             // Square 全指標計算
             const sqMetrics = useMemo(() => {
@@ -1317,7 +1325,7 @@
                 // サブスクデータがない店舗向けフォールバック判定
                 // （サブスクAPIがタイムアウトした場合、インボイスのlocationIdで直接フィルタ）
                 const useInvoiceFallback = sqStore !== 'all' && filtered.length === 0
-                    && allInvoices.some(inv => inv.subscriptionId && inv.locationId === sqStore);
+                    && allInvoices.some(inv => inv.subscriptionId && sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId));
 
                 // 基準月・前月のアクティブ（解約率・継続率・コホート用に保持）
                 const activeRef = filtered.filter(s => isActiveAt(s, refEnd) && hasPaymentActivity(s));
@@ -1353,12 +1361,12 @@
                     const memberInvRef = allInvoices.filter(inv =>
                         inv.subscriptionId && inv.status === 'PAID'
                         && toYM(inv.createdAt) === sqMonth
-                        && (sqStore === 'all' || inv.locationId === sqStore)
+                        && (sqStore === 'all' || (sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId)))
                     );
                     const memberInvPrev = allInvoices.filter(inv =>
                         inv.subscriptionId && inv.status === 'PAID'
                         && toYM(inv.createdAt) === prevYM
-                        && (sqStore === 'all' || inv.locationId === sqStore)
+                        && (sqStore === 'all' || (sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId)))
                     );
                     memberCount = new Set(memberInvRef.map(inv => inv.customerId || inv.subscriptionId)).size;
                     prevMemberCount = new Set(memberInvPrev.map(inv => inv.customerId || inv.subscriptionId)).size;
@@ -1368,7 +1376,7 @@
                 // フォールバック時はインボイスのlocationIdで直接フィルタ（realSubIdsチェック不要）
                 const subInvsMonth = allInvoices.filter(inv =>
                     inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth
-                    && (useInvoiceFallback ? inv.locationId === sqStore : realSubIds.has(inv.subscriptionId))
+                    && (useInvoiceFallback ? (sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId)) : realSubIds.has(inv.subscriptionId))
                 );
                 const storeSubIds = (sqStore === 'all' || useInvoiceFallback) ? null : new Set(filtered.map(s => s.id));
                 const filteredSubInvs = storeSubIds
@@ -1378,7 +1386,7 @@
 
                 const prevSubInvs = allInvoices.filter(inv =>
                     inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === prevYM
-                    && (useInvoiceFallback ? inv.locationId === sqStore : realSubIds.has(inv.subscriptionId))
+                    && (useInvoiceFallback ? (sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId)) : realSubIds.has(inv.subscriptionId))
                 );
                 const filteredPrevSubInvs = storeSubIds
                     ? prevSubInvs.filter(inv => storeSubIds.has(inv.subscriptionId))
@@ -1390,7 +1398,7 @@
                 const allRefunds = sqData.refunds || [];
                 const refundsFiltered = sqStore === 'all'
                     ? allRefunds
-                    : allRefunds.filter(r => r.locationId === sqStore);
+                    : allRefunds.filter(r => sqStoreLocationIds && sqStoreLocationIds.has(r.locationId));
                 const monthRefunds = refundsFiltered.filter(r => toYM(r.createdAt) === sqMonth);
                 const totalRefunds = monthRefunds.reduce((sum, r) => sum + r.amount, 0);
 
@@ -1399,7 +1407,7 @@
                 const allPayments = sqData.payments || [];
                 const paymentsFiltered = sqStore === 'all'
                     ? allPayments
-                    : allPayments.filter(p => p.locationId === sqStore);
+                    : allPayments.filter(p => sqStoreLocationIds && sqStoreLocationIds.has(p.locationId));
                 const monthPayments = paymentsFiltered.filter(p => toYM(p.createdAt) === sqMonth);
                 let totalSales = monthPayments.reduce((sum, p) => sum + p.amount, 0);
                 // フォールバック: Payments APIが空の場合、PAIDインボイス合計を使用
@@ -1409,7 +1417,7 @@
                     );
                     const storeInvs = sqStore === 'all'
                         ? paidInvsMonth
-                        : paidInvsMonth.filter(inv => inv.locationId === sqStore);
+                        : paidInvsMonth.filter(inv => sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId));
                     totalSales = storeInvs.reduce((sum, inv) => sum + inv.amount, 0);
                 }
                 // 返品差引: 純売上 = 売上合計 - 返金額
@@ -1468,7 +1476,9 @@
 
                 const byStore = {};
                 for (const store of (sqData.stores || [])) {
-                    const ss = subsByLoc[store.id] || [];
+                    // 複数ロケーション統合: store.locationIdsの全ロケーションからデータを集約
+                    const storeLocIds = store.locationIds || [store.id];
+                    const ss = storeLocIds.flatMap(lid => subsByLoc[lid] || []);
                     const storeHasSubs = ss.length > 0;
                     let smc, smrr, sn;
                     if (storeHasSubs) {
@@ -1485,8 +1495,8 @@
                         }
                         sn = ss.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s) && !isPlanChange(s));
                     } else {
-                        // フォールバック: ロケーション別グループから取得
-                        const storeInvsRef = monthPaidInvByLoc[store.id] || [];
+                        // フォールバック: ロケーション別グループから取得（全locationIdsを集約）
+                        const storeInvsRef = storeLocIds.flatMap(lid => monthPaidInvByLoc[lid] || []);
                         smc = new Set(storeInvsRef.map(inv => inv.customerId || inv.subscriptionId)).size;
                         smrr = storeInvsRef.reduce((sum, inv) => sum + inv.amount, 0);
                         sn = [];
@@ -1495,10 +1505,10 @@
                     const storePrevActive = ss.filter(s => isActiveAt(s, prevEnd) && hasPaymentActivity(s, prevYM));
                     const storePrevIds = new Set(storePrevActive.map(s => s.customerId));
                     const { rate: sChurn, churned: sCanceled } = calcMemberChurn(storePrevIds, globalActiveRefIds);
-                    // 店舗別総売上高: 事前グループ化済みデータから取得
-                    const storeMonthPayments = monthPaymentsByLoc[store.id] || [];
+                    // 店舗別総売上高: 事前グループ化済みデータから取得（全locationIdsを集約）
+                    const storeMonthPayments = storeLocIds.flatMap(lid => monthPaymentsByLoc[lid] || []);
                     const storeSales = storeMonthPayments.reduce((sum, p) => sum + p.amount, 0);
-                    const storeMonthRefunds = monthRefundsByLoc[store.id] || [];
+                    const storeMonthRefunds = storeLocIds.flatMap(lid => monthRefundsByLoc[lid] || []);
                     const storeRefundTotal = storeMonthRefunds.reduce((sum, r) => sum + r.amount, 0);
 
                     byStore[store.id] = {
@@ -1614,7 +1624,7 @@
                     if (!iym) continue;
                     if (!paidInvsByYM[iym]) paidInvsByYM[iym] = [];
                     paidInvsByYM[iym].push(inv);
-                    if (useInvoiceFallback ? inv.locationId === sqStore : realSubIds.has(inv.subscriptionId)) {
+                    if (useInvoiceFallback ? (sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId)) : realSubIds.has(inv.subscriptionId)) {
                         if (!paidSubInvsByYM[iym]) paidSubInvsByYM[iym] = [];
                         paidSubInvsByYM[iym].push(inv);
                     }
@@ -1665,7 +1675,7 @@
                     // フォールバック: サブスクデータがない場合はPAIDインボイスベース
                     if (ymMemberCount === 0) {
                         const ymAllPaidInvs = paidInvsByYM[ym] || [];
-                        const ymMemberInvs = isAllStores ? ymAllPaidInvs : ymAllPaidInvs.filter(inv => inv.locationId === sqStore);
+                        const ymMemberInvs = isAllStores ? ymAllPaidInvs : ymAllPaidInvs.filter(inv => sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId));
                         const invCount = new Set(ymMemberInvs.map(inv => inv.customerId || inv.subscriptionId)).size;
                         if (invCount > 0) {
                             ymMemberCount = invCount;
@@ -1736,7 +1746,7 @@
                 // フォールバック時はインボイスの月も含める
                 if (useInvoiceFallback) {
                     for (const inv of allInvoices) {
-                        if (inv.locationId === sqStore && inv.createdAt) allMonths.add(toYM(inv.createdAt));
+                        if (sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId) && inv.createdAt) allMonths.add(toYM(inv.createdAt));
                     }
                 }
                 const now = new Date();
@@ -1756,7 +1766,7 @@
                     byStore, byPlan, monthlyTrends, cohort, availableMonths,
                     isEstimated: useInvoiceFallback,
                 };
-            }, [sqPreprocessed, sqData, sqStore, sqMonth]);
+            }, [sqPreprocessed, sqData, sqStore, sqMonth, sqStoreLocationIds]);
 
             // 顧客テーブルデータ（サブスク単位・月フィルター連動）
             const sqCustomerData = useMemo(() => {
@@ -1768,7 +1778,7 @@
 
                 // サブスクデータがない店舗向けインボイスフォールバック判定
                 const useInvFallback = sqStore !== 'all' && storeSubs.length === 0
-                    && allInvoices.some(inv => inv.subscriptionId && inv.locationId === sqStore);
+                    && allInvoices.some(inv => inv.subscriptionId && sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId));
 
                 const activeList = [];
                 const canceledList = [];
@@ -1781,7 +1791,7 @@
 
                 if (useInvFallback) {
                     // フォールバック: インボイスから顧客リストを構築
-                    const storeInvs = allInvoices.filter(inv => inv.subscriptionId && inv.locationId === sqStore);
+                    const storeInvs = allInvoices.filter(inv => inv.subscriptionId && sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId));
                     // 顧客ごとにインボイスをグループ化
                     const invByCustomer = {};
                     for (const inv of storeInvs) {
@@ -2029,7 +2039,7 @@
                 }
 
                 return { activeList: dedup(activeList), newMonthList: dedup(newMonthList), planChangeList: dedup(planChangeList), canceledList: dedup(canceledList), pausedList: dedup(pausedList), resumedList: dedup(resumedList), refundedList, overdueList };
-            }, [sqPreprocessed, sqStore, sqMonth]);
+            }, [sqPreprocessed, sqStore, sqMonth, sqStoreLocationIds]);
 
             const sqSortedList = useMemo(() => {
                 if (!sqCustomerData) return [];

@@ -729,6 +729,11 @@
                         invoices: [], payments: [], refunds: [], plans: {},
                         diagnostics: [],
                     };
+                    // バッチ間の重複排除用Set
+                    const seenSubIds = new Set();
+                    const seenInvIds = new Set();
+                    const seenPayIds = new Set();
+                    const seenRefIds = new Set();
                     const failedAccounts = [];
 
                     // 個別アカウント取得（バッチ失敗時のフォールバック）
@@ -764,11 +769,12 @@
                                 merged.stores.push({ ...store, locationIds: store.locationIds || [store.id] });
                             }
                         }
-                        merged.subscriptions.push(...(data.subscriptions || []));
+                        // バッチ間・アカウント間の重複排除付きマージ
+                        for (const s of (data.subscriptions || [])) { if (!seenSubIds.has(s.id)) { seenSubIds.add(s.id); merged.subscriptions.push(s); } }
                         Object.assign(merged.customers, data.customers || {});
-                        merged.invoices.push(...(data.invoices || []));
-                        merged.payments.push(...(data.payments || []));
-                        merged.refunds.push(...(data.refunds || []));
+                        for (const inv of (data.invoices || [])) { if (!seenInvIds.has(inv.id)) { seenInvIds.add(inv.id); merged.invoices.push(inv); } }
+                        for (const p of (data.payments || [])) { if (!p.id || !seenPayIds.has(p.id)) { if (p.id) seenPayIds.add(p.id); merged.payments.push(p); } }
+                        for (const rf of (data.refunds || [])) { if (!rf.id || !seenRefIds.has(rf.id)) { if (rf.id) seenRefIds.add(rf.id); merged.refunds.push(rf); } }
                         Object.assign(merged.plans, data.plans || {});
                         if (data.meta && data.meta.diagnostics) merged.diagnostics.push(...data.meta.diagnostics);
                     };
@@ -4175,7 +4181,182 @@
                 };
             };
 
-            // チャットメッセージ送信
+            // ── データコンテキスト構築（Claude API 用）──
+            const buildDataContext = (question) => {
+                const sections = [];
+                const lowerQ = question.toLowerCase();
+
+                // ── ブランチ検出 ──
+                let targetBranch = null;
+                for (const branch of allBranches) {
+                    if (lowerQ.includes(branch.toLowerCase())) { targetBranch = branch; break; }
+                }
+                if (!targetBranch) {
+                    for (const branch of allBranches) {
+                        const base = branch.replace(/駅?院$/, '');
+                        if (base.length >= 2 && lowerQ.includes(base.toLowerCase())) { targetBranch = branch; break; }
+                    }
+                }
+                if (!targetBranch) {
+                    for (const branch of allBranches) {
+                        if (branch.length >= 2 && lowerQ.includes(branch.substring(0, 2).toLowerCase())) { targetBranch = branch; break; }
+                    }
+                }
+                if (/全店舗|全体|全院/.test(question)) targetBranch = null;
+
+                // ── 月検出 ──
+                let targetMonth = null;
+                let mm = lowerQ.match(/(\d{2,4})年(\d{1,2})月/);
+                if (mm) {
+                    let y = mm[1]; if (y.length === 2) y = '20' + y;
+                    targetMonth = y + '年' + parseInt(mm[2]) + '月';
+                }
+                if (!targetMonth) {
+                    mm = lowerQ.match(/(\d{1,2})月/);
+                    if (mm) {
+                        const yCounts = {};
+                        rawData.forEach(d => { const ym = (d.month || '').match(/(\d{4})年/); if (ym) yCounts[ym[1]] = (yCounts[ym[1]] || 0) + 1; });
+                        const topY = Object.keys(yCounts).sort((a, b) => yCounts[b] - yCounts[a])[0] || String(new Date().getFullYear());
+                        targetMonth = topY + '年' + parseInt(mm[1]) + '月';
+                    }
+                }
+
+                const vn = (n) => (n == null || isNaN(n) || !isFinite(n)) ? 0 : Math.round(n);
+
+                // ── 経営データ ──
+                if (rawData.length > 0) {
+                    sections.push('■ 経営データ');
+
+                    // 1) 詳細データ（対象ブランチ＋月、最大30件）
+                    if (targetBranch || targetMonth) {
+                        const focused = rawData.filter(d => {
+                            const bOk = !targetBranch || d.branch === targetBranch;
+                            const mOk = !targetMonth || d.month === targetMonth;
+                            return bOk && mOk;
+                        });
+                        if (focused.length > 0) {
+                            const label = [targetBranch, targetMonth].filter(Boolean).join(' / ');
+                            sections.push('\n▼ ' + label + '（スタッフ別）');
+                            focused.slice(0, 30).forEach(d => {
+                                const er = d.newCount > 0 ? Math.round((d.newEnroll / d.newCount) * 100) : 0;
+                                sections.push(
+                                    (d.name || '不明') + '(' + d.branch + '/' + d.month + '): ' +
+                                    '個別売上¥' + vn(d.individualSales).toLocaleString() +
+                                    ', 継続¥' + vn(d.recurringSales).toLocaleString() +
+                                    ', 新規' + vn(d.newCount) + ', 入会' + vn(d.newEnroll) + '(' + er + '%)' +
+                                    ', 退会' + vn(d.churnCount) + ', 前月会員' + vn(d.prevMembers) +
+                                    ', 生産性¥' + vn(d.productivity).toLocaleString() +
+                                    ', G口コミ' + vn(d.gReviews) + ', H口コミ' + vn(d.hReviews) +
+                                    ', 紹介' + vn(d.referrals)
+                                );
+                            });
+                        }
+                    }
+
+                    // 2) 月次推移（対象ブランチ、直近6ヶ月）
+                    if (targetBranch) {
+                        const bd = rawData.filter(d => d.branch === targetBranch);
+                        const months = [...new Set(bd.map(d => d.month))].sort().slice(-6);
+                        if (months.length > 1) {
+                            sections.push('\n▼ ' + targetBranch + ' 月次推移');
+                            months.forEach(mo => {
+                                const md = bd.filter(d => d.month === mo);
+                                const sales = md.reduce((s, d) => s + vn(d.individualSales), 0);
+                                const nc = md.reduce((s, d) => s + vn(d.newCount), 0);
+                                const ne = md.reduce((s, d) => s + vn(d.newEnroll), 0);
+                                const ch = md.reduce((s, d) => s + vn(d.churnCount), 0);
+                                const pm = md.reduce((s, d) => s + vn(d.prevMembers), 0);
+                                sections.push(mo + ': 売上¥' + sales.toLocaleString() + ', 新規' + nc + ', 入会率' + (nc > 0 ? Math.round((ne / nc) * 100) : 0) + '%, 退会率' + (pm > 0 ? Math.round((ch / pm) * 100) : 0) + '%');
+                            });
+                        }
+                    }
+
+                    // 3) 店舗比較（対象月 or 最新月）
+                    const compareMonth = targetMonth || [...new Set(rawData.map(d => d.month))].sort().pop();
+                    if (compareMonth) {
+                        const md = rawData.filter(d => d.month === compareMonth);
+                        const branches = [...new Set(md.map(d => d.branch))];
+                        if (branches.length > 1) {
+                            sections.push('\n▼ ' + compareMonth + ' 店舗比較');
+                            branches.forEach(b => {
+                                const bd = md.filter(d => d.branch === b);
+                                const sales = bd.reduce((s, d) => s + vn(d.individualSales), 0);
+                                const nc = bd.reduce((s, d) => s + vn(d.newCount), 0);
+                                const ne = bd.reduce((s, d) => s + vn(d.newEnroll), 0);
+                                const ch = bd.reduce((s, d) => s + vn(d.churnCount), 0);
+                                const pm = bd.reduce((s, d) => s + vn(d.prevMembers), 0);
+                                sections.push(b + ': 売上¥' + sales.toLocaleString() + ', 新規' + nc + ', 入会率' + (nc > 0 ? Math.round((ne / nc) * 100) : 0) + '%, 退会率' + (pm > 0 ? Math.round((ch / pm) * 100) : 0) + '%');
+                            });
+                        }
+                    }
+                }
+
+                // ── マーケティングデータ ──
+                if (mktData.length > 0) {
+                    sections.push('\n■ マーケティングデータ');
+                    let mf = mktData;
+                    if (targetBranch) mf = mf.filter(d => d.branch === targetBranch || (d.branch && d.branch.includes(targetBranch.replace(/駅?院$/, ''))));
+                    if (targetMonth) mf = mf.filter(d => d.month === targetMonth);
+                    if (mf.length === 0) {
+                        const latestM = [...new Set(mktData.map(d => d.month).filter(Boolean))].sort().pop();
+                        mf = mktData.filter(d => d.month === latestM);
+                    }
+                    const byB = {};
+                    mf.forEach(d => {
+                        const b = d.branch || '不明';
+                        if (!byB[b]) byB[b] = { nc: 0, ec: 0, cc: 0, as: 0, rv: 0, media: {} };
+                        byB[b].nc += d.newCount || 0;
+                        byB[b].ec += d.enrollCount || 0;
+                        byB[b].cc += d.cancelCount || 0;
+                        byB[b].as += d.adSpend || 0;
+                        byB[b].rv += d.revenue || 0;
+                        if (d.media && d.media !== '全媒体合計') {
+                            if (!byB[b].media[d.media]) byB[b].media[d.media] = { nc: 0, as: 0, ec: 0 };
+                            byB[b].media[d.media].nc += d.newCount || 0;
+                            byB[b].media[d.media].as += d.adSpend || 0;
+                            byB[b].media[d.media].ec += d.enrollCount || 0;
+                        }
+                    });
+                    Object.entries(byB).slice(0, 15).forEach(([b, d]) => {
+                        const cpa = d.nc > 0 ? Math.round(d.as / d.nc) : 0;
+                        const er = d.nc > 0 ? Math.round((d.ec / d.nc) * 100) : 0;
+                        const roas = d.as > 0 ? Math.round((d.rv / d.as) * 100) : 0;
+                        sections.push(b + ': 新規' + d.nc + ', 入会率' + er + '%, CPA¥' + cpa.toLocaleString() + ', ROAS' + roas + '%, 広告費¥' + d.as.toLocaleString());
+                        Object.entries(d.media).sort((a, b) => b[1].nc - a[1].nc).slice(0, 5).forEach(([m, md]) => {
+                            const mCpa = md.nc > 0 ? Math.round(md.as / md.nc) : 0;
+                            sections.push('  └ ' + m + ': ' + md.nc + '人, CPA¥' + mCpa.toLocaleString());
+                        });
+                    });
+                }
+
+                // ── サブスクリプションデータ ──
+                if (sqData && sqData.subscriptions) {
+                    sections.push('\n■ サブスクリプションデータ');
+                    const subs = sqData.subscriptions || [];
+                    const stores = sqData.stores || [];
+                    stores.forEach(store => {
+                        if (targetBranch && !store.name.includes(targetBranch.replace(/駅?院$/, ''))) return;
+                        const storeLids = store.locationIds || [];
+                        const ss = subs.filter(s => storeLids.includes(s.locationId));
+                        const active = ss.filter(s => s.status === 'ACTIVE').length;
+                        const canceled = ss.filter(s => s.status === 'CANCELED' || s.status === 'DEACTIVATED').length;
+                        const paused = ss.filter(s => s.status === 'PAUSED').length;
+                        const mrr = ss.filter(s => s.status === 'ACTIVE').reduce((sum, s) => sum + (s.monthlyPrice || 0), 0);
+                        sections.push(store.name + ': アクティブ' + active + ', 解約' + canceled + ', 休止' + paused + ', MRR¥' + mrr.toLocaleString());
+                    });
+                }
+
+                // ── 利用可能な店舗・期間 ──
+                sections.push('\n■ 利用可能な店舗: ' + allBranches.join('、'));
+                const allMonths = [...new Set(rawData.map(d => d.month).filter(Boolean))].sort();
+                if (allMonths.length > 0) {
+                    sections.push('■ 利用可能な期間: ' + allMonths[0] + ' 〜 ' + allMonths[allMonths.length - 1]);
+                }
+
+                return sections.join('\n');
+            };
+
+            // チャットメッセージ送信（Claude AI API）
             const handleChatSubmit = async () => {
                 if (!chatInput.trim() || chatLoading) return;
 
@@ -4184,52 +4365,90 @@
                 setChatInput('');
                 setChatLoading(true);
 
-                // 少し遅延を入れてリアルな感じに
+                try {
+                    const dataContext = buildDataContext(userMessage);
+                    const history = chatMessages.map(msg => ({
+                        role: msg.type === 'user' ? 'user' : 'assistant',
+                        content: msg.content
+                    }));
+
+                    const response = await fetch('/api/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            question: userMessage,
+                            history: history.slice(-20),
+                            dataContext,
+                            stream: true
+                        })
+                    });
+
+                    if (!response.ok) {
+                        const errData = await response.json().catch(() => ({}));
+                        throw new Error(errData.message || 'APIエラー: ' + response.status);
+                    }
+
+                    // SSE ストリーミング処理
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let assistantText = '';
+                    let buffer = '';
+
+                    // 空のアシスタントメッセージを追加（ストリーミング表示先）
+                    setChatMessages(prev => [...prev, { type: 'assistant', content: '' }]);
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+
+                        buffer += decoder.decode(value, { stream: true });
+                        const lines = buffer.split('\n\n');
+                        buffer = lines.pop() || '';
+
+                        for (const line of lines) {
+                            if (!line.startsWith('data: ')) continue;
+                            try {
+                                const evt = JSON.parse(line.slice(6));
+                                if (evt.type === 'text') {
+                                    assistantText += evt.text;
+                                    const currentText = assistantText;
+                                    setChatMessages(prev => {
+                                        const updated = [...prev];
+                                        updated[updated.length - 1] = { type: 'assistant', content: currentText };
+                                        return updated;
+                                    });
+                                } else if (evt.type === 'error') {
+                                    throw new Error(evt.error);
+                                }
+                            } catch (e) {
+                                if (e.message && !e.message.includes('JSON')) throw e;
+                            }
+                        }
+                    }
+
+                    if (!assistantText) throw new Error('応答が空でした');
+
+                } catch (err) {
+                    console.error('Chat API error:', err);
+                    setChatMessages(prev => {
+                        const last = prev[prev.length - 1];
+                        const errorMsg = 'すみません、エラーが発生しました: ' + err.message +
+                            '\n\nAI機能を使用するには、Vercelの環境変数にANTHROPIC_API_KEYを設定してください。';
+                        if (last && last.type === 'assistant' && !last.content) {
+                            const updated = [...prev];
+                            updated[updated.length - 1] = { type: 'assistant', content: errorMsg };
+                            return updated;
+                        }
+                        return [...prev, { type: 'assistant', content: errorMsg }];
+                    });
+                }
+
+                setChatLoading(false);
                 setTimeout(() => {
-                    try {
-                    // 現在の文脈を渡して分析
-                    const result = analyzeChatQuestion(userMessage, chatContext);
-
-                    // 文脈のリセットが要求された場合
-                    if (result.resetContext) {
-                        setChatContext({ branch: null, month: null });
+                    if (chatContainerRef.current) {
+                        chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
                     }
-                    // 新しい文脈がある場合、更新
-                    else if (result.newContext) {
-                        setChatContext(result.newContext);
-                    }
-
-                    // メッセージに文脈情報を追加
-                    let displayMessage = result.message;
-                    if (result.newContext && !result.resetContext) {
-                        const contextInfo = [];
-                        if (result.newContext.branch) contextInfo.push(`店舗: ${result.newContext.branch}`);
-                        if (result.newContext.month) contextInfo.push(`期間: ${result.newContext.month}`);
-                        if (contextInfo.length > 0) {
-                            displayMessage += `\n\n---\n次の質問でも同じ${contextInfo.join('、')}を使用します。変更する場合は明示してください。`;
-                        }
-                    }
-
-                    setChatMessages(prev => [...prev, {
-                        type: 'assistant',
-                        content: displayMessage
-                    }]);
-                    } catch (chatErr) {
-                        console.error('Chat analysis error:', chatErr);
-                        setChatMessages(prev => [...prev, {
-                            type: 'assistant',
-                            content: 'すみません、分析中にエラーが発生しました。質問を変えて再度お試しください。\n\n質問例:\n・「蒲田の1月の売上は？」\n・「全店舗のCPAを比較して」'
-                        }]);
-                    }
-                    setChatLoading(false);
-
-                    // スクロールを最下部へ
-                    setTimeout(() => {
-                        if (chatContainerRef.current) {
-                            chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
-                        }
-                    }, 100);
-                }, 500);
+                }, 100);
             };
 
             console.log('🎨 Rendering App - loading:', loading, 'error:', error, 'rawData length:', rawData.length);
@@ -7572,8 +7791,8 @@
                                             <span className="text-lg">🤖</span>
                                         </div>
                                         <div>
-                                            <h3 className="text-white font-black text-sm">AI アシスタント</h3>
-                                            <p className="text-indigo-100 text-xs font-bold">データ分析をお手伝いします</p>
+                                            <h3 className="text-white font-black text-sm">NAORU AI アシスタント</h3>
+                                            <p className="text-indigo-100 text-xs font-bold">Claude が経営データを分析します</p>
                                         </div>
                                     </div>
                                     <button
@@ -7591,9 +7810,9 @@
                                     {chatMessages.length === 0 && (
                                         <div className="text-center py-12">
                                             <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-gradient-to-br from-indigo-100 to-purple-100 flex items-center justify-center">
-                                                <span className="text-3xl">💡</span>
+                                                <span className="text-3xl">🧠</span>
                                             </div>
-                                            <p className="text-slate-600 font-bold text-sm mb-2">データについて質問してください</p>
+                                            <p className="text-slate-600 font-bold text-sm mb-2">AI がデータを分析します</p>
                                             <div className="text-xs text-slate-400 space-y-1 max-w-xs mx-auto">
                                                 <p className="font-bold">例:</p>
                                                 <p>• 千葉駅院の26年1月を分析して</p>

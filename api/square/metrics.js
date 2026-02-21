@@ -209,16 +209,27 @@ async function fetchAllSubscriptions(client, locationIds, diag, timeoutMs = 1800
     return locSubs;
   });
 
-  const allSubs = results.filter(Boolean).flat();
+  const rawSubs = results.filter(Boolean).flat();
+  // ロケーション別並列取得で同一サブスクが複数返される場合があるためIDで重複排除
+  const seenIds = new Set();
+  const allSubs = [];
+  for (const s of rawSubs) {
+    if (seenIds.has(s.id)) continue;
+    seenIds.add(s.id);
+    allSubs.push(s);
+  }
+  const dedupCount = rawSubs.length - allSubs.length;
   if (diag) {
+    const dedupSuffix = dedupCount > 0 ? `, 重複排除${dedupCount}件` : '';
     if (timedOut) {
-      diag.subscriptionsApi = `${allSubs.length}件取得 (部分結果・タイムアウト${timeoutMs / 1000}s)`;
+      diag.subscriptionsApi = `${allSubs.length}件取得 (部分結果・タイムアウト${timeoutMs / 1000}s${dedupSuffix})`;
     } else {
       diag.subscriptionsApi = errors.length > 0
-        ? `${allSubs.length}件取得, エラー${errors.length}件: ${errors.join('; ')}`
-        : `ok: ${allSubs.length}件`;
+        ? `${allSubs.length}件取得, エラー${errors.length}件: ${errors.join('; ')}${dedupSuffix}`
+        : `ok: ${allSubs.length}件${dedupSuffix}`;
     }
   }
+  if (dedupCount > 0) console.log(`  Subscriptions: ${dedupCount}件の重複を排除 (${rawSubs.length} → ${allSubs.length})`);
   console.log(`  Subscriptions API: ${allSubs.length}件取得${timedOut ? ' (partial/timeout)' : ''}${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
   return allSubs;
 }
@@ -335,6 +346,7 @@ async function fetchSalesFromPayments(token, env, locationIds, diag, timeoutMs =
             for (const p of data.payments) {
               if (p.status === 'COMPLETED') {
                 payments.push({
+                  id: p.id,
                   amount: toNumber(p.total_money && p.total_money.amount),
                   createdAt: p.created_at,
                   locationId: p.location_id || locId,
@@ -396,6 +408,7 @@ async function fetchSalesFromPayments(token, env, locationIds, diag, timeoutMs =
             for (const r of data.refunds) {
               if (r.status === 'COMPLETED') {
                 refunds.push({
+                  id: r.id,
                   amount: toNumber(r.amount_money && r.amount_money.amount),
                   createdAt: r.created_at,
                   locationId: r.location_id || locId,
@@ -427,17 +440,38 @@ async function fetchSalesFromPayments(token, env, locationIds, diag, timeoutMs =
     return { payments, refunds };
   });
 
-  const payments = allResults.filter(Boolean).flatMap(r => r.payments);
-  const refunds = allResults.filter(Boolean).flatMap(r => r.refunds);
+  const rawPayments = allResults.filter(Boolean).flatMap(r => r.payments);
+  const rawRefunds = allResults.filter(Boolean).flatMap(r => r.refunds);
+  // ロケーション別並列取得で同一決済/返品が複数返される場合があるためIDで重複排除
+  const seenPayIds = new Set();
+  const payments = [];
+  for (const p of rawPayments) {
+    if (p.id && seenPayIds.has(p.id)) continue;
+    if (p.id) seenPayIds.add(p.id);
+    payments.push(p);
+  }
+  const seenRefIds = new Set();
+  const refunds = [];
+  for (const r of rawRefunds) {
+    if (r.id && seenRefIds.has(r.id)) continue;
+    if (r.id) seenRefIds.add(r.id);
+    refunds.push(r);
+  }
+  const payDedupCount = rawPayments.length - payments.length;
+  const refDedupCount = rawRefunds.length - refunds.length;
   if (diag) {
     const suffix = timedOut ? ` (部分結果・タイムアウト${timeoutMs / 1000}s)` : '';
+    const payDedup = payDedupCount > 0 ? `, 重複排除${payDedupCount}件` : '';
+    const refDedup = refDedupCount > 0 ? `, 重複排除${refDedupCount}件` : '';
     diag.paymentsApi = errors.length > 0
-      ? `Payments API: ${payments.length}件売上, エラー${errors.length}件${suffix}`
-      : `ok: ${payments.length}件 (Payments API)${suffix}`;
+      ? `Payments API: ${payments.length}件売上, エラー${errors.length}件${suffix}${payDedup}`
+      : `ok: ${payments.length}件 (Payments API)${suffix}${payDedup}`;
     diag.refundsApi = errors.length > 0
-      ? `Refunds API: ${refunds.length}件返品, エラー${errors.length}件${suffix}`
-      : `ok: ${refunds.length}件 (Refunds API)${suffix}`;
+      ? `Refunds API: ${refunds.length}件返品, エラー${errors.length}件${suffix}${refDedup}`
+      : `ok: ${refunds.length}件 (Refunds API)${suffix}${refDedup}`;
   }
+  if (payDedupCount > 0) console.log(`  Payments: ${payDedupCount}件の重複を排除 (${rawPayments.length} → ${payments.length})`);
+  if (refDedupCount > 0) console.log(`  Refunds: ${refDedupCount}件の重複を排除 (${rawRefunds.length} → ${refunds.length})`);
   console.log(`  Payments API: ${payments.length}件売上, ${refunds.length}件返品${timedOut ? ' (partial/timeout)' : ''}${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
   return { payments, refunds };
 }
@@ -515,18 +549,29 @@ async function fetchInvoices(client, locationIds, diag, timeoutMs = 180000) {
       }
     } while (cursor);
   });
+  // ロケーション別並列取得で同一インボイスが複数返される場合があるためIDで重複排除
+  const seenInvIds = new Set();
+  const dedupedInvoices = [];
+  for (const inv of allInvoices) {
+    if (seenInvIds.has(inv.id)) continue;
+    seenInvIds.add(inv.id);
+    dedupedInvoices.push(inv);
+  }
+  const invDedupCount = allInvoices.length - dedupedInvoices.length;
   if (diag) {
-    const withSubId = allInvoices.filter(inv => inv.subscriptionId).length;
+    const withSubId = dedupedInvoices.filter(inv => inv.subscriptionId).length;
+    const dedupSuffix = invDedupCount > 0 ? `, 重複排除${invDedupCount}件` : '';
     if (timedOut) {
-      diag.invoicesApi = `${allInvoices.length}件取得 (部分結果・タイムアウト${timeoutMs / 1000}s, サブスク紐付: ${withSubId}件)`;
+      diag.invoicesApi = `${dedupedInvoices.length}件取得 (部分結果・タイムアウト${timeoutMs / 1000}s, サブスク紐付: ${withSubId}件${dedupSuffix})`;
     } else {
       diag.invoicesApi = errors.length > 0
-        ? `${allInvoices.length}件取得 (サブスク紐付: ${withSubId}件), エラー${errors.length}件: ${errors.join('; ')}`
-        : `ok: ${allInvoices.length}件 (サブスク紐付: ${withSubId}件)`;
+        ? `${dedupedInvoices.length}件取得 (サブスク紐付: ${withSubId}件), エラー${errors.length}件: ${errors.join('; ')}${dedupSuffix}`
+        : `ok: ${dedupedInvoices.length}件 (サブスク紐付: ${withSubId}件${dedupSuffix})`;
     }
   }
-  console.log(`  Invoices API: ${allInvoices.length}件取得${timedOut ? ' (partial/timeout)' : ''}${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
-  return allInvoices;
+  if (invDedupCount > 0) console.log(`  Invoices: ${invDedupCount}件の重複を排除 (${allInvoices.length} → ${dedupedInvoices.length})`);
+  console.log(`  Invoices API: ${dedupedInvoices.length}件取得${timedOut ? ' (partial/timeout)' : ''}${errors.length > 0 ? `, errors: ${errors.length}` : ''}`);
+  return dedupedInvoices;
 }
 
 // 全顧客名を取得
@@ -802,6 +847,11 @@ export default async function handler(req, res) {
       stores: [], subscriptions: [], customers: {},
       invoices: [], payments: [], refunds: [], plans: {},
     };
+    // アカウント間の重複排除用Set
+    const seenSubIds = new Set();
+    const seenInvIds = new Set();
+    const seenPayIds = new Set();
+    const seenRefIds = new Set();
     const failedAccounts = [];
     const allDiag = [];
 
@@ -837,11 +887,12 @@ export default async function handler(req, res) {
             merged.stores.push({ ...store, locationIds: store.locationIds || [store.id] });
           }
         }
-        merged.subscriptions.push(...r.subscriptions);
+        // アカウント間の重複排除付きマージ
+        for (const s of r.subscriptions) { if (!seenSubIds.has(s.id)) { seenSubIds.add(s.id); merged.subscriptions.push(s); } }
         Object.assign(merged.customers, r.customers);
-        merged.invoices.push(...r.invoices);
-        merged.payments.push(...r.payments);
-        merged.refunds.push(...(r.refunds || []));
+        for (const inv of r.invoices) { if (!seenInvIds.has(inv.id)) { seenInvIds.add(inv.id); merged.invoices.push(inv); } }
+        for (const p of r.payments) { if (!p.id || !seenPayIds.has(p.id)) { if (p.id) seenPayIds.add(p.id); merged.payments.push(p); } }
+        for (const rf of (r.refunds || [])) { if (!rf.id || !seenRefIds.has(rf.id)) { if (rf.id) seenRefIds.add(rf.id); merged.refunds.push(rf); } }
         Object.assign(merged.plans, r.plans);
         if (r._diag) allDiag.push({ account: cfg.name, ...r._diag });
       } catch (err) {
@@ -918,6 +969,11 @@ export default async function handler(req, res) {
     stores: [], subscriptions: [], customers: {}, invoices: [],
     payments: [], refunds: [], plans: {},
   };
+  // アカウント間の重複排除用Set
+  const seenSubIds = new Set();
+  const seenInvIds = new Set();
+  const seenPayIds = new Set();
+  const seenRefIds = new Set();
   const failedAccounts = [];
   const allDiag = [];
 
@@ -953,11 +1009,12 @@ export default async function handler(req, res) {
             merged.stores.push({ ...store, locationIds: store.locationIds || [store.id] });
           }
         }
-        merged.subscriptions.push(...r.subscriptions);
+        // アカウント間の重複排除付きマージ
+        for (const s of r.subscriptions) { if (!seenSubIds.has(s.id)) { seenSubIds.add(s.id); merged.subscriptions.push(s); } }
         Object.assign(merged.customers, r.customers);
-        merged.invoices.push(...r.invoices);
-        merged.payments.push(...r.payments);
-        merged.refunds.push(...(r.refunds || []));
+        for (const inv of r.invoices) { if (!seenInvIds.has(inv.id)) { seenInvIds.add(inv.id); merged.invoices.push(inv); } }
+        for (const p of r.payments) { if (!p.id || !seenPayIds.has(p.id)) { if (p.id) seenPayIds.add(p.id); merged.payments.push(p); } }
+        for (const rf of (r.refunds || [])) { if (!rf.id || !seenRefIds.has(rf.id)) { if (rf.id) seenRefIds.add(rf.id); merged.refunds.push(rf); } }
         Object.assign(merged.plans, r.plans);
         if (r._diag) allDiag.push({ account: cfg.name, ...r._diag });
       } catch (err) {

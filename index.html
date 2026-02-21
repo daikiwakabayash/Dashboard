@@ -729,6 +729,11 @@
                         invoices: [], payments: [], refunds: [], plans: {},
                         diagnostics: [],
                     };
+                    // バッチ間の重複排除用Set
+                    const seenSubIds = new Set();
+                    const seenInvIds = new Set();
+                    const seenPayIds = new Set();
+                    const seenRefIds = new Set();
                     const failedAccounts = [];
 
                     // 個別アカウント取得（バッチ失敗時のフォールバック）
@@ -764,11 +769,12 @@
                                 merged.stores.push({ ...store, locationIds: store.locationIds || [store.id] });
                             }
                         }
-                        merged.subscriptions.push(...(data.subscriptions || []));
+                        // バッチ間・アカウント間の重複排除付きマージ
+                        for (const s of (data.subscriptions || [])) { if (!seenSubIds.has(s.id)) { seenSubIds.add(s.id); merged.subscriptions.push(s); } }
                         Object.assign(merged.customers, data.customers || {});
-                        merged.invoices.push(...(data.invoices || []));
-                        merged.payments.push(...(data.payments || []));
-                        merged.refunds.push(...(data.refunds || []));
+                        for (const inv of (data.invoices || [])) { if (!seenInvIds.has(inv.id)) { seenInvIds.add(inv.id); merged.invoices.push(inv); } }
+                        for (const p of (data.payments || [])) { if (!p.id || !seenPayIds.has(p.id)) { if (p.id) seenPayIds.add(p.id); merged.payments.push(p); } }
+                        for (const rf of (data.refunds || [])) { if (!rf.id || !seenRefIds.has(rf.id)) { if (rf.id) seenRefIds.add(rf.id); merged.refunds.push(rf); } }
                         Object.assign(merged.plans, data.plans || {});
                         if (data.meta && data.meta.diagnostics) merged.diagnostics.push(...data.meta.diagnostics);
                     };

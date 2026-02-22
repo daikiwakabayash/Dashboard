@@ -132,70 +132,13 @@ function buildMessages(question, history = [], dataContext = '') {
 }
 
 // ── API パラメータ設定 ──────────────────────────────────────────
-// モデル優先順位: 最新 → 安定版の順にフォールバック
+// モデル優先順位: 利用可能な最新モデルから順にフォールバック
 const MODELS = [
   'claude-sonnet-4-5-20250514',
-  'claude-3-7-sonnet-latest',
+  'claude-3-7-sonnet-20250219',
   'claude-3-5-sonnet-20241022',
 ];
-const MAX_TOKENS = 16000;
-const THINKING_BUDGET = 10000;
-
-// Extended Thinking対応モデルかどうか（3.5 Sonnetは非対応）
-const THINKING_SUPPORTED = new Set([
-  'claude-sonnet-4-5-20250514',
-  'claude-3-7-sonnet-latest',
-  'claude-3-7-sonnet-20250219',
-]);
-
-// ── APIパラメータ構築 ──
-function buildApiParams(model, messages) {
-  const params = {
-    model,
-    max_tokens: MAX_TOKENS,
-    system: SYSTEM_PROMPT,
-    messages,
-  };
-  if (THINKING_SUPPORTED.has(model)) {
-    params.thinking = { type: 'enabled', budget_tokens: THINKING_BUDGET };
-  }
-  return params;
-}
-
-// ── ストリーミング実行（エラー時にfalseを返す） ──
-function tryStream(res, apiParams) {
-  return new Promise((resolve) => {
-    const stream = anthropic.messages.stream(apiParams);
-    let started = false;
-
-    stream.on('text', (text) => {
-      started = true;
-      res.write(`data: ${JSON.stringify({ type: 'text', text })}\n\n`);
-    });
-
-    stream.on('error', (error) => {
-      console.error(`Stream error (${apiParams.model}):`, error.message || error);
-      if (!started) {
-        resolve(false); // まだ何も送信していない → フォールバック可能
-      } else {
-        res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
-        res.end();
-        resolve(true); // 途中まで送信済み → フォールバック不可
-      }
-    });
-
-    stream.on('end', () => {
-      res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
-      res.end();
-      resolve(true);
-    });
-
-    res.on('close', () => {
-      stream.abort();
-      resolve(true);
-    });
-  });
-}
+const MAX_TOKENS = 8192;
 
 // ── Vercel Serverless Handler ────────────────────────────────────
 export default async function handler(req, res) {
@@ -231,33 +174,81 @@ export default async function handler(req, res) {
 
     const messages = buildMessages(question, history, dataContext);
 
-    // ── ストリーミングモード（モデルフォールバック付き）──
+    // ── 利用可能なモデルを特定（最初の1回だけ404/400でフォールバック）──
+    let selectedModel = MODELS[0];
+
+    // ── ストリーミングモード ──
     if (useStream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
 
-      for (const model of MODELS) {
-        console.log(`[chat] Trying model: ${model}`);
-        const apiParams = buildApiParams(model, messages);
-        const ok = await tryStream(res, apiParams);
-        if (ok) return;
-        console.log(`[chat] Model ${model} failed, trying next...`);
-      }
+      // モデルフォールバック: 接続テストとして非ストリーミングで試行し、
+      // 404/400ならフォールバック。成功したモデルでストリーミング開始。
+      for (let i = 0; i < MODELS.length; i++) {
+        selectedModel = MODELS[i];
+        console.log(`[chat] Trying model: ${selectedModel}`);
+        try {
+          const stream = anthropic.messages.stream({
+            model: selectedModel,
+            max_tokens: MAX_TOKENS,
+            system: SYSTEM_PROMPT,
+            messages,
+          });
 
-      // 全モデル失敗
-      res.write(`data: ${JSON.stringify({ type: 'error', error: '全モデルで応答に失敗しました。しばらく待ってから再度お試しください。' })}\n\n`);
+          // ストリーミングイベントをPromiseで待機
+          await new Promise((resolve, reject) => {
+            stream.on('text', (text) => {
+              res.write(`data: ${JSON.stringify({ type: 'text', text })}\n\n`);
+            });
+
+            stream.on('error', (error) => {
+              reject(error);
+            });
+
+            stream.on('end', () => {
+              res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+              resolve();
+            });
+
+            req.on('close', () => {
+              stream.abort();
+              resolve();
+            });
+          });
+
+          res.end();
+          return;
+        } catch (err) {
+          const status = err.status || err.error?.status;
+          console.log(`[chat] Model ${selectedModel} failed: ${status || err.message}`);
+          // 404(モデル不存在) or 400(パラメータエラー) → 次のモデルで再試行
+          if ((status === 404 || status === 400) && i < MODELS.length - 1) {
+            continue;
+          }
+          // それ以外のエラー or 最後のモデル → エラー応答
+          res.write(`data: ${JSON.stringify({ type: 'error', error: err.message || 'AI応答の生成に失敗しました' })}\n\n`);
+          res.end();
+          return;
+        }
+      }
+      // ここには到達しないはず
       res.end();
       return;
     }
 
-    // ── 非ストリーミングモード（モデルフォールバック付き）──
+    // ── 非ストリーミングモード ──
     let lastError;
-    for (const model of MODELS) {
+    for (let i = 0; i < MODELS.length; i++) {
+      selectedModel = MODELS[i];
       try {
-        console.log(`[chat] Trying model: ${model}`);
-        const apiParams = buildApiParams(model, messages);
-        const response = await anthropic.messages.create(apiParams);
+        console.log(`[chat] Trying model (non-stream): ${selectedModel}`);
+        const response = await anthropic.messages.create({
+          model: selectedModel,
+          max_tokens: MAX_TOKENS,
+          system: SYSTEM_PROMPT,
+          messages,
+        });
 
         const assistantMessage = response.content
           .filter(block => block.type === 'text')
@@ -273,9 +264,10 @@ export default async function handler(req, res) {
           }
         });
       } catch (err) {
-        console.log(`[chat] Model ${model} failed: ${err.status || err.message}`);
+        const status = err.status || err.error?.status;
+        console.log(`[chat] Model ${selectedModel} failed: ${status || err.message}`);
         lastError = err;
-        if (err.status !== 404 && err.status !== 400) break; // 404/400以外は別のモデルでも同じなので中断
+        if (status !== 404 && status !== 400) break;
       }
     }
     throw lastError;

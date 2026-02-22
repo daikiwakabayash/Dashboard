@@ -4223,11 +4223,47 @@
 
                 const vn = (n) => (n == null || isNaN(n) || !isFinite(n)) ? 0 : Math.round(n);
 
+                // ── ベンチマーク評価ヘルパー ──
+                const gradeEnrollRate = (r) => r >= 55 ? '優秀' : r >= 40 ? '良好' : r >= 30 ? '平均' : '要改善';
+                const gradeChurnRate = (r) => r <= 5 ? '優秀' : r <= 10 ? '良好' : r <= 15 ? '平均' : '要改善';
+                const gradeCPA = (v) => v <= 8000 ? '優秀' : v <= 12000 ? '良好' : v <= 18000 ? '平均' : '要改善';
+                const gradeProductivity = (v) => v >= 1200000 ? '優秀' : v >= 800000 ? '良好' : v >= 600000 ? '平均' : '要改善';
+                const delta = (cur, prev) => prev > 0 ? ((cur - prev) / prev * 100).toFixed(1) : '-';
+
+                // ── 前月キーを算出 ──
+                const getPrevMonth = (monthStr) => {
+                    const ym = (monthStr || '').match(/(\d{4})年(\d{1,2})月/);
+                    if (!ym) return null;
+                    let y = parseInt(ym[1]), m = parseInt(ym[2]) - 1;
+                    if (m === 0) { m = 12; y--; }
+                    return y + '年' + m + '月';
+                };
+
+                // ── 店舗別月次集計ヘルパー ──
+                const aggregateBranch = (data, branch, month) => {
+                    const bd = data.filter(d => d.branch === branch && d.month === month);
+                    if (bd.length === 0) return null;
+                    const sales = bd.reduce((s, d) => s + vn(d.individualSales), 0);
+                    const recurring = bd.reduce((s, d) => s + vn(d.recurringSales), 0);
+                    const nc = bd.reduce((s, d) => s + vn(d.newCount), 0);
+                    const ne = bd.reduce((s, d) => s + vn(d.newEnroll), 0);
+                    const ch = bd.reduce((s, d) => s + vn(d.churnCount), 0);
+                    const pm = bd.reduce((s, d) => s + vn(d.prevMembers), 0);
+                    const prod = bd.reduce((s, d) => s + vn(d.productivity), 0);
+                    const gr = bd.reduce((s, d) => s + vn(d.gReviews), 0);
+                    const hr = bd.reduce((s, d) => s + vn(d.hReviews), 0);
+                    const ref = bd.reduce((s, d) => s + vn(d.referrals), 0);
+                    const er = nc > 0 ? Math.round((ne / nc) * 100) : 0;
+                    const cr = pm > 0 ? Math.round((ch / pm) * 1000) / 10 : 0;
+                    const avgProd = bd.length > 0 ? Math.round(prod / bd.length) : 0;
+                    return { sales, recurring, nc, ne, ch, pm, er, cr, avgProd, gr, hr, ref, staffCount: bd.length };
+                };
+
                 // ── 経営データ ──
                 if (rawData.length > 0) {
                     sections.push('■ 経営データ');
 
-                    // 1) 詳細データ（対象ブランチ＋月、最大30件）
+                    // 1) スタッフ別詳細データ（対象ブランチ＋月、最大30件）
                     if (targetBranch || targetMonth) {
                         const focused = rawData.filter(d => {
                             const bOk = !targetBranch || d.branch === targetBranch;
@@ -4236,7 +4272,7 @@
                         });
                         if (focused.length > 0) {
                             const label = [targetBranch, targetMonth].filter(Boolean).join(' / ');
-                            sections.push('\n▼ ' + label + '（スタッフ別）');
+                            sections.push('\n▼ ' + label + '（スタッフ別詳細）');
                             focused.slice(0, 30).forEach(d => {
                                 const er = d.newCount > 0 ? Math.round((d.newEnroll / d.newCount) * 100) : 0;
                                 sections.push(
@@ -4253,40 +4289,64 @@
                         }
                     }
 
-                    // 2) 月次推移（対象ブランチ、直近6ヶ月）
+                    // 2) 月次推移（前月比デルタ付き、直近6ヶ月）
                     if (targetBranch) {
                         const bd = rawData.filter(d => d.branch === targetBranch);
                         const months = [...new Set(bd.map(d => d.month))].sort().slice(-6);
                         if (months.length > 1) {
-                            sections.push('\n▼ ' + targetBranch + ' 月次推移');
+                            sections.push('\n▼ ' + targetBranch + ' 月次推移（前月比付き）');
+                            let prevAgg = null;
                             months.forEach(mo => {
-                                const md = bd.filter(d => d.month === mo);
-                                const sales = md.reduce((s, d) => s + vn(d.individualSales), 0);
-                                const nc = md.reduce((s, d) => s + vn(d.newCount), 0);
-                                const ne = md.reduce((s, d) => s + vn(d.newEnroll), 0);
-                                const ch = md.reduce((s, d) => s + vn(d.churnCount), 0);
-                                const pm = md.reduce((s, d) => s + vn(d.prevMembers), 0);
-                                sections.push(mo + ': 売上¥' + sales.toLocaleString() + ', 新規' + nc + ', 入会率' + (nc > 0 ? Math.round((ne / nc) * 100) : 0) + '%, 退会率' + (pm > 0 ? Math.round((ch / pm) * 100) : 0) + '%');
+                                const agg = aggregateBranch(rawData, targetBranch, mo);
+                                if (!agg) return;
+                                let line = mo + ': 売上¥' + agg.sales.toLocaleString();
+                                if (prevAgg) line += '(前月比' + delta(agg.sales, prevAgg.sales) + '%)';
+                                line += ', 新規' + agg.nc;
+                                if (prevAgg) line += '(前月比' + delta(agg.nc, prevAgg.nc) + '%)';
+                                line += ', 入会率' + agg.er + '%[' + gradeEnrollRate(agg.er) + ']';
+                                line += ', 退会率' + agg.cr + '%[' + gradeChurnRate(agg.cr) + ']';
+                                line += ', 生産性¥' + agg.avgProd.toLocaleString();
+                                sections.push(line);
+                                prevAgg = agg;
                             });
                         }
                     }
 
-                    // 3) 店舗比較（対象月 or 最新月）
+                    // 3) 店舗ランキング（対象月 or 最新月 — 売上順・ベンチマーク評価付き）
                     const compareMonth = targetMonth || [...new Set(rawData.map(d => d.month))].sort().pop();
+                    const prevMonth = getPrevMonth(compareMonth);
                     if (compareMonth) {
-                        const md = rawData.filter(d => d.month === compareMonth);
-                        const branches = [...new Set(md.map(d => d.branch))];
+                        const branches = [...new Set(rawData.filter(d => d.month === compareMonth).map(d => d.branch))];
                         if (branches.length > 1) {
-                            sections.push('\n▼ ' + compareMonth + ' 店舗比較');
-                            branches.forEach(b => {
-                                const bd = md.filter(d => d.branch === b);
-                                const sales = bd.reduce((s, d) => s + vn(d.individualSales), 0);
-                                const nc = bd.reduce((s, d) => s + vn(d.newCount), 0);
-                                const ne = bd.reduce((s, d) => s + vn(d.newEnroll), 0);
-                                const ch = bd.reduce((s, d) => s + vn(d.churnCount), 0);
-                                const pm = bd.reduce((s, d) => s + vn(d.prevMembers), 0);
-                                sections.push(b + ': 売上¥' + sales.toLocaleString() + ', 新規' + nc + ', 入会率' + (nc > 0 ? Math.round((ne / nc) * 100) : 0) + '%, 退会率' + (pm > 0 ? Math.round((ch / pm) * 100) : 0) + '%');
+                            const ranked = branches.map(b => {
+                                const cur = aggregateBranch(rawData, b, compareMonth);
+                                const prev = prevMonth ? aggregateBranch(rawData, b, prevMonth) : null;
+                                return { branch: b, cur, prev };
+                            }).filter(r => r.cur).sort((a, b) => b.cur.sales - a.cur.sales);
+
+                            sections.push('\n▼ ' + compareMonth + ' 店舗ランキング（売上順・ベンチマーク評価付き）');
+                            ranked.forEach((r, i) => {
+                                const c = r.cur;
+                                const p = r.prev;
+                                let line = (i + 1) + '. ' + r.branch;
+                                line += ': 売上¥' + c.sales.toLocaleString();
+                                if (p) line += '(前月比' + delta(c.sales, p.sales) + '%)';
+                                line += ', 新規' + c.nc;
+                                if (p) line += '(前月比' + delta(c.nc, p.nc) + '%)';
+                                line += ', 入会率' + c.er + '%[' + gradeEnrollRate(c.er) + ']';
+                                line += ', 退会率' + c.cr + '%[' + gradeChurnRate(c.cr) + ']';
+                                line += ', 生産性¥' + c.avgProd.toLocaleString() + '[' + gradeProductivity(c.avgProd) + ']';
+                                line += ', スタッフ' + c.staffCount + '人';
+                                sections.push(line);
                             });
+
+                            // 全店舗合計サマリー
+                            const totSales = ranked.reduce((s, r) => s + r.cur.sales, 0);
+                            const totNc = ranked.reduce((s, r) => s + r.cur.nc, 0);
+                            const totNe = ranked.reduce((s, r) => s + r.cur.ne, 0);
+                            const totCh = ranked.reduce((s, r) => s + r.cur.ch, 0);
+                            const totPm = ranked.reduce((s, r) => s + r.cur.pm, 0);
+                            sections.push('合計: 売上¥' + totSales.toLocaleString() + ', 新規' + totNc + ', 入会率' + (totNc > 0 ? Math.round((totNe / totNc) * 100) : 0) + '%, 退会率' + (totPm > 0 ? Math.round((totCh / totPm) * 1000) / 10 : 0) + '%');
                         }
                     }
                 }
@@ -4301,6 +4361,26 @@
                         const latestM = [...new Set(mktData.map(d => d.month).filter(Boolean))].sort().pop();
                         mf = mktData.filter(d => d.month === latestM);
                     }
+
+                    // 前月マーケティングデータ（比較用）
+                    const mktMonth = targetMonth || [...new Set(mf.map(d => d.month).filter(Boolean))].sort().pop();
+                    const mktPrevMonth = getPrevMonth(mktMonth);
+                    let mfPrev = [];
+                    if (mktPrevMonth) {
+                        mfPrev = mktData.filter(d => d.month === mktPrevMonth);
+                        if (targetBranch) mfPrev = mfPrev.filter(d => d.branch === targetBranch || (d.branch && d.branch.includes(targetBranch.replace(/駅?院$/, ''))));
+                    }
+                    const prevByB = {};
+                    mfPrev.forEach(d => {
+                        const b = d.branch || '不明';
+                        if (!prevByB[b]) prevByB[b] = { nc: 0, ec: 0, cc: 0, as: 0, rv: 0 };
+                        prevByB[b].nc += d.newCount || 0;
+                        prevByB[b].ec += d.enrollCount || 0;
+                        prevByB[b].cc += d.cancelCount || 0;
+                        prevByB[b].as += d.adSpend || 0;
+                        prevByB[b].rv += d.revenue || 0;
+                    });
+
                     const byB = {};
                     mf.forEach(d => {
                         const b = d.branch || '不明';
@@ -4321,10 +4401,19 @@
                         const cpa = d.nc > 0 ? Math.round(d.as / d.nc) : 0;
                         const er = d.nc > 0 ? Math.round((d.ec / d.nc) * 100) : 0;
                         const roas = d.as > 0 ? Math.round((d.rv / d.as) * 100) : 0;
-                        sections.push(b + ': 新規' + d.nc + ', 入会率' + er + '%, CPA¥' + cpa.toLocaleString() + ', ROAS' + roas + '%, 広告費¥' + d.as.toLocaleString());
+                        const p = prevByB[b];
+                        let line = b + ': 新規' + d.nc;
+                        if (p) line += '(前月比' + delta(d.nc, p.nc) + '%)';
+                        line += ', 入会率' + er + '%[' + gradeEnrollRate(er) + ']';
+                        line += ', CPA¥' + cpa.toLocaleString() + '[' + gradeCPA(cpa) + ']';
+                        if (p && p.nc > 0) line += '(前月CPA¥' + Math.round(p.as / p.nc).toLocaleString() + ')';
+                        line += ', ROAS' + roas + '%';
+                        line += ', 広告費¥' + d.as.toLocaleString();
+                        sections.push(line);
                         Object.entries(d.media).sort((a, b) => b[1].nc - a[1].nc).slice(0, 5).forEach(([m, md]) => {
                             const mCpa = md.nc > 0 ? Math.round(md.as / md.nc) : 0;
-                            sections.push('  └ ' + m + ': ' + md.nc + '人, CPA¥' + mCpa.toLocaleString());
+                            const mEr = md.nc > 0 ? Math.round((md.ec / md.nc) * 100) : 0;
+                            sections.push('  └ ' + m + ': ' + md.nc + '人, CPA¥' + mCpa.toLocaleString() + ', 入会率' + mEr + '%');
                         });
                     });
                 }
@@ -4334,6 +4423,10 @@
                     sections.push('\n■ サブスクリプションデータ');
                     const subs = sqData.subscriptions || [];
                     const stores = sqData.stores || [];
+                    const invs = sqData.invoices || [];
+                    let totalMRR = 0;
+                    let totalActive = 0;
+                    let totalCanceled = 0;
                     stores.forEach(store => {
                         if (targetBranch && !store.name.includes(targetBranch.replace(/駅?院$/, ''))) return;
                         const storeLids = store.locationIds || [];
@@ -4342,8 +4435,23 @@
                         const canceled = ss.filter(s => s.status === 'CANCELED' || s.status === 'DEACTIVATED').length;
                         const paused = ss.filter(s => s.status === 'PAUSED').length;
                         const mrr = ss.filter(s => s.status === 'ACTIVE').reduce((sum, s) => sum + (s.monthlyPrice || 0), 0);
-                        sections.push(store.name + ': アクティブ' + active + ', 解約' + canceled + ', 休止' + paused + ', MRR¥' + mrr.toLocaleString());
+                        totalMRR += mrr; totalActive += active; totalCanceled += canceled;
+                        // 直近3ヶ月の解約数を集計
+                        const now = new Date();
+                        const recent3m = ss.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && s.canceledDate).filter(s => {
+                            const cd = new Date(s.canceledDate);
+                            const diff = (now - cd) / (1000 * 60 * 60 * 24);
+                            return diff <= 90;
+                        }).length;
+                        let line = store.name + ': アクティブ' + active + ', 解約累計' + canceled + '(直近3ヶ月' + recent3m + '), 休止' + paused + ', MRR¥' + mrr.toLocaleString();
+                        if (active + canceled > 0) {
+                            line += ', 解約率' + Math.round((canceled / (active + canceled)) * 100) + '%';
+                        }
+                        sections.push(line);
                     });
+                    if (!targetBranch && stores.length > 1) {
+                        sections.push('全店合計: アクティブ' + totalActive + ', MRR¥' + totalMRR.toLocaleString() + ', ARR¥' + (totalMRR * 12).toLocaleString());
+                    }
                 }
 
                 // ── 利用可能な店舗・期間 ──

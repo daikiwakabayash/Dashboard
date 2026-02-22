@@ -116,6 +116,7 @@ async function createClient(tokenConfig) {
   return new Client({
     accessToken: tokenConfig.token,
     environment: tokenConfig.env === 'production' ? Environment.Production : Environment.Sandbox,
+    httpClientOptions: { timeout: 120000 }, // 120秒（デフォルト60秒→大規模ロケーションのページネーション完走用）
   });
 }
 

@@ -181,6 +181,9 @@
         const UserPlus = (props) => <Icon {...props}><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></Icon>;
         const UserMinus = (props) => <Icon {...props}><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="23" y1="11" x2="17" y2="11"/></Icon>;
         const X = (props) => <Icon {...props}><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></Icon>;
+        const Target = (props) => <Icon {...props}><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></Icon>;
+        const Lightbulb = (props) => <Icon {...props}><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/></Icon>;
+        const Send = (props) => <Icon {...props}><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></Icon>;
 
         console.log('✅ All icon components defined');
 
@@ -541,6 +544,22 @@
             const [chatLoading, setChatLoading] = useState(false);
             const [chatContext, setChatContext] = useState({ branch: null, month: null }); // 会話の文脈を保持
             const chatContainerRef = useRef(null);
+
+            // 事業計画タブ用 State
+            const [planGoals, setPlanGoals] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('naoru_plan_goals');
+                    return saved ? JSON.parse(saved) : { newCustomers: 50, sales: 250, enrollRate: 50, cpaTarget: 10000 };
+                } catch { return { newCustomers: 50, sales: 250, enrollRate: 50, cpaTarget: 10000 }; }
+            });
+            const [planMessages, setPlanMessages] = useState([]);
+            const [planInput, setPlanInput] = useState('');
+            const [planLoading, setPlanLoading] = useState(false);
+            const planChatRef = useRef(null);
+            // 目標値の保存
+            useEffect(() => {
+                try { localStorage.setItem('naoru_plan_goals', JSON.stringify(planGoals)); } catch {}
+            }, [planGoals]);
 
             // マーケティングデータ取得
             const fetchMarketingData = async (forceRefresh = false) => {
@@ -4559,6 +4578,149 @@
                 }, 100);
             };
 
+            // ── 事業計画: 現在の実績を計算 ──
+            const computePlanActuals = () => {
+                const allMonths = [...new Set(rawData.map(d => d.month).filter(Boolean))].sort();
+                const latestMonth = allMonths[allMonths.length - 1] || '';
+                const prevMonth = allMonths[allMonths.length - 2] || '';
+                const curData = rawData.filter(d => d.month === latestMonth);
+                const prevData = rawData.filter(d => d.month === prevMonth);
+                const vn = (n) => (n == null || isNaN(n) || !isFinite(n)) ? 0 : Math.round(n);
+
+                const totalSales = curData.reduce((s, d) => s + vn(d.individualSales), 0);
+                const totalNewCount = curData.reduce((s, d) => s + vn(d.newCount), 0);
+                const totalNewEnroll = curData.reduce((s, d) => s + vn(d.newEnroll), 0);
+                const enrollRate = totalNewCount > 0 ? Math.round((totalNewEnroll / totalNewCount) * 100) : 0;
+
+                // CPA はマーケデータから
+                const curMkt = mktData.filter(d => d.month === latestMonth);
+                const totalAdSpend = curMkt.reduce((s, d) => s + (d.adSpend || 0), 0);
+                const mktNewCount = curMkt.reduce((s, d) => s + (d.newCount || 0), 0);
+                const cpa = mktNewCount > 0 ? Math.round(totalAdSpend / mktNewCount) : 0;
+
+                // 前月
+                const prevSales = prevData.reduce((s, d) => s + vn(d.individualSales), 0);
+                const prevNewCount = prevData.reduce((s, d) => s + vn(d.newCount), 0);
+
+                return { latestMonth, totalSales, totalNewCount, totalNewEnroll, enrollRate, cpa, totalAdSpend, prevSales, prevNewCount };
+            };
+
+            // ── 事業計画: AIデータコンテキスト構築 ──
+            const buildPlanningContext = (question) => {
+                const base = buildDataContext(question);
+                const a = computePlanActuals();
+                const goalSalesYen = planGoals.sales * 10000;
+                const salesGap = goalSalesYen - a.totalSales;
+                const newGap = planGoals.newCustomers - a.totalNewCount;
+                const lines = [
+                    '■ 事業計画：目標と現在の進捗',
+                    '対象月: ' + (a.latestMonth || '不明'),
+                    '',
+                    '【目標】',
+                    '新規集客目標: ' + planGoals.newCustomers + '名',
+                    '売上目標: ¥' + goalSalesYen.toLocaleString() + '（' + planGoals.sales + '万円）',
+                    '入会率目標: ' + planGoals.enrollRate + '%',
+                    'CPA目標: ¥' + planGoals.cpaTarget.toLocaleString(),
+                    '',
+                    '【現在の実績】',
+                    '新規数: ' + a.totalNewCount + '名（目標まであと' + Math.max(0, newGap) + '名、達成率' + (planGoals.newCustomers > 0 ? Math.round((a.totalNewCount / planGoals.newCustomers) * 100) : 0) + '%）',
+                    '売上: ¥' + a.totalSales.toLocaleString() + '（目標まであと¥' + Math.max(0, salesGap).toLocaleString() + '、達成率' + (goalSalesYen > 0 ? Math.round((a.totalSales / goalSalesYen) * 100) : 0) + '%）',
+                    '入会率: ' + a.enrollRate + '%（目標' + planGoals.enrollRate + '%）',
+                    'CPA: ¥' + a.cpa.toLocaleString() + '（目標¥' + planGoals.cpaTarget.toLocaleString() + '）',
+                    '広告費合計: ¥' + a.totalAdSpend.toLocaleString(),
+                    '',
+                    '【ギャップ分析】',
+                    salesGap > 0 ? '売上ギャップ: ¥' + salesGap.toLocaleString() + '（' + Math.round(salesGap / 10000) + '万円不足）' : '売上目標: 達成済み！',
+                    newGap > 0 ? '新規ギャップ: あと' + newGap + '名必要' : '新規目標: 達成済み！',
+                    a.enrollRate < planGoals.enrollRate ? '入会率ギャップ: あと' + (planGoals.enrollRate - a.enrollRate) + 'ポイント改善が必要' : '入会率目標: 達成済み！',
+                    a.cpa > planGoals.cpaTarget && a.cpa > 0 ? 'CPAギャップ: ¥' + (a.cpa - planGoals.cpaTarget).toLocaleString() + '削減が必要' : 'CPA目標: 達成済み！',
+                ];
+                return lines.join('\n') + '\n\n' + base;
+            };
+
+            // ── 事業計画: AI送信 ──
+            const handlePlanSubmit = async (overrideInput) => {
+                const msg = (overrideInput || planInput).trim();
+                if (!msg || planLoading) return;
+
+                setPlanMessages(prev => [...prev, { type: 'user', content: msg }]);
+                if (!overrideInput) setPlanInput('');
+                setPlanLoading(true);
+
+                try {
+                    const dataContext = buildPlanningContext(msg);
+                    const history = planMessages.map(m => ({ role: m.type === 'user' ? 'user' : 'assistant', content: m.content }));
+
+                    const response = await fetch('/api/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            question: '【事業計画相談】' + msg,
+                            history: history.slice(-20),
+                            dataContext,
+                            stream: true
+                        })
+                    });
+
+                    if (!response.ok) {
+                        const errData = await response.json().catch(() => ({}));
+                        throw new Error(errData.message || 'APIエラー: ' + response.status);
+                    }
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let assistantText = '';
+                    let buffer = '';
+
+                    setPlanMessages(prev => [...prev, { type: 'assistant', content: '' }]);
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        buffer += decoder.decode(value, { stream: true });
+                        const lines = buffer.split('\n\n');
+                        buffer = lines.pop() || '';
+                        for (const line of lines) {
+                            if (!line.startsWith('data: ')) continue;
+                            try {
+                                const evt = JSON.parse(line.slice(6));
+                                if (evt.type === 'text') {
+                                    assistantText += evt.text;
+                                    const currentText = assistantText;
+                                    setPlanMessages(prev => {
+                                        const updated = [...prev];
+                                        updated[updated.length - 1] = { type: 'assistant', content: currentText };
+                                        return updated;
+                                    });
+                                } else if (evt.type === 'error') {
+                                    throw new Error(evt.error);
+                                }
+                            } catch (e) {
+                                if (e.message && !e.message.includes('JSON')) throw e;
+                            }
+                        }
+                    }
+                    if (!assistantText) throw new Error('応答が空でした');
+                } catch (err) {
+                    console.error('Plan chat error:', err);
+                    setPlanMessages(prev => {
+                        const last = prev[prev.length - 1];
+                        const errorMsg = 'エラーが発生しました: ' + err.message;
+                        if (last && last.type === 'assistant' && !last.content) {
+                            const updated = [...prev];
+                            updated[updated.length - 1] = { type: 'assistant', content: errorMsg };
+                            return updated;
+                        }
+                        return [...prev, { type: 'assistant', content: errorMsg }];
+                    });
+                }
+
+                setPlanLoading(false);
+                setTimeout(() => {
+                    if (planChatRef.current) planChatRef.current.scrollTop = planChatRef.current.scrollHeight;
+                }, 100);
+            };
+
             console.log('🎨 Rendering App - loading:', loading, 'error:', error, 'rawData length:', rawData.length);
 
             if (loading) {
@@ -7887,6 +8049,160 @@
                         )}
                     </div>
 
+                    {/* ===== 事業計画相談タブ ===== */}
+                    {currentPage === 'planning' && (
+                        <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
+                            <h2 className="text-lg md:text-2xl font-black italic mb-4 flex items-center gap-2">
+                                <Target size={24} className="text-indigo-600" /> 事業計画相談
+                            </h2>
+
+                            {/* ── 目標設定カード ── */}
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                                {[
+                                    { key: 'newCustomers', label: '新規集客目標', unit: '名', icon: <UserPlus size={16} />, color: 'indigo' },
+                                    { key: 'sales', label: '売上目標', unit: '万円', icon: <DollarSign size={16} />, color: 'emerald' },
+                                    { key: 'enrollRate', label: '入会率目標', unit: '%', icon: <CheckCircle size={16} />, color: 'blue' },
+                                    { key: 'cpaTarget', label: 'CPA目標', unit: '円', icon: <Wallet size={16} />, color: 'amber' },
+                                ].map(g => (
+                                    <div key={g.key} className={`bg-white rounded-xl border border-slate-200 p-3 shadow-sm`}>
+                                        <div className="flex items-center gap-1 text-xs text-slate-500 font-bold mb-1">{g.icon}{g.label}</div>
+                                        <div className="flex items-center gap-1">
+                                            <input
+                                                type="number"
+                                                value={planGoals[g.key]}
+                                                onChange={e => setPlanGoals(prev => ({ ...prev, [g.key]: Number(e.target.value) || 0 }))}
+                                                className="w-full text-lg font-black text-slate-800 border border-slate-200 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                                            />
+                                            <span className="text-xs text-slate-400 font-bold whitespace-nowrap">{g.unit}</span>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+
+                            {/* ── 進捗ゲージ ── */}
+                            {(() => {
+                                const a = computePlanActuals();
+                                const goalSalesYen = planGoals.sales * 10000;
+                                const items = [
+                                    { label: '新規集客', current: a.totalNewCount, target: planGoals.newCustomers, unit: '名', color: 'indigo' },
+                                    { label: '売上', current: a.totalSales, target: goalSalesYen, unit: '円', isMoney: true, color: 'emerald' },
+                                    { label: '入会率', current: a.enrollRate, target: planGoals.enrollRate, unit: '%', color: 'blue' },
+                                    { label: 'CPA', current: a.cpa, target: planGoals.cpaTarget, unit: '円', isMoney: true, inverse: true, color: 'amber' },
+                                ];
+                                return (
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                                        {items.map((item, i) => {
+                                            const pct = item.inverse
+                                                ? (item.current > 0 && item.target > 0 ? Math.round((item.target / item.current) * 100) : 0)
+                                                : (item.target > 0 ? Math.round((item.current / item.target) * 100) : 0);
+                                            const clampedPct = Math.min(pct, 100);
+                                            const achieved = pct >= 100;
+                                            const displayCurrent = item.isMoney ? '¥' + item.current.toLocaleString() : item.current + item.unit;
+                                            const displayTarget = item.isMoney ? '¥' + item.target.toLocaleString() : item.target + item.unit;
+                                            return (
+                                                <div key={i} className="bg-white rounded-xl border border-slate-200 p-3 shadow-sm">
+                                                    <div className="flex justify-between items-center mb-1">
+                                                        <span className="text-xs font-bold text-slate-500">{item.label}</span>
+                                                        <span className={`text-xs font-black ${achieved ? 'text-emerald-600' : pct >= 70 ? 'text-blue-600' : 'text-red-500'}`}>{pct}%</span>
+                                                    </div>
+                                                    <div className="text-sm font-black text-slate-800 mb-1">{displayCurrent}<span className="text-slate-400 font-bold text-xs"> / {displayTarget}</span></div>
+                                                    <div className="w-full bg-slate-100 rounded-full h-2">
+                                                        <div className={`h-2 rounded-full transition-all ${achieved ? 'bg-emerald-500' : pct >= 70 ? 'bg-blue-500' : 'bg-red-400'}`} style={{ width: clampedPct + '%' }}></div>
+                                                    </div>
+                                                    {item.label === '新規集客' && !item.inverse && item.current < item.target && (
+                                                        <div className="text-xs text-red-500 font-bold mt-1">あと{item.target - item.current}名</div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                );
+                            })()}
+
+                            {/* ── クイックアクションボタン ── */}
+                            <div className="flex flex-wrap gap-2 mb-4">
+                                {[
+                                    '新規' + planGoals.newCustomers + '名達成するためのアイディアは？',
+                                    '売上' + planGoals.sales + '万達成するためのアクションは？',
+                                    '現在の課題と改善策を提案して',
+                                    '今の数字から来月の事業計画を立てて',
+                                    'CPA¥' + planGoals.cpaTarget.toLocaleString() + '以下にする方法は？',
+                                ].map((q, i) => (
+                                    <button key={i}
+                                        onClick={() => handlePlanSubmit(q)}
+                                        disabled={planLoading}
+                                        className="text-xs bg-indigo-50 text-indigo-700 font-bold px-3 py-1.5 rounded-full hover:bg-indigo-100 transition-colors border border-indigo-200 disabled:opacity-50"
+                                    >
+                                        <Lightbulb size={12} className="inline mr-1" />{q}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* ── AIチャットエリア ── */}
+                            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col" style={{ height: 'calc(100vh - 440px)', minHeight: '350px' }}>
+                                <div className="px-4 py-3 border-b border-slate-100 flex items-center gap-2">
+                                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center"><span className="text-white text-sm">AI</span></div>
+                                    <div>
+                                        <div className="text-sm font-black text-slate-800">経営顧問AI</div>
+                                        <div className="text-xs text-slate-400">目標達成のための戦略を一緒に考えます</div>
+                                    </div>
+                                </div>
+
+                                <div ref={planChatRef} className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin">
+                                    {planMessages.length === 0 && (
+                                        <div className="text-center py-12">
+                                            <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-gradient-to-br from-indigo-100 to-purple-100 flex items-center justify-center">
+                                                <Target size={28} className="text-indigo-500" />
+                                            </div>
+                                            <p className="text-slate-600 font-bold text-sm mb-2">目標達成に向けた戦略を相談できます</p>
+                                            <div className="text-xs text-slate-400 space-y-1 max-w-xs mx-auto">
+                                                <p>上の目標値を設定して、クイックボタンを押すか</p>
+                                                <p>自由に質問を入力してください</p>
+                                            </div>
+                                        </div>
+                                    )}
+                                    {planMessages.map((msg, idx) => (
+                                        <div key={idx} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                            <div className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm ${
+                                                msg.type === 'user'
+                                                    ? 'bg-indigo-500 text-white font-bold'
+                                                    : 'bg-slate-50 text-slate-700 border border-slate-200'
+                                            }`}>
+                                                <div className="whitespace-pre-wrap break-words" style={{ lineHeight: '1.6' }}>{msg.content}</div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                    {planLoading && (
+                                        <div className="flex justify-start">
+                                            <div className="bg-slate-50 rounded-2xl px-4 py-3 border border-slate-200">
+                                                <div className="flex gap-1"><div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce"></div><div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{animationDelay:'0.15s'}}></div><div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{animationDelay:'0.3s'}}></div></div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="p-3 border-t border-slate-100 flex gap-2">
+                                    <input
+                                        type="text"
+                                        value={planInput}
+                                        onChange={e => setPlanInput(e.target.value)}
+                                        onKeyPress={e => e.key === 'Enter' && handlePlanSubmit()}
+                                        placeholder="事業計画について質問..."
+                                        className="flex-1 bg-slate-50 rounded-xl px-4 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-indigo-300 border border-slate-200"
+                                        disabled={planLoading}
+                                    />
+                                    <button
+                                        onClick={() => handlePlanSubmit()}
+                                        disabled={!planInput.trim() || planLoading}
+                                        className="bg-indigo-500 text-white rounded-xl px-4 py-2.5 font-bold hover:bg-indigo-600 disabled:opacity-50 transition-colors"
+                                    >
+                                        <Send size={16} />
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {/* チャットアシスタント */}
                     <div className="fixed bottom-6 right-6 z-50">
                         {/* チャットパネル */}
@@ -9341,7 +9657,8 @@
                 { id: 'dashboard', label: '経営指標', icon: <Home size={20} />, mobileIcon: <Home size={18} /> },
                 { id: 'charts', label: 'ダッシュボード', icon: <BarChart3 size={20} />, mobileIcon: <BarChart3 size={18} /> },
                 { id: 'marketing', label: 'マーケティング', icon: <Megaphone size={20} />, mobileIcon: <Megaphone size={18} /> },
-                { id: 'square', label: 'サブスク分析', icon: <CreditCard size={20} />, mobileIcon: <CreditCard size={18} /> }
+                { id: 'square', label: 'サブスク分析', icon: <CreditCard size={20} />, mobileIcon: <CreditCard size={18} /> },
+                { id: 'planning', label: '事業計画', icon: <Target size={20} />, mobileIcon: <Target size={18} /> }
             ];
 
             return (

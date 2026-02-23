@@ -134,9 +134,8 @@ function buildMessages(question, history = [], dataContext = '') {
 // ── API パラメータ設定 ──────────────────────────────────────────
 // モデル優先順位: 利用可能な最新モデルから順にフォールバック
 const MODELS = [
-  'claude-sonnet-4-5-20250514',
-  'claude-3-7-sonnet-20250219',
-  'claude-3-5-sonnet-20241022',
+  'claude-sonnet-4-5',          // Sonnet 4.5（高品質・コスパ最適）
+  'claude-haiku-4-5',           // Haiku 4.5（高速・低コストフォールバック）
 ];
 const MAX_TOKENS = 8192;
 

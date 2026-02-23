@@ -183,6 +183,184 @@
         const X = (props) => <Icon {...props}><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></Icon>;
         const Lightbulb = (props) => <Icon {...props}><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/></Icon>;
         const Send = (props) => <Icon {...props}><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></Icon>;
+        const Link2 = (props) => <Icon {...props}><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></Icon>;
+        const ExternalLink = (props) => <Icon {...props}><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></Icon>;
+        const Plus = (props) => <Icon {...props}><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></Icon>;
+        const Trash2 = (props) => <Icon {...props}><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></Icon>;
+        const Bookmark = (props) => <Icon {...props}><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></Icon>;
+
+        // ── 簡易Markdownレンダラー（AIレスポンス用） ──
+        const renderMarkdown = (text) => {
+            if (!text) return null;
+            // 前処理: テーブル行間の空行を除去（AIが空行を入れてもテーブルを壊さない）
+            const rawLines = text.split('\n');
+            const lines = [];
+            for (let i = 0; i < rawLines.length; i++) {
+                const cur = rawLines[i].trim();
+                // 空行の次の行がテーブル行なら空行をスキップ
+                if (cur === '' && i + 1 < rawLines.length && rawLines[i + 1].trim().startsWith('|') && rawLines[i + 1].trim().endsWith('|')) continue;
+                // 前の行がテーブル行で次の行もテーブル行なら空行をスキップ
+                if (cur === '' && i > 0 && rawLines[i - 1].trim().startsWith('|') && rawLines[i - 1].trim().endsWith('|')) continue;
+                lines.push(rawLines[i]);
+            }
+            const elements = [];
+            let listItems = [];
+            let listType = null;
+            let tableRows = [];
+            let inTable = false;
+
+            const flushList = () => {
+                if (listItems.length > 0) {
+                    if (listType === 'ol') {
+                        elements.push(React.createElement('ol', { key: 'ol-' + elements.length, className: 'list-decimal list-inside space-y-0.5 my-1.5 text-sm' }, listItems));
+                    } else {
+                        elements.push(React.createElement('ul', { key: 'ul-' + elements.length, className: 'list-disc list-inside space-y-0.5 my-1.5 text-sm' }, listItems));
+                    }
+                    listItems = [];
+                    listType = null;
+                }
+            };
+
+            const flushTable = () => {
+                if (tableRows.length < 2) { tableRows = []; inTable = false; return; }
+                // ヘッダーとセパレータを検出
+                let headerIdx = -1;
+                let sepIdx = -1;
+                for (let ti = 0; ti < tableRows.length; ti++) {
+                    if (tableRows[ti] === null) { sepIdx = ti; headerIdx = ti - 1; break; }
+                }
+                if (headerIdx < 0 || sepIdx < 0) {
+                    // セパレータなし → 全行をデータ行として表示（ヘッダーは最初の行）
+                    headerIdx = 0;
+                    sepIdx = -1;
+                }
+                const headerCells = tableRows[headerIdx];
+                const bodyRows = tableRows.filter((r, idx) => r !== null && idx !== headerIdx);
+                if (!headerCells || headerCells.length === 0) { tableRows = []; inTable = false; return; }
+                elements.push(
+                    React.createElement('div', { key: 'tbl-' + elements.length, className: 'overflow-x-auto my-3 rounded-lg border border-slate-200' },
+                        React.createElement('table', { className: 'w-full text-xs border-collapse' },
+                            React.createElement('thead', null,
+                                React.createElement('tr', { className: 'bg-gradient-to-r from-slate-50 to-slate-100' },
+                                    headerCells.map((c, ci) => React.createElement('th', { key: ci, className: 'px-3 py-2 text-left font-black text-slate-700 border-b-2 border-slate-200 whitespace-nowrap' }, parseInline(c.trim())))
+                                )
+                            ),
+                            bodyRows.length > 0 ? React.createElement('tbody', null,
+                                bodyRows.map((row, ri) =>
+                                    React.createElement('tr', { key: ri, className: (ri % 2 === 0 ? 'bg-white' : 'bg-slate-50/50') + ' hover:bg-indigo-50/30 transition-colors' },
+                                        row.map((c, ci) => React.createElement('td', { key: ci, className: 'px-3 py-2 border-b border-slate-100 text-slate-700' }, parseInline(c.trim())))
+                                    )
+                                )
+                            ) : null
+                        )
+                    )
+                );
+                tableRows = [];
+                inTable = false;
+            };
+
+            const parseInline = (text) => {
+                if (!text || typeof text !== 'string') return text || '';
+                const parts = [];
+                let idx = 0;
+                const regex = /(\*\*(.+?)\*\*)|(\[([^\]]+)\]\(([^)]+)\))|(`([^`]+)`)/g;
+                let match;
+                let lastIdx = 0;
+                while ((match = regex.exec(text)) !== null) {
+                    if (match.index > lastIdx) {
+                        parts.push(text.slice(lastIdx, match.index));
+                    }
+                    if (match[1]) {
+                        parts.push(React.createElement('strong', { key: 'b' + idx++, className: 'font-black text-slate-800' }, match[2]));
+                    } else if (match[3]) {
+                        parts.push(React.createElement('a', { key: 'a' + idx++, href: match[5], target: '_blank', rel: 'noopener', className: 'text-indigo-600 hover:text-indigo-800 underline underline-offset-2 inline-flex items-center gap-0.5' }, match[4], React.createElement(ExternalLink, { size: 10 })));
+                    } else if (match[6]) {
+                        parts.push(React.createElement('code', { key: 'c' + idx++, className: 'bg-slate-100 text-indigo-700 px-1 py-0.5 rounded text-xs font-mono' }, match[7]));
+                    }
+                    lastIdx = match.index + match[0].length;
+                }
+                if (lastIdx < text.length) {
+                    parts.push(text.slice(lastIdx));
+                }
+                return parts.length > 0 ? parts : text;
+            };
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                const trimmed = line.trim();
+
+                // Table row detection（|で始まり|で終わる行）
+                if (trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.length > 1) {
+                    flushList();
+                    const cells = trimmed.slice(1, -1).split('|');
+                    if (trimmed.match(/^\|[\s\-:|]+\|$/)) {
+                        tableRows.push(null); // separator
+                    } else {
+                        tableRows.push(cells);
+                    }
+                    inTable = true;
+                    continue;
+                }
+
+                // 空行: テーブル中なら無視（AIが空行を入れてもOK）
+                if (!trimmed) {
+                    if (inTable) continue; // テーブル中の空行はスキップ
+                    flushList();
+                    continue;
+                }
+
+                // テーブル以外の行が来たらテーブルを確定
+                if (inTable) {
+                    flushTable();
+                }
+
+                // Headings
+                if (trimmed.startsWith('### ')) {
+                    flushList();
+                    elements.push(React.createElement('h4', { key: 'h4-' + i, className: 'text-xs font-black text-slate-700 mt-3 mb-1 flex items-center gap-1' }, parseInline(trimmed.slice(4))));
+                    continue;
+                }
+                if (trimmed.startsWith('## ')) {
+                    flushList();
+                    elements.push(React.createElement('h3', { key: 'h3-' + i, className: 'text-sm font-black text-slate-800 mt-3 mb-1 border-b border-slate-100 pb-1' }, parseInline(trimmed.slice(3))));
+                    continue;
+                }
+                if (trimmed.startsWith('# ')) {
+                    flushList();
+                    elements.push(React.createElement('h2', { key: 'h2-' + i, className: 'text-base font-black text-slate-900 mt-3 mb-1.5' }, parseInline(trimmed.slice(2))));
+                    continue;
+                }
+
+                // Horizontal rule
+                if (trimmed === '---' || trimmed === '***') {
+                    flushList();
+                    elements.push(React.createElement('hr', { key: 'hr-' + i, className: 'my-2 border-slate-200' }));
+                    continue;
+                }
+
+                // Ordered list
+                const olMatch = trimmed.match(/^(\d+)\.\s+(.+)/);
+                if (olMatch) {
+                    if (listType !== 'ol') { flushList(); listType = 'ol'; }
+                    listItems.push(React.createElement('li', { key: 'li-' + i, className: 'text-slate-700 leading-relaxed' }, parseInline(olMatch[2])));
+                    continue;
+                }
+
+                // Unordered list
+                if (trimmed.startsWith('- ') || trimmed.startsWith('• ') || trimmed.startsWith('* ')) {
+                    if (listType !== 'ul') { flushList(); listType = 'ul'; }
+                    listItems.push(React.createElement('li', { key: 'li-' + i, className: 'text-slate-700 leading-relaxed' }, parseInline(trimmed.slice(2))));
+                    continue;
+                }
+
+                // Regular paragraph
+                flushList();
+                elements.push(React.createElement('p', { key: 'p-' + i, className: 'text-sm text-slate-700 leading-relaxed my-0.5' }, parseInline(trimmed)));
+            }
+            flushList();
+            flushTable();
+            return elements;
+        };
 
         console.log('✅ All icon components defined');
 
@@ -575,10 +753,25 @@
             const [planInput, setPlanInput] = useState('');
             const [planLoading, setPlanLoading] = useState(false);
             const planChatRef = useRef(null);
+            // 参考リンク管理
+            const [planLinks, setPlanLinks] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('naoru_plan_links');
+                    return saved ? JSON.parse(saved) : [];
+                } catch { return []; }
+            });
+            const [showLinkEditor, setShowLinkEditor] = useState(false);
+            const [newLinkTitle, setNewLinkTitle] = useState('');
+            const [newLinkUrl, setNewLinkUrl] = useState('');
+            const [newLinkCategory, setNewLinkCategory] = useState('参考資料');
             // 目標値の保存
             useEffect(() => {
                 try { localStorage.setItem('naoru_plan_goals', JSON.stringify(planGoals)); } catch {}
             }, [planGoals]);
+            // リンクの保存
+            useEffect(() => {
+                try { localStorage.setItem('naoru_plan_links', JSON.stringify(planLinks)); } catch {}
+            }, [planLinks]);
             // 初期店舗選択: rawDataが読み込まれたら最初の店舗を選択
             useEffect(() => {
                 if (!planSelectedBranch && rawData.length > 0) {
@@ -4731,6 +4924,17 @@
                 lines.push(newGap > 0 ? '新規ギャップ: あと' + newGap + '名必要' : '新規目標: 達成済み！');
                 lines.push(a.enrollRate < planGoals.enrollRate ? '入会率ギャップ: あと' + (planGoals.enrollRate - a.enrollRate) + 'ポイント改善が必要' : '入会率目標: 達成済み！');
                 lines.push(a.cpa > planGoals.cpaTarget && a.cpa > 0 ? 'CPAギャップ: ¥' + (a.cpa - planGoals.cpaTarget).toLocaleString() + '削減が必要' : 'CPA目標: 達成済み！');
+                // 参考リンク
+                if (planLinks.length > 0) {
+                    lines.push('', '【参考リンク（回答の中で関連するものがあれば[タイトル](URL)形式のMarkdownリンクとして積極的に紹介してください）】');
+                    planLinks.forEach(l => {
+                        lines.push('- ' + l.title + ' (' + l.category + '): ' + l.url);
+                    });
+                }
+                lines.push('', '【回答フォーマット指示】');
+                lines.push('- Markdownで構造化して回答してください（## 見出し、**太字**、- 箇条書き、| 表 |）');
+                lines.push('- コンパクトにまとめ、冗長な説明は避けてください');
+                lines.push('- 参考リンクが関連する場合は[タイトル](URL)形式で本文中に自然に挿入してください');
                 return lines.join('\n') + '\n\n' + base;
             };
 
@@ -8327,6 +8531,68 @@
                                                 <div className="flex gap-4"><span>売上</span><span>新規</span><span>入会率</span></div>
                                             </div>
                                         </div>
+
+                                        {/* 参考リンク管理 */}
+                                        <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+                                            <div className="flex items-center justify-between mb-2">
+                                                <h3 className="text-sm font-black text-slate-700 flex items-center gap-1.5">
+                                                    <Bookmark size={15} className="text-indigo-500" /> 参考リンク
+                                                </h3>
+                                                <button onClick={() => setShowLinkEditor(!showLinkEditor)}
+                                                    className="text-xs text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-0.5">
+                                                    <Plus size={12} /> 追加
+                                                </button>
+                                            </div>
+                                            <p className="text-xs text-slate-400 mb-2">登録したリンクはAIが回答時に参照・引用します</p>
+
+                                            {showLinkEditor && (
+                                                <div className="bg-slate-50 rounded-lg p-3 mb-2 space-y-2">
+                                                    <input type="text" placeholder="タイトル（例: HPB管理画面）" value={newLinkTitle}
+                                                        onChange={e => setNewLinkTitle(e.target.value)}
+                                                        className="w-full text-xs bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-indigo-300 font-bold" />
+                                                    <input type="text" placeholder="URL（https://...）" value={newLinkUrl}
+                                                        onChange={e => setNewLinkUrl(e.target.value)}
+                                                        className="w-full text-xs bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-indigo-300 font-mono" />
+                                                    <div className="flex items-center gap-2">
+                                                        <select value={newLinkCategory} onChange={e => setNewLinkCategory(e.target.value)}
+                                                            className="text-xs bg-white border border-slate-200 rounded-lg px-2 py-1.5 outline-none font-bold flex-1">
+                                                            <option>参考資料</option>
+                                                            <option>広告管理</option>
+                                                            <option>分析ツール</option>
+                                                            <option>マニュアル</option>
+                                                            <option>競合情報</option>
+                                                            <option>その他</option>
+                                                        </select>
+                                                        <button onClick={() => {
+                                                            if (newLinkTitle.trim() && newLinkUrl.trim()) {
+                                                                setPlanLinks(prev => [...prev, { title: newLinkTitle.trim(), url: newLinkUrl.trim(), category: newLinkCategory, id: Date.now() }]);
+                                                                setNewLinkTitle(''); setNewLinkUrl(''); setShowLinkEditor(false);
+                                                            }
+                                                        }} className="text-xs bg-indigo-500 text-white font-bold px-3 py-1.5 rounded-lg hover:bg-indigo-600">保存</button>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {planLinks.length > 0 ? (
+                                                <div className="space-y-1">
+                                                    {planLinks.map(link => (
+                                                        <div key={link.id} className="flex items-center gap-2 bg-slate-50 rounded-lg px-2.5 py-1.5 group">
+                                                            <Link2 size={12} className="text-slate-400 shrink-0" />
+                                                            <div className="flex-1 min-w-0">
+                                                                <a href={link.url} target="_blank" rel="noopener" className="text-xs font-bold text-indigo-600 hover:text-indigo-800 truncate block">{link.title}</a>
+                                                                <span className="text-xs text-slate-400">{link.category}</span>
+                                                            </div>
+                                                            <button onClick={() => setPlanLinks(prev => prev.filter(l => l.id !== link.id))}
+                                                                className="opacity-0 group-hover:opacity-100 transition-opacity text-slate-400 hover:text-red-500">
+                                                                <Trash2 size={12} />
+                                                            </button>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ) : (
+                                                <div className="text-xs text-slate-400 text-center py-2">リンク未登録</div>
+                                            )}
+                                        </div>
                                     </div>
 
                                     {/* ── 右カラム: AIチャット ── */}
@@ -8376,13 +8642,15 @@
                                                 )}
                                                 {planMessages.map((msg, idx) => (
                                                     <div key={idx} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                                        <div className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm ${
-                                                            msg.type === 'user'
-                                                                ? 'bg-indigo-500 text-white font-bold'
-                                                                : 'bg-slate-50 text-slate-700 border border-slate-200'
-                                                        }`}>
-                                                            <div className="whitespace-pre-wrap break-words" style={{ lineHeight: '1.7' }}>{msg.content}</div>
-                                                        </div>
+                                                        {msg.type === 'user' ? (
+                                                            <div className="max-w-[80%] rounded-2xl px-4 py-2.5 text-sm bg-indigo-500 text-white font-bold">
+                                                                <div className="break-words">{msg.content}</div>
+                                                            </div>
+                                                        ) : (
+                                                            <div className="max-w-[90%] rounded-2xl px-4 py-3 bg-slate-50 border border-slate-200">
+                                                                <div className="break-words plan-ai-response">{renderMarkdown(msg.content)}</div>
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 ))}
                                                 {planLoading && (

@@ -61,14 +61,41 @@ describe('index.html - 必須コンポーネント', () => {
   });
 });
 
-describe('index.html - API呼び出し', () => {
-  it('GAS APIのURLが定義されている', () => {
-    expect(html).toContain('GAS_API_URL');
-    expect(html).toContain('script.google.com');
+describe('index.html - 認証', () => {
+  it('認証stateが定義されている', () => {
+    expect(html).toContain('authState');
+    expect(html).toContain('setAuthState');
   });
 
-  it('マーケティングAPIのURLが定義されている', () => {
+  it('ログイン画面がある', () => {
+    expect(html).toContain('handleLogin');
+    expect(html).toContain('authPassword');
+    expect(html).toContain('パスワードを入力');
+  });
+
+  it('ログアウト機能がある', () => {
+    expect(html).toContain('handleLogout');
+    expect(html).toContain('ログアウト');
+  });
+
+  it('認証トークンをlocalStorageに保存する', () => {
+    expect(html).toContain('naoru_auth_token');
+  });
+
+  it('トークン検証APIを呼び出す', () => {
+    expect(html).toContain('/api/auth');
+    expect(html).toContain("action: 'verify'");
+  });
+});
+
+describe('index.html - API呼び出し', () => {
+  it('GAS APIがプロキシ経由になっている', () => {
+    expect(html).toContain('/api/gas-proxy');
+  });
+
+  it('マーケティングAPIがプロキシ経由になっている', () => {
     expect(html).toContain('MARKETING_API_URL');
+    expect(html).toContain('/api/gas-proxy');
   });
 
   it('Square APIのURLが定義されている', () => {
@@ -86,5 +113,13 @@ describe('index.html - セキュリティ', () => {
     expect(html).not.toMatch(/sk-[a-zA-Z0-9]{20,}/);
     expect(html).not.toMatch(/ANTHROPIC_API_KEY\s*=\s*['"][^'"]+['"]/);
     expect(html).not.toMatch(/sq_live_[a-zA-Z0-9]+/);
+  });
+
+  it('GAS URLがフロントエンドにハードコードされていない', () => {
+    expect(html).not.toContain('script.google.com/macros/s/');
+  });
+
+  it('Google Apps Script deployment IDが露出していない', () => {
+    expect(html).not.toMatch(/AKfycb[a-zA-Z0-9_-]+/);
   });
 });

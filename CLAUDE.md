@@ -1,0 +1,67 @@
+# NAORU Dashboard
+
+## プロジェクト概要
+NAORU整骨院グループの経営ダッシュボード。GAS(Google Apps Script)・Square API・Claude AIを統合した分析ツール。
+
+## 技術スタック
+- **フロントエンド**: React (CDN/Babel standalone) + Tailwind CSS — `index.html` 単一ファイル
+- **バックエンド**: Vercel Serverless Functions (`api/`)
+- **テスト**: Vitest
+- **AI**: Claude API (`api/chat.js`)
+- **決済**: Square API (`api/square/`)
+- **認証**: パスワードベース (`api/auth.js`)
+
+## コマンド
+
+### テスト実行（必須）
+```bash
+npm test          # 全テスト実行（変更後は必ず実行）
+npm run test:watch  # ウォッチモード
+```
+
+### デプロイ
+Vercelにpushすると自動デプロイ。
+
+## テスト構成
+
+| ファイル | 内容 |
+|----------|------|
+| `tests/auth-api.test.js` | 認証API（ログイン・トークン検証・パスワード未設定時の挙動） |
+| `tests/chat-api.test.js` | API バリデーション・メッセージ構築・システムプロンプト検証 |
+| `tests/markdown.test.js` | Markdownパーサー（見出し・リスト・テーブル・インライン要素） |
+| `tests/plan-calc.test.js` | 事業計画データ計算（店舗別集計・媒体別CPA・ランキング） |
+| `tests/html-structure.test.js` | フロントエンド構造検証（認証・API・セキュリティ） |
+
+## ファイル構成
+```
+index.html          # フロントエンド（React SPA）
+api/
+  auth.js           # 認証API（パスワード検証・トークン発行）
+  gas-proxy.js      # GAS APIプロキシ（秘密URL隠蔽）
+  chat.js           # Claude AI チャットAPI
+  health.js         # ヘルスチェック
+  square/
+    metrics.js      # Square サブスクデータ集計
+    test.js         # Square API接続テスト
+lib/
+  markdown.js       # Markdownパーサー（テスト用分離モジュール）
+  plan-calc.js      # 事業計画計算ロジック（テスト用分離モジュール）
+tests/              # Vitestテスト
+```
+
+## セキュリティ
+- **認証**: `DASHBOARD_PASSWORD` 環境変数でパスワード保護。未設定時は認証スキップ（開発用）
+- **秘密情報**: GAS URL等はサーバーサイド(`api/gas-proxy.js`)経由。フロントにハードコードしない
+- **環境変数**: Vercelの環境変数に以下を設定
+  - `DASHBOARD_PASSWORD` — ダッシュボードログインパスワード
+  - `GAS_API_URL` — 経営データ用GAS URL
+  - `MARKETING_API_URL` — マーケティングデータ用GAS URL
+  - `ANTHROPIC_API_KEY` — Claude AI APIキー
+  - `SQUARE_TOKENS` — Square APIトークン（JSON配列）
+
+## 開発ルール
+- `index.html` を編集したら `npm test` を実行して構造テストを通す
+- `api/chat.js` を編集したら `tests/chat-api.test.js` のテストを通す
+- 新しいビジネスロジックは `lib/` に分離してテストを書く
+- **絶対にAPIキーやトークンをコードにハードコードしない**（`.env` + Vercel環境変数を使う）
+- GAS URLはフロントに直接書かず、`/api/gas-proxy` 経由にする

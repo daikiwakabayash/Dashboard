@@ -193,7 +193,7 @@
         const MARKETING_CACHE_KEY = 'marketing_data_cache';
         const SQUARE_CACHE_KEY = 'square_data_cache_v5'; // v5: インボイス取得期間を25ヶ月に拡張
         const UI_STATE_KEY = 'dashboard_ui_state';
-        const CACHE_EXPIRY_MS = 30 * 60 * 1000; // 30分（GASタイムアウト対策）
+        const CACHE_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24時間（1日1回の読み込みで十分）
         const BATCH_SIZE = 5; // バッチあたりのアカウント数（5アカウント×5並列で75店舗を3ラウンドで完走）
         const MAX_CONCURRENT_BATCHES = 5; // 同時バッチリクエスト数
 
@@ -360,11 +360,11 @@
                 const { data, timestamp } = JSON.parse(cached);
                 const age = Date.now() - timestamp;
                 if (age > CACHE_EXPIRY_MS) {
-                    if (allowStale && age < CACHE_EXPIRY_MS * 2 && data) {
-                        console.log('📦 Using stale marketing cache (age:', Math.round(age / 1000), 's)');
+                    if (allowStale && age < STALE_MAX_MS && data) {
+                        console.log('📦 Using stale marketing cache (age:', Math.round(age / 3600000), 'h)');
                         return data;
                     }
-                    localStorage.removeItem(MARKETING_CACHE_KEY);
+                    if (age > STALE_MAX_MS) localStorage.removeItem(MARKETING_CACHE_KEY);
                     return null;
                 }
                 console.log('📦 Using cached marketing data');
@@ -385,6 +385,7 @@
         };
 
         // キャッシュヘルパー関数
+        const STALE_MAX_MS = 7 * 24 * 60 * 60 * 1000; // staleキャッシュは最大7日間保持
         const getCachedData = (allowStale = false) => {
             try {
                 const cached = localStorage.getItem(CACHE_KEY);
@@ -396,16 +397,16 @@
 
                 // キャッシュが期限切れかチェック
                 if (age > CACHE_EXPIRY_MS) {
-                    // stale許容時: 60分以内なら期限切れデータも返す（裏で更新）
-                    if (allowStale && age < CACHE_EXPIRY_MS * 2 && data) {
-                        console.log('📦 Using stale cached data (age:', Math.round(age / 1000), 'seconds) - will refresh');
+                    // stale許容時: 7日以内なら期限切れデータも返す（裏で更新）
+                    if (allowStale && age < STALE_MAX_MS && data) {
+                        console.log('📦 Using stale cached data (age:', Math.round(age / 3600000), 'hours) - will refresh in background');
                         return data;
                     }
-                    localStorage.removeItem(CACHE_KEY);
+                    if (age > STALE_MAX_MS) localStorage.removeItem(CACHE_KEY);
                     return null;
                 }
 
-                console.log('📦 Using cached data (age:', Math.round(age / 1000), 'seconds)');
+                console.log('📦 Using cached data (age:', Math.round(age / 3600000), 'hours)');
                 return data;
             } catch (e) {
                 console.error('❌ Cache read error:', e);
@@ -466,8 +467,26 @@
             const savedUIState = getUIState();
 
             const [currentPage, setCurrentPage] = useState(savedUIState?.currentPage || 'dashboard');
-            const [rawData, setRawData] = useState([]);
-            const [loading, setLoading] = useState(true);
+            const [rawData, setRawData] = useState(() => {
+                try {
+                    const cached = localStorage.getItem(CACHE_KEY);
+                    if (cached) {
+                        const { data } = JSON.parse(cached);
+                        if (data && data.length > 0) return data;
+                    }
+                } catch {}
+                return [];
+            });
+            const [loading, setLoading] = useState(() => {
+                try {
+                    const cached = localStorage.getItem(CACHE_KEY);
+                    if (cached) {
+                        const { data } = JSON.parse(cached);
+                        if (data && data.length > 0) return false; // キャッシュがあればローディング不要
+                    }
+                } catch {}
+                return true;
+            });
             const [error, setError] = useState(null);
             const [lastFetchTime, setLastFetchTime] = useState(null);
             const [startMonth, setStartMonth] = useState(savedUIState?.startMonth || "");
@@ -653,30 +672,28 @@
 
                     // Step 0: キャッシュを先にチェック（ネットワーク呼び出し前に即座に表示）
                     let hasStaleCache = false;
-                    if (!forceRefresh) {
-                        try {
-                            const cached = localStorage.getItem(SQUARE_CACHE_KEY);
-                            if (cached) {
-                                const parsed = JSON.parse(cached);
-                                if (parsed.timestamp && parsed.data) {
-                                    const age = Date.now() - parsed.timestamp;
-                                    if (age < CACHE_EXPIRY_MS) {
-                                        console.log('Using cached Square data (skip info fetch)');
-                                        setSqData(parsed.data);
-                                        setSqLastFetch(new Date(parsed.timestamp));
-                                        return;
-                                    }
-                                    // 30分超〜60分以内: stale表示して裏で更新（info取得を並列で進める）
-                                    if (age < CACHE_EXPIRY_MS * 2) {
-                                        console.log('Showing stale cache, refreshing in background...');
-                                        setSqData(parsed.data);
-                                        setSqLastFetch(new Date(parsed.timestamp));
-                                        hasStaleCache = true;
-                                    }
+                    try {
+                        const cached = localStorage.getItem(SQUARE_CACHE_KEY);
+                        if (cached) {
+                            const parsed = JSON.parse(cached);
+                            if (parsed.timestamp && parsed.data) {
+                                const age = Date.now() - parsed.timestamp;
+                                if (age < CACHE_EXPIRY_MS && !forceRefresh) {
+                                    console.log('Using cached Square data (skip info fetch)');
+                                    setSqData(parsed.data);
+                                    setSqLastFetch(new Date(parsed.timestamp));
+                                    return;
+                                }
+                                // 期限切れでも7日以内ならstale表示して裏で更新
+                                if (age < STALE_MAX_MS) {
+                                    console.log('Showing stale Square cache, refreshing in background...');
+                                    setSqData(parsed.data);
+                                    setSqLastFetch(new Date(parsed.timestamp));
+                                    hasStaleCache = true;
                                 }
                             }
-                        } catch (e) { /* cache miss */ }
-                    }
+                        }
+                    } catch (e) { /* cache miss */ }
 
                     // Step 1: アカウント一覧を取得
                     let infoData = null;
@@ -694,20 +711,18 @@
                         totalAccounts = infoData.accounts.length;
                     } catch (infoErr) {
                         // info取得失敗時はキャッシュがあれば使う（オフライン対応）
-                        if (!forceRefresh) {
-                            try {
-                                const cached = localStorage.getItem(SQUARE_CACHE_KEY);
-                                if (cached) {
-                                    const parsed = JSON.parse(cached);
-                                    if (parsed.data) {
-                                        console.log('Info fetch failed, using cached data');
-                                        setSqData(parsed.data);
-                                        setSqLastFetch(new Date(parsed.timestamp));
-                                        return;
-                                    }
+                        try {
+                            const cached = localStorage.getItem(SQUARE_CACHE_KEY);
+                            if (cached) {
+                                const parsed = JSON.parse(cached);
+                                if (parsed.data) {
+                                    console.log('Info fetch failed, using cached data');
+                                    setSqData(parsed.data);
+                                    setSqLastFetch(new Date(parsed.timestamp));
+                                    return;
                                 }
-                            } catch (e) { /* cache miss */ }
-                        }
+                            }
+                        } catch (e) { /* cache miss */ }
                         throw infoErr;
                     }
 
@@ -1032,7 +1047,7 @@
                 // マーケティングデータもプリロード（タブ切り替え時の待ち時間を削減）
                 fetchMarketingData();
 
-                // Auto-refresh every 5 minutes (only when tab is visible)
+                // Auto-refresh every 6 hours (only when tab is visible)
                 const autoRefreshInterval = setInterval(() => {
                     if (document.hidden) {
                         console.log('🔄 Auto-refresh skipped (tab hidden)');
@@ -1041,7 +1056,7 @@
                     console.log('🔄 Auto-refresh triggered');
                     fetchDataFromSpreadsheet(true);
                     fetchMarketingData(true);
-                }, 5 * 60 * 1000);
+                }, 6 * 60 * 60 * 1000);
 
                 const handleClickOutside = (event) => {
                     if (branchMenuRef.current && !branchMenuRef.current.contains(event.target)) {

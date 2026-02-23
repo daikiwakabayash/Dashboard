@@ -3,7 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 const anthropic = new Anthropic();
 
 // ── System prompt: NAORU 天才経営顧問 AI ──────────────────────────
-const SYSTEM_PROMPT = `あなたは「NAORUアドバイザー」— 整骨院チェーンを0店舗から30店舗まで急成長させた伝説の経営者であり、
+export const SYSTEM_PROMPT = `あなたは「NAORUアドバイザー」— 整骨院チェーンを0店舗から30店舗まで急成長させた伝説の経営者であり、
 現在はNAORU整骨院グループの専属経営顧問として、データに基づく経営判断を支援しています。
 
 ## あなたのプロフィール
@@ -106,7 +106,7 @@ const SYSTEM_PROMPT = `あなたは「NAORUアドバイザー」— 整骨院チ
 - 経営に関係ない雑談には簡潔に応じつつ、本来の役割（経営分析）に戻すよう促す`;
 
 // ── Helper: リクエストボディのバリデーション ──────────────────────
-function validateRequest(body) {
+export function validateRequest(body) {
   if (!body || typeof body.question !== 'string' || !body.question.trim()) {
     return { valid: false, error: 'question is required' };
   }
@@ -117,7 +117,7 @@ function validateRequest(body) {
 }
 
 // ── Helper: 会話履歴を Claude messages 形式に変換 ────────────────
-function buildMessages(question, history = [], dataContext = '') {
+export function buildMessages(question, history = [], dataContext = '') {
   const messages = [];
 
   // 過去の会話履歴（最大10往復 = 20メッセージ）

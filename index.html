@@ -774,11 +774,14 @@
                         setAuthState({ checking: false, authenticated: false, token: null });
                     }
                 }).catch(() => {
-                    setAuthState({ checking: false, authenticated: false, token: null });
+                    // ネットワークエラー時はトークンを保持してログイン状態を維持
+                    console.warn('Auth verification failed (network error), keeping saved token');
+                    setAuthState({ checking: false, authenticated: true, token: authState.token });
                 });
             }, []);
 
-            const handleLogin = async () => {
+            const handleLogin = async (e) => {
+                if (e) e.preventDefault();
                 if (!authPassword.trim()) return;
                 setAuthLoading(true);
                 setAuthError('');
@@ -5216,13 +5219,15 @@
                                 <h1 className="text-xl font-black text-slate-800 italic">NAORU Dashboard</h1>
                                 <p className="text-xs text-slate-400 mt-1">経営ダッシュボードにログイン</p>
                             </div>
-                            <div className="space-y-4">
+                            <form onSubmit={handleLogin} className="space-y-4" autoComplete="on">
+                                <input type="hidden" name="username" autoComplete="username" value="naoru-dashboard" />
                                 <div>
                                     <input
                                         type="password"
+                                        name="password"
+                                        autoComplete="current-password"
                                         value={authPassword}
                                         onChange={e => setAuthPassword(e.target.value)}
-                                        onKeyPress={e => e.key === 'Enter' && handleLogin()}
                                         placeholder="パスワードを入力"
                                         className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent"
                                         autoFocus
@@ -5235,13 +5240,13 @@
                                     </div>
                                 )}
                                 <button
-                                    onClick={handleLogin}
+                                    type="submit"
                                     disabled={authLoading || !authPassword.trim()}
                                     className="w-full bg-indigo-500 text-white font-bold py-3 rounded-xl hover:bg-indigo-600 disabled:opacity-50 transition-colors text-sm"
                                 >
                                     {authLoading ? 'ログイン中...' : 'ログイン'}
                                 </button>
-                            </div>
+                            </form>
                         </div>
                     </div>
                 );

@@ -806,63 +806,12 @@
                 setAuthState({ checking: false, authenticated: false, token: null });
             };
 
-            // 認証チェック中
-            if (authState.checking) {
-                return (
-                    <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-                        <div className="text-center space-y-4">
-                            <Loader2 className="w-10 h-10 text-indigo-600 animate-spin mx-auto" />
-                            <div className="text-slate-500 font-bold text-sm">認証確認中...</div>
-                        </div>
-                    </div>
-                );
-            }
-
-            // 未認証 → ログイン画面
-            if (!authState.authenticated) {
-                return (
-                    <div className="min-h-screen bg-gradient-to-br from-slate-100 to-indigo-50 flex items-center justify-center p-4">
-                        <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-8 w-full max-w-sm">
-                            <div className="text-center mb-6">
-                                <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg">
-                                    <span className="text-white text-2xl font-black italic">N</span>
-                                </div>
-                                <h1 className="text-xl font-black text-slate-800 italic">NAORU Dashboard</h1>
-                                <p className="text-xs text-slate-400 mt-1">経営ダッシュボードにログイン</p>
-                            </div>
-                            <div className="space-y-4">
-                                <div>
-                                    <input
-                                        type="password"
-                                        value={authPassword}
-                                        onChange={e => setAuthPassword(e.target.value)}
-                                        onKeyPress={e => e.key === 'Enter' && handleLogin()}
-                                        placeholder="パスワードを入力"
-                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent"
-                                        autoFocus
-                                        disabled={authLoading}
-                                    />
-                                </div>
-                                {authError && (
-                                    <div className="text-xs text-red-500 font-bold bg-red-50 rounded-lg px-3 py-2 flex items-center gap-1">
-                                        <AlertCircle size={14} /> {authError}
-                                    </div>
-                                )}
-                                <button
-                                    onClick={handleLogin}
-                                    disabled={authLoading || !authPassword.trim()}
-                                    className="w-full bg-indigo-500 text-white font-bold py-3 rounded-xl hover:bg-indigo-600 disabled:opacity-50 transition-colors text-sm"
-                                >
-                                    {authLoading ? 'ログイン中...' : 'ログイン'}
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                );
-            }
+            // 認証チェック中・未認証の場合は後でreturn文で分岐する（Hooksの順序を保つため）
+            const isAuthChecking = authState.checking;
+            const isAuthenticated = authState.authenticated;
 
             // 保存されたUI状態を取得
-            const savedUIState = getUIState();
+            const savedUIState = isAuthenticated ? getUIState() : null;
 
             const [currentPage, setCurrentPage] = useState(savedUIState?.currentPage || 'dashboard');
             const [rawData, setRawData] = useState(() => {
@@ -5242,6 +5191,61 @@
             };
 
             console.log('🎨 Rendering App - loading:', loading, 'error:', error, 'rawData length:', rawData.length);
+
+            // ── 認証チェック中 ──
+            if (isAuthChecking) {
+                return (
+                    <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+                        <div className="text-center space-y-4">
+                            <Loader2 className="w-10 h-10 text-indigo-600 animate-spin mx-auto" />
+                            <div className="text-slate-500 font-bold text-sm">認証確認中...</div>
+                        </div>
+                    </div>
+                );
+            }
+
+            // ── 未認証 → ログイン画面 ──
+            if (!isAuthenticated) {
+                return (
+                    <div className="min-h-screen bg-gradient-to-br from-slate-100 to-indigo-50 flex items-center justify-center p-4">
+                        <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-8 w-full max-w-sm">
+                            <div className="text-center mb-6">
+                                <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg">
+                                    <span className="text-white text-2xl font-black italic">N</span>
+                                </div>
+                                <h1 className="text-xl font-black text-slate-800 italic">NAORU Dashboard</h1>
+                                <p className="text-xs text-slate-400 mt-1">経営ダッシュボードにログイン</p>
+                            </div>
+                            <div className="space-y-4">
+                                <div>
+                                    <input
+                                        type="password"
+                                        value={authPassword}
+                                        onChange={e => setAuthPassword(e.target.value)}
+                                        onKeyPress={e => e.key === 'Enter' && handleLogin()}
+                                        placeholder="パスワードを入力"
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent"
+                                        autoFocus
+                                        disabled={authLoading}
+                                    />
+                                </div>
+                                {authError && (
+                                    <div className="text-xs text-red-500 font-bold bg-red-50 rounded-lg px-3 py-2 flex items-center gap-1">
+                                        <AlertCircle size={14} /> {authError}
+                                    </div>
+                                )}
+                                <button
+                                    onClick={handleLogin}
+                                    disabled={authLoading || !authPassword.trim()}
+                                    className="w-full bg-indigo-500 text-white font-bold py-3 rounded-xl hover:bg-indigo-600 disabled:opacity-50 transition-colors text-sm"
+                                >
+                                    {authLoading ? 'ログイン中...' : 'ログイン'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
 
             if (loading) {
                 console.log('⏳ Rendering loading screen');

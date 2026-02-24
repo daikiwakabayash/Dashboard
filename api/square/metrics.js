@@ -882,15 +882,17 @@ export default async function handler(req, res) {
           failedAccounts.push({ name: cfg.name || `アカウント${idx + 1}`, error: r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です' });
           return;
         }
-        // 店舗を名前で重複排除（同名店舗が複数アカウントに存在する場合にlocationIdsを統合）
+        // 店舗をlocationIdで重複排除（名前ではなく物理ロケーションで判定）
         for (const store of r.stores) {
-          const existing = merged.stores.find(s => s.name === store.name);
+          const storeLocIds = store.locationIds || [store.id];
+          const existing = merged.stores.find(s => {
+            const existingLocIds = s.locationIds || [s.id];
+            return storeLocIds.some(id => existingLocIds.includes(id));
+          });
           if (existing) {
-            const existingLocIds = existing.locationIds || [existing.id];
-            const newLocIds = store.locationIds || [store.id];
-            existing.locationIds = [...new Set([...existingLocIds, ...newLocIds])];
+            existing.locationIds = [...new Set([...(existing.locationIds || [existing.id]), ...storeLocIds])];
           } else {
-            merged.stores.push({ ...store, locationIds: store.locationIds || [store.id] });
+            merged.stores.push({ ...store, locationIds: [...storeLocIds] });
           }
         }
         // アカウント間の重複排除付きマージ
@@ -1004,15 +1006,17 @@ export default async function handler(req, res) {
           failedAccounts.push({ name: cfg.name || `アカウント${j + 1}`, error: r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です' });
           return;
         }
-        // 店舗を名前で重複排除（同名店舗が複数アカウントに存在する場合にlocationIdsを統合）
+        // 店舗をlocationIdで重複排除（名前ではなく物理ロケーションで判定）
         for (const store of r.stores) {
-          const existing = merged.stores.find(s => s.name === store.name);
+          const storeLocIds = store.locationIds || [store.id];
+          const existing = merged.stores.find(s => {
+            const existingLocIds = s.locationIds || [s.id];
+            return storeLocIds.some(id => existingLocIds.includes(id));
+          });
           if (existing) {
-            const existingLocIds = existing.locationIds || [existing.id];
-            const newLocIds = store.locationIds || [store.id];
-            existing.locationIds = [...new Set([...existingLocIds, ...newLocIds])];
+            existing.locationIds = [...new Set([...(existing.locationIds || [existing.id]), ...storeLocIds])];
           } else {
-            merged.stores.push({ ...store, locationIds: store.locationIds || [store.id] });
+            merged.stores.push({ ...store, locationIds: [...storeLocIds] });
           }
         }
         // アカウント間の重複排除付きマージ

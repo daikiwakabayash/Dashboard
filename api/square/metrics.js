@@ -683,16 +683,12 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     if (stores.length === 0) {
       stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];
     }
-    // 店舗リスト構築ロジック:
-    // - consolidate指定あり → 全ロケーションを1店舗に統合（従来互換）
-    // - ロケーションが1件のみ → accountNameでラベル付け（各トークン=1店舗のパターン）
-    // - ロケーションが複数 → 個別店舗としてそのまま返す（1トークンで全店舗アクセスのパターン）
-    if (accountName && tokenConfig.consolidate) {
+    // 店舗リスト構築: accountNameが設定されている場合は全ロケーションを
+    // そのアカウント名で1店舗に統合（SQUARE_TOKENSの1エントリ=1店舗）
+    // accountNameが未設定の場合のみ個別ロケーションとして返す
+    if (accountName) {
       const allLocIds = stores.map(s => s.id);
       stores = [{ id: allLocIds[0], name: accountName, locationIds: allLocIds }];
-    } else if (accountName && stores.length === 1) {
-      // 1ロケーションのみ: accountNameで上書き（"株式会社X" → "恵比寿院" 等）
-      stores = [{ id: stores[0].id, name: accountName, locationIds: [stores[0].id] }];
     } else {
       stores = stores.map(s => ({ ...s, locationIds: [s.id] }));
     }

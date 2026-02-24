@@ -650,9 +650,9 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     if (stores.length === 0) {
       stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];
     }
-    // アカウント名が設定されている場合は全ロケーションを1店舗として統合
-    // （1アカウント = 1店舗。複数ロケーションがあっても1つの店舗として扱う）
-    if (accountName) {
+    // アカウント名が設定されていて明示的にconsolidate指定がある場合のみ、全ロケーションを1店舗に統合
+    // デフォルトは各ロケーションを個別の店舗として返す
+    if (accountName && tokenConfig.consolidate) {
       const allLocIds = stores.map(s => s.id);
       stores = [{ id: allLocIds[0], name: accountName, locationIds: allLocIds }];
     } else {

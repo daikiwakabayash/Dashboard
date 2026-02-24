@@ -889,6 +889,7 @@
             const [sqMonth, setSqMonth] = useState('');
             const [sqTab, setSqTab] = useState('active');
             const [sqSort, setSqSort] = useState({ key: 'paidTotal', dir: 'desc' });
+            const [sqStoreSort, setSqStoreSort] = useState({ key: 'totalSales', dir: 'desc' });
             const [sqDrilldown, setSqDrilldown] = useState(null); // { month, type: 'new'|'canceled' }
             const [sqStoreMenuOpen, setSqStoreMenuOpen] = useState(false);
             const [sqStoreSearch, setSqStoreSearch] = useState('');
@@ -8475,15 +8476,32 @@
                                                         <div className="overflow-x-auto">
                                                             <table className="w-full text-sm">
                                                                 <thead><tr className="bg-slate-50 text-left">
-                                                                    <th className="px-4 py-3 font-black text-slate-500 text-xs">店舗</th>
-                                                                    <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">総売上高</th>
-                                                                    <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">会員数</th>
-                                                                    <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">MRR</th>
-                                                                    <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">ARPU</th>
-                                                                    <th className="px-4 py-3 font-black text-slate-500 text-xs text-right">解約率</th>
+                                                                    {[
+                                                                        { key: 'name', label: '店舗', align: '' },
+                                                                        { key: 'totalSales', label: '総売上高', align: 'text-right' },
+                                                                        { key: 'memberCount', label: '会員数', align: 'text-right' },
+                                                                        { key: 'mrr', label: 'MRR', align: 'text-right' },
+                                                                        { key: 'arpu', label: 'ARPU', align: 'text-right' },
+                                                                        { key: 'churnRate', label: '解約率', align: 'text-right' },
+                                                                    ].map(col => (
+                                                                        <th key={col.key}
+                                                                            className={`px-4 py-3 font-black text-slate-500 text-xs ${col.align} cursor-pointer hover:text-slate-700 select-none whitespace-nowrap`}
+                                                                            onClick={() => setSqStoreSort(prev => prev.key === col.key ? { key: col.key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key: col.key, dir: 'desc' })}>
+                                                                            {col.label}{sqStoreSort.key === col.key ? (sqStoreSort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
+                                                                        </th>
+                                                                    ))}
                                                                 </tr></thead>
                                                                 <tbody className="divide-y divide-slate-100">
-                                                                    {Object.entries(sqMetrics.byStore).map(([id, s]) => (
+                                                                    {Object.entries(sqMetrics.byStore)
+                                                                        .sort(([, a], [, b]) => {
+                                                                            const av = sqStoreSort.key === 'name' ? (a.name || '') : (a[sqStoreSort.key] || 0);
+                                                                            const bv = sqStoreSort.key === 'name' ? (b.name || '') : (b[sqStoreSort.key] || 0);
+                                                                            if (sqStoreSort.key === 'name') {
+                                                                                return sqStoreSort.dir === 'asc' ? av.localeCompare(bv, 'ja') : bv.localeCompare(av, 'ja');
+                                                                            }
+                                                                            return sqStoreSort.dir === 'asc' ? av - bv : bv - av;
+                                                                        })
+                                                                        .map(([id, s]) => (
                                                                         <tr key={id} className="hover:bg-slate-50">
                                                                             <td className="px-4 py-3 font-bold text-slate-700">{s.name}</td>
                                                                             <td className="px-4 py-3 font-bold text-right text-emerald-700">¥{(s.totalSales || 0) >= 10000 ? `${((s.totalSales || 0)/10000).toFixed(1)}万` : (s.totalSales || 0).toLocaleString()}</td>

@@ -208,6 +208,12 @@ async function fetchLocations(client, diag) {
     const errMsg = extractApiError(err);
     console.error('Failed to fetch locations:', errMsg);
     if (diag) diag.locationsApi = `error: ${errMsg}`;
+    // UNAUTHORIZED: トークン無効なので後続API呼び出しを全て省略するため再スロー
+    if (isUnauthorizedError(err)) {
+      const authErr = new Error(`UNAUTHORIZED: ${errMsg}`);
+      authErr._unauthorized = true;
+      throw authErr;
+    }
     return [];
   }
 }
@@ -531,6 +537,16 @@ async function fetchSalesFromPayments(token, env, locationIds, diag, timeoutMs =
   return { payments, refunds };
 }
 
+function isUnauthorizedError(err) {
+  if (err.statusCode === 401 || err.statusCode === 403) return true;
+  try {
+    if (err.result && err.result.errors) {
+      return err.result.errors.some(e => e.code === 'UNAUTHORIZED' || e.code === 'ACCESS_TOKEN_EXPIRED' || e.code === 'ACCESS_TOKEN_REVOKED');
+    }
+  } catch (_) {}
+  return false;
+}
+
 function extractApiError(err) {
   try {
     if (err.result && err.result.errors) {
@@ -689,7 +705,17 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     // 診断情報トラッキング（早期初期化）
     const diag = {};
 
-    let stores = await fetchLocations(client, diag);
+    // fetchLocationsでUNAUTHORIZED検出時は即座にフェイル（後続API呼び出しを全省略）
+    let stores;
+    try {
+      stores = await fetchLocations(client, diag);
+    } catch (authErr) {
+      if (authErr._unauthorized) {
+        console.error(`[${accountName}] トークン認証エラー: ${authErr.message}`);
+        return { _failed: true, _errorDetail: `トークン認証エラー（UNAUTHORIZED）: ${authErr.message}`, _accountName: accountName, _diag: diag };
+      }
+      throw authErr;
+    }
     console.log(`[${accountName || 'main'}] ロケーション取得: ${stores.length}件`, stores.map(s => s.name));
     if (stores.length === 0) {
       stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];

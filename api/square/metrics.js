@@ -92,22 +92,47 @@ async function withTimeout(promise, ms, fallback, label) {
 // 環境変数からトークン設定を取得
 // SQUARE_TOKENS: JSON配列 [{"name":"恵比寿院","token":"xxx","env":"production"}, ...]
 // SQUARE_ACCESS_TOKEN: 後方互換（単一アカウント用）
+// パース診断情報（?info=1で返却）
+let _tokenParseInfo = null;
+
 function getTokenConfigs() {
+  const parseInfo = { source: null, error: null, rawLength: 0, parsedCount: 0 };
+
   if (process.env.SQUARE_TOKENS) {
+    const raw = process.env.SQUARE_TOKENS.trim();
+    parseInfo.source = 'SQUARE_TOKENS';
+    parseInfo.rawLength = raw.length;
+    // JSON冒頭・末尾を表示（フォーマット確認用、トークン値は含まない）
+    parseInfo.rawStart = raw.substring(0, 80);
+    parseInfo.rawEnd = raw.length > 80 ? raw.substring(raw.length - 40) : '';
+
     try {
-      const tokens = JSON.parse(process.env.SQUARE_TOKENS);
-      if (Array.isArray(tokens) && tokens.length > 0) return tokens;
+      const tokens = JSON.parse(raw);
+      if (Array.isArray(tokens) && tokens.length > 0) {
+        parseInfo.parsedCount = tokens.length;
+        parseInfo.names = tokens.map((t, i) => t.name || `(名前なし:${i})`);
+        _tokenParseInfo = parseInfo;
+        return tokens;
+      }
+      parseInfo.error = `JSON配列が空またはオブジェクト型 (type: ${typeof tokens}, isArray: ${Array.isArray(tokens)})`;
     } catch (e) {
+      parseInfo.error = `JSONパースエラー: ${e.message}`;
       console.error('SQUARE_TOKENS parse error:', e.message);
+      console.error('SQUARE_TOKENS raw (first 200):', raw.substring(0, 200));
     }
   }
   if (process.env.SQUARE_ACCESS_TOKEN) {
+    parseInfo.source = parseInfo.source ? `SQUARE_TOKENS解析失敗→SQUARE_ACCESS_TOKENフォールバック` : 'SQUARE_ACCESS_TOKEN';
+    parseInfo.parsedCount = 1;
+    _tokenParseInfo = parseInfo;
     return [{
       name: '',
       token: process.env.SQUARE_ACCESS_TOKEN,
       env: process.env.SQUARE_ENVIRONMENT || 'production',
     }];
   }
+  parseInfo.source = '環境変数未設定';
+  _tokenParseInfo = parseInfo;
   return [];
 }
 
@@ -839,6 +864,7 @@ export default async function handler(req, res) {
       accounts: configs.map((cfg, i) => ({ index: i, name: cfg.name || `アカウント${i + 1}` })),
       totalAccounts: configs.length,
       cacheSize: accountCache.size,
+      tokenParseInfo: _tokenParseInfo || null,
     });
   }
 

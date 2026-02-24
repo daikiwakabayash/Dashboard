@@ -1089,6 +1089,12 @@
                         if (!infoData.success || !infoData.accounts) {
                             throw new Error(infoData.error || 'アカウント情報の取得に失敗しました');
                         }
+                        // SQUARE_TOKENSパースエラー検知: フォールバックで1件になっている場合に警告
+                        if (infoData.tokenParseInfo && infoData.tokenParseInfo.error) {
+                            console.error('SQUARE_TOKENSパースエラー:', infoData.tokenParseInfo);
+                            const pi = infoData.tokenParseInfo;
+                            throw new Error(`SQUARE_TOKENS環境変数のJSON解析に失敗しました。\n${pi.error}\n\n【確認】Vercelの環境変数でSQUARE_TOKENSのJSON形式を確認してください。\n先頭: ${pi.rawStart || '(なし)'}\n文字数: ${pi.rawLength}`);
+                        }
                         totalAccounts = infoData.accounts.length;
                     } catch (infoErr) {
                         // info取得失敗時はキャッシュがあれば使う（オフライン対応）

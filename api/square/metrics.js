@@ -102,9 +102,10 @@ function getTokenConfigs() {
     const raw = process.env.SQUARE_TOKENS.trim();
     parseInfo.source = 'SQUARE_TOKENS';
     parseInfo.rawLength = raw.length;
-    // JSON冒頭・末尾を表示（フォーマット確認用、トークン値は含まない）
-    parseInfo.rawStart = raw.substring(0, 80);
-    parseInfo.rawEnd = raw.length > 80 ? raw.substring(raw.length - 40) : '';
+    // JSON冒頭・末尾を表示（トークン値をマスク）
+    const masked = raw.replace(/"token"\s*:\s*"[^"]*"/g, '"token":"***"');
+    parseInfo.rawStart = masked.substring(0, 120);
+    parseInfo.rawEnd = masked.length > 120 ? masked.substring(masked.length - 60) : '';
 
     try {
       const tokens = JSON.parse(raw);
@@ -117,8 +118,15 @@ function getTokenConfigs() {
       parseInfo.error = `JSON配列が空またはオブジェクト型 (type: ${typeof tokens}, isArray: ${Array.isArray(tokens)})`;
     } catch (e) {
       parseInfo.error = `JSONパースエラー: ${e.message}`;
+      // エラー位置付近を表示（トークンマスク済み）
+      const posMatch = e.message.match(/position (\d+)/);
+      if (posMatch) {
+        const pos = parseInt(posMatch[1], 10);
+        const start = Math.max(0, pos - 40);
+        const snippet = masked.substring(start, pos + 40);
+        parseInfo.errorContext = `...${snippet}...  ← position ${pos}付近`;
+      }
       console.error('SQUARE_TOKENS parse error:', e.message);
-      console.error('SQUARE_TOKENS raw (first 200):', raw.substring(0, 200));
     }
   }
   if (process.env.SQUARE_ACCESS_TOKEN) {

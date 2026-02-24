@@ -275,6 +275,7 @@
         const Loader2 = (props) => <Icon {...props}><path d="M21 12a9 9 0 1 1-6.219-8.56"/></Icon>;
         const AlertCircle = (props) => <Icon {...props}><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></Icon>;
         const AlertTriangle = (props) => <Icon {...props}><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></Icon>;
+        const Bell = (props) => <Icon {...props}><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></Icon>;
         const Hash = (props) => <Icon {...props}><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></Icon>;
         const Percent = (props) => <Icon {...props}><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></Icon>;
         const RefreshCw = (props) => <Icon {...props}><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></Icon>;
@@ -875,6 +876,10 @@
             const mktStaffRef = useRef(null);
             const mktMediaRef = useRef(null);
 
+            // アラート用 State
+            const [alertOpen, setAlertOpen] = useState(false);
+            const alertRef = useRef(null);
+
             // Square API用 State
             const [sqData, setSqData] = useState(null);
             const [sqLoading, setSqLoading] = useState(false);
@@ -1443,6 +1448,9 @@
                     }
                     if (sqStoreMenuRef.current && !sqStoreMenuRef.current.contains(event.target)) {
                         setSqStoreMenuOpen(false);
+                    }
+                    if (alertRef.current && !alertRef.current.contains(event.target)) {
+                        setAlertOpen(false);
                     }
                 };
 
@@ -2943,6 +2951,49 @@
                     };
                 }).sort((a, b) => b.newCount - a.newCount);
             }, [mktFiltered]);
+
+            // CPAアラート: META/TikTok のネットCPA（来店CPA）が¥5,000超の店舗を検出
+            const CPA_ALERT_THRESHOLD = 5000;
+            const CPA_ALERT_MEDIA = ['META', 'meta', 'Meta', 'Facebook', 'Instagram', 'TIKTOK', 'TikTok', 'tiktok', 'Tiktok'];
+            const cpaAlerts = useMemo(() => {
+                if (mktData.length === 0) return [];
+                // 最新月を特定
+                const allMonths = [...new Set(mktData.map(d => d.month).filter(Boolean))].sort();
+                const latestMonth = allMonths[allMonths.length - 1];
+                if (!latestMonth) return [];
+                // 最新月のMETA/TikTokデータを店舗×媒体で集計
+                const latestData = mktData.filter(d => d.month === latestMonth && d.media && d.media !== '全媒体合計');
+                const map = {};
+                latestData.forEach(d => {
+                    // META系（META, Facebook, Instagram）とTikTok系をグループ化
+                    let mediaGroup = null;
+                    const m = (d.media || '').trim();
+                    if (/^(META|meta|Meta|Facebook|Instagram)$/i.test(m)) mediaGroup = 'META';
+                    else if (/^(TIKTOK|TikTok|tiktok|Tiktok)$/i.test(m)) mediaGroup = 'TikTok';
+                    if (!mediaGroup) return;
+                    const key = (d.branch || '不明') + '|||' + mediaGroup;
+                    if (!map[key]) map[key] = { branch: d.branch || '不明', mediaGroup, adSpend: 0, newCount: 0 };
+                    map[key].adSpend += d.adSpend || 0;
+                    map[key].newCount += d.newCount || 0;
+                });
+                const alerts = [];
+                Object.values(map).forEach(item => {
+                    if (item.newCount <= 0) return;
+                    const cpa = Math.round(item.adSpend / item.newCount);
+                    if (cpa > CPA_ALERT_THRESHOLD) {
+                        alerts.push({
+                            branch: item.branch,
+                            media: item.mediaGroup,
+                            cpa,
+                            adSpend: item.adSpend,
+                            newCount: item.newCount,
+                            month: latestMonth,
+                            threshold: CPA_ALERT_THRESHOLD,
+                        });
+                    }
+                });
+                return alerts.sort((a, b) => b.cpa - a.cpa);
+            }, [mktData]);
 
             // ソート済み店舗データ
             const sortedMktByBranch = useMemo(() => {
@@ -5293,7 +5344,7 @@
             return (
                 <div className="min-h-screen bg-slate-50 flex">
                     {/* Sidebar */}
-                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} />
+                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} />
 
                     {/* Main Content */}
                     <div className="flex-1 overflow-x-hidden pb-16 md:pb-0">
@@ -10361,7 +10412,7 @@
             );
         };
 
-        const Sidebar = ({ currentPage, setCurrentPage, handleLogout }) => {
+        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef }) => {
             const menuItems = [
                 { id: 'dashboard', label: '経営指標', icon: <Home size={20} />, mobileIcon: <Home size={18} /> },
                 { id: 'charts', label: 'ダッシュボード', icon: <BarChart3 size={20} />, mobileIcon: <BarChart3 size={18} /> },
@@ -10370,14 +10421,73 @@
                 { id: 'planning', label: '事業計画', icon: <Target size={20} />, mobileIcon: <Target size={18} /> }
             ];
 
+            const alertCount = cpaAlerts.length;
+
             return (
                 <>
                     {/* Desktop Sidebar */}
                     <div className="hidden md:flex md:flex-col w-64 min-h-screen bg-white border-r border-slate-200 p-6">
-                        {/* Logo/Title */}
-                        <div className="mb-8">
-                            <h1 className="text-xl font-black text-slate-900">NAORU</h1>
-                            <p className="text-xs text-slate-400 font-bold">総合ダッシュボード</p>
+                        {/* Logo/Title + Alert Bell */}
+                        <div className="mb-8 flex items-center justify-between">
+                            <div>
+                                <h1 className="text-xl font-black text-slate-900">NAORU</h1>
+                                <p className="text-xs text-slate-400 font-bold">総合ダッシュボード</p>
+                            </div>
+                            <div className="relative" ref={alertRef}>
+                                <button
+                                    onClick={() => setAlertOpen(!alertOpen)}
+                                    className={`relative p-2 rounded-xl transition-all ${alertCount > 0 ? 'text-amber-600 hover:bg-amber-50' : 'text-slate-400 hover:bg-slate-100'}`}
+                                    title={alertCount > 0 ? `${alertCount}件のアラート` : 'アラートなし'}
+                                >
+                                    <Bell size={20} />
+                                    {alertCount > 0 && (
+                                        <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] flex items-center justify-center bg-rose-500 text-white text-[10px] font-black rounded-full px-1">
+                                            {alertCount}
+                                        </span>
+                                    )}
+                                </button>
+                                {alertOpen && (
+                                    <div className="absolute left-0 top-full mt-2 w-80 bg-white rounded-2xl shadow-2xl border border-slate-200 z-50 overflow-hidden">
+                                        <div className="bg-gradient-to-r from-amber-50 to-rose-50 px-4 py-3 border-b border-slate-200">
+                                            <div className="flex items-center gap-2">
+                                                <AlertTriangle size={16} className="text-amber-600" />
+                                                <span className="font-black text-sm text-slate-800">CPA アラート</span>
+                                                <span className="ml-auto text-[10px] font-bold text-slate-500">{cpaAlerts[0]?.month || ''}</span>
+                                            </div>
+                                        </div>
+                                        {alertCount === 0 ? (
+                                            <div className="p-6 text-center text-slate-400 text-sm">
+                                                <Bell size={24} className="mx-auto mb-2 opacity-30" />
+                                                アラートはありません
+                                            </div>
+                                        ) : (
+                                            <div className="max-h-80 overflow-y-auto divide-y divide-slate-100">
+                                                {cpaAlerts.map((alert, idx) => (
+                                                    <div key={idx} className="px-4 py-3 hover:bg-slate-50 transition-colors">
+                                                        <div className="flex items-center gap-2 mb-1">
+                                                            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-black ${
+                                                                alert.media === 'META' ? 'bg-blue-100 text-blue-700' : 'bg-slate-900 text-white'
+                                                            }`}>
+                                                                {alert.media}
+                                                            </span>
+                                                            <span className="font-bold text-sm text-slate-800">{alert.branch}</span>
+                                                        </div>
+                                                        <div className="flex items-baseline gap-2">
+                                                            <span className="text-rose-600 font-black text-lg">¥{alert.cpa.toLocaleString()}</span>
+                                                            <span className="text-[10px] text-slate-400 font-bold">ネットCPA</span>
+                                                            <span className="text-[10px] text-rose-500 font-bold ml-auto">基準 ¥{alert.threshold.toLocaleString()} 超過</span>
+                                                        </div>
+                                                        <div className="flex gap-3 mt-1 text-[10px] text-slate-500">
+                                                            <span>広告費 ¥{alert.adSpend.toLocaleString()}</span>
+                                                            <span>来院 {alert.newCount}名</span>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
                         </div>
 
                         {/* Menu Items */}
@@ -10412,6 +10522,50 @@
                             </div>
                         </div>
                     </div>
+
+                    {/* Mobile Alert Floating Button */}
+                    {alertCount > 0 && (
+                        <div className="md:hidden fixed top-3 right-3 z-50" ref={!alertRef.current ? alertRef : undefined}>
+                            <button
+                                onClick={() => setAlertOpen(!alertOpen)}
+                                className="relative p-2.5 bg-white rounded-full shadow-lg border border-amber-200"
+                            >
+                                <Bell size={18} className="text-amber-600" />
+                                <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] flex items-center justify-center bg-rose-500 text-white text-[10px] font-black rounded-full px-1">
+                                    {alertCount}
+                                </span>
+                            </button>
+                            {alertOpen && (
+                                <div className="absolute right-0 top-full mt-2 w-72 bg-white rounded-2xl shadow-2xl border border-slate-200 z-50 overflow-hidden">
+                                    <div className="bg-gradient-to-r from-amber-50 to-rose-50 px-3 py-2 border-b border-slate-200">
+                                        <div className="flex items-center gap-2">
+                                            <AlertTriangle size={14} className="text-amber-600" />
+                                            <span className="font-black text-xs text-slate-800">CPA アラート</span>
+                                            <span className="ml-auto text-[10px] font-bold text-slate-500">{cpaAlerts[0]?.month || ''}</span>
+                                        </div>
+                                    </div>
+                                    <div className="max-h-60 overflow-y-auto divide-y divide-slate-100">
+                                        {cpaAlerts.map((alert, idx) => (
+                                            <div key={idx} className="px-3 py-2">
+                                                <div className="flex items-center gap-2 mb-0.5">
+                                                    <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-black ${
+                                                        alert.media === 'META' ? 'bg-blue-100 text-blue-700' : 'bg-slate-900 text-white'
+                                                    }`}>
+                                                        {alert.media}
+                                                    </span>
+                                                    <span className="font-bold text-xs text-slate-800">{alert.branch}</span>
+                                                </div>
+                                                <div className="flex items-baseline gap-2">
+                                                    <span className="text-rose-600 font-black text-base">¥{alert.cpa.toLocaleString()}</span>
+                                                    <span className="text-[9px] text-rose-500 font-bold ml-auto">¥{alert.threshold.toLocaleString()} 超過</span>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
 
                     {/* Mobile Bottom Navigation */}
                     <div className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-slate-200 shadow-lg">

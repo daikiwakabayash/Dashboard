@@ -930,6 +930,9 @@
             const [planInput, setPlanInput] = useState('');
             const [planLoading, setPlanLoading] = useState(false);
             const planChatRef = useRef(null);
+            const [planBranchMenuOpen, setPlanBranchMenuOpen] = useState(false);
+            const [planBranchSearch, setPlanBranchSearch] = useState('');
+            const planBranchMenuRef = useRef(null);
             // 参考リンク管理
             const [planLinks, setPlanLinks] = useState(() => {
                 try {
@@ -1451,6 +1454,9 @@
                     }
                     if (alertRef.current && !alertRef.current.contains(event.target)) {
                         setAlertOpen(false);
+                    }
+                    if (planBranchMenuRef.current && !planBranchMenuRef.current.contains(event.target)) {
+                        setPlanBranchMenuOpen(false);
                     }
                 };
 
@@ -8637,17 +8643,44 @@
                                 <h2 className="text-lg md:text-2xl font-black italic flex items-center gap-2">
                                     <Target size={24} className="text-indigo-600" /> 事業計画相談
                                 </h2>
-                                <div className="flex items-center gap-2">
-                                    <MapPin size={16} className="text-slate-400" />
-                                    <select
-                                        value={planSelectedBranch}
-                                        onChange={e => { setPlanSelectedBranch(e.target.value); setPlanMessages([]); }}
-                                        className="bg-white border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none shadow-sm min-w-[160px]"
+                                <div className="relative flex-1 sm:flex-none" ref={planBranchMenuRef}>
+                                    <button
+                                        onClick={() => setPlanBranchMenuOpen(!planBranchMenuOpen)}
+                                        className="w-full sm:w-auto px-3 md:px-4 py-2 md:py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs md:text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 flex items-center gap-2 min-w-0 sm:min-w-[160px]"
                                     >
-                                        {Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).sort().map(b => (
-                                            <option key={b} value={b}>{b}</option>
-                                        ))}
-                                    </select>
+                                        <MapPin size={16} className="text-slate-400" />
+                                        <span className="truncate">{planSelectedBranch || '店舗を選択'}</span>
+                                        <ChevronDown size={16} className={`ml-auto transition-transform ${planBranchMenuOpen ? 'rotate-180' : ''}`} />
+                                    </button>
+                                    {planBranchMenuOpen && (
+                                        <div className="absolute top-full right-0 sm:left-0 mt-2 bg-white border border-slate-200 rounded-2xl shadow-xl z-50 p-3 space-y-2 min-w-[220px] max-h-[350px] overflow-hidden flex flex-col">
+                                            <div className="relative px-1 pb-2">
+                                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                                                <input
+                                                    type="text"
+                                                    placeholder="店舗を検索..."
+                                                    className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
+                                                    value={planBranchSearch}
+                                                    onChange={(e) => setPlanBranchSearch(e.target.value)}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                />
+                                            </div>
+                                            <div className="overflow-y-auto flex-1 space-y-1">
+                                                {Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).sort()
+                                                    .filter(b => !planBranchSearch || b.toLowerCase().includes(planBranchSearch.toLowerCase()))
+                                                    .map(b => (
+                                                        <div
+                                                            key={b}
+                                                            onClick={() => { setPlanSelectedBranch(b); setPlanMessages([]); setPlanBranchMenuOpen(false); setPlanBranchSearch(''); }}
+                                                            className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${planSelectedBranch === b ? 'bg-indigo-50 text-indigo-700' : 'hover:bg-slate-50 text-slate-600'}`}
+                                                        >
+                                                            <span className="text-sm font-bold">{b}</span>
+                                                        </div>
+                                                    ))
+                                                }
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
 

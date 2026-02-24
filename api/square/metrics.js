@@ -102,9 +102,10 @@ function getTokenConfigs() {
     const raw = process.env.SQUARE_TOKENS.trim();
     parseInfo.source = 'SQUARE_TOKENS';
     parseInfo.rawLength = raw.length;
-    // JSON冒頭・末尾を表示（フォーマット確認用、トークン値は含まない）
-    parseInfo.rawStart = raw.substring(0, 80);
-    parseInfo.rawEnd = raw.length > 80 ? raw.substring(raw.length - 40) : '';
+    // JSON冒頭・末尾を表示（トークン値をマスク）
+    const masked = raw.replace(/"token"\s*:\s*"[^"]*"/g, '"token":"***"');
+    parseInfo.rawStart = masked.substring(0, 120);
+    parseInfo.rawEnd = masked.length > 120 ? masked.substring(masked.length - 60) : '';
 
     try {
       const tokens = JSON.parse(raw);
@@ -117,8 +118,15 @@ function getTokenConfigs() {
       parseInfo.error = `JSON配列が空またはオブジェクト型 (type: ${typeof tokens}, isArray: ${Array.isArray(tokens)})`;
     } catch (e) {
       parseInfo.error = `JSONパースエラー: ${e.message}`;
+      // エラー位置付近を表示（トークンマスク済み）
+      const posMatch = e.message.match(/position (\d+)/);
+      if (posMatch) {
+        const pos = parseInt(posMatch[1], 10);
+        const start = Math.max(0, pos - 40);
+        const snippet = masked.substring(start, pos + 40);
+        parseInfo.errorContext = `...${snippet}...  ← position ${pos}付近`;
+      }
       console.error('SQUARE_TOKENS parse error:', e.message);
-      console.error('SQUARE_TOKENS raw (first 200):', raw.substring(0, 200));
     }
   }
   if (process.env.SQUARE_ACCESS_TOKEN) {
@@ -134,6 +142,27 @@ function getTokenConfigs() {
   parseInfo.source = '環境変数未設定';
   _tokenParseInfo = parseInfo;
   return [];
+}
+
+// ── 店舗名の正規化（SQUARE_TOKENSやSquare APIの不統一な名前をクリーンアップ） ──
+const CORP_NAME_PATTERNS = ['株式会社', '合同会社', '有限会社', '一般社団法人', '株）', '株)'];
+
+function normalizeStoreName(name) {
+  if (!name) return name;
+  let n = name;
+  // 「JCB対応版_」プレフィックス除去
+  n = n.replace(/^JCB対応版[_\s\u3000]*/i, '');
+  // 「NAORU整体」「naoru整体」「NAORU 整体」等のプレフィックス除去
+  n = n.replace(/^[Nn][Aa][Oo][Rr][Uu][\s\u3000]*整体[\s\u3000]*/i, '');
+  // 全角・半角スペースのトリム
+  n = n.replace(/^[\s\u3000]+|[\s\u3000]+$/g, '');
+  // 空になった場合は元の名前を返す
+  return n || name;
+}
+
+function isCorpName(name) {
+  if (!name) return false;
+  return CORP_NAME_PATTERNS.some(p => name.startsWith(p));
 }
 
 async function createClient(tokenConfig) {
@@ -637,8 +666,19 @@ async function fetchAllCustomers(client, diag) {
 
 // 1つのSquareアカウントの全データを取得
 async function fetchAccountData(tokenConfig, isMultiAccount) {
-  const accountName = tokenConfig.name || '';
+  const rawAccountName = tokenConfig.name || '';
+  const accountName = normalizeStoreName(rawAccountName);
+  if (rawAccountName && rawAccountName !== accountName) {
+    console.log(`[${rawAccountName}] 店舗名正規化: "${rawAccountName}" → "${accountName}"`);
+  }
   console.log(`[${accountName || 'main'}] データ取得開始...`);
+
+  // 法人名アカウントはスキップ（店舗データなし）
+  if (accountName && isCorpName(accountName)) {
+    console.log(`[${accountName}] 法人名アカウントをスキップ`);
+    return { stores: [], subscriptions: [], customers: {}, invoices: [], payments: [], refunds: [], plans: {}, _skippedCorp: true };
+  }
+
   try {
     if (!tokenConfig.token) {
       console.error(`[${accountName}] トークンが空です`);
@@ -663,10 +703,8 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
       }
     }
     // 複数ロケーション時: 法人名ロケーション（株式会社・合同会社等）を自動除外
-    // Squareがビジネスエンティティ用に自動作成するデフォルトロケーションを除外
     if (stores.length > 1) {
-      const corpPatterns = ['株式会社', '合同会社', '有限会社', '一般社団法人'];
-      const nonCorpStores = stores.filter(s => !corpPatterns.some(p => s.name && s.name.startsWith(p)));
+      const nonCorpStores = stores.filter(s => !isCorpName(s.name));
       if (nonCorpStores.length > 0 && nonCorpStores.length < stores.length) {
         console.log(`[${accountName}] ${stores.length - nonCorpStores.length}件の法人ロケーションを自動除外`);
         stores = nonCorpStores;
@@ -675,18 +713,15 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     if (stores.length === 0) {
       stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];
     }
-    // 店舗リスト構築ロジック:
-    // - consolidate指定あり → 全ロケーションを1店舗に統合（従来互換）
-    // - ロケーションが1件のみ → accountNameでラベル付け（各トークン=1店舗のパターン）
-    // - ロケーションが複数 → 個別店舗としてそのまま返す（1トークンで全店舗アクセスのパターン）
-    if (accountName && tokenConfig.consolidate) {
+    // 店舗リスト構築: accountNameが設定されている場合は全ロケーションを
+    // そのアカウント名で1店舗に統合（SQUARE_TOKENSの1エントリ=1店舗）
+    // 店舗名は正規化済み（NAORUプレフィックス等を除去）
+    if (accountName) {
       const allLocIds = stores.map(s => s.id);
       stores = [{ id: allLocIds[0], name: accountName, locationIds: allLocIds }];
-    } else if (accountName && stores.length === 1) {
-      // 1ロケーションのみ: accountNameで上書き（"株式会社X" → "恵比寿院" 等）
-      stores = [{ id: stores[0].id, name: accountName, locationIds: [stores[0].id] }];
     } else {
-      stores = stores.map(s => ({ ...s, locationIds: [s.id] }));
+      // accountName未設定: 個別ロケーション名を正規化して返す
+      stores = stores.map(s => ({ ...s, name: normalizeStoreName(s.name), locationIds: [s.id] }));
     }
     const locationIds = stores.flatMap(s => s.locationIds);
 
@@ -908,10 +943,11 @@ export default async function handler(req, res) {
           failedAccounts.push({ name: cfg.name || `アカウント${idx + 1}`, error: r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です' });
           return;
         }
-        // 店舗をlocationIdで重複排除（名前ではなく物理ロケーションで判定）
+        // 店舗を名前またはlocationIdで重複排除（正規化済み名前の一致 or 同一ロケーション）
         for (const store of r.stores) {
           const storeLocIds = store.locationIds || [store.id];
           const existing = merged.stores.find(s => {
+            if (s.name === store.name) return true;
             const existingLocIds = s.locationIds || [s.id];
             return storeLocIds.some(id => existingLocIds.includes(id));
           });
@@ -1032,10 +1068,11 @@ export default async function handler(req, res) {
           failedAccounts.push({ name: cfg.name || `アカウント${j + 1}`, error: r && r._errorDetail ? r._errorDetail : 'トークンが空または無効です' });
           return;
         }
-        // 店舗をlocationIdで重複排除（名前ではなく物理ロケーションで判定）
+        // 店舗を名前またはlocationIdで重複排除（正規化済み名前の一致 or 同一ロケーション）
         for (const store of r.stores) {
           const storeLocIds = store.locationIds || [store.id];
           const existing = merged.stores.find(s => {
+            if (s.name === store.name) return true;
             const existingLocIds = s.locationIds || [s.id];
             return storeLocIds.some(id => existingLocIds.includes(id));
           });

@@ -752,7 +752,9 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
       // accountName未設定: 個別ロケーション名を正規化して返す
       stores = stores.map(s => ({ ...s, name: normalizeStoreName(s.name), locationIds: [s.id] }));
     }
-    const locationIds = stores.flatMap(s => s.locationIds);
+    // データ取得にはフィルタ前の全ロケーションIDを使用
+    // （法人名ロケーションにもサブスク・インボイス・決済データが紐づく可能性があるため）
+    const locationIds = [...new Set([...allOriginalLocIds, ...stores.flatMap(s => s.locationIds)])];
 
     // サブスク＋インボイス＋売上(Payments REST API)＋顧客を並列取得（各API個別タイムアウト付き）
     // Payments/Refunds APIはSDKバグ回避のためREST APIを直接呼び出す
@@ -824,7 +826,25 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
       diag.subscriptionStatuses = statusCounts;
     }
 
+    // データ整合性チェック: 取得したデータに含まれるlocationIdが店舗のlocationIdsに含まれているか確認
+    // Square APIがロケーション移行等でデータのlocationIdを変更した場合に対応
+    if (accountName && stores.length === 1) {
+      const storeLocIds = new Set(stores[0].locationIds);
+      const dataLocIds = new Set();
+      for (const s of subscriptions) { if (s.locationId) dataLocIds.add(s.locationId); }
+      for (const inv of invoices) { if (inv.locationId) dataLocIds.add(inv.locationId); }
+      for (const p of payments) { if (p.locationId) dataLocIds.add(p.locationId); }
+      for (const r of refunds) { if (r.locationId) dataLocIds.add(r.locationId); }
+      const extraLocIds = [...dataLocIds].filter(id => !storeLocIds.has(id));
+      if (extraLocIds.length > 0) {
+        console.log(`[${accountName}] データに店舗未登録のlocationId検出: ${extraLocIds.join(', ')} → 店舗に追加`);
+        stores[0].locationIds = [...stores[0].locationIds, ...extraLocIds];
+        diag.extraLocationIds = extraLocIds;
+      }
+    }
+
     console.log(`[${accountName || 'main'}] ${stores.length} stores, ${subscriptions.length} subs, ${invoices.length} inv, ${payments.length} payments, ${refunds.length} refunds`);
+    console.log(`[${accountName || 'main'}] storeLocationIds:`, JSON.stringify(stores.map(s => ({ name: s.name, locIds: s.locationIds }))));
     console.log(`[${accountName || 'main'}] diag:`, JSON.stringify(diag));
     return { stores, subscriptions, customers, invoices, payments, refunds, plans, _diag: diag };
   } catch (err) {

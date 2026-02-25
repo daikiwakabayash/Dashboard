@@ -720,6 +720,9 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     if (stores.length === 0) {
       stores = [{ id: `default-${accountName}`, name: accountName || 'メイン店舗' }];
     }
+    // accountName設定時: フィルタ前の全ロケーションIDを保持（データ取得に使用）
+    // フィルタは表示用店舗名の選定のみ。サブスク・インボイス・決済は全ロケーションから取得する必要がある
+    const allOriginalLocIds = stores.map(s => s.id);
     // excludeLocations: 不要なロケーションを除外（例: ["株式会社SSiM"]）
     if (tokenConfig.excludeLocations && Array.isArray(tokenConfig.excludeLocations)) {
       const before = stores.length;
@@ -742,9 +745,9 @@ async function fetchAccountData(tokenConfig, isMultiAccount) {
     // 店舗リスト構築: accountNameが設定されている場合は全ロケーションを
     // そのアカウント名で1店舗に統合（SQUARE_TOKENSの1エントリ=1店舗）
     // 店舗名は正規化済み（NAORUプレフィックス等を除去）
+    // 重要: フィルタ前の全ロケーションIDを使用（法人名ロケーションにもデータが紐づくため）
     if (accountName) {
-      const allLocIds = stores.map(s => s.id);
-      stores = [{ id: allLocIds[0], name: accountName, locationIds: allLocIds }];
+      stores = [{ id: allOriginalLocIds[0], name: accountName, locationIds: allOriginalLocIds }];
     } else {
       // accountName未設定: 個別ロケーション名を正規化して返す
       stores = stores.map(s => ({ ...s, name: normalizeStoreName(s.name), locationIds: [s.id] }));

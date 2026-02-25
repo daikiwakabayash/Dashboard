@@ -38,7 +38,8 @@ index.html          # フロントエンド（React SPA）
 api/
   auth.js           # 認証API（パスワード検証・トークン発行）
   gas-proxy.js      # GAS APIプロキシ（秘密URL隠蔽）
-  chat.js           # Claude AI チャットAPI
+  chat.js           # Claude AI チャットAPI（フィードバック動的注入対応）
+  feedback.js       # フィードバックAPI（GAS連携・取得/送信）
   health.js         # ヘルスチェック
   square/
     metrics.js      # Square サブスクデータ集計
@@ -46,6 +47,8 @@ api/
 lib/
   markdown.js       # Markdownパーサー（テスト用分離モジュール）
   plan-calc.js      # 事業計画計算ロジック（テスト用分離モジュール）
+gas/
+  feedback-gas-sample.js  # フィードバック用GASサンプルスクリプト
 tests/              # Vitestテスト
 ```
 
@@ -58,6 +61,7 @@ tests/              # Vitestテスト
   - `MARKETING_API_URL` — マーケティングデータ用GAS URL
   - `ANTHROPIC_API_KEY` — Claude AI APIキー
   - `SQUARE_TOKENS` — Square APIトークン（JSON配列）
+  - `FEEDBACK_GAS_URL` — フィードバック用GAS WebアプリURL（オプション）
 
 ## 開発ルール
 - `index.html` を編集したら `npm test` を実行して構造テストを通す

@@ -918,6 +918,11 @@
             const [chatLoading, setChatLoading] = useState(false);
             const [chatContext, setChatContext] = useState({ branch: null, month: null }); // 会話の文脈を保持
             const chatContainerRef = useRef(null);
+            const [feedbackTarget, setFeedbackTarget] = useState(null); // { msgIdx, question, badAnswer }
+            const [feedbackGood, setFeedbackGood] = useState('');
+            const [feedbackCategory, setFeedbackCategory] = useState('');
+            const [feedbackSending, setFeedbackSending] = useState(false);
+            const [feedbackSent, setFeedbackSent] = useState({});
 
             // 事業計画タブ用 State
             const [planGoals, setPlanGoals] = useState(() => {
@@ -5000,6 +5005,54 @@
             };
 
             // チャットメッセージ送信（Claude AI API）
+            // ── フィードバック送信 ──
+            const handleFeedbackSubmit = async () => {
+                if (!feedbackTarget || feedbackSending) return;
+                setFeedbackSending(true);
+                try {
+                    const resp = await fetch('/api/feedback', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            question: feedbackTarget.question,
+                            badAnswer: feedbackTarget.badAnswer,
+                            goodAnswer: feedbackGood,
+                            category: feedbackCategory || '一般',
+                        })
+                    });
+                    if (resp.ok) {
+                        setFeedbackSent(prev => ({ ...prev, [feedbackTarget.msgIdx]: true }));
+                        setFeedbackTarget(null);
+                        setFeedbackGood('');
+                        setFeedbackCategory('');
+                    }
+                } catch (err) {
+                    console.error('Feedback submit error:', err);
+                } finally {
+                    setFeedbackSending(false);
+                }
+            };
+
+            // ── フィードバックモーダルを開く ──
+            const openFeedback = (msgIdx) => {
+                // 対象のアシスタントメッセージとその直前のユーザーメッセージを取得
+                const assistantMsg = chatMessages[msgIdx];
+                let userQuestion = '';
+                for (let i = msgIdx - 1; i >= 0; i--) {
+                    if (chatMessages[i].type === 'user') {
+                        userQuestion = chatMessages[i].content;
+                        break;
+                    }
+                }
+                setFeedbackTarget({
+                    msgIdx,
+                    question: userQuestion,
+                    badAnswer: assistantMsg.content.substring(0, 500),
+                });
+                setFeedbackGood('');
+                setFeedbackCategory('');
+            };
+
             const handleChatSubmit = async () => {
                 if (!chatInput.trim() || chatLoading) return;
 
@@ -9144,8 +9197,26 @@
                                                     <div className="text-sm font-bold break-words">{msg.content}</div>
                                                 </div>
                                             ) : (
-                                                <div className="max-w-[95%] rounded-2xl px-4 py-3 bg-slate-50 border border-slate-200">
-                                                    <div className="break-words chat-ai-response">{renderMarkdown(msg.content)}</div>
+                                                <div className="max-w-[95%] group">
+                                                    <div className="rounded-2xl px-4 py-3 bg-slate-50 border border-slate-200">
+                                                        <div className="break-words chat-ai-response">{renderMarkdown(msg.content)}</div>
+                                                    </div>
+                                                    {msg.content && !chatLoading && (
+                                                        <div className="flex items-center gap-1 mt-1 ml-1">
+                                                            {feedbackSent[idx] ? (
+                                                                <span className="text-xs text-green-600 font-bold">FB送信済み</span>
+                                                            ) : (
+                                                                <button
+                                                                    onClick={() => openFeedback(idx)}
+                                                                    className="text-xs text-slate-400 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 flex items-center gap-0.5 font-bold"
+                                                                    title="回答を改善するフィードバックを送る"
+                                                                >
+                                                                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5" /></svg>
+                                                                    改善FB
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    )}
                                                 </div>
                                             )}
                                         </div>
@@ -9162,6 +9233,47 @@
                                         </div>
                                     )}
                                 </div>
+
+                                {/* フィードバックモーダル */}
+                                {feedbackTarget && (
+                                    <div className="p-4 border-t border-amber-200 bg-amber-50">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <span className="text-sm font-bold text-amber-800">回答の改善フィードバック</span>
+                                            <button onClick={() => setFeedbackTarget(null)} className="text-slate-400 hover:text-slate-600 text-lg font-bold">&times;</button>
+                                        </div>
+                                        <div className="text-xs text-slate-500 mb-2 bg-white rounded-lg p-2 border border-slate-200 max-h-20 overflow-y-auto">
+                                            <span className="font-bold">対象の質問:</span> {feedbackTarget.question || '(不明)'}
+                                        </div>
+                                        <div className="mb-2">
+                                            <select
+                                                value={feedbackCategory}
+                                                onChange={(e) => setFeedbackCategory(e.target.value)}
+                                                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-bold focus:outline-none focus:ring-2 focus:ring-amber-500"
+                                            >
+                                                <option value="">カテゴリを選択...</option>
+                                                <option value="表・フォーマット">表・フォーマットの問題</option>
+                                                <option value="データの誤り">データの誤り・抜け漏れ</option>
+                                                <option value="分析の質">分析・アドバイスの質</option>
+                                                <option value="トーン">トーン・言い回し</option>
+                                                <option value="その他">その他</option>
+                                            </select>
+                                        </div>
+                                        <textarea
+                                            value={feedbackGood}
+                                            onChange={(e) => setFeedbackGood(e.target.value)}
+                                            placeholder="どう改善すべきか記入してください（例: 表形式で全員分出すべき、もっと具体的なアクションを提案すべき、等）"
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-bold focus:outline-none focus:ring-2 focus:ring-amber-500 resize-none"
+                                            rows={3}
+                                        />
+                                        <button
+                                            onClick={handleFeedbackSubmit}
+                                            disabled={feedbackSending || !feedbackGood.trim()}
+                                            className="mt-2 w-full px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-bold text-xs"
+                                        >
+                                            {feedbackSending ? '送信中...' : 'フィードバックを送信'}
+                                        </button>
+                                    </div>
+                                )}
 
                                 {/* 入力エリア */}
                                 <div className="p-4 border-t border-slate-200">

@@ -364,7 +364,7 @@ async function fetchSalesFromPayments(token, env, locationIds, diag, timeoutMs =
     ? 'https://connect.squareup.com'
     : 'https://connect.squareupsandbox.com';
   const beginTime = new Date();
-  beginTime.setMonth(beginTime.getMonth() - 13);
+  beginTime.setMonth(beginTime.getMonth() - 2); // 決済・返金は直近2ヶ月のみ取得（データ量削減）
   const beginStr = beginTime.toISOString();
   const errors = [];
   const startTime = Date.now();

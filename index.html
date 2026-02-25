@@ -4909,7 +4909,6 @@
                         const paused = ss.filter(s => s.status === 'PAUSED').length;
                         const mrr = ss.filter(s => s.status === 'ACTIVE').reduce((sum, s) => sum + (s.monthlyPrice || 0), 0);
                         totalMRR += mrr; totalActive += active; totalCanceled += canceled;
-                        // 直近3ヶ月の解約数を集計
                         const now = new Date();
                         const recent3m = ss.filter(s => (s.status === 'CANCELED' || s.status === 'DEACTIVATED') && s.canceledDate).filter(s => {
                             const cd = new Date(s.canceledDate);
@@ -4924,6 +4923,69 @@
                     });
                     if (!targetBranch && stores.length > 1) {
                         sections.push('全店合計: アクティブ' + totalActive + ', MRR¥' + totalMRR.toLocaleString() + ', ARR¥' + (totalMRR * 12).toLocaleString());
+                    }
+
+                    // ── 会員詳細データ（解約者・新規入会者・アクティブ会員の個別一覧） ──
+                    if (sqCustomerData && (targetBranch || /解約|退会|新規|入会|アクティブ|一覧|リスト|名前|氏名|患者|会員|誰/.test(question))) {
+                        const memberLine = (m) => {
+                            const lastPaid = m.paidMonths && m.paidMonths.length > 0 ? [...m.paidMonths].sort().reverse()[0] : '-';
+                            return m.name + ': コース=' + (m.plan || '-') + ', 入会日=' + (m.startDate || '-') + ', 決済回数=' + (m.paidCount || 0) + '回, 合計金額=¥' + (m.paidTotal || 0).toLocaleString() + ', 最終決済月=' + lastPaid;
+                        };
+
+                        // 解約者一覧
+                        if (/解約|退会|チャーン|churn|離脱/.test(lowerQ) || !targetBranch) {
+                            const list = sqCustomerData.canceledList || [];
+                            if (list.length > 0) {
+                                sections.push('\n▼ ' + (sqStore === 'all' ? '全店' : '') + sqMonth + ' 解約者一覧（' + list.length + '名）');
+                                list.slice(0, 50).forEach(m => {
+                                    sections.push(memberLine(m) + ', 解約日=' + (m.canceledDate || '-'));
+                                });
+                            }
+                        }
+
+                        // 新規入会者一覧
+                        if (/新規|入会|新入|new/.test(lowerQ) || !targetBranch) {
+                            const list = sqCustomerData.newMonthList || [];
+                            if (list.length > 0) {
+                                sections.push('\n▼ ' + (sqStore === 'all' ? '全店' : '') + sqMonth + ' 新規入会者一覧（' + list.length + '名）');
+                                list.slice(0, 50).forEach(m => {
+                                    sections.push(memberLine(m));
+                                });
+                            }
+                        }
+
+                        // アクティブ会員一覧（店舗指定時のみ）
+                        if (/アクティブ|会員|一覧|リスト|全員/.test(lowerQ) && targetBranch) {
+                            const list = sqCustomerData.activeList || [];
+                            if (list.length > 0) {
+                                sections.push('\n▼ ' + sqMonth + ' アクティブ会員一覧（' + list.length + '名）');
+                                list.slice(0, 80).forEach(m => {
+                                    sections.push(memberLine(m));
+                                });
+                            }
+                        }
+
+                        // 一時停止者一覧
+                        if (/停止|休止|pause/.test(lowerQ)) {
+                            const list = sqCustomerData.pausedList || [];
+                            if (list.length > 0) {
+                                sections.push('\n▼ ' + sqMonth + ' 一時停止者一覧（' + list.length + '名）');
+                                list.slice(0, 50).forEach(m => {
+                                    sections.push(memberLine(m) + ', 停止日=' + (m.canceledDate || '-'));
+                                });
+                            }
+                        }
+
+                        // 復帰者一覧
+                        if (/復帰|再開|resume/.test(lowerQ)) {
+                            const list = sqCustomerData.resumedList || [];
+                            if (list.length > 0) {
+                                sections.push('\n▼ ' + sqMonth + ' 復帰者一覧（' + list.length + '名）');
+                                list.slice(0, 50).forEach(m => {
+                                    sections.push(memberLine(m) + ', 復帰月=' + (m.resumedDate || '-'));
+                                });
+                            }
+                        }
                     }
                 }
 

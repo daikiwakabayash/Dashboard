@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { fetchFeedbackExamples, buildFeedbackPrompt } from './feedback.js';
 
 const anthropic = new Anthropic();
 
@@ -228,6 +229,18 @@ export default async function handler(req, res) {
 
     const messages = buildMessages(question, history, dataContext);
 
+    // ── フィードバック動的注入: GAS から改善例を取得してシステムプロンプトに追加 ──
+    let systemPrompt = SYSTEM_PROMPT;
+    try {
+      const feedbackExamples = await fetchFeedbackExamples();
+      const feedbackSection = buildFeedbackPrompt(feedbackExamples);
+      if (feedbackSection) {
+        systemPrompt = SYSTEM_PROMPT + feedbackSection;
+      }
+    } catch (err) {
+      console.log('[chat] Feedback fetch skipped:', err.message);
+    }
+
     // ── 利用可能なモデルを特定（最初の1回だけ404/400でフォールバック）──
     let selectedModel = MODELS[0];
 
@@ -246,7 +259,7 @@ export default async function handler(req, res) {
           const stream = anthropic.messages.stream({
             model: selectedModel,
             max_tokens: MAX_TOKENS,
-            system: SYSTEM_PROMPT,
+            system: systemPrompt,
             messages,
           });
 
@@ -300,7 +313,7 @@ export default async function handler(req, res) {
         const response = await anthropic.messages.create({
           model: selectedModel,
           max_tokens: MAX_TOKENS,
-          system: SYSTEM_PROMPT,
+          system: systemPrompt,
           messages,
         });
 

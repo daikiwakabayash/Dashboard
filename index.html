@@ -228,9 +228,67 @@
         .plan-ai-response tbody tr:nth-child(even):hover, .chat-ai-response tbody tr:nth-child(even):hover {
             background: #f1f5f9;
         }
+        /* ── Splash Screen ── */
+        @keyframes splashFadeIn {
+            from { opacity: 0; transform: scale(0.8); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        @keyframes splashPulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+        @keyframes splashFadeOut {
+            from { opacity: 1; }
+            to { opacity: 0; visibility: hidden; }
+        }
+        @keyframes splashTextSlide {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .splash-screen {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #f8fafc 0%, #e0e7ff 50%, #ede9fe 100%);
+        }
+        .splash-screen.fade-out {
+            animation: splashFadeOut 0.6s ease-out forwards;
+        }
+        .splash-logo-container {
+            text-align: center;
+            animation: splashFadeIn 0.8s ease-out;
+        }
+        .splash-logo-icon {
+            animation: splashPulse 2s ease-in-out infinite;
+        }
+        .splash-text {
+            animation: splashTextSlide 0.6s ease-out 0.3s both;
+        }
+        .splash-sub {
+            animation: splashTextSlide 0.6s ease-out 0.5s both;
+        }
+
+        /* ── Sidebar Logo Hover ── */
+        .sidebar-logo-mark:hover {
+            transform: scale(1.08);
+        }
     </style>
 </head>
 <body class="bg-slate-50">
+    <!-- Splash Screen (pure HTML/CSS, shown before React loads) -->
+    <div id="splash" class="splash-screen">
+        <div class="splash-logo-container">
+            <div class="splash-logo-icon" style="width:120px;height:120px;margin:0 auto 16px">
+                <img src="/public/logo-icon.svg" alt="NAORU" style="width:100%;height:100%;object-fit:contain" />
+            </div>
+            <div class="splash-text" style="font-size:28px;font-weight:800;color:#1a1a1a;letter-spacing:8px">NAORU</div>
+            <div class="splash-sub" style="font-size:11px;color:#94a3b8;font-weight:700;margin-top:6px;letter-spacing:3px;text-transform:uppercase">Dashboard</div>
+        </div>
+    </div>
+
     <noscript>
         <div style="display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: sans-serif;">
             <div style="text-align: center; padding: 20px;">
@@ -846,6 +904,17 @@
                     console.warn('Auth verification failed (network error), keeping saved token');
                     setAuthState({ checking: false, authenticated: true, token: authState.token });
                 });
+            }, []);
+
+            // ── スプラッシュスクリーン制御 ──
+            useEffect(() => {
+                const splash = document.getElementById('splash');
+                if (!splash) return;
+                const timer = setTimeout(() => {
+                    splash.classList.add('fade-out');
+                    setTimeout(() => { splash.remove(); }, 600);
+                }, 1200);
+                return () => clearTimeout(timer);
             }, []);
 
             const handleLogin = async (e) => {
@@ -5462,11 +5531,12 @@
                     <div className="min-h-screen bg-gradient-to-br from-slate-100 to-indigo-50 flex items-center justify-center p-4">
                         <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-8 w-full max-w-sm">
                             <div className="text-center mb-6">
-                                <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg">
-                                    <span className="text-white text-2xl font-black italic">N</span>
+                                <div className="w-20 h-20 mx-auto mb-4">
+                                    <img src="/public/logo-icon.svg" alt="NAORU" className="w-full h-full object-contain" />
                                 </div>
-                                <h1 className="text-xl font-black text-slate-800 italic">NAORU Dashboard</h1>
-                                <p className="text-xs text-slate-400 mt-1">経営ダッシュボードにログイン</p>
+                                <h1 className="text-xl font-black text-slate-800" style={{letterSpacing: '4px'}}>NAORU</h1>
+                                <p className="text-[10px] text-slate-400 mt-1 font-bold tracking-widest uppercase">Dashboard</p>
+                                <p className="text-xs text-slate-400 mt-2">経営ダッシュボードにログイン</p>
                             </div>
                             <form onSubmit={handleLogin} className="space-y-4" autoComplete="on">
                                 <input type="hidden" name="username" autoComplete="username" value="naoru-dashboard" />
@@ -5546,6 +5616,16 @@
 
                     {/* Main Content */}
                     <div className="flex-1 overflow-x-hidden pb-16 md:pb-0">
+                        {/* Mobile Top Logo Bar */}
+                        <div className="md:hidden flex items-center gap-2.5 px-3 py-2.5 bg-white border-b border-slate-200">
+                            <div className="w-8 h-8">
+                                <img src="/public/logo-icon.svg" alt="NAORU" className="w-full h-full object-contain" />
+                            </div>
+                            <div>
+                                <span className="text-sm font-black text-slate-900" style={{letterSpacing: '2px'}}>NAORU</span>
+                                <span className="text-[9px] text-slate-400 font-bold tracking-wider ml-1.5 uppercase">Dashboard</span>
+                            </div>
+                        </div>
                         {currentPage === 'dashboard' && (
                             <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
                                 <div className="max-w-[1600px] mx-auto space-y-4 md:space-y-6">
@@ -10739,9 +10819,14 @@
                     <div className="hidden md:flex md:flex-col w-64 min-h-screen bg-white border-r border-slate-200 p-6">
                         {/* Logo/Title + Alert Bell */}
                         <div className="mb-8 flex items-center justify-between">
-                            <div>
-                                <h1 className="text-xl font-black text-slate-900">NAORU</h1>
-                                <p className="text-xs text-slate-400 font-bold">総合ダッシュボード</p>
+                            <div className="flex items-center gap-3">
+                                <div className="sidebar-logo-mark w-10 h-10 transition-all cursor-default">
+                                    <img src="/public/logo-icon.svg" alt="NAORU" className="w-full h-full object-contain" />
+                                </div>
+                                <div>
+                                    <h1 className="text-lg font-black text-slate-900 leading-tight" style={{letterSpacing: '3px'}}>NAORU</h1>
+                                    <p className="text-[10px] text-slate-400 font-bold tracking-wider">総合ダッシュボード</p>
+                                </div>
                             </div>
                             <div className="relative" ref={alertRef}>
                                 <button

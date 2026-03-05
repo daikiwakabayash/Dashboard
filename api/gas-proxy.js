@@ -29,24 +29,52 @@ export default async function handler(req, res) {
     });
   }
 
-  try {
-    const response = await fetch(targetUrl, {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' },
-      redirect: 'follow',
-    });
+  const maxRetries = 2;
+  const timeoutMs = 25000; // 25秒（Vercelのデフォルト関数タイムアウト内に収める）
+  let lastError;
 
-    if (!response.ok) {
-      throw new Error(`GAS API returned ${response.status}`);
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      if (attempt > 0) {
+        const delay = 2000 * attempt; // 2秒, 4秒
+        await new Promise(r => setTimeout(r, delay));
+        console.log(`GAS proxy retry ${attempt}/${maxRetries} for ${type}`);
+      }
+
+      const response = await fetch(targetUrl, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`GAS API returned ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      // キャッシュヘッダー（5分）
+      res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate=600');
+      return res.status(200).json(data);
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (err.name === 'AbortError') {
+        lastError = new Error('GAS APIがタイムアウトしました（25秒）');
+      } else {
+        lastError = err;
+      }
+      console.error(`GAS proxy error (${type}) attempt ${attempt + 1}:`, lastError.message);
     }
-
-    const data = await response.json();
-
-    // キャッシュヘッダー（5分）
-    res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate=600');
-    return res.status(200).json(data);
-  } catch (err) {
-    console.error(`GAS proxy error (${type}):`, err);
-    return res.status(502).json({ error: 'Failed to fetch from GAS API', message: err.message });
   }
+
+  return res.status(504).json({
+    error: 'GAS APIへの接続がタイムアウトしました',
+    message: lastError.message,
+    retryable: true,
+  });
 }

@@ -28,6 +28,7 @@ describe('index.html - 必須コンポーネント', () => {
     expect(html).toContain("'marketing'");
     expect(html).toContain("'square'");
     expect(html).toContain("'planning'");
+    expect(html).toContain("'finance'");
   });
 
   it('メニューアイテムが5つ定義されている', () => {

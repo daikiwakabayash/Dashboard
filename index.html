@@ -409,6 +409,8 @@
         .stagger-4 { animation-delay: 0.2s; }
         .stagger-5 { animation-delay: 0.25s; }
     </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>if(window.pdfjsLib)pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
 </head>
 <body class="bg-slate-50">
     <!-- Splash Screen (pure HTML/CSS, shown before React loads) -->
@@ -1331,19 +1333,79 @@
                 }
             }, [finData]);
 
-            // PDF決算書アップロード処理
+            // PDF決算書アップロード処理（pdf.js → ページ画像 → Claude API）
             const [finPdfLoading, setFinPdfLoading] = useState(false);
             const [finPdfError, setFinPdfError] = useState(null);
             const [finPdfResult, setFinPdfResult] = useState(null);
+            const [finPdfProgress, setFinPdfProgress] = useState('');
             const finFileInputRef = useRef(null);
 
-            const handleFinancePdfUpload = async (file) => {
-                if (!file || file.type !== 'application/pdf') {
+            // 複数期のデータを管理（期別に保存）
+            const [finPeriodData, setFinPeriodData] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('naoru_finance_periods');
+                    return saved ? JSON.parse(saved) : [];
+                } catch { return []; }
+            });
+            useEffect(() => {
+                if (finPeriodData.length > 0) {
+                    try { localStorage.setItem('naoru_finance_periods', JSON.stringify(finPeriodData)); } catch {}
+                    // monthlyTrendを期データから自動生成
+                    const trend = finPeriodData
+                        .filter(d => d.pl && d.period)
+                        .sort((a, b) => a.period.localeCompare(b.period))
+                        .map(d => ({
+                            month: d.period,
+                            fiscalYear: d.fiscalYear || '',
+                            sales: d.pl.sales || 0,
+                            operatingIncome: d.pl.operatingIncome || 0,
+                            operatingCF: d.cashflow?.operatingCF || 0,
+                            cash: d.bs?.cash || 0,
+                            netIncome: d.pl.netIncome || 0,
+                            totalAssets: d.bs?.totalAssets || 0,
+                        }));
+                    if (trend.length > 0) {
+                        setFinData(prev => ({ ...prev, monthlyTrend: trend }));
+                    }
+                }
+            }, [finPeriodData]);
+
+            // PDF → ページ画像変換（pdf.js使用）
+            const pdfToPageImages = async (file, onProgress) => {
+                const arrayBuffer = await file.arrayBuffer();
+                const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                const totalPages = pdf.numPages;
+                const images = [];
+                // 最大20ページまで処理（決算書は通常10ページ以内）
+                const maxPages = Math.min(totalPages, 20);
+                for (let i = 1; i <= maxPages; i++) {
+                    onProgress(`PDF変換中... ${i}/${maxPages}ページ`);
+                    const page = await pdf.getPage(i);
+                    const scale = 2.0; // 高解像度で読み取り
+                    const viewport = page.getViewport({ scale });
+                    const canvas = document.createElement('canvas');
+                    canvas.width = viewport.width;
+                    canvas.height = viewport.height;
+                    const ctx = canvas.getContext('2d');
+                    await page.render({ canvasContext: ctx, viewport }).promise;
+                    // JPEG Base64（品質0.85でサイズ削減）
+                    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+                    images.push(dataUrl.split(',')[1]);
+                }
+                return images;
+            };
+
+            const handleFinancePdfUpload = async (files) => {
+                const fileList = Array.from(files);
+                if (fileList.length === 0) return;
+                const pdfFiles = fileList.filter(f => f.type === 'application/pdf');
+                if (pdfFiles.length === 0) {
                     setFinPdfError('PDFファイルを選択してください');
                     return;
                 }
-                if (file.size > 20 * 1024 * 1024) {
-                    setFinPdfError('ファイルサイズは20MB以下にしてください');
+
+                if (!window.pdfjsLib) {
+                    setFinPdfError('PDF.jsの読み込みに失敗しました。ページを再読み込みしてください。');
                     return;
                 }
 
@@ -1351,57 +1413,73 @@
                 setFinPdfError(null);
                 setFinPdfResult(null);
 
-                try {
-                    // File → Base64
-                    const base64 = await new Promise((resolve, reject) => {
-                        const reader = new FileReader();
-                        reader.onload = () => resolve(reader.result.split(',')[1]);
-                        reader.onerror = reject;
-                        reader.readAsDataURL(file);
-                    });
+                const results = [];
+                const errors = [];
 
-                    const res = await fetch('/api/finance-pdf', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ pdfBase64: base64, fileName: file.name }),
-                    });
+                for (let fi = 0; fi < pdfFiles.length; fi++) {
+                    const file = pdfFiles[fi];
+                    setFinPdfProgress(`${file.name} を処理中（${fi + 1}/${pdfFiles.length}）...`);
 
-                    // レスポンスをテキストで受け取り、JSONパースを試みる
-                    const text = await res.text();
-                    let result;
                     try {
-                        result = JSON.parse(text);
-                    } catch {
-                        // Vercelのボディサイズ制限等でHTMLエラーが返る場合
-                        if (text.includes('Request Entity Too Large') || text.includes('FUNCTION_PAYLOAD_TOO_LARGE') || res.status === 413) {
-                            setFinPdfError('PDFファイルが大きすぎます。ページ数の少ないPDFを試してください。');
-                        } else {
-                            setFinPdfError(`サーバーエラー（${res.status}）: PDFの処理に失敗しました。しばらく待ってから再試行してください。`);
+                        // Step 1: PDF → ページ画像
+                        const pageImages = await pdfToPageImages(file, setFinPdfProgress);
+                        setFinPdfProgress(`${file.name}: AIが決算データを読み取り中...`);
+
+                        // Step 2: ページ画像をAPIに送信
+                        const res = await fetch('/api/finance-pdf', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ pageImages, fileName: file.name }),
+                        });
+
+                        const text = await res.text();
+                        let result;
+                        try { result = JSON.parse(text); } catch {
+                            errors.push(`${file.name}: サーバーエラー`);
+                            continue;
                         }
-                        return;
+
+                        if (result.success && result.data) {
+                            const extracted = result.data;
+                            // 最新のデータとして反映
+                            setFinData(prev => ({
+                                ...prev,
+                                pl: { ...prev?.pl, ...extracted.pl },
+                                bs: { ...prev?.bs, ...extracted.bs },
+                                cashflow: { ...prev?.cashflow, ...extracted.cashflow },
+                                accountDetails: extracted.accountDetails || prev?.accountDetails,
+                            }));
+                            if (extracted.period) setFinPeriod(extracted.period);
+                            // 期データとして保存
+                            setFinPeriodData(prev => {
+                                const existing = prev.filter(d => d.fiscalYear !== extracted.fiscalYear);
+                                return [...existing, extracted].sort((a, b) => (a.period || '').localeCompare(b.period || ''));
+                            });
+                            setFinUploadedFiles(prev => [...prev, { name: file.name, period: extracted.period || '', fiscalYear: extracted.fiscalYear || '', uploadedAt: new Date().toISOString() }]);
+                            results.push(`${file.name}（${extracted.fiscalYear || ''}）`);
+                        } else {
+                            errors.push(`${file.name}: ${result.message || '抽出失敗'}`);
+                        }
+                    } catch (err) {
+                        errors.push(`${file.name}: ${err.message}`);
                     }
 
-                    if (result.success && result.data) {
-                        const extracted = result.data;
-                        setFinData(prev => ({
-                            ...prev,
-                            pl: { ...prev?.pl, ...extracted.pl },
-                            bs: { ...prev?.bs, ...extracted.bs },
-                            cashflow: { ...prev?.cashflow, ...extracted.cashflow },
-                            accountDetails: extracted.accountDetails || prev?.accountDetails,
-                        }));
-                        if (extracted.period) setFinPeriod(extracted.period);
-                        setFinUploadedFiles(prev => [...prev, { name: file.name, period: extracted.period || '', fiscalYear: extracted.fiscalYear || '', uploadedAt: new Date().toISOString() }]);
-                        setFinPdfResult(`${file.name} からデータを取り込みました（${extracted.fiscalYear || ''}）`);
-                    } else {
-                        setFinPdfError(result.message || 'データの抽出に失敗しました');
+                    // レート制限回避のため複数ファイル間に待機
+                    if (fi < pdfFiles.length - 1) {
+                        setFinPdfProgress('レート制限回避のため待機中...');
+                        await new Promise(r => setTimeout(r, 3000));
                     }
-                } catch (err) {
-                    setFinPdfError('PDF解析エラー: ' + err.message);
-                } finally {
-                    setFinPdfLoading(false);
-                    if (finFileInputRef.current) finFileInputRef.current.value = '';
                 }
+
+                if (results.length > 0) {
+                    setFinPdfResult(`${results.length}件取り込み完了: ${results.join(', ')}`);
+                }
+                if (errors.length > 0) {
+                    setFinPdfError(`${errors.length}件エラー: ${errors.join(' / ')}`);
+                }
+                setFinPdfLoading(false);
+                setFinPdfProgress('');
+                if (finFileInputRef.current) finFileInputRef.current.value = '';
             };
 
             // ファイナンスAIチャット送信
@@ -10263,8 +10341,9 @@
                                             ref={finFileInputRef}
                                             type="file"
                                             accept=".pdf"
+                                            multiple
                                             className="hidden"
-                                            onChange={e => e.target.files[0] && handleFinancePdfUpload(e.target.files[0])}
+                                            onChange={e => e.target.files.length > 0 && handleFinancePdfUpload(e.target.files)}
                                         />
                                         <button
                                             onClick={() => finFileInputRef.current?.click()}
@@ -10274,11 +10353,17 @@
                                             {finPdfLoading ? (
                                                 <><RefreshCw size={14} className="animate-spin" /> 解析中...</>
                                             ) : (
-                                                <><Upload size={14} /> PDF取込</>
+                                                <><Upload size={14} /> 決算書PDF取込（複数可）</>
                                             )}
                                         </button>
                                     </div>
                                 </div>
+                                {/* 進捗表示 */}
+                                {finPdfProgress && (
+                                    <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 text-blue-600 rounded-xl text-sm font-bold">
+                                        <RefreshCw size={14} className="animate-spin" /> {finPdfProgress}
+                                    </div>
+                                )}
                                 {/* PDF取込結果メッセージ */}
                                 {(finPdfError || finPdfResult) && (
                                     <div className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-bold ${finPdfError ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-600'}`}>
@@ -10388,31 +10473,50 @@
                                         </div>
                                     </div>
 
-                                    {/* 月次トレンド */}
-                                    {finData.monthlyTrend && (
+                                    {/* 期別比較トレンド */}
+                                    {finData.monthlyTrend && finData.monthlyTrend.length > 0 && (
                                         <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 md:p-6">
-                                            <h3 className="font-black text-sm md:text-base text-slate-800 mb-4">月次トレンド</h3>
+                                            <h3 className="font-black text-sm md:text-base text-slate-800 mb-4 flex items-center gap-2">
+                                                <TrendingUp size={18} className="text-emerald-500" /> 期別比較
+                                                <span className="text-xs text-slate-400 font-bold ml-2">（{finData.monthlyTrend.length}期分）</span>
+                                            </h3>
                                             <div className="overflow-x-auto">
                                                 <table className="w-full text-sm">
                                                     <thead>
                                                         <tr className="text-left border-b-2 border-slate-200">
-                                                            <th className="py-2 px-3 font-black text-slate-600">月</th>
+                                                            <th className="py-2 px-3 font-black text-slate-600">決算期</th>
                                                             <th className="py-2 px-3 font-black text-slate-600 text-right">売上高</th>
                                                             <th className="py-2 px-3 font-black text-slate-600 text-right">営業利益</th>
-                                                            <th className="py-2 px-3 font-black text-slate-600 text-right">営業CF</th>
-                                                            <th className="py-2 px-3 font-black text-slate-600 text-right">現金残高</th>
+                                                            <th className="py-2 px-3 font-black text-slate-600 text-right">純利益</th>
+                                                            <th className="py-2 px-3 font-black text-slate-600 text-right">総資産</th>
+                                                            <th className="py-2 px-3 font-black text-slate-600 text-right">現金</th>
                                                         </tr>
                                                     </thead>
                                                     <tbody>
-                                                        {finData.monthlyTrend.map((row, idx) => (
-                                                            <tr key={idx} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
-                                                                <td className="py-2.5 px-3 font-bold text-slate-700">{row.month}</td>
-                                                                <td className="py-2.5 px-3 text-right font-bold">¥{(row.sales / 10000).toFixed(0)}万</td>
-                                                                <td className="py-2.5 px-3 text-right font-bold text-emerald-600">¥{(row.operatingIncome / 10000).toFixed(0)}万</td>
-                                                                <td className="py-2.5 px-3 text-right font-bold text-blue-600">¥{(row.operatingCF / 10000).toFixed(0)}万</td>
-                                                                <td className="py-2.5 px-3 text-right font-bold text-amber-600">¥{(row.cash / 10000).toFixed(0)}万</td>
-                                                            </tr>
-                                                        ))}
+                                                        {finData.monthlyTrend.map((row, idx) => {
+                                                            const prev = idx > 0 ? finData.monthlyTrend[idx - 1] : null;
+                                                            const salesGrowth = prev && prev.sales ? ((row.sales - prev.sales) / prev.sales * 100).toFixed(1) : null;
+                                                            return (
+                                                                <tr key={idx} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                                                                    <td className="py-2.5 px-3 font-bold text-slate-700">
+                                                                        {row.fiscalYear || row.month}
+                                                                        <div className="text-[10px] text-slate-400">{row.month}</div>
+                                                                    </td>
+                                                                    <td className="py-2.5 px-3 text-right">
+                                                                        <span className="font-bold">¥{(row.sales / 10000).toFixed(0)}万</span>
+                                                                        {salesGrowth !== null && (
+                                                                            <div className={`text-[10px] font-bold ${Number(salesGrowth) >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                                                                                {Number(salesGrowth) >= 0 ? '+' : ''}{salesGrowth}%
+                                                                            </div>
+                                                                        )}
+                                                                    </td>
+                                                                    <td className="py-2.5 px-3 text-right font-bold text-emerald-600">¥{(row.operatingIncome / 10000).toFixed(0)}万</td>
+                                                                    <td className="py-2.5 px-3 text-right font-bold text-purple-600">¥{((row.netIncome || 0) / 10000).toFixed(0)}万</td>
+                                                                    <td className="py-2.5 px-3 text-right font-bold text-blue-600">¥{((row.totalAssets || 0) / 10000).toFixed(0)}万</td>
+                                                                    <td className="py-2.5 px-3 text-right font-bold text-amber-600">¥{(row.cash / 10000).toFixed(0)}万</td>
+                                                                </tr>
+                                                            );
+                                                        })}
                                                     </tbody>
                                                 </table>
                                             </div>

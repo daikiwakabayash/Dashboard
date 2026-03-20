@@ -88,8 +88,8 @@ const EXTRACTION_PROMPT = `あなたは決算書の読み取り専門家です�
 キャッシュフロー計算書が画像に含まれない場合は、PLとBSから推計してください（営業CF ≈ 純利益 + 減価償却費、など）。`;
 
 const MODELS = [
-  'claude-sonnet-4-5',
-  'claude-haiku-4-5',
+  'claude-sonnet-4-5-20241022',
+  'claude-haiku-4-5-20251001',
 ];
 
 async function callWithRetry(fn, maxRetries = 2) {
@@ -225,9 +225,10 @@ export default async function handler(req, res) {
     if (error.status === 429) {
       return res.status(429).json({ error: 'Rate limited', message: 'APIのレート制限に達しました。1〜2分後に再度お試しください。' });
     }
-    return res.status(500).json({
+    const statusCode = error.status || 500;
+    return res.status(statusCode).json({
       error: 'Internal server error',
-      message: 'PDF解析中にエラーが発生しました。' + (error.message || ''),
+      message: 'PDF解析中にエラーが発生しました: ' + (error.message || String(error)),
     });
   }
 }

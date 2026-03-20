@@ -1380,8 +1380,19 @@
             const handleDeletePeriod = (fiscalYear) => {
                 setFinPeriodData(prev => prev.filter(d => d.fiscalYear !== fiscalYear));
                 setFinUploadedFiles(prev => prev.filter(f => f.fiscalYear !== fiscalYear));
-                // 削除した期が選択中だったらlatestに戻す
                 if (finPeriod === fiscalYear) setFinPeriod('latest');
+            };
+            // 全財務データクリア
+            const handleClearAllFinanceData = () => {
+                setFinPeriodData([]);
+                setFinUploadedFiles([]);
+                setFinData(null);
+                setFinPeriod('latest');
+                try {
+                    localStorage.removeItem('naoru_finance_periods');
+                    localStorage.removeItem('naoru_finance_data');
+                    localStorage.removeItem('naoru_finance_uploaded_files');
+                } catch {}
             };
 
 
@@ -1398,7 +1409,7 @@
                 for (let i = 1; i <= maxPages; i++) {
                     onProgress(`PDF変換中... ${i}/${maxPages}ページ`);
                     const page = await pdf.getPage(i);
-                    const scale = 1.5; // バランスの良い解像度
+                    const scale = 1.2; // 読みやすさとサイズのバランス
                     const viewport = page.getViewport({ scale });
                     const canvas = document.createElement('canvas');
                     canvas.width = viewport.width;
@@ -1442,85 +1453,48 @@
                         const pageImages = await pdfToPageImages(file, setFinPdfProgress);
                         setFinPdfProgress(`${file.name}: AIが決算データを読み取り中...（${pageImages.length}ページ）`);
 
-                        // Step 2: ページ画像をバッチに分割して送信（5ページずつ）
-                        const BATCH_SIZE = 5;
-                        const batches = [];
-                        for (let b = 0; b < pageImages.length; b += BATCH_SIZE) {
-                            batches.push(pageImages.slice(b, b + BATCH_SIZE));
+                        // Step 2: 全ページを一括でAPIに送信
+                        const res = await fetch('/api/finance-pdf', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                pageImages,
+                                fileName: file.name,
+                            }),
+                        });
+
+                        const text = await res.text();
+                        let result;
+                        try { result = JSON.parse(text); } catch {
+                            console.error('Non-JSON response:', text.substring(0, 500));
+                            errors.push(`${file.name}: サーバーエラー（${res.status}）`);
+                            continue;
                         }
 
-                        let mergedResult = null;
-                        for (let bi = 0; bi < batches.length; bi++) {
-                            if (batches.length > 1) {
-                                setFinPdfProgress(`${file.name}: AIが読み取り中...（バッチ ${bi + 1}/${batches.length}）`);
-                            }
-                            const res = await fetch('/api/finance-pdf', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    pageImages: batches[bi],
-                                    fileName: file.name,
-                                    batchInfo: batches.length > 1 ? `バッチ${bi + 1}/${batches.length}` : null,
-                                }),
-                            });
-
-                            const text = await res.text();
-                            let result;
-                            try { result = JSON.parse(text); } catch {
-                                console.error('Non-JSON response:', text.substring(0, 500));
-                                errors.push(`${file.name}: サーバーエラー（${res.status}）- レスポンスがJSONではありません`);
-                                mergedResult = null;
-                                break;
-                            }
-
-                            if (!result.success) {
-                                errors.push(`${file.name}: ${result.message || result.error || '不明なエラー'}`);
-                                mergedResult = null;
-                                break;
-                            }
-
-                            if (!mergedResult) {
-                                mergedResult = result;
-                            } else {
-                                // バッチ結果をマージ（後のバッチのデータで上書き、0でない値のみ）
-                                const d = result.data;
-                                if (d.pl) Object.keys(d.pl).forEach(k => { if (d.pl[k]) mergedResult.data.pl[k] = d.pl[k]; });
-                                if (d.bs) Object.keys(d.bs).forEach(k => { if (d.bs[k]) mergedResult.data.bs[k] = d.bs[k]; });
-                                if (d.cashflow) Object.keys(d.cashflow).forEach(k => { if (d.cashflow[k]) mergedResult.data.cashflow[k] = d.cashflow[k]; });
-                                if (d.accountDetails) mergedResult.data.accountDetails = d.accountDetails;
-                            }
-
-                            // バッチ間のレート制限回避
-                            if (bi < batches.length - 1) {
-                                setFinPdfProgress('レート制限回避のため待機中...');
-                                await new Promise(r => setTimeout(r, 3000));
-                            }
+                        if (!result.success) {
+                            errors.push(`${file.name}: ${result.message || result.error || '不明なエラー'}`);
+                            continue;
                         }
 
-                        if (!mergedResult) continue;
-                        const result = mergedResult;
+                        const extracted = result.data;
+                        console.log(`[Finance PDF] ${file.name} extracted:`, JSON.stringify(extracted).substring(0, 200));
 
-                        if (result.success && result.data) {
-                            const extracted = result.data;
-                            // 最新のデータとして反映
-                            setFinData(prev => ({
-                                ...prev,
-                                pl: { ...prev?.pl, ...extracted.pl },
-                                bs: { ...prev?.bs, ...extracted.bs },
-                                cashflow: { ...prev?.cashflow, ...extracted.cashflow },
-                                accountDetails: extracted.accountDetails || prev?.accountDetails,
-                            }));
-                            setFinPeriod(extracted.fiscalYear || extracted.period || 'latest');
-                            // 期データとして保存
-                            setFinPeriodData(prev => {
-                                const existing = prev.filter(d => d.fiscalYear !== extracted.fiscalYear);
-                                return [...existing, extracted].sort((a, b) => (a.period || '').localeCompare(b.period || ''));
-                            });
-                            setFinUploadedFiles(prev => [...prev, { name: file.name, period: extracted.period || '', fiscalYear: extracted.fiscalYear || '', uploadedAt: new Date().toISOString() }]);
-                            results.push(`${file.name}（${extracted.fiscalYear || ''}）`);
-                        } else {
-                            errors.push(`${file.name}: ${result.message || '抽出失敗'}`);
-                        }
+                        // 最新のデータとして反映
+                        setFinData(prev => ({
+                            ...prev,
+                            pl: { ...prev?.pl, ...extracted.pl },
+                            bs: { ...prev?.bs, ...extracted.bs },
+                            cashflow: { ...prev?.cashflow, ...extracted.cashflow },
+                            accountDetails: extracted.accountDetails || prev?.accountDetails,
+                        }));
+                        setFinPeriod(extracted.fiscalYear || extracted.period || 'latest');
+                        // 期データとして保存
+                        setFinPeriodData(prev => {
+                            const existing = prev.filter(d => d.fiscalYear !== extracted.fiscalYear);
+                            return [...existing, extracted].sort((a, b) => (a.period || '').localeCompare(b.period || ''));
+                        });
+                        setFinUploadedFiles(prev => [...prev, { name: file.name, period: extracted.period || '', fiscalYear: extracted.fiscalYear || '', uploadedAt: new Date().toISOString() }]);
+                        results.push(`${file.name}（${extracted.fiscalYear || ''}）`);
                     } catch (err) {
                         errors.push(`${file.name}: ${err.message}`);
                     }
@@ -10450,6 +10424,10 @@
                                                 </span>
                                             ))}
                                         </div>
+                                        <button
+                                            onClick={() => { if (confirm('全ての財務データを削除しますか？')) handleClearAllFinanceData(); }}
+                                            className="text-xs text-slate-400 hover:text-rose-500 font-bold shrink-0 mt-1 transition-colors"
+                                        >全クリア</button>
                                     </div>
                                 )}
                                 {/* 進捗表示 */}

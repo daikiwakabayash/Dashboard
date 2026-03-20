@@ -1261,18 +1261,31 @@
             const [finLoading, setFinLoading] = useState(false);
             const finChatRef = useRef(null);
             const [finPeriod, setFinPeriod] = useState('latest'); // 'latest' or fiscalYear string
+
+            // アップロード済みファイル一覧（localStorage永続化）
             const [finUploadedFiles, setFinUploadedFiles] = useState(() => {
                 try {
                     const saved = localStorage.getItem('naoru_finance_uploaded_files');
                     return saved ? JSON.parse(saved) : [];
                 } catch { return []; }
             });
+
+            // 複数期のデータを管理（期別に保存・localStorage永続化）※先に宣言
+            const [finPeriodData, setFinPeriodData] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('naoru_finance_periods');
+                    return saved ? JSON.parse(saved) : [];
+                } catch { return []; }
+            });
+
+            // 現在表示用の統合データ（最新期がデフォルト）
             const [finData, setFinData] = useState(() => {
                 try {
                     const saved = localStorage.getItem('naoru_finance_data');
                     return saved ? JSON.parse(saved) : null;
                 } catch { return null; }
             });
+
             // ファイナンスデータの保存
             useEffect(() => {
                 if (finData) {
@@ -1282,11 +1295,32 @@
             useEffect(() => {
                 try { localStorage.setItem('naoru_finance_uploaded_files', JSON.stringify(finUploadedFiles)); } catch {}
             }, [finUploadedFiles]);
+            useEffect(() => {
+                try { localStorage.setItem('naoru_finance_periods', JSON.stringify(finPeriodData)); } catch {}
+                // monthlyTrendを期データから自動生成
+                if (finPeriodData.length > 0) {
+                    const trend = finPeriodData
+                        .filter(d => d.pl && d.period)
+                        .sort((a, b) => a.period.localeCompare(b.period))
+                        .map(d => ({
+                            month: d.period,
+                            fiscalYear: d.fiscalYear || '',
+                            sales: d.pl.sales || 0,
+                            operatingIncome: d.pl.operatingIncome || 0,
+                            operatingCF: d.cashflow?.operatingCF || 0,
+                            cash: d.bs?.cash || 0,
+                            netIncome: d.pl.netIncome || 0,
+                            totalAssets: d.bs?.totalAssets || 0,
+                        }));
+                    if (trend.length > 0) {
+                        setFinData(prev => ({ ...prev, monthlyTrend: trend }));
+                    }
+                }
+            }, [finPeriodData]);
 
             // 西暦 → 令和年度変換
             const toReiwaYear = (period) => {
                 if (!period) return '';
-                // period形式: "YYYY-MM" or fiscalYear "第N期"
                 const yearMatch = period.match(/^(\d{4})/);
                 if (!yearMatch) return period;
                 const westernYear = parseInt(yearMatch[1]);
@@ -1313,7 +1347,6 @@
             const finSelectedData = useMemo(() => {
                 if (!finPeriodData || finPeriodData.length === 0) return finData;
                 if (finPeriod === 'latest' || !finPeriod) {
-                    // 最新のデータを返す
                     const sorted = [...finPeriodData].sort((a, b) => (b.period || '').localeCompare(a.period || ''));
                     if (sorted.length > 0) {
                         const latest = sorted[0];
@@ -1328,6 +1361,14 @@
                 return finData;
             }, [finPeriod, finPeriodData, finData]);
 
+            // 選択中の期の令和年度ラベル
+            const finSelectedLabel = useMemo(() => {
+                if (finPeriodOptions.length === 0) return '';
+                if (finPeriod === 'latest') return finPeriodOptions[finPeriodOptions.length - 1]?.label || '';
+                const opt = finPeriodOptions.find(o => o.value === finPeriod);
+                return opt?.label || '';
+            }, [finPeriod, finPeriodOptions]);
+
             // PDF決算書アップロード処理（pdf.js → ページ画像 → Claude API）
             const [finPdfLoading, setFinPdfLoading] = useState(false);
             const [finPdfError, setFinPdfError] = useState(null);
@@ -1335,35 +1376,22 @@
             const [finPdfProgress, setFinPdfProgress] = useState('');
             const finFileInputRef = useRef(null);
 
-            // 複数期のデータを管理（期別に保存）
-            const [finPeriodData, setFinPeriodData] = useState(() => {
-                try {
-                    const saved = localStorage.getItem('naoru_finance_periods');
-                    return saved ? JSON.parse(saved) : [];
-                } catch { return []; }
-            });
-            useEffect(() => {
-                if (finPeriodData.length > 0) {
-                    try { localStorage.setItem('naoru_finance_periods', JSON.stringify(finPeriodData)); } catch {}
-                    // monthlyTrendを期データから自動生成
-                    const trend = finPeriodData
-                        .filter(d => d.pl && d.period)
-                        .sort((a, b) => a.period.localeCompare(b.period))
-                        .map(d => ({
-                            month: d.period,
-                            fiscalYear: d.fiscalYear || '',
-                            sales: d.pl.sales || 0,
-                            operatingIncome: d.pl.operatingIncome || 0,
-                            operatingCF: d.cashflow?.operatingCF || 0,
-                            cash: d.bs?.cash || 0,
-                            netIncome: d.pl.netIncome || 0,
-                            totalAssets: d.bs?.totalAssets || 0,
-                        }));
-                    if (trend.length > 0) {
-                        setFinData(prev => ({ ...prev, monthlyTrend: trend }));
-                    }
-                }
-            }, [finPeriodData]);
+            // 期データ削除
+            const handleDeletePeriod = (fiscalYear) => {
+                setFinPeriodData(prev => prev.filter(d => d.fiscalYear !== fiscalYear));
+                setFinUploadedFiles(prev => prev.filter(f => f.fiscalYear !== fiscalYear));
+                // 削除した期が選択中だったらlatestに戻す
+                if (finPeriod === fiscalYear) setFinPeriod('latest');
+            };
+
+            // PDF決算書アップロード処理（pdf.js → ページ画像 → Claude API）
+            const [finPdfLoading, setFinPdfLoading] = useState(false);
+            const [finPdfError, setFinPdfError] = useState(null);
+            const [finPdfResult, setFinPdfResult] = useState(null);
+            const [finPdfProgress, setFinPdfProgress] = useState('');
+            const finFileInputRef = useRef(null);
+
+            // (finPeriodData は上部で宣言済み)
 
             // PDF → ページ画像変換（pdf.js使用）
             const pdfToPageImages = async (file, onProgress) => {
@@ -10370,9 +10398,9 @@
                                             <p className="text-xs text-slate-400 font-bold">損益計算書・貸借対照表・キャッシュフロー分析</p>
                                         </div>
                                     </div>
-                                    <div className="flex items-center gap-2 flex-wrap">
+                                    <div className="flex items-center gap-2 flex-wrap justify-end">
                                         {/* 令和年度セレクター */}
-                                        {finPeriodOptions.length > 0 && finPeriodOptions.map(opt => (
+                                        {finPeriodOptions.map(opt => (
                                             <button
                                                 key={opt.value}
                                                 onClick={() => setFinPeriod(opt.value)}
@@ -10406,6 +10434,30 @@
                                         </button>
                                     </div>
                                 </div>
+                                {/* 取込済みPDF一覧（削除可能） */}
+                                {finUploadedFiles.length > 0 && (
+                                    <div className="flex items-start gap-2">
+                                        <span className="text-xs font-bold text-slate-400 mt-1 shrink-0">取込済:</span>
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {finUploadedFiles.map((f, i) => (
+                                                <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-50 text-emerald-700 rounded-md text-xs font-bold border border-emerald-200">
+                                                    <FileText size={10} /> {f.name} {f.fiscalYear && <span className="text-emerald-500">({f.fiscalYear})</span>}
+                                                    <button
+                                                        onClick={() => {
+                                                            if (confirm(`「${f.name}」のデータを削除しますか？`)) {
+                                                                handleDeletePeriod(f.fiscalYear);
+                                                            }
+                                                        }}
+                                                        className="ml-0.5 text-slate-400 hover:text-rose-500 transition-colors"
+                                                        title="このPDFデータを削除"
+                                                    >
+                                                        <X size={10} />
+                                                    </button>
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
                                 {/* 進捗表示 */}
                                 {finPdfProgress && (
                                     <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 text-blue-600 rounded-xl text-sm font-bold">
@@ -10586,7 +10638,7 @@
                                     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 md:p-6">
                                         <h3 className="font-black text-base md:text-lg text-slate-800 mb-4 flex items-center gap-2">
                                             <BarChart3 size={20} className="text-emerald-500" /> 損益計算書（P/L）
-                                            <span className="text-xs text-slate-400 font-bold ml-auto">{finPeriod !== 'latest' ? finPeriodOptions.find(o => o.value === finPeriod)?.label || '' : finPeriodOptions.length > 0 ? finPeriodOptions[finPeriodOptions.length - 1]?.label : ''}</span>
+                                            <span className="text-xs text-slate-400 font-bold ml-auto">{finSelectedLabel}</span>
                                         </h3>
                                         <div className="overflow-x-auto">
                                             <table className="w-full text-sm">

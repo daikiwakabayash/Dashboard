@@ -102,8 +102,8 @@ const EXTRACTION_PROMPT = `あなたは日本の決算書の読み取り専門�
 該当データがない項目は 0 にする。`;
 
 const MODELS = [
-  'claude-sonnet-4-5-20241022',
   'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-5-20241022',
 ];
 
 async function callWithRetry(fn, maxRetries = 2) {
@@ -236,13 +236,17 @@ export default async function handler(req, res) {
     if (error.status === 401) {
       return res.status(500).json({ error: 'Invalid API key', message: 'ANTHROPIC_API_KEY が無効です。' });
     }
+    if (error.status === 400 && error.message?.includes('credit balance')) {
+      return res.status(402).json({ error: 'Insufficient credits', message: 'Anthropic APIのクレジット残高が不足しています。console.anthropic.com でクレジットをチャージしてください。' });
+    }
     if (error.status === 429) {
       return res.status(429).json({ error: 'Rate limited', message: 'APIのレート制限に達しました。1〜2分後に再度お試しください。' });
     }
+    const errMsg = error.message || String(error);
     const statusCode = error.status || 500;
     return res.status(statusCode).json({
       error: 'Internal server error',
-      message: 'PDF解析中にエラーが発生しました: ' + (error.message || String(error)),
+      message: errMsg.includes('credit') ? 'Anthropic APIのクレジット残高が不足しています。console.anthropic.com でクレジットをチャージしてください。' : 'PDF解析中にエラーが発生しました: ' + errMsg,
     });
   }
 }

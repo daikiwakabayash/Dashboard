@@ -1488,7 +1488,7 @@
                                 cashflow: { ...prev?.cashflow, ...extracted.cashflow },
                                 accountDetails: extracted.accountDetails || prev?.accountDetails,
                             }));
-                            if (extracted.period) setFinPeriod(extracted.period);
+                            setFinPeriod(extracted.fiscalYear || extracted.period || 'latest');
                             // 期データとして保存
                             setFinPeriodData(prev => {
                                 const existing = prev.filter(d => d.fiscalYear !== extracted.fiscalYear);
@@ -10371,6 +10371,20 @@
                                         </div>
                                     </div>
                                     <div className="flex items-center gap-2 flex-wrap">
+                                        {/* 令和年度セレクター */}
+                                        {finPeriodOptions.length > 0 && finPeriodOptions.map(opt => (
+                                            <button
+                                                key={opt.value}
+                                                onClick={() => setFinPeriod(opt.value)}
+                                                className={`px-3 py-2 rounded-xl font-bold text-sm transition-all ${
+                                                    (finPeriod === opt.value || (finPeriod === 'latest' && opt === finPeriodOptions[finPeriodOptions.length - 1]))
+                                                        ? 'bg-emerald-500 text-white shadow-md'
+                                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                                }`}
+                                            >
+                                                {opt.label}
+                                            </button>
+                                        ))}
                                         <input
                                             ref={finFileInputRef}
                                             type="file"
@@ -10433,40 +10447,6 @@
                                 ))}
                             </div>
 
-                            {/* ── 令和年度セレクター＆アップロード済みファイル ── */}
-                            {finPeriodOptions.length > 0 && (
-                                <div className="bg-white rounded-xl md:rounded-2xl shadow-sm border border-slate-200 p-3 md:p-4 space-y-3">
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                        <span className="text-xs font-bold text-slate-500 mr-1">表示期間:</span>
-                                        {finPeriodOptions.map(opt => (
-                                            <button
-                                                key={opt.value}
-                                                onClick={() => setFinPeriod(opt.value)}
-                                                className={`px-3 py-1.5 rounded-lg font-bold text-sm transition-all ${
-                                                    (finPeriod === opt.value || (finPeriod === 'latest' && opt === finPeriodOptions[finPeriodOptions.length - 1]))
-                                                        ? 'bg-emerald-500 text-white shadow-md'
-                                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                                                }`}
-                                            >
-                                                {opt.label}
-                                            </button>
-                                        ))}
-                                    </div>
-                                    {finUploadedFiles.length > 0 && (
-                                        <div className="flex items-start gap-2">
-                                            <span className="text-xs font-bold text-slate-400 mt-0.5 shrink-0">取込済PDF:</span>
-                                            <div className="flex flex-wrap gap-1.5">
-                                                {finUploadedFiles.map((f, i) => (
-                                                    <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-50 text-emerald-700 rounded-md text-xs font-bold border border-emerald-200">
-                                                        <FileText size={10} /> {f.name} {f.fiscalYear && <span className="text-emerald-500">({f.fiscalYear})</span>}
-                                                    </span>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-
                             {/* データなし表示 */}
                             {!finSelectedData && finActiveTab !== 'qa' && (
                                 <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-12 text-center">
@@ -10490,10 +10470,10 @@
                                     {/* KPI カード */}
                                     <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
                                         {[
-                                            { label: '売上高', value: finSelectedData.pl.sales, color: 'from-blue-500 to-blue-400', icon: <TrendingUp size={20} /> },
-                                            { label: '営業利益', value: finSelectedData.pl.operatingIncome, color: 'from-emerald-500 to-emerald-400', icon: <BarChart3 size={20} /> },
-                                            { label: '当期純利益', value: finSelectedData.pl.netIncome, color: 'from-purple-500 to-purple-400', icon: <Target size={20} /> },
-                                            { label: '現金残高', value: finSelectedData.bs.cash, color: 'from-amber-500 to-amber-400', icon: <Banknote size={20} /> },
+                                            { label: '売上高', value: finSelectedData.pl?.sales || 0, color: 'from-blue-500 to-blue-400', icon: <TrendingUp size={20} /> },
+                                            { label: '営業利益', value: finSelectedData.pl?.operatingIncome || 0, color: 'from-emerald-500 to-emerald-400', icon: <BarChart3 size={20} /> },
+                                            { label: '当期純利益', value: finSelectedData.pl?.netIncome || 0, color: 'from-purple-500 to-purple-400', icon: <Target size={20} /> },
+                                            { label: '現金残高', value: finSelectedData.bs?.cash || 0, color: 'from-amber-500 to-amber-400', icon: <Banknote size={20} /> },
                                         ].map((kpi, idx) => (
                                             <div key={idx} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 md:p-5 card-hover">
                                                 <div className="flex items-center justify-between mb-3">
@@ -10511,10 +10491,10 @@
                                             <h3 className="font-black text-sm md:text-base text-slate-800 mb-4">収益性指標</h3>
                                             <div className="space-y-3">
                                                 {[
-                                                    { label: '売上総利益率', value: ((finSelectedData.pl.grossProfit / finSelectedData.pl.sales) * 100).toFixed(1), suffix: '%', benchmark: '70%', color: 'emerald' },
-                                                    { label: '営業利益率', value: ((finSelectedData.pl.operatingIncome / finSelectedData.pl.sales) * 100).toFixed(1), suffix: '%', benchmark: '15%', color: 'blue' },
-                                                    { label: '経常利益率', value: ((finSelectedData.pl.ordinaryIncome / finSelectedData.pl.sales) * 100).toFixed(1), suffix: '%', benchmark: '12%', color: 'purple' },
-                                                    { label: '人件費率', value: ((finSelectedData.pl.personnelCost / finSelectedData.pl.sales) * 100).toFixed(1), suffix: '%', benchmark: '40%以下', color: 'amber' },
+                                                    { label: '売上総利益率', value: finSelectedData.pl?.sales ? (((finSelectedData.pl.grossProfit || 0) / finSelectedData.pl.sales) * 100).toFixed(1) : '-', suffix: '%', benchmark: '70%', color: 'emerald' },
+                                                    { label: '営業利益率', value: finSelectedData.pl?.sales ? (((finSelectedData.pl.operatingIncome || 0) / finSelectedData.pl.sales) * 100).toFixed(1) : '-', suffix: '%', benchmark: '15%', color: 'blue' },
+                                                    { label: '経常利益率', value: finSelectedData.pl?.sales ? (((finSelectedData.pl.ordinaryIncome || 0) / finSelectedData.pl.sales) * 100).toFixed(1) : '-', suffix: '%', benchmark: '12%', color: 'purple' },
+                                                    { label: '人件費率', value: finSelectedData.pl?.sales ? (((finSelectedData.pl.personnelCost || 0) / finSelectedData.pl.sales) * 100).toFixed(1) : '-', suffix: '%', benchmark: '40%以下', color: 'amber' },
                                                 ].map((item, idx) => (
                                                     <div key={idx} className="flex items-center justify-between py-2 border-b border-slate-100 last:border-0">
                                                         <span className="text-sm text-slate-600 font-bold">{item.label}</span>
@@ -10531,10 +10511,10 @@
                                             <h3 className="font-black text-sm md:text-base text-slate-800 mb-4">安全性指標</h3>
                                             <div className="space-y-3">
                                                 {[
-                                                    { label: '流動比率', value: ((finSelectedData.bs.totalCurrentAssets / finSelectedData.bs.totalCurrentLiabilities) * 100).toFixed(1), suffix: '%', benchmark: '200%以上', color: 'emerald' },
-                                                    { label: '自己資本比率', value: ((finSelectedData.bs.totalEquity / finSelectedData.bs.totalAssets) * 100).toFixed(1), suffix: '%', benchmark: '40%以上', color: 'blue' },
-                                                    { label: '負債比率', value: ((finSelectedData.bs.totalLiabilities / finSelectedData.bs.totalEquity) * 100).toFixed(1), suffix: '%', benchmark: '100%以下', color: 'amber' },
-                                                    { label: '現金月商比', value: (finSelectedData.bs.cash / (finSelectedData.pl.sales)).toFixed(2), suffix: 'ヶ月', benchmark: '1.5以上', color: 'purple' },
+                                                    { label: '流動比率', value: finSelectedData.bs?.totalCurrentLiabilities ? (((finSelectedData.bs.totalCurrentAssets || 0) / finSelectedData.bs.totalCurrentLiabilities) * 100).toFixed(1) : '-', suffix: '%', benchmark: '200%以上', color: 'emerald' },
+                                                    { label: '自己資本比率', value: finSelectedData.bs?.totalAssets ? (((finSelectedData.bs.totalEquity || 0) / finSelectedData.bs.totalAssets) * 100).toFixed(1) : '-', suffix: '%', benchmark: '40%以上', color: 'blue' },
+                                                    { label: '負債比率', value: finSelectedData.bs?.totalEquity ? (((finSelectedData.bs.totalLiabilities || 0) / finSelectedData.bs.totalEquity) * 100).toFixed(1) : '-', suffix: '%', benchmark: '100%以下', color: 'amber' },
+                                                    { label: '現金月商比', value: finSelectedData.pl?.sales ? ((finSelectedData.bs?.cash || 0) / finSelectedData.pl.sales).toFixed(2) : '-', suffix: 'ヶ月', benchmark: '1.5以上', color: 'purple' },
                                                 ].map((item, idx) => (
                                                     <div key={idx} className="flex items-center justify-between py-2 border-b border-slate-100 last:border-0">
                                                         <span className="text-sm text-slate-600 font-bold">{item.label}</span>

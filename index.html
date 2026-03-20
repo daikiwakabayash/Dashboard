@@ -1365,10 +1365,23 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ pdfBase64: base64, fileName: file.name }),
                     });
-                    const result = await res.json();
+
+                    // レスポンスをテキストで受け取り、JSONパースを試みる
+                    const text = await res.text();
+                    let result;
+                    try {
+                        result = JSON.parse(text);
+                    } catch {
+                        // Vercelのボディサイズ制限等でHTMLエラーが返る場合
+                        if (text.includes('Request Entity Too Large') || text.includes('FUNCTION_PAYLOAD_TOO_LARGE') || res.status === 413) {
+                            setFinPdfError('PDFファイルが大きすぎます。ページ数の少ないPDFを試してください。');
+                        } else {
+                            setFinPdfError(`サーバーエラー（${res.status}）: PDFの処理に失敗しました。しばらく待ってから再試行してください。`);
+                        }
+                        return;
+                    }
 
                     if (result.success && result.data) {
-                        // 抽出データをfinDataにマージ
                         const extracted = result.data;
                         setFinData(prev => ({
                             ...prev,

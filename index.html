@@ -1260,70 +1260,17 @@
             const [finInput, setFinInput] = useState('');
             const [finLoading, setFinLoading] = useState(false);
             const finChatRef = useRef(null);
-            const [finPeriod, setFinPeriod] = useState(() => {
-                const now = new Date();
-                return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+            const [finPeriod, setFinPeriod] = useState('latest'); // 'latest' or fiscalYear string
+            const [finUploadedFiles, setFinUploadedFiles] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('naoru_finance_uploaded_files');
+                    return saved ? JSON.parse(saved) : [];
+                } catch { return []; }
             });
-            const [finUploadedFiles, setFinUploadedFiles] = useState([]);
             const [finData, setFinData] = useState(() => {
                 try {
                     const saved = localStorage.getItem('naoru_finance_data');
-                    return saved ? JSON.parse(saved) : {
-                        pl: {
-                            sales: 12500000, costOfSales: 3750000, grossProfit: 8750000,
-                            sgaExpenses: 6250000, personnelCost: 4000000, rent: 1200000, advertising: 600000, depreciation: 200000, otherSga: 250000,
-                            operatingIncome: 2500000, nonOperatingIncome: 50000, nonOperatingExpenses: 150000,
-                            ordinaryIncome: 2400000, extraordinaryGains: 0, extraordinaryLosses: 0,
-                            incomeBeforeTax: 2400000, incomeTax: 720000, netIncome: 1680000
-                        },
-                        bs: {
-                            cash: 8500000, accountsReceivable: 2800000, inventory: 0, otherCurrentAssets: 500000,
-                            totalCurrentAssets: 11800000,
-                            fixedAssets: 5200000, intangibleAssets: 800000, investments: 1000000,
-                            totalFixedAssets: 7000000, totalAssets: 18800000,
-                            accountsPayable: 1200000, shortTermLoans: 2000000, unpaidExpenses: 1500000, otherCurrentLiabilities: 800000,
-                            totalCurrentLiabilities: 5500000,
-                            longTermLoans: 4000000, otherFixedLiabilities: 300000,
-                            totalFixedLiabilities: 4300000, totalLiabilities: 9800000,
-                            capital: 3000000, retainedEarnings: 6000000,
-                            totalEquity: 9000000, totalLiabilitiesAndEquity: 18800000
-                        },
-                        cashflow: {
-                            operatingCF: 2200000, investingCF: -500000, financingCF: -800000,
-                            netCashChange: 900000, beginningCash: 7600000, endingCash: 8500000,
-                            depreciation: 200000, changeInReceivables: -300000, changeInPayables: 100000,
-                            capex: -500000, loanRepayment: -800000
-                        },
-                        accountDetails: {
-                            unpaidExpenses: [
-                                { name: '社会保険料', amount: 450000 },
-                                { name: '水道光熱費', amount: 280000 },
-                                { name: '通信費', amount: 120000 },
-                                { name: '業務委託費', amount: 350000 },
-                                { name: 'リース料', amount: 300000 },
-                            ],
-                            accountsReceivable: [
-                                { name: '保険診療報酬（社保）', amount: 1200000 },
-                                { name: '保険診療報酬（国保）', amount: 800000 },
-                                { name: 'クレジットカード売掛金', amount: 500000 },
-                                { name: '法人契約売掛金', amount: 300000 },
-                            ],
-                            accountsPayable: [
-                                { name: '施術用品仕入', amount: 400000 },
-                                { name: '事務用品', amount: 150000 },
-                                { name: 'IT関連費用', amount: 350000 },
-                                { name: '清掃費', amount: 300000 },
-                            ]
-                        },
-                        monthlyTrend: [
-                            { month: '2025-10', sales: 11000000, operatingIncome: 2000000, operatingCF: 1800000, cash: 6800000 },
-                            { month: '2025-11', sales: 11500000, operatingIncome: 2200000, operatingCF: 2000000, cash: 7200000 },
-                            { month: '2025-12', sales: 12000000, operatingIncome: 2300000, operatingCF: 2100000, cash: 7600000 },
-                            { month: '2026-01', sales: 11800000, operatingIncome: 2100000, operatingCF: 1900000, cash: 7800000 },
-                            { month: '2026-02', sales: 12200000, operatingIncome: 2400000, operatingCF: 2100000, cash: 8200000 },
-                            { month: '2026-03', sales: 12500000, operatingIncome: 2500000, operatingCF: 2200000, cash: 8500000 },
-                        ]
-                    };
+                    return saved ? JSON.parse(saved) : null;
                 } catch { return null; }
             });
             // ファイナンスデータの保存
@@ -1332,6 +1279,54 @@
                     try { localStorage.setItem('naoru_finance_data', JSON.stringify(finData)); } catch {}
                 }
             }, [finData]);
+            useEffect(() => {
+                try { localStorage.setItem('naoru_finance_uploaded_files', JSON.stringify(finUploadedFiles)); } catch {}
+            }, [finUploadedFiles]);
+
+            // 西暦 → 令和年度変換
+            const toReiwaYear = (period) => {
+                if (!period) return '';
+                // period形式: "YYYY-MM" or fiscalYear "第N期"
+                const yearMatch = period.match(/^(\d{4})/);
+                if (!yearMatch) return period;
+                const westernYear = parseInt(yearMatch[1]);
+                const reiwaYear = westernYear - 2018;
+                if (reiwaYear <= 0) return `${westernYear}年度`;
+                return `令和${reiwaYear}年度`;
+            };
+
+            // 期データから令和年度リストを生成
+            const finPeriodOptions = useMemo(() => {
+                if (!finPeriodData || finPeriodData.length === 0) return [];
+                return finPeriodData
+                    .filter(d => d.period)
+                    .sort((a, b) => a.period.localeCompare(b.period))
+                    .map(d => ({
+                        value: d.fiscalYear || d.period,
+                        label: toReiwaYear(d.period),
+                        period: d.period,
+                        fiscalYear: d.fiscalYear || '',
+                    }));
+            }, [finPeriodData]);
+
+            // 選択中の期のデータを取得
+            const finSelectedData = useMemo(() => {
+                if (!finPeriodData || finPeriodData.length === 0) return finData;
+                if (finPeriod === 'latest' || !finPeriod) {
+                    // 最新のデータを返す
+                    const sorted = [...finPeriodData].sort((a, b) => (b.period || '').localeCompare(a.period || ''));
+                    if (sorted.length > 0) {
+                        const latest = sorted[0];
+                        return { pl: latest.pl, bs: latest.bs, cashflow: latest.cashflow, accountDetails: latest.accountDetails, monthlyTrend: finData?.monthlyTrend };
+                    }
+                    return finData;
+                }
+                const match = finPeriodData.find(d => d.fiscalYear === finPeriod || d.period === finPeriod);
+                if (match) {
+                    return { pl: match.pl, bs: match.bs, cashflow: match.cashflow, accountDetails: match.accountDetails, monthlyTrend: finData?.monthlyTrend };
+                }
+                return finData;
+            }, [finPeriod, finPeriodData, finData]);
 
             // PDF決算書アップロード処理（pdf.js → ページ画像 → Claude API）
             const [finPdfLoading, setFinPdfLoading] = useState(false);
@@ -1537,11 +1532,12 @@
                 try {
                     const dataContext = JSON.stringify({
                         period: finPeriod,
-                        pl: finData?.pl,
-                        bs: finData?.bs,
-                        cashflow: finData?.cashflow,
-                        accountDetails: finData?.accountDetails,
-                        monthlyTrend: finData?.monthlyTrend,
+                        pl: finSelectedData?.pl,
+                        bs: finSelectedData?.bs,
+                        cashflow: finSelectedData?.cashflow,
+                        accountDetails: finSelectedData?.accountDetails,
+                        monthlyTrend: finSelectedData?.monthlyTrend,
+                        allPeriods: finPeriodData,
                         uploadedFiles: finUploadedFiles.map(f => f.name)
                     });
 
@@ -10376,12 +10372,6 @@
                                     </div>
                                     <div className="flex items-center gap-2 flex-wrap">
                                         <input
-                                            type="month"
-                                            value={finPeriod}
-                                            onChange={e => setFinPeriod(e.target.value)}
-                                            className="px-3 py-2 bg-slate-100 rounded-xl font-bold text-sm text-slate-700 border-none focus:ring-2 focus:ring-emerald-400"
-                                        />
-                                        <input
                                             ref={finFileInputRef}
                                             type="file"
                                             accept=".pdf"
@@ -10418,16 +10408,6 @@
                                         </button>
                                     </div>
                                 )}
-                                {/* アップロード済みファイル一覧 */}
-                                {finUploadedFiles.length > 0 && (
-                                    <div className="flex flex-wrap gap-2">
-                                        {finUploadedFiles.map((f, i) => (
-                                            <span key={i} className="inline-flex items-center gap-1 px-2 py-1 bg-slate-100 text-slate-600 rounded-lg text-xs font-bold">
-                                                <FileText size={12} /> {f.name} {f.fiscalYear && `(${f.fiscalYear})`}
-                                            </span>
-                                        ))}
-                                    </div>
-                                )}
                             </header>
 
                             {/* ── サブタブナビゲーション ── */}
@@ -10453,16 +10433,67 @@
                                 ))}
                             </div>
 
+                            {/* ── 令和年度セレクター＆アップロード済みファイル ── */}
+                            {finPeriodOptions.length > 0 && (
+                                <div className="bg-white rounded-xl md:rounded-2xl shadow-sm border border-slate-200 p-3 md:p-4 space-y-3">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="text-xs font-bold text-slate-500 mr-1">表示期間:</span>
+                                        {finPeriodOptions.map(opt => (
+                                            <button
+                                                key={opt.value}
+                                                onClick={() => setFinPeriod(opt.value)}
+                                                className={`px-3 py-1.5 rounded-lg font-bold text-sm transition-all ${
+                                                    (finPeriod === opt.value || (finPeriod === 'latest' && opt === finPeriodOptions[finPeriodOptions.length - 1]))
+                                                        ? 'bg-emerald-500 text-white shadow-md'
+                                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                                }`}
+                                            >
+                                                {opt.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                    {finUploadedFiles.length > 0 && (
+                                        <div className="flex items-start gap-2">
+                                            <span className="text-xs font-bold text-slate-400 mt-0.5 shrink-0">取込済PDF:</span>
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {finUploadedFiles.map((f, i) => (
+                                                    <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-50 text-emerald-700 rounded-md text-xs font-bold border border-emerald-200">
+                                                        <FileText size={10} /> {f.name} {f.fiscalYear && <span className="text-emerald-500">({f.fiscalYear})</span>}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* データなし表示 */}
+                            {!finSelectedData && finActiveTab !== 'qa' && (
+                                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-12 text-center">
+                                    <div className="w-16 h-16 bg-emerald-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                                        <Upload size={28} className="text-emerald-500" />
+                                    </div>
+                                    <h3 className="text-lg font-bold text-slate-700 mb-2">決算書をアップロードしてください</h3>
+                                    <p className="text-sm text-slate-400 mb-4">PDF形式の決算書をアップロードすると、AIが自動で財務データを読み取ります。<br/>複数期分のPDFを一括アップロードできます。</p>
+                                    <button
+                                        onClick={() => finFileInputRef.current?.click()}
+                                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-500 text-white rounded-xl font-bold text-sm hover:bg-emerald-600 transition-all shadow-sm"
+                                    >
+                                        <Upload size={14} /> 決算書PDF取込
+                                    </button>
+                                </div>
+                            )}
+
                             {/* ===== 概要タブ ===== */}
-                            {finActiveTab === 'overview' && finData && (
+                            {finActiveTab === 'overview' && finSelectedData && (
                                 <div className="space-y-4 md:space-y-6 animate-fade-in-up">
                                     {/* KPI カード */}
                                     <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
                                         {[
-                                            { label: '売上高', value: finData.pl.sales, color: 'from-blue-500 to-blue-400', icon: <TrendingUp size={20} /> },
-                                            { label: '営業利益', value: finData.pl.operatingIncome, color: 'from-emerald-500 to-emerald-400', icon: <BarChart3 size={20} /> },
-                                            { label: '当期純利益', value: finData.pl.netIncome, color: 'from-purple-500 to-purple-400', icon: <Target size={20} /> },
-                                            { label: '現金残高', value: finData.bs.cash, color: 'from-amber-500 to-amber-400', icon: <Banknote size={20} /> },
+                                            { label: '売上高', value: finSelectedData.pl.sales, color: 'from-blue-500 to-blue-400', icon: <TrendingUp size={20} /> },
+                                            { label: '営業利益', value: finSelectedData.pl.operatingIncome, color: 'from-emerald-500 to-emerald-400', icon: <BarChart3 size={20} /> },
+                                            { label: '当期純利益', value: finSelectedData.pl.netIncome, color: 'from-purple-500 to-purple-400', icon: <Target size={20} /> },
+                                            { label: '現金残高', value: finSelectedData.bs.cash, color: 'from-amber-500 to-amber-400', icon: <Banknote size={20} /> },
                                         ].map((kpi, idx) => (
                                             <div key={idx} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 md:p-5 card-hover">
                                                 <div className="flex items-center justify-between mb-3">
@@ -10480,10 +10511,10 @@
                                             <h3 className="font-black text-sm md:text-base text-slate-800 mb-4">収益性指標</h3>
                                             <div className="space-y-3">
                                                 {[
-                                                    { label: '売上総利益率', value: ((finData.pl.grossProfit / finData.pl.sales) * 100).toFixed(1), suffix: '%', benchmark: '70%', color: 'emerald' },
-                                                    { label: '営業利益率', value: ((finData.pl.operatingIncome / finData.pl.sales) * 100).toFixed(1), suffix: '%', benchmark: '15%', color: 'blue' },
-                                                    { label: '経常利益率', value: ((finData.pl.ordinaryIncome / finData.pl.sales) * 100).toFixed(1), suffix: '%', benchmark: '12%', color: 'purple' },
-                                                    { label: '人件費率', value: ((finData.pl.personnelCost / finData.pl.sales) * 100).toFixed(1), suffix: '%', benchmark: '40%以下', color: 'amber' },
+                                                    { label: '売上総利益率', value: ((finSelectedData.pl.grossProfit / finSelectedData.pl.sales) * 100).toFixed(1), suffix: '%', benchmark: '70%', color: 'emerald' },
+                                                    { label: '営業利益率', value: ((finSelectedData.pl.operatingIncome / finSelectedData.pl.sales) * 100).toFixed(1), suffix: '%', benchmark: '15%', color: 'blue' },
+                                                    { label: '経常利益率', value: ((finSelectedData.pl.ordinaryIncome / finSelectedData.pl.sales) * 100).toFixed(1), suffix: '%', benchmark: '12%', color: 'purple' },
+                                                    { label: '人件費率', value: ((finSelectedData.pl.personnelCost / finSelectedData.pl.sales) * 100).toFixed(1), suffix: '%', benchmark: '40%以下', color: 'amber' },
                                                 ].map((item, idx) => (
                                                     <div key={idx} className="flex items-center justify-between py-2 border-b border-slate-100 last:border-0">
                                                         <span className="text-sm text-slate-600 font-bold">{item.label}</span>
@@ -10500,10 +10531,10 @@
                                             <h3 className="font-black text-sm md:text-base text-slate-800 mb-4">安全性指標</h3>
                                             <div className="space-y-3">
                                                 {[
-                                                    { label: '流動比率', value: ((finData.bs.totalCurrentAssets / finData.bs.totalCurrentLiabilities) * 100).toFixed(1), suffix: '%', benchmark: '200%以上', color: 'emerald' },
-                                                    { label: '自己資本比率', value: ((finData.bs.totalEquity / finData.bs.totalAssets) * 100).toFixed(1), suffix: '%', benchmark: '40%以上', color: 'blue' },
-                                                    { label: '負債比率', value: ((finData.bs.totalLiabilities / finData.bs.totalEquity) * 100).toFixed(1), suffix: '%', benchmark: '100%以下', color: 'amber' },
-                                                    { label: '現金月商比', value: (finData.bs.cash / (finData.pl.sales)).toFixed(2), suffix: 'ヶ月', benchmark: '1.5以上', color: 'purple' },
+                                                    { label: '流動比率', value: ((finSelectedData.bs.totalCurrentAssets / finSelectedData.bs.totalCurrentLiabilities) * 100).toFixed(1), suffix: '%', benchmark: '200%以上', color: 'emerald' },
+                                                    { label: '自己資本比率', value: ((finSelectedData.bs.totalEquity / finSelectedData.bs.totalAssets) * 100).toFixed(1), suffix: '%', benchmark: '40%以上', color: 'blue' },
+                                                    { label: '負債比率', value: ((finSelectedData.bs.totalLiabilities / finSelectedData.bs.totalEquity) * 100).toFixed(1), suffix: '%', benchmark: '100%以下', color: 'amber' },
+                                                    { label: '現金月商比', value: (finSelectedData.bs.cash / (finSelectedData.pl.sales)).toFixed(2), suffix: 'ヶ月', benchmark: '1.5以上', color: 'purple' },
                                                 ].map((item, idx) => (
                                                     <div key={idx} className="flex items-center justify-between py-2 border-b border-slate-100 last:border-0">
                                                         <span className="text-sm text-slate-600 font-bold">{item.label}</span>
@@ -10518,11 +10549,11 @@
                                     </div>
 
                                     {/* 期別比較トレンド */}
-                                    {finData.monthlyTrend && finData.monthlyTrend.length > 0 && (
+                                    {finSelectedData.monthlyTrend && finSelectedData.monthlyTrend.length > 0 && (
                                         <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 md:p-6">
                                             <h3 className="font-black text-sm md:text-base text-slate-800 mb-4 flex items-center gap-2">
                                                 <TrendingUp size={18} className="text-emerald-500" /> 期別比較
-                                                <span className="text-xs text-slate-400 font-bold ml-2">（{finData.monthlyTrend.length}期分）</span>
+                                                <span className="text-xs text-slate-400 font-bold ml-2">（{finSelectedData.monthlyTrend.length}期分）</span>
                                             </h3>
                                             <div className="overflow-x-auto">
                                                 <table className="w-full text-sm">
@@ -10537,8 +10568,8 @@
                                                         </tr>
                                                     </thead>
                                                     <tbody>
-                                                        {finData.monthlyTrend.map((row, idx) => {
-                                                            const prev = idx > 0 ? finData.monthlyTrend[idx - 1] : null;
+                                                        {finSelectedData.monthlyTrend.map((row, idx) => {
+                                                            const prev = idx > 0 ? finSelectedData.monthlyTrend[idx - 1] : null;
                                                             const salesGrowth = prev && prev.sales ? ((row.sales - prev.sales) / prev.sales * 100).toFixed(1) : null;
                                                             return (
                                                                 <tr key={idx} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
@@ -10570,12 +10601,12 @@
                             )}
 
                             {/* ===== PL（損益計算書）タブ ===== */}
-                            {finActiveTab === 'pl' && finData && (
+                            {finActiveTab === 'pl' && finSelectedData && (
                                 <div className="space-y-4 md:space-y-6 animate-fade-in-up">
                                     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 md:p-6">
                                         <h3 className="font-black text-base md:text-lg text-slate-800 mb-4 flex items-center gap-2">
                                             <BarChart3 size={20} className="text-emerald-500" /> 損益計算書（P/L）
-                                            <span className="text-xs text-slate-400 font-bold ml-auto">{finPeriod}</span>
+                                            <span className="text-xs text-slate-400 font-bold ml-auto">{finPeriod !== 'latest' ? finPeriodOptions.find(o => o.value === finPeriod)?.label || '' : finPeriodOptions.length > 0 ? finPeriodOptions[finPeriodOptions.length - 1]?.label : ''}</span>
                                         </h3>
                                         <div className="overflow-x-auto">
                                             <table className="w-full text-sm">
@@ -10588,26 +10619,26 @@
                                                 </thead>
                                                 <tbody>
                                                     {[
-                                                        { label: '売上高', value: finData.pl.sales, bold: true, bg: 'bg-blue-50' },
-                                                        { label: '売上原価', value: -finData.pl.costOfSales },
-                                                        { label: '売上総利益（粗利）', value: finData.pl.grossProfit, bold: true, bg: 'bg-emerald-50' },
-                                                        { label: '── 人件費', value: -finData.pl.personnelCost, indent: true },
-                                                        { label: '── 家賃', value: -finData.pl.rent, indent: true },
-                                                        { label: '── 広告宣伝費', value: -finData.pl.advertising, indent: true },
-                                                        { label: '── 減価償却費', value: -finData.pl.depreciation, indent: true },
-                                                        { label: '── その他販管費', value: -finData.pl.otherSga, indent: true },
-                                                        { label: '販管費合計', value: -finData.pl.sgaExpenses, bold: true },
-                                                        { label: '営業利益', value: finData.pl.operatingIncome, bold: true, bg: 'bg-emerald-50', highlight: true },
-                                                        { label: '営業外収益', value: finData.pl.nonOperatingIncome },
-                                                        { label: '営業外費用', value: -finData.pl.nonOperatingExpenses },
-                                                        { label: '経常利益', value: finData.pl.ordinaryIncome, bold: true, bg: 'bg-blue-50' },
-                                                        { label: '特別利益', value: finData.pl.extraordinaryGains },
-                                                        { label: '特別損失', value: -finData.pl.extraordinaryLosses },
-                                                        { label: '税引前当期純利益', value: finData.pl.incomeBeforeTax, bold: true },
-                                                        { label: '法人税等', value: -finData.pl.incomeTax },
-                                                        { label: '当期純利益', value: finData.pl.netIncome, bold: true, bg: 'bg-purple-50', highlight: true },
+                                                        { label: '売上高', value: finSelectedData.pl.sales, bold: true, bg: 'bg-blue-50' },
+                                                        { label: '売上原価', value: -finSelectedData.pl.costOfSales },
+                                                        { label: '売上総利益（粗利）', value: finSelectedData.pl.grossProfit, bold: true, bg: 'bg-emerald-50' },
+                                                        { label: '── 人件費', value: -finSelectedData.pl.personnelCost, indent: true },
+                                                        { label: '── 家賃', value: -finSelectedData.pl.rent, indent: true },
+                                                        { label: '── 広告宣伝費', value: -finSelectedData.pl.advertising, indent: true },
+                                                        { label: '── 減価償却費', value: -finSelectedData.pl.depreciation, indent: true },
+                                                        { label: '── その他販管費', value: -finSelectedData.pl.otherSga, indent: true },
+                                                        { label: '販管費合計', value: -finSelectedData.pl.sgaExpenses, bold: true },
+                                                        { label: '営業利益', value: finSelectedData.pl.operatingIncome, bold: true, bg: 'bg-emerald-50', highlight: true },
+                                                        { label: '営業外収益', value: finSelectedData.pl.nonOperatingIncome },
+                                                        { label: '営業外費用', value: -finSelectedData.pl.nonOperatingExpenses },
+                                                        { label: '経常利益', value: finSelectedData.pl.ordinaryIncome, bold: true, bg: 'bg-blue-50' },
+                                                        { label: '特別利益', value: finSelectedData.pl.extraordinaryGains },
+                                                        { label: '特別損失', value: -finSelectedData.pl.extraordinaryLosses },
+                                                        { label: '税引前当期純利益', value: finSelectedData.pl.incomeBeforeTax, bold: true },
+                                                        { label: '法人税等', value: -finSelectedData.pl.incomeTax },
+                                                        { label: '当期純利益', value: finSelectedData.pl.netIncome, bold: true, bg: 'bg-purple-50', highlight: true },
                                                     ].map((row, idx) => {
-                                                        const pct = finData.pl.sales ? ((Math.abs(row.value) / finData.pl.sales) * 100).toFixed(1) : '0.0';
+                                                        const pct = finSelectedData.pl.sales ? ((Math.abs(row.value) / finSelectedData.pl.sales) * 100).toFixed(1) : '0.0';
                                                         return (
                                                             <tr key={idx} className={`border-b border-slate-100 ${row.bg || ''} ${row.highlight ? 'ring-1 ring-emerald-200' : ''}`}>
                                                                 <td className={`py-2.5 px-3 ${row.bold ? 'font-black text-slate-800' : 'text-slate-600'} ${row.indent ? 'pl-8 text-slate-500' : ''}`}>
@@ -10630,13 +10661,13 @@
                                         <h3 className="font-black text-sm md:text-base text-slate-800 mb-4">販管費の内訳</h3>
                                         <div className="space-y-3">
                                             {[
-                                                { label: '人件費', value: finData.pl.personnelCost, color: 'bg-blue-500' },
-                                                { label: '家賃', value: finData.pl.rent, color: 'bg-emerald-500' },
-                                                { label: '広告宣伝費', value: finData.pl.advertising, color: 'bg-amber-500' },
-                                                { label: '減価償却費', value: finData.pl.depreciation, color: 'bg-purple-500' },
-                                                { label: 'その他', value: finData.pl.otherSga, color: 'bg-slate-400' },
+                                                { label: '人件費', value: finSelectedData.pl.personnelCost, color: 'bg-blue-500' },
+                                                { label: '家賃', value: finSelectedData.pl.rent, color: 'bg-emerald-500' },
+                                                { label: '広告宣伝費', value: finSelectedData.pl.advertising, color: 'bg-amber-500' },
+                                                { label: '減価償却費', value: finSelectedData.pl.depreciation, color: 'bg-purple-500' },
+                                                { label: 'その他', value: finSelectedData.pl.otherSga, color: 'bg-slate-400' },
                                             ].map((item, idx) => {
-                                                const pct = finData.pl.sgaExpenses ? ((item.value / finData.pl.sgaExpenses) * 100).toFixed(1) : '0';
+                                                const pct = finSelectedData.pl.sgaExpenses ? ((item.value / finSelectedData.pl.sgaExpenses) * 100).toFixed(1) : '0';
                                                 return (
                                                     <div key={idx}>
                                                         <div className="flex justify-between text-sm mb-1">
@@ -10655,7 +10686,7 @@
                             )}
 
                             {/* ===== BS（貸借対照表）タブ ===== */}
-                            {finActiveTab === 'bs' && finData && (
+                            {finActiveTab === 'bs' && finSelectedData && (
                                 <div className="space-y-4 md:space-y-6 animate-fade-in-up">
                                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6">
                                         {/* 資産の部 */}
@@ -10667,16 +10698,16 @@
                                                 <tbody>
                                                     {[
                                                         { label: '【流動資産】', value: null, header: true },
-                                                        { label: '現金及び預金', value: finData.bs.cash },
-                                                        { label: '売掛金', value: finData.bs.accountsReceivable },
-                                                        { label: 'その他流動資産', value: finData.bs.otherCurrentAssets },
-                                                        { label: '流動資産合計', value: finData.bs.totalCurrentAssets, bold: true, bg: 'bg-blue-50' },
+                                                        { label: '現金及び預金', value: finSelectedData.bs.cash },
+                                                        { label: '売掛金', value: finSelectedData.bs.accountsReceivable },
+                                                        { label: 'その他流動資産', value: finSelectedData.bs.otherCurrentAssets },
+                                                        { label: '流動資産合計', value: finSelectedData.bs.totalCurrentAssets, bold: true, bg: 'bg-blue-50' },
                                                         { label: '【固定資産】', value: null, header: true },
-                                                        { label: '有形固定資産', value: finData.bs.fixedAssets },
-                                                        { label: '無形固定資産', value: finData.bs.intangibleAssets },
-                                                        { label: '投資その他の資産', value: finData.bs.investments },
-                                                        { label: '固定資産合計', value: finData.bs.totalFixedAssets, bold: true, bg: 'bg-blue-50' },
-                                                        { label: '資産合計', value: finData.bs.totalAssets, bold: true, bg: 'bg-blue-100', highlight: true },
+                                                        { label: '有形固定資産', value: finSelectedData.bs.fixedAssets },
+                                                        { label: '無形固定資産', value: finSelectedData.bs.intangibleAssets },
+                                                        { label: '投資その他の資産', value: finSelectedData.bs.investments },
+                                                        { label: '固定資産合計', value: finSelectedData.bs.totalFixedAssets, bold: true, bg: 'bg-blue-50' },
+                                                        { label: '資産合計', value: finSelectedData.bs.totalAssets, bold: true, bg: 'bg-blue-100', highlight: true },
                                                     ].map((row, idx) => (
                                                         <tr key={idx} className={`border-b border-slate-100 ${row.bg || ''} ${row.highlight ? 'ring-1 ring-blue-200' : ''}`}>
                                                             <td className={`py-2 px-3 ${row.header ? 'font-black text-slate-500 text-xs pt-4' : row.bold ? 'font-black text-slate-800' : 'text-slate-600 pl-6'}`}>
@@ -10700,21 +10731,21 @@
                                                 <tbody>
                                                     {[
                                                         { label: '【流動負債】', value: null, header: true },
-                                                        { label: '買掛金', value: finData.bs.accountsPayable },
-                                                        { label: '短期借入金', value: finData.bs.shortTermLoans },
-                                                        { label: '未払費用', value: finData.bs.unpaidExpenses },
-                                                        { label: 'その他流動負債', value: finData.bs.otherCurrentLiabilities },
-                                                        { label: '流動負債合計', value: finData.bs.totalCurrentLiabilities, bold: true, bg: 'bg-rose-50' },
+                                                        { label: '買掛金', value: finSelectedData.bs.accountsPayable },
+                                                        { label: '短期借入金', value: finSelectedData.bs.shortTermLoans },
+                                                        { label: '未払費用', value: finSelectedData.bs.unpaidExpenses },
+                                                        { label: 'その他流動負債', value: finSelectedData.bs.otherCurrentLiabilities },
+                                                        { label: '流動負債合計', value: finSelectedData.bs.totalCurrentLiabilities, bold: true, bg: 'bg-rose-50' },
                                                         { label: '【固定負債】', value: null, header: true },
-                                                        { label: '長期借入金', value: finData.bs.longTermLoans },
-                                                        { label: 'その他固定負債', value: finData.bs.otherFixedLiabilities },
-                                                        { label: '固定負債合計', value: finData.bs.totalFixedLiabilities, bold: true, bg: 'bg-rose-50' },
-                                                        { label: '負債合計', value: finData.bs.totalLiabilities, bold: true, bg: 'bg-rose-100' },
+                                                        { label: '長期借入金', value: finSelectedData.bs.longTermLoans },
+                                                        { label: 'その他固定負債', value: finSelectedData.bs.otherFixedLiabilities },
+                                                        { label: '固定負債合計', value: finSelectedData.bs.totalFixedLiabilities, bold: true, bg: 'bg-rose-50' },
+                                                        { label: '負債合計', value: finSelectedData.bs.totalLiabilities, bold: true, bg: 'bg-rose-100' },
                                                         { label: '【純資産】', value: null, header: true },
-                                                        { label: '資本金', value: finData.bs.capital },
-                                                        { label: '利益剰余金', value: finData.bs.retainedEarnings },
-                                                        { label: '純資産合計', value: finData.bs.totalEquity, bold: true, bg: 'bg-emerald-50' },
-                                                        { label: '負債・純資産合計', value: finData.bs.totalLiabilitiesAndEquity, bold: true, bg: 'bg-slate-100', highlight: true },
+                                                        { label: '資本金', value: finSelectedData.bs.capital },
+                                                        { label: '利益剰余金', value: finSelectedData.bs.retainedEarnings },
+                                                        { label: '純資産合計', value: finSelectedData.bs.totalEquity, bold: true, bg: 'bg-emerald-50' },
+                                                        { label: '負債・純資産合計', value: finSelectedData.bs.totalLiabilitiesAndEquity, bold: true, bg: 'bg-slate-100', highlight: true },
                                                     ].map((row, idx) => (
                                                         <tr key={idx} className={`border-b border-slate-100 ${row.bg || ''} ${row.highlight ? 'ring-1 ring-slate-300' : ''}`}>
                                                             <td className={`py-2 px-3 ${row.header ? 'font-black text-slate-500 text-xs pt-4' : row.bold ? 'font-black text-slate-800' : 'text-slate-600 pl-6'}`}>
@@ -10731,12 +10762,12 @@
                                     </div>
 
                                     {/* 勘定明細 */}
-                                    {finData.accountDetails && (
+                                    {finSelectedData.accountDetails && (
                                         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
                                             {[
-                                                { title: '売掛金明細', items: finData.accountDetails.accountsReceivable, color: 'blue' },
-                                                { title: '買掛金明細', items: finData.accountDetails.accountsPayable, color: 'amber' },
-                                                { title: '未払費用明細', items: finData.accountDetails.unpaidExpenses, color: 'rose' },
+                                                { title: '売掛金明細', items: finSelectedData.accountDetails.accountsReceivable, color: 'blue' },
+                                                { title: '買掛金明細', items: finSelectedData.accountDetails.accountsPayable, color: 'amber' },
+                                                { title: '未払費用明細', items: finSelectedData.accountDetails.unpaidExpenses, color: 'rose' },
                                             ].map((section, idx) => (
                                                 <div key={idx} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 md:p-5">
                                                     <h4 className={`font-black text-sm text-${section.color}-600 mb-3`}>{section.title}</h4>
@@ -10756,14 +10787,14 @@
                             )}
 
                             {/* ===== キャッシュフロータブ ===== */}
-                            {finActiveTab === 'cashflow' && finData && (
+                            {finActiveTab === 'cashflow' && finSelectedData && (
                                 <div className="space-y-4 md:space-y-6 animate-fade-in-up">
                                     {/* CF 3区分カード */}
                                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4">
                                         {[
-                                            { label: '営業活動CF', value: finData.cashflow.operatingCF, color: 'emerald', icon: <TrendingUp size={20} />, desc: '本業からの収入' },
-                                            { label: '投資活動CF', value: finData.cashflow.investingCF, color: 'blue', icon: <Target size={20} />, desc: '設備投資等' },
-                                            { label: '財務活動CF', value: finData.cashflow.financingCF, color: 'purple', icon: <CreditCard size={20} />, desc: '借入・返済等' },
+                                            { label: '営業活動CF', value: finSelectedData.cashflow.operatingCF, color: 'emerald', icon: <TrendingUp size={20} />, desc: '本業からの収入' },
+                                            { label: '投資活動CF', value: finSelectedData.cashflow.investingCF, color: 'blue', icon: <Target size={20} />, desc: '設備投資等' },
+                                            { label: '財務活動CF', value: finSelectedData.cashflow.financingCF, color: 'purple', icon: <CreditCard size={20} />, desc: '借入・返済等' },
                                         ].map((cf, idx) => (
                                             <div key={idx} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 md:p-5 card-hover">
                                                 <div className="flex items-center justify-between mb-2">
@@ -10785,20 +10816,20 @@
                                             <tbody>
                                                 {[
                                                     { label: '【営業活動CF】', value: null, header: true },
-                                                    { label: '当期純利益', value: finData.pl.netIncome },
-                                                    { label: '減価償却費', value: finData.cashflow.depreciation },
-                                                    { label: '売掛金の増減', value: finData.cashflow.changeInReceivables },
-                                                    { label: '買掛金の増減', value: finData.cashflow.changeInPayables },
-                                                    { label: '営業活動CF合計', value: finData.cashflow.operatingCF, bold: true, bg: 'bg-emerald-50' },
+                                                    { label: '当期純利益', value: finSelectedData.pl.netIncome },
+                                                    { label: '減価償却費', value: finSelectedData.cashflow.depreciation },
+                                                    { label: '売掛金の増減', value: finSelectedData.cashflow.changeInReceivables },
+                                                    { label: '買掛金の増減', value: finSelectedData.cashflow.changeInPayables },
+                                                    { label: '営業活動CF合計', value: finSelectedData.cashflow.operatingCF, bold: true, bg: 'bg-emerald-50' },
                                                     { label: '【投資活動CF】', value: null, header: true },
-                                                    { label: '設備投資', value: finData.cashflow.capex },
-                                                    { label: '投資活動CF合計', value: finData.cashflow.investingCF, bold: true, bg: 'bg-blue-50' },
+                                                    { label: '設備投資', value: finSelectedData.cashflow.capex },
+                                                    { label: '投資活動CF合計', value: finSelectedData.cashflow.investingCF, bold: true, bg: 'bg-blue-50' },
                                                     { label: '【財務活動CF】', value: null, header: true },
-                                                    { label: '借入金返済', value: finData.cashflow.loanRepayment },
-                                                    { label: '財務活動CF合計', value: finData.cashflow.financingCF, bold: true, bg: 'bg-purple-50' },
-                                                    { label: '現金増減額', value: finData.cashflow.netCashChange, bold: true, bg: 'bg-amber-50', highlight: true },
-                                                    { label: '期首現金残高', value: finData.cashflow.beginningCash },
-                                                    { label: '期末現金残高', value: finData.cashflow.endingCash, bold: true, bg: 'bg-amber-100', highlight: true },
+                                                    { label: '借入金返済', value: finSelectedData.cashflow.loanRepayment },
+                                                    { label: '財務活動CF合計', value: finSelectedData.cashflow.financingCF, bold: true, bg: 'bg-purple-50' },
+                                                    { label: '現金増減額', value: finSelectedData.cashflow.netCashChange, bold: true, bg: 'bg-amber-50', highlight: true },
+                                                    { label: '期首現金残高', value: finSelectedData.cashflow.beginningCash },
+                                                    { label: '期末現金残高', value: finSelectedData.cashflow.endingCash, bold: true, bg: 'bg-amber-100', highlight: true },
                                                 ].map((row, idx) => (
                                                     <tr key={idx} className={`border-b border-slate-100 ${row.bg || ''} ${row.highlight ? 'ring-1 ring-amber-200' : ''}`}>
                                                         <td className={`py-2.5 px-3 ${row.header ? 'font-black text-slate-500 text-xs pt-4' : row.bold ? 'font-black text-slate-800' : 'text-slate-600 pl-6'}`}>

@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const anthropic = new Anthropic();
 
-const EXTRACTION_PROMPT = `あなたは決算書の読み取り専門家です。アップロードされたPDFから財務データを正確に抽出し、以下のJSON構造で返してください。
+const EXTRACTION_PROMPT = `あなたは決算書の読み取り専門家です。アップロードされた決算書のページ画像から財務データを正確に抽出し、以下のJSON構造で返してください。
 
 ## 抽出ルール
 - 金額は全て円（整数）で出力（千円単位の場合は×1000に変換）
@@ -10,6 +10,7 @@ const EXTRACTION_PROMPT = `あなたは決算書の読み取り専門家です�
 - 該当データがない項目は 0 にする
 - 複数期がある場合は最新の期のデータを抽出
 - 科目名が異なる場合は最も近い科目にマッピング
+- 画像が不鮮明でも、見える範囲で最善の読み取りをする
 
 ## 出力JSON構造（必ずこの形式で返すこと）
 \`\`\`json
@@ -84,14 +85,13 @@ const EXTRACTION_PROMPT = `あなたは決算書の読み取り専門家です�
 \`\`\`
 
 **重要**: JSONのみを返してください。説明文やマークダウンの装飾は不要です。\`\`\`json と \`\`\` で囲んで返してください。
-キャッシュフロー計算書がPDFに含まれない場合は、PLとBSから推計してください（営業CF ≈ 純利益 + 減価償却費、など）。`;
+キャッシュフロー計算書が画像に含まれない場合は、PLとBSから推計してください（営業CF ≈ 純利益 + 減価償却費、など）。`;
 
 const MODELS = [
   'claude-sonnet-4-5',
   'claude-haiku-4-5',
 ];
 
-// レート制限時のリトライ（最大2回、指数バックオフ）
 async function callWithRetry(fn, maxRetries = 2) {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -99,7 +99,7 @@ async function callWithRetry(fn, maxRetries = 2) {
     } catch (err) {
       const status = err.status || err.error?.status;
       if (status === 429 && attempt < maxRetries) {
-        const waitMs = Math.pow(2, attempt + 1) * 1000; // 2s, 4s
+        const waitMs = Math.pow(2, attempt + 1) * 1000;
         console.log(`[finance-pdf] Rate limited, retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`);
         await new Promise(r => setTimeout(r, waitMs));
         continue;
@@ -133,48 +133,38 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { pdfBase64, fileName } = req.body;
+    const { pageImages, fileName } = req.body;
 
-    if (!pdfBase64) {
-      return res.status(400).json({ error: 'pdfBase64 is required' });
+    if (!pageImages || !Array.isArray(pageImages) || pageImages.length === 0) {
+      return res.status(400).json({ error: 'pageImages array is required' });
     }
 
-    // Base64サイズチェック（Claude API上限: ~25MB）
-    const base64SizeMB = (pdfBase64.length * 3 / 4) / (1024 * 1024);
-    console.log(`[finance-pdf] File: ${fileName}, Base64 size: ${base64SizeMB.toFixed(1)}MB`);
+    console.log(`[finance-pdf] File: ${fileName}, Pages: ${pageImages.length}`);
 
-    if (base64SizeMB > 20) {
-      return res.status(413).json({
-        error: 'File too large',
-        message: `PDFサイズが大きすぎます（${base64SizeMB.toFixed(1)}MB）。20MB以下のファイルを使用してください。`,
+    // ページ画像をClaude APIのcontent blocksに変換
+    const contentBlocks = [];
+    for (let i = 0; i < pageImages.length; i++) {
+      contentBlocks.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: 'image/jpeg',
+          data: pageImages[i],
+        },
       });
     }
+    contentBlocks.push({
+      type: 'text',
+      text: `この決算書（${fileName || '不明'}、全${pageImages.length}ページ）から財務データを抽出してJSON形式で返してください。`,
+    });
 
-    const messages = [
-      {
-        role: 'user',
-        content: [
-          {
-            type: 'document',
-            source: {
-              type: 'base64',
-              media_type: 'application/pdf',
-              data: pdfBase64,
-            },
-          },
-          {
-            type: 'text',
-            text: `この決算書PDF（${fileName || '不明'}）から財務データを抽出してJSON形式で返してください。`,
-          },
-        ],
-      },
-    ];
+    const messages = [{ role: 'user', content: contentBlocks }];
 
     let lastError;
     for (let i = 0; i < MODELS.length; i++) {
       const model = MODELS[i];
       try {
-        console.log(`[finance-pdf] Trying model: ${model} for file: ${fileName}`);
+        console.log(`[finance-pdf] Trying model: ${model}`);
 
         const response = await callWithRetry(() =>
           anthropic.messages.create({
@@ -190,7 +180,6 @@ export default async function handler(req, res) {
           .map(block => block.text)
           .join('');
 
-        // JSON を抽出
         const jsonMatch = text.match(/```json\s*([\s\S]*?)```/) || text.match(/(\{[\s\S]*\})/);
         if (!jsonMatch) {
           return res.status(422).json({
@@ -206,6 +195,7 @@ export default async function handler(req, res) {
           success: true,
           data: parsed,
           fileName,
+          pages: pageImages.length,
           usage: {
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,

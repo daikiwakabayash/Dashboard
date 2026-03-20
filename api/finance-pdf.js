@@ -91,6 +91,32 @@ const MODELS = [
   'claude-haiku-4-5',
 ];
 
+// レート制限時のリトライ（最大2回、指数バックオフ）
+async function callWithRetry(fn, maxRetries = 2) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const status = err.status || err.error?.status;
+      if (status === 429 && attempt < maxRetries) {
+        const waitMs = Math.pow(2, attempt + 1) * 1000; // 2s, 4s
+        console.log(`[finance-pdf] Rate limited, retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+        await new Promise(r => setTimeout(r, waitMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: '25mb',
+    },
+  },
+};
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -113,7 +139,17 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'pdfBase64 is required' });
     }
 
-    // PDF をClaude APIに送信（document type）
+    // Base64サイズチェック（Claude API上限: ~25MB）
+    const base64SizeMB = (pdfBase64.length * 3 / 4) / (1024 * 1024);
+    console.log(`[finance-pdf] File: ${fileName}, Base64 size: ${base64SizeMB.toFixed(1)}MB`);
+
+    if (base64SizeMB > 20) {
+      return res.status(413).json({
+        error: 'File too large',
+        message: `PDFサイズが大きすぎます（${base64SizeMB.toFixed(1)}MB）。20MB以下のファイルを使用してください。`,
+      });
+    }
+
     const messages = [
       {
         role: 'user',
@@ -139,12 +175,15 @@ export default async function handler(req, res) {
       const model = MODELS[i];
       try {
         console.log(`[finance-pdf] Trying model: ${model} for file: ${fileName}`);
-        const response = await anthropic.messages.create({
-          model,
-          max_tokens: 8192,
-          system: EXTRACTION_PROMPT,
-          messages,
-        });
+
+        const response = await callWithRetry(() =>
+          anthropic.messages.create({
+            model,
+            max_tokens: 8192,
+            system: EXTRACTION_PROMPT,
+            messages,
+          })
+        );
 
         const text = response.content
           .filter(block => block.type === 'text')
@@ -152,12 +191,11 @@ export default async function handler(req, res) {
           .join('');
 
         // JSON を抽出
-        const jsonMatch = text.match(/```json\s*([\s\S]*?)```/) || text.match(/\{[\s\S]*\}/);
+        const jsonMatch = text.match(/```json\s*([\s\S]*?)```/) || text.match(/(\{[\s\S]*\})/);
         if (!jsonMatch) {
           return res.status(422).json({
             error: 'Failed to extract structured data',
             message: 'PDFから構造化データを抽出できませんでした。別のPDFを試してください。',
-            raw: text,
           });
         }
 
@@ -192,10 +230,10 @@ export default async function handler(req, res) {
       });
     }
     if (error.status === 401) {
-      return res.status(500).json({ error: 'Invalid API key' });
+      return res.status(500).json({ error: 'Invalid API key', message: 'ANTHROPIC_API_KEY が無効です。' });
     }
     if (error.status === 429) {
-      return res.status(429).json({ error: 'Rate limited', message: 'レート制限に達しました。' });
+      return res.status(429).json({ error: 'Rate limited', message: 'APIのレート制限に達しました。1〜2分後に再度お試しください。' });
     }
     return res.status(500).json({
       error: 'Internal server error',

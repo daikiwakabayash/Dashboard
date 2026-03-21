@@ -102,8 +102,8 @@ const EXTRACTION_PROMPT = `あなたは日本の決算書の読み取り専門�
 該当データがない項目は 0 にする。`;
 
 const MODELS = [
+  'claude-sonnet-4-6',
   'claude-haiku-4-5-20251001',
-  'claude-sonnet-4-5-20241022',
 ];
 
 async function callWithRetry(fn, maxRetries = 2) {

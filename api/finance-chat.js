@@ -33,7 +33,7 @@ const FINANCE_SYSTEM_PROMPT = `あなたは「NAORU財務アドバイザー」�
 - 提供されたデータに基づいてのみ分析する。データにない数値は捏造しない`;
 
 const MODELS = [
-  'claude-sonnet-4-5-20241022',
+  'claude-sonnet-4-6',
   'claude-haiku-4-5-20251001',
 ];
 const MAX_TOKENS = 8192;

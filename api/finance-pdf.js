@@ -205,11 +205,29 @@ export default async function handler(req, res) {
         const jsonStr = jsonMatch[1] || jsonMatch[0];
         const parsed = JSON.parse(jsonStr);
 
+        // サーバーサイドのデータ検証・ログ
+        const plSales = parsed.pl?.sales || 0;
+        const bsTotal = parsed.bs?.totalAssets || 0;
+        const bsCash = parsed.bs?.cash || 0;
+        const opIncome = parsed.pl?.operatingIncome || 0;
+        console.log(`[finance-pdf] EXTRACTED: model=${model}, period=${parsed.period}, fiscalYear=${parsed.fiscalYear}`);
+        console.log(`[finance-pdf] VALUES: sales=${plSales}, opIncome=${opIncome}, totalAssets=${bsTotal}, cash=${bsCash}`);
+        console.log(`[finance-pdf] RAW JSON (first 1000): ${JSON.stringify(parsed).substring(0, 1000)}`);
+
+        // 全て0の場合は警告
+        const allZero = plSales === 0 && bsTotal === 0 && bsCash === 0 && opIncome === 0;
+        if (allZero) {
+          console.warn(`[finance-pdf] WARNING: All key values are 0! Model may have failed to read the images.`);
+          console.warn(`[finance-pdf] Raw AI response (first 500): ${text.substring(0, 500)}`);
+        }
+
         return res.status(200).json({
           success: true,
           data: parsed,
           fileName,
           pages: pageImages.length,
+          allZeroWarning: allZero,
+          model,
           usage: {
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,

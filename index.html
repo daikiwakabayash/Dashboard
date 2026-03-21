@@ -1409,15 +1409,15 @@
                 for (let i = 1; i <= maxPages; i++) {
                     onProgress(`PDF変換中... ${i}/${maxPages}ページ`);
                     const page = await pdf.getPage(i);
-                    const scale = 1.2; // 読みやすさとサイズのバランス
+                    const scale = 1.5; // Sonnetモデル用に高解像度化
                     const viewport = page.getViewport({ scale });
                     const canvas = document.createElement('canvas');
                     canvas.width = viewport.width;
                     canvas.height = viewport.height;
                     const ctx = canvas.getContext('2d');
                     await page.render({ canvasContext: ctx, viewport }).promise;
-                    // JPEG Base64（品質0.7でサイズ削減）
-                    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+                    // JPEG Base64（品質0.8で読み取り精度向上）
+                    const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
                     images.push(dataUrl.split(',')[1]);
                 }
                 return images;
@@ -1479,6 +1479,13 @@
                         const extracted = result.data;
                         console.log(`[Finance PDF] ${file.name} full extracted data:`, JSON.stringify(extracted));
                         console.log(`[Finance PDF] Key values - sales:${extracted.pl?.sales}, operatingIncome:${extracted.pl?.operatingIncome}, totalAssets:${extracted.bs?.totalAssets}, cash:${extracted.bs?.cash}`);
+                        console.log(`[Finance PDF] Model used: ${result.model}, allZeroWarning: ${result.allZeroWarning}`);
+
+                        // 全値0の警告チェック
+                        if (result.allZeroWarning) {
+                            errors.push(`${file.name}: AIが数値を読み取れませんでした（全て0）。画像品質が低い可能性があります。`);
+                            continue;
+                        }
 
                         // 最新のデータとして反映
                         setFinData(prev => ({
@@ -1495,7 +1502,7 @@
                             return [...existing, extracted].sort((a, b) => (a.period || '').localeCompare(b.period || ''));
                         });
                         setFinUploadedFiles(prev => [...prev, { name: file.name, period: extracted.period || '', fiscalYear: extracted.fiscalYear || '', uploadedAt: new Date().toISOString() }]);
-                        results.push(`${file.name}（${extracted.fiscalYear || ''}）`);
+                        results.push(`${file.name}（${extracted.fiscalYear || ''}, モデル: ${result.model || '不明'}）`);
                     } catch (err) {
                         const msg = err.message || '';
                         errors.push(`${file.name}: ${msg.includes('credit') ? 'APIクレジット不足' : msg}`);
@@ -10449,24 +10456,36 @@
                                     </div>
                                 )}
                                 {/* データ診断パネル（取込データの確認用） */}
-                                {finPeriodData.length > 0 && (
-                                    <details className="text-xs">
-                                        <summary className="cursor-pointer text-slate-400 hover:text-slate-600 font-bold">取込データ確認（デバッグ）</summary>
-                                        <div className="mt-1 bg-slate-50 border border-slate-200 rounded-lg p-2 space-y-1 max-h-40 overflow-y-auto">
-                                            {finPeriodData.map((d, i) => (
-                                                <div key={i} className="text-slate-600">
-                                                    <span className="font-bold">{d.fiscalYear || d.period}</span>:
-                                                    売上={d.pl?.sales?.toLocaleString() || '0'}円,
-                                                    営業利益={d.pl?.operatingIncome?.toLocaleString() || '0'}円,
-                                                    総資産={d.bs?.totalAssets?.toLocaleString() || '0'}円,
-                                                    現金={d.bs?.cash?.toLocaleString() || '0'}円,
-                                                    営業CF={d.cashflow?.operatingCF?.toLocaleString() || '0'}円
+                                {finPeriodData.length > 0 && (() => {
+                                    const hasZeroData = finPeriodData.every(d =>
+                                        (!d.pl?.sales || d.pl.sales === 0) &&
+                                        (!d.bs?.totalAssets || d.bs.totalAssets === 0)
+                                    );
+                                    return (
+                                        <div className="text-xs space-y-1">
+                                            {hasZeroData && (
+                                                <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 text-amber-700 rounded-xl font-bold">
+                                                    <AlertTriangle size={14} />
+                                                    取込済みデータの値が全て0です。「全クリア」後にPDFを再アップロードしてください（改善済みモデルで再読取されます）
                                                 </div>
-                                            ))}
-                                            <div className="text-slate-400 mt-1">選択中: {finPeriod} | finSelectedData: {finSelectedData ? `売上=${finSelectedData.pl?.sales?.toLocaleString()}` : 'null'}</div>
+                                            )}
+                                            <details open={hasZeroData}>
+                                                <summary className="cursor-pointer text-slate-400 hover:text-slate-600 font-bold">取込データ確認</summary>
+                                                <div className="mt-1 bg-slate-50 border border-slate-200 rounded-lg p-2 space-y-1 max-h-40 overflow-y-auto">
+                                                    {finPeriodData.map((d, i) => (
+                                                        <div key={i} className="text-slate-600">
+                                                            <span className="font-bold">{d.fiscalYear || d.period}</span>:
+                                                            売上={d.pl?.sales?.toLocaleString() || '0'}円,
+                                                            営業利益={d.pl?.operatingIncome?.toLocaleString() || '0'}円,
+                                                            総資産={d.bs?.totalAssets?.toLocaleString() || '0'}円,
+                                                            現金={d.bs?.cash?.toLocaleString() || '0'}円
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </details>
                                         </div>
-                                    </details>
-                                )}
+                                    );
+                                })()}
                             </header>
 
                             {/* ── サブタブナビゲーション ── */}

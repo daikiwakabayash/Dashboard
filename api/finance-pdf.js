@@ -2,12 +2,13 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const anthropic = new Anthropic();
 
-const EXTRACTION_PROMPT = `あなたは日本の決算書の読み取り専門家です。アップロードされた決算書のページ画像から財務データを正確に抽出してください。
+const EXTRACTION_PROMPT = `あなたは日本の決算書の読み取り専門家です。アップロードされた決算書（画像またはテキスト）から財務データを正確に抽出してください。
 
 ## 重要な注意事項
-- 決算書の全ページの画像が提供されます。損益計算書(PL)、貸借対照表(BS)、キャッシュフロー計算書(CF)のページを探してデータを読み取ってください
+- 画像の場合: 決算書の全ページの画像が提供されます。損益計算書(PL)、貸借対照表(BS)、キャッシュフロー計算書(CF)のページを探してデータを読み取ってください
+- テキストの場合: 決算書のテキストデータが提供されます。数値を正確に読み取ってください
 - 必ず全ての数値を読み取ってください。特に売上高、営業利益、経常利益、当期純利益、総資産、現金は重要です
-- 画像に表示されている数値をそのまま読み取ってください
+- 提供されたデータに表示されている数値をそのまま読み取ってください
 
 ## 金額の変換ルール
 - 最終出力は全て円（整数）
@@ -147,30 +148,40 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { pageImages, fileName } = req.body;
+    const { pageImages, textContent, fileName } = req.body;
 
-    if (!pageImages || !Array.isArray(pageImages) || pageImages.length === 0) {
-      return res.status(400).json({ error: 'pageImages array is required' });
+    const hasImages = pageImages && Array.isArray(pageImages) && pageImages.length > 0;
+    const hasText = textContent && typeof textContent === 'string' && textContent.trim().length > 0;
+
+    if (!hasImages && !hasText) {
+      return res.status(400).json({ error: 'pageImages array or textContent is required' });
     }
 
-    console.log(`[finance-pdf] File: ${fileName}, Pages: ${pageImages.length}`);
+    console.log(`[finance-pdf] File: ${fileName}, Mode: ${hasImages ? `image (${pageImages.length} pages)` : `text (${textContent.length} chars)`}`);
 
-    // ページ画像をClaude APIのcontent blocksに変換
+    // content blocksを構築（画像 or テキスト）
     const contentBlocks = [];
-    for (let i = 0; i < pageImages.length; i++) {
+    if (hasImages) {
+      for (let i = 0; i < pageImages.length; i++) {
+        contentBlocks.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: 'image/jpeg',
+            data: pageImages[i],
+          },
+        });
+      }
       contentBlocks.push({
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: 'image/jpeg',
-          data: pageImages[i],
-        },
+        type: 'text',
+        text: `この決算書（${fileName || '不明'}、全${pageImages.length}ページ）の全てのページを注意深く確認し、損益計算書(PL)・貸借対照表(BS)・キャッシュフロー計算書のデータを漏れなく抽出してJSON形式で返してください。特に売上高、各種費用、資産・負債の各科目の金額を正確に読み取ってください。単位（千円、万円等）に注意して円に変換してください。`,
+      });
+    } else {
+      contentBlocks.push({
+        type: 'text',
+        text: `以下は決算書のテキストデータです（${fileName || '不明'}）。このテキストから損益計算書(PL)・貸借対照表(BS)・キャッシュフロー計算書のデータを漏れなく抽出してJSON形式で返してください。特に売上高、各種費用、資産・負債の各科目の金額を正確に読み取ってください。単位（千円、万円等）に注意して円に変換してください。\n\n---\n${textContent}`,
       });
     }
-    contentBlocks.push({
-      type: 'text',
-      text: `この決算書（${fileName || '不明'}、全${pageImages.length}ページ）の全てのページを注意深く確認し、損益計算書(PL)・貸借対照表(BS)・キャッシュフロー計算書のデータを漏れなく抽出してJSON形式で返してください。特に売上高、各種費用、資産・負債の各科目の金額を正確に読み取ってください。単位（千円、万円等）に注意して円に変換してください。`,
-    });
 
     const messages = [{ role: 'user', content: contentBlocks }];
 
@@ -225,7 +236,8 @@ export default async function handler(req, res) {
           success: true,
           data: parsed,
           fileName,
-          pages: pageImages.length,
+          pages: hasImages ? pageImages.length : 0,
+          mode: hasImages ? 'image' : 'text',
           allZeroWarning: allZero,
           model,
           usage: {

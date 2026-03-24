@@ -1426,13 +1426,19 @@
             const handleFinancePdfUpload = async (files) => {
                 const fileList = Array.from(files);
                 if (fileList.length === 0) return;
-                const pdfFiles = fileList.filter(f => f.type === 'application/pdf');
-                if (pdfFiles.length === 0) {
-                    setFinPdfError('PDFファイルを選択してください');
+
+                const TEXT_EXTS = ['.txt', '.csv', '.tsv'];
+                const isTextFile = (f) => TEXT_EXTS.some(ext => f.name.toLowerCase().endsWith(ext)) || f.type.startsWith('text/');
+                const supportedFiles = fileList.filter(f => f.type === 'application/pdf' || isTextFile(f));
+                if (supportedFiles.length === 0) {
+                    setFinPdfError('PDF・テキスト(.txt/.csv)ファイルを選択してください');
                     return;
                 }
 
-                if (!window.pdfjsLib) {
+                const pdfFiles = supportedFiles.filter(f => f.type === 'application/pdf');
+                const textFiles = supportedFiles.filter(f => isTextFile(f));
+
+                if (pdfFiles.length > 0 && !window.pdfjsLib) {
                     setFinPdfError('PDF.jsの読み込みに失敗しました。ページを再読み込みしてください。');
                     return;
                 }
@@ -1443,24 +1449,37 @@
 
                 const results = [];
                 const errors = [];
+                const allFiles = [...pdfFiles, ...textFiles];
 
-                for (let fi = 0; fi < pdfFiles.length; fi++) {
-                    const file = pdfFiles[fi];
-                    setFinPdfProgress(`${file.name} を処理中（${fi + 1}/${pdfFiles.length}）...`);
+                for (let fi = 0; fi < allFiles.length; fi++) {
+                    const file = allFiles[fi];
+                    const isPdf = file.type === 'application/pdf';
+                    setFinPdfProgress(`${file.name} を処理中（${fi + 1}/${allFiles.length}）...`);
 
                     try {
-                        // Step 1: PDF → ページ画像
-                        const pageImages = await pdfToPageImages(file, setFinPdfProgress);
-                        setFinPdfProgress(`${file.name}: AIが決算データを読み取り中...（${pageImages.length}ページ）`);
+                        let bodyPayload;
+                        if (isPdf) {
+                            // PDF → ページ画像
+                            const pageImages = await pdfToPageImages(file, setFinPdfProgress);
+                            setFinPdfProgress(`${file.name}: AIが決算データを読み取り中...（${pageImages.length}ページ）`);
+                            bodyPayload = { pageImages, fileName: file.name };
+                        } else {
+                            // テキストファイル → そのまま送信
+                            setFinPdfProgress(`${file.name}: テキストを読み込み中...`);
+                            const textContent = await file.text();
+                            if (!textContent.trim()) {
+                                errors.push(`${file.name}: ファイルが空です`);
+                                continue;
+                            }
+                            setFinPdfProgress(`${file.name}: AIが決算データを読み取り中...`);
+                            bodyPayload = { textContent, fileName: file.name };
+                        }
 
-                        // Step 2: 全ページを一括でAPIに送信
+                        // APIに送信
                         const res = await fetch('/api/finance-pdf', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                pageImages,
-                                fileName: file.name,
-                            }),
+                            body: JSON.stringify(bodyPayload),
                         });
 
                         const text = await res.text();
@@ -10393,7 +10412,7 @@
                                         <input
                                             ref={finFileInputRef}
                                             type="file"
-                                            accept=".pdf"
+                                            accept=".pdf,.txt,.csv,.tsv"
                                             multiple
                                             className="hidden"
                                             onChange={e => e.target.files.length > 0 && handleFinancePdfUpload(e.target.files)}
@@ -10406,7 +10425,7 @@
                                             {finPdfLoading ? (
                                                 <><RefreshCw size={14} className="animate-spin" /> 解析中...</>
                                             ) : (
-                                                <><Upload size={14} /> 決算書PDF取込（複数可）</>
+                                                <><Upload size={14} /> 決算書取込（PDF/テキスト）</>
                                             )}
                                         </button>
                                     </div>
@@ -10518,12 +10537,12 @@
                                         <Upload size={28} className="text-emerald-500" />
                                     </div>
                                     <h3 className="text-lg font-bold text-slate-700 mb-2">決算書をアップロードしてください</h3>
-                                    <p className="text-sm text-slate-400 mb-4">PDF形式の決算書をアップロードすると、AIが自動で財務データを読み取ります。<br/>複数期分のPDFを一括アップロードできます。</p>
+                                    <p className="text-sm text-slate-400 mb-4">PDF・テキスト形式の決算書をアップロードすると、AIが自動で財務データを読み取ります。<br/>複数期分を一括アップロードできます。</p>
                                     <button
                                         onClick={() => finFileInputRef.current?.click()}
                                         className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-500 text-white rounded-xl font-bold text-sm hover:bg-emerald-600 transition-all shadow-sm"
                                     >
-                                        <Upload size={14} /> 決算書PDF取込
+                                        <Upload size={14} /> 決算書取込（PDF/テキスト）
                                     </button>
                                 </div>
                             )}

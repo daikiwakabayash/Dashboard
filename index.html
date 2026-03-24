@@ -1375,6 +1375,8 @@
             const [finPdfResult, setFinPdfResult] = useState(null);
             const [finPdfProgress, setFinPdfProgress] = useState('');
             const finFileInputRef = useRef(null);
+            const [finTextInput, setFinTextInput] = useState('');
+            const [finShowTextInput, setFinShowTextInput] = useState(false);
 
             // 期データ削除
             const handleDeletePeriod = (fiscalYear) => {
@@ -1421,6 +1423,59 @@
                     images.push(dataUrl.split(',')[1]);
                 }
                 return images;
+            };
+
+            // テキスト直接入力で決算データを送信
+            const handleFinanceTextSubmit = async () => {
+                const text = finTextInput.trim();
+                if (!text) { setFinPdfError('テキストを入力してください'); return; }
+                setFinPdfLoading(true);
+                setFinPdfError(null);
+                setFinPdfResult(null);
+                setFinPdfProgress('テキストデータをAIが解析中...');
+                try {
+                    const res = await fetch('/api/finance-pdf', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ textContent: text, fileName: 'テキスト入力' }),
+                    });
+                    const respText = await res.text();
+                    let result;
+                    try { result = JSON.parse(respText); } catch {
+                        setFinPdfError(`サーバーエラー（${res.status}）`);
+                        setFinPdfLoading(false); setFinPdfProgress(''); return;
+                    }
+                    if (!result.success) {
+                        setFinPdfError(result.message || result.error || '不明なエラー');
+                        setFinPdfLoading(false); setFinPdfProgress(''); return;
+                    }
+                    const extracted = result.data;
+                    console.log('[Finance Text] extracted:', JSON.stringify(extracted));
+                    if (result.allZeroWarning) {
+                        setFinPdfError('AIが数値を読み取れませんでした（全て0）。テキスト内容を確認してください。');
+                        setFinPdfLoading(false); setFinPdfProgress(''); return;
+                    }
+                    setFinData(prev => ({
+                        ...prev,
+                        pl: { ...prev?.pl, ...extracted.pl },
+                        bs: { ...prev?.bs, ...extracted.bs },
+                        cashflow: { ...prev?.cashflow, ...extracted.cashflow },
+                        accountDetails: extracted.accountDetails || prev?.accountDetails,
+                    }));
+                    setFinPeriod(extracted.fiscalYear || extracted.period || 'latest');
+                    setFinPeriodData(prev => {
+                        const existing = prev.filter(d => d.fiscalYear !== extracted.fiscalYear);
+                        return [...existing, extracted].sort((a, b) => (a.period || '').localeCompare(b.period || ''));
+                    });
+                    setFinUploadedFiles(prev => [...prev, { name: 'テキスト入力', period: extracted.period || '', fiscalYear: extracted.fiscalYear || '', uploadedAt: new Date().toISOString() }]);
+                    setFinPdfResult(`取り込み完了（${extracted.fiscalYear || ''}, モデル: ${result.model || '不明'}）`);
+                    setFinTextInput('');
+                    setFinShowTextInput(false);
+                } catch (err) {
+                    setFinPdfError(err.message?.includes('credit') ? 'APIクレジット不足' : (err.message || 'エラーが発生しました'));
+                }
+                setFinPdfLoading(false);
+                setFinPdfProgress('');
             };
 
             const handleFinancePdfUpload = async (files) => {
@@ -10425,11 +10480,46 @@
                                             {finPdfLoading ? (
                                                 <><RefreshCw size={14} className="animate-spin" /> 解析中...</>
                                             ) : (
-                                                <><Upload size={14} /> 決算書取込（PDF/テキスト）</>
+                                                <><Upload size={14} /> ファイル取込</>
                                             )}
+                                        </button>
+                                        <button
+                                            onClick={() => setFinShowTextInput(prev => !prev)}
+                                            disabled={finPdfLoading}
+                                            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold text-sm transition-all disabled:opacity-50 shadow-sm ${
+                                                finShowTextInput ? 'bg-slate-700 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                            }`}
+                                        >
+                                            <FileText size={14} /> テキスト入力
                                         </button>
                                     </div>
                                 </div>
+                                {/* テキスト直接入力エリア */}
+                                {finShowTextInput && (
+                                    <div className="bg-white rounded-xl border border-slate-200 p-3 space-y-2 shadow-sm">
+                                        <p className="text-xs text-slate-400 font-bold">決算書のデータをテキストで貼り付けてください（損益計算書・貸借対照表・キャッシュフロー計算書など）</p>
+                                        <textarea
+                                            value={finTextInput}
+                                            onChange={e => setFinTextInput(e.target.value)}
+                                            placeholder={"例:\n損益計算書（自 2024年11月1日 至 2025年10月31日）\n売上高　　　　120,000,000円\n売上原価　　　 30,000,000円\n売上総利益　　 90,000,000円\n..."}
+                                            className="w-full h-40 p-3 border border-slate-200 rounded-lg text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-emerald-300 focus:border-emerald-400"
+                                        />
+                                        <div className="flex items-center gap-2 justify-end">
+                                            <span className="text-xs text-slate-400">{finTextInput.length > 0 ? `${finTextInput.length}文字` : ''}</span>
+                                            <button
+                                                onClick={() => { setFinShowTextInput(false); setFinTextInput(''); }}
+                                                className="px-3 py-1.5 text-slate-500 hover:text-slate-700 rounded-lg font-bold text-sm transition-all"
+                                            >キャンセル</button>
+                                            <button
+                                                onClick={handleFinanceTextSubmit}
+                                                disabled={finPdfLoading || !finTextInput.trim()}
+                                                className="flex items-center gap-1.5 px-4 py-1.5 bg-emerald-500 text-white rounded-lg font-bold text-sm hover:bg-emerald-600 transition-all disabled:opacity-50"
+                                            >
+                                                {finPdfLoading ? <><RefreshCw size={14} className="animate-spin" /> 解析中...</> : <><Send size={14} /> AIで読み取り</>}
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
                                 {/* 取込済みPDF一覧（削除可能） */}
                                 {finUploadedFiles.length > 0 && (
                                     <div className="flex items-start gap-2">
@@ -10537,13 +10627,21 @@
                                         <Upload size={28} className="text-emerald-500" />
                                     </div>
                                     <h3 className="text-lg font-bold text-slate-700 mb-2">決算書をアップロードしてください</h3>
-                                    <p className="text-sm text-slate-400 mb-4">PDF・テキスト形式の決算書をアップロードすると、AIが自動で財務データを読み取ります。<br/>複数期分を一括アップロードできます。</p>
-                                    <button
-                                        onClick={() => finFileInputRef.current?.click()}
-                                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-500 text-white rounded-xl font-bold text-sm hover:bg-emerald-600 transition-all shadow-sm"
-                                    >
-                                        <Upload size={14} /> 決算書取込（PDF/テキスト）
-                                    </button>
+                                    <p className="text-sm text-slate-400 mb-4">PDFファイル、またはテキストを直接入力して財務データを取り込めます。</p>
+                                    <div className="flex items-center gap-3 justify-center">
+                                        <button
+                                            onClick={() => finFileInputRef.current?.click()}
+                                            className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-500 text-white rounded-xl font-bold text-sm hover:bg-emerald-600 transition-all shadow-sm"
+                                        >
+                                            <Upload size={14} /> ファイル取込
+                                        </button>
+                                        <button
+                                            onClick={() => setFinShowTextInput(true)}
+                                            className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-100 text-slate-600 rounded-xl font-bold text-sm hover:bg-slate-200 transition-all shadow-sm"
+                                        >
+                                            <FileText size={14} /> テキスト入力
+                                        </button>
+                                    </div>
                                 </div>
                             )}
 

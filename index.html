@@ -11277,25 +11277,26 @@
             const pickerRef = useRef(null);
             const [dropdownPos, setDropdownPos] = useState({ top: 0, left: 0 });
 
+            // ドロップダウンの位置をボタンの下に計算（スクロール追従）
             useEffect(() => {
-                const handleClickOutside = (event) => {
-                    if (pickerRef.current && !pickerRef.current.contains(event.target)) {
-                        setIsOpen(false);
-                    }
-                };
-                document.addEventListener("mousedown", handleClickOutside);
-                return () => document.removeEventListener("mousedown", handleClickOutside);
-            }, []);
-
-            // ドロップダウンの位置をボタンの下に固定で計算
-            useEffect(() => {
-                if (isOpen && pickerRef.current) {
+                if (!isOpen || !pickerRef.current) return;
+                const updatePos = () => {
                     const rect = pickerRef.current.getBoundingClientRect();
+                    const calHeight = 520;
+                    const spaceBelow = window.innerHeight - rect.bottom - 8;
+                    const top = spaceBelow >= calHeight ? rect.bottom + 8 : Math.max(8, rect.top - calHeight - 8);
                     setDropdownPos({
-                        top: rect.bottom + 8,
-                        left: Math.max(8, Math.min(rect.left, window.innerWidth - 400)),
+                        top,
+                        left: Math.max(8, Math.min(rect.left, window.innerWidth - 408)),
                     });
-                }
+                };
+                updatePos();
+                window.addEventListener('scroll', updatePos, true);
+                window.addEventListener('resize', updatePos);
+                return () => {
+                    window.removeEventListener('scroll', updatePos, true);
+                    window.removeEventListener('resize', updatePos);
+                };
             }, [isOpen]);
 
             // 月の日付を生成
@@ -11407,8 +11408,20 @@
                         </button>
                     </div>
 
-                    {isOpen && (
-                        <div className="fixed bg-white border border-slate-200 rounded-2xl shadow-xl p-3 md:p-4 min-w-[320px] md:min-w-[380px]" style={{ zIndex: 9999, top: dropdownPos.top, left: dropdownPos.left, maxWidth: 'calc(100vw - 16px)' }}>
+                    {isOpen && ReactDOM.createPortal(
+                        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 99999 }}>
+                            {/* 背景オーバーレイ */}
+                            <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0 }} onClick={() => setIsOpen(false)} />
+                            {/* カレンダー本体 */}
+                            <div
+                                className="bg-white border border-slate-200 rounded-2xl shadow-2xl p-3 md:p-4 w-[360px] md:w-[400px] max-w-[calc(100vw-16px)]"
+                                style={{
+                                    position: 'fixed',
+                                    zIndex: 100000,
+                                    top: dropdownPos.top,
+                                    left: dropdownPos.left,
+                                }}
+                            >
                             {/* 選択モード表示 */}
                             <div className="flex gap-2 mb-4">
                                 <button
@@ -11545,7 +11558,9 @@
                             >
                                 適用して閉じる
                             </button>
-                        </div>
+                            </div>
+                        </div>,
+                        document.body
                     )}
                 </div>
             );

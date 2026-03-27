@@ -2,7 +2,7 @@
 // 環境変数:
 //   PATIENT_DB_GAS_URL - 患者データベース用GAS WebアプリURL
 //   SQUARE_TOKENS      - Square APIトークン（JSON配列）
-const API_VERSION = 'v6-batch-customers';
+const API_VERSION = 'v7-bulk-retrieve';
 
 export const config = {
   api: { bodyParser: false },
@@ -71,34 +71,32 @@ async function getSquareSubscribers(accountFilter) {
       const activeSubscriptions = subscriptions.filter(s => s.status === 'ACTIVE');
       debugInfo.push(`${accountName}: ${subscriptions.length}件中 ${activeSubscriptions.length}件アクティブ`);
 
-      // 3. サブスク顧客のみバッチ取得（全顧客取得はタイムアウトするため）
+      // 3. サブスク顧客のみ一括取得（bulkRetrieveCustomers: 1回で最大100件）
       const customerDetails = {};
       const uniqueCustomerIds = [...new Set(activeSubscriptions.map(s => s.customerId).filter(Boolean))];
       debugInfo.push(`対象顧客: ${uniqueCustomerIds.length}件`);
 
-      // 20件ずつ並列で取得（高速化）
-      const BATCH_SIZE = 20;
-      for (let i = 0; i < uniqueCustomerIds.length; i += BATCH_SIZE) {
-        const batch = uniqueCustomerIds.slice(i, i + BATCH_SIZE);
-        const results = await Promise.allSettled(
-          batch.map(id =>
-            client.customersApi.retrieveCustomer(id)
-              .then(r => r.result.customer)
-              .catch(() => null)
-          )
-        );
-        for (const r of results) {
-          if (r.status === 'fulfilled' && r.value) {
-            const c = r.value;
-            customerDetails[c.id] = {
-              id: c.id,
-              name: [c.familyName, c.givenName].filter(Boolean).join('') || c.emailAddress || c.id,
-              familyName: c.familyName || '',
-              givenName: c.givenName || '',
-              phone: c.phoneNumber || '',
-              email: c.emailAddress || '',
-            };
+      const BULK_SIZE = 100;
+      for (let i = 0; i < uniqueCustomerIds.length; i += BULK_SIZE) {
+        const batch = uniqueCustomerIds.slice(i, i + BULK_SIZE);
+        try {
+          const bulkResp = await client.customersApi.bulkRetrieveCustomers({ customerIds: batch });
+          const responses = bulkResp.result.responses || {};
+          for (const [custId, custResp] of Object.entries(responses)) {
+            const c = custResp.customer;
+            if (c) {
+              customerDetails[c.id] = {
+                id: c.id,
+                name: [c.familyName, c.givenName].filter(Boolean).join('') || c.emailAddress || c.id,
+                familyName: c.familyName || '',
+                givenName: c.givenName || '',
+                phone: c.phoneNumber || '',
+                email: c.emailAddress || '',
+              };
+            }
           }
+        } catch (e) {
+          debugInfo.push(`bulk取得エラー(batch ${i}): ${e.message}`);
         }
       }
       debugInfo.push(`顧客${Object.keys(customerDetails).length}件取得成功`);

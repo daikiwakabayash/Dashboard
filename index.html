@@ -1239,13 +1239,14 @@
             // ── 顧客管理用 State ──
             const [custLoading, setCustLoading] = useState(false);
             const [custError, setCustError] = useState(null);
-            const [custPatients, setCustPatients] = useState([]);
-            const [custNoVisit, setCustNoVisit] = useState([]);
-            const [custSubsAlert, setCustSubsAlert] = useState([]);
-            const [custActiveTab, setCustActiveTab] = useState('novisit');
-            const [custThresholdDays, setCustThresholdDays] = useState(30);
+            const [custMonthlyChurn, setCustMonthlyChurn] = useState([]);
+            const [custSubsAlerts, setCustSubsAlerts] = useState([]);
+            const [custSummary, setCustSummary] = useState(null);
+            const [custActiveTab, setCustActiveTab] = useState('churn');
+            const [custSelectedPeriod, setCustSelectedPeriod] = useState(null);
             const [custSearchQuery, setCustSearchQuery] = useState('');
             const [custLastFetched, setCustLastFetched] = useState(null);
+            const [custSetupRequired, setCustSetupRequired] = useState(false);
 
             // ── 経理・ファイナンスタブ用 State ──
             const [finActiveTab, setFinActiveTab] = useState('overview'); // overview | pl | bs | cashflow | qa
@@ -1638,22 +1639,28 @@
                 }
             }, [finMessages, finLoading]);
 
-            // タスクデータ取得
             // 顧客データ取得
             const fetchCustomerData = async () => {
                 setCustLoading(true);
                 setCustError(null);
+                setCustSetupRequired(false);
                 try {
                     const response = await fetch(CUSTOMERS_API_URL);
+                    const data = await response.json().catch(() => ({}));
                     if (!response.ok) {
-                        const errData = await response.json().catch(() => ({}));
-                        throw new Error(errData.message || `HTTP ${response.status}`);
+                        if (data.setupRequired) {
+                            setCustSetupRequired(true);
+                            throw new Error('PATIENT_DB_GAS_URL が未設定です。Vercelの環境変数に患者DBのGAS WebアプリURLを設定してください。');
+                        }
+                        throw new Error(data.message || `HTTP ${response.status}`);
                     }
-                    const data = await response.json();
-                    setCustPatients(data.patients || []);
-                    setCustNoVisit(data.noVisitPatients || []);
-                    setCustSubsAlert(data.subsAlerts || []);
+                    setCustMonthlyChurn(data.monthlyChurn || []);
+                    setCustSubsAlerts(data.subsAlerts || []);
+                    setCustSummary(data.summary || null);
                     setCustLastFetched(new Date().toLocaleString('ja-JP'));
+                    if (data.monthlyChurn?.length > 0 && !custSelectedPeriod) {
+                        setCustSelectedPeriod(data.monthlyChurn.length - 1);
+                    }
                 } catch (err) {
                     console.error('[customers] Fetch error:', err);
                     setCustError(err.message);
@@ -1664,7 +1671,7 @@
 
             // 顧客管理ページ表示時にデータ取得
             useEffect(() => {
-                if (currentPage === 'customers' && custPatients.length === 0 && !custLoading) {
+                if (currentPage === 'customers' && custMonthlyChurn.length === 0 && !custLoading && !custSetupRequired) {
                     fetchCustomerData();
                 }
             }, [currentPage]);
@@ -9802,11 +9809,11 @@
                                             <Users size={12} className="md:hidden" /><Users size={14} className="hidden md:block" /> Customer Management
                                         </div>
                                         <h1 className="text-xl md:text-3xl font-black tracking-tight text-slate-900 italic">顧客管理</h1>
-                                        <p className="text-xs text-slate-400 font-bold">患者データベースとSquareサブスクを照合し、未来院・決済アラートを管理</p>
+                                        <p className="text-xs text-slate-400 font-bold">月別離反者の抽出とSquareサブスク決済状況の照合</p>
                                     </div>
                                     <div className="flex items-center gap-2">
                                         <button
-                                            onClick={() => fetchCustomerData()}
+                                            onClick={() => { setCustMonthlyChurn([]); setCustSubsAlerts([]); setCustSummary(null); fetchCustomerData(); }}
                                             disabled={custLoading}
                                             className="p-2 rounded-xl bg-brand-500 text-white hover:bg-brand-600 disabled:opacity-50 transition-colors"
                                             title="再読み込み"
@@ -9822,9 +9829,8 @@
                                 {/* タブ切替 */}
                                 <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
                                     {[
-                                        { id: 'novisit', label: '未来院アラート', icon: React.createElement(AlertCircle, { size: 14 }) },
+                                        { id: 'churn', label: '月別離反者', icon: React.createElement(AlertCircle, { size: 14 }) },
                                         { id: 'subsalert', label: 'サブスク決済アラート', icon: React.createElement(CreditCard, { size: 14 }) },
-                                        { id: 'all', label: '全患者一覧', icon: React.createElement(Users, { size: 14 }) },
                                     ].map(tab => (
                                         <button
                                             key={tab.id}
@@ -9843,155 +9849,195 @@
 
                             {/* エラー表示 */}
                             {custError && (
-                                <div className="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-700 font-bold flex items-center gap-2 animate-fade-in">
-                                    <AlertCircle size={16} />
-                                    {custError}
+                                <div className="bg-red-50 border border-red-200 rounded-2xl p-4 animate-fade-in">
+                                    <div className="flex items-start gap-3">
+                                        <AlertCircle size={20} className="text-red-500 mt-0.5 flex-shrink-0" />
+                                        <div>
+                                            <p className="text-sm text-red-700 font-bold">{custError}</p>
+                                            {custSetupRequired && (
+                                                <div className="mt-3 text-xs text-red-600 space-y-2">
+                                                    <p className="font-bold">セットアップ手順:</p>
+                                                    <ol className="list-decimal list-inside space-y-1 text-red-500">
+                                                        <li>スプレッドシートで「拡張機能 → Apps Script」を開く</li>
+                                                        <li>GAS WebアプリのスクリプトをコピーしてWebアプリとしてデプロイ</li>
+                                                        <li>Vercelの環境変数に <code className="bg-red-100 px-1 rounded">PATIENT_DB_GAS_URL</code> を追加</li>
+                                                        <li>Vercelでリデプロイ</li>
+                                                    </ol>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
                                 </div>
                             )}
 
                             {/* ローディング */}
-                            {custLoading && custPatients.length === 0 && (
+                            {custLoading && (
                                 <div className="flex items-center justify-center py-20 animate-fade-in">
                                     <div className="text-center space-y-3">
                                         <Loader2 size={32} className="animate-spin text-brand-400 mx-auto" />
                                         <p className="text-sm font-bold text-slate-400">患者データを読み込み中...</p>
+                                        <p className="text-xs text-slate-300">GASからデータを取得しています（最大30秒）</p>
                                     </div>
                                 </div>
                             )}
 
                             {/* サマリーカード */}
-                            {!custLoading && (custNoVisit.length > 0 || custSubsAlert.length > 0 || custPatients.length > 0) && (
+                            {!custLoading && custSummary && (
                                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3 animate-fade-in-up">
                                     <div className="bg-white rounded-2xl border border-slate-200 p-4 card-hover">
                                         <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-1">総患者数</div>
-                                        <div className="text-2xl font-black text-slate-800">{custPatients.length.toLocaleString()}</div>
+                                        <div className="text-2xl font-black text-slate-800">{(custSummary.totalPatients || 0).toLocaleString()}</div>
                                     </div>
                                     <div className="bg-white rounded-2xl border border-amber-200 p-4 card-hover">
-                                        <div className="text-[10px] font-black text-amber-500 uppercase tracking-wider mb-1">未来院 (30日+)</div>
-                                        <div className="text-2xl font-black text-amber-600">{custNoVisit.length.toLocaleString()}</div>
+                                        <div className="text-[10px] font-black text-amber-500 uppercase tracking-wider mb-1">離反者合計</div>
+                                        <div className="text-2xl font-black text-amber-600">{(custSummary.totalChurned || 0).toLocaleString()}</div>
                                     </div>
                                     <div className="bg-white rounded-2xl border border-red-200 p-4 card-hover">
                                         <div className="text-[10px] font-black text-red-500 uppercase tracking-wider mb-1">決済アラート</div>
-                                        <div className="text-2xl font-black text-red-600">{custSubsAlert.length.toLocaleString()}</div>
+                                        <div className="text-2xl font-black text-red-600">{(custSummary.subsAlertCount || 0).toLocaleString()}</div>
                                     </div>
-                                    <div className="bg-white rounded-2xl border border-emerald-200 p-4 card-hover">
-                                        <div className="text-[10px] font-black text-emerald-500 uppercase tracking-wider mb-1">来院中</div>
-                                        <div className="text-2xl font-black text-emerald-600">{(custPatients.length - custNoVisit.length).toLocaleString()}</div>
+                                    <div className="bg-white rounded-2xl border border-blue-200 p-4 card-hover">
+                                        <div className="text-[10px] font-black text-blue-500 uppercase tracking-wider mb-1">Square契約者</div>
+                                        <div className="text-2xl font-black text-blue-600">{(custSummary.squareSubscribers || 0).toLocaleString()}</div>
                                     </div>
                                 </div>
                             )}
 
-                            {/* ── 未来院アラートタブ ── */}
-                            {custActiveTab === 'novisit' && !custLoading && (
-                                <div className="bg-white rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 overflow-hidden animate-fade-in-up">
-                                    <div className="bg-gradient-to-r from-amber-500 to-orange-400 p-4 md:p-5 text-white">
-                                        <h2 className="font-black text-base md:text-lg flex items-center gap-2">
-                                            <AlertCircle size={20} /> 未来院アラート
-                                        </h2>
-                                        <p className="text-amber-100 text-xs font-bold mt-1">
-                                            {custThresholdDays}日以上来院がない患者をピックアップ
-                                        </p>
-                                    </div>
-
-                                    {/* フィルター */}
-                                    <div className="p-3 md:p-4 border-b border-slate-100 flex flex-col sm:flex-row gap-3">
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs font-bold text-slate-500">未来院日数:</span>
-                                            <select
-                                                value={custThresholdDays}
-                                                onChange={(e) => setCustThresholdDays(Number(e.target.value))}
-                                                className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-300"
-                                            >
-                                                <option value={30}>30日以上</option>
-                                                <option value={60}>60日以上</option>
-                                                <option value={90}>90日以上</option>
-                                            </select>
-                                        </div>
-                                        <div className="flex-1">
-                                            <input
-                                                type="text"
-                                                value={custSearchQuery}
-                                                onChange={(e) => setCustSearchQuery(e.target.value)}
-                                                placeholder="患者名で検索..."
-                                                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-300"
-                                            />
-                                        </div>
-                                    </div>
-
-                                    <div className="p-3 md:p-4">
-                                        {(() => {
-                                            const filtered = custNoVisit
-                                                .filter(p => {
-                                                    const daysSince = p.daysSinceLastVisit || 0;
-                                                    if (daysSince < custThresholdDays) return false;
-                                                    if (custSearchQuery) {
-                                                        return (p.name || '').includes(custSearchQuery);
-                                                    }
-                                                    return true;
-                                                })
-                                                .sort((a, b) => (b.daysSinceLastVisit || 0) - (a.daysSinceLastVisit || 0));
-
-                                            if (filtered.length === 0) {
-                                                return (
-                                                    <div className="text-center py-12 text-slate-400">
-                                                        <Users size={40} className="mx-auto mb-3 opacity-20" />
-                                                        <p className="text-sm font-bold">{custNoVisit.length === 0 ? 'データを取得してください' : '該当する患者はいません'}</p>
-                                                    </div>
-                                                );
-                                            }
+                            {/* ── 月別離反者タブ ── */}
+                            {custActiveTab === 'churn' && !custLoading && custMonthlyChurn.length > 0 && (
+                                <div className="space-y-4 animate-fade-in-up">
+                                    {/* 月別カード一覧 */}
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                        {custMonthlyChurn.map((period, idx) => {
+                                            const isSelected = custSelectedPeriod === idx;
+                                            const colors = [
+                                                { bg: 'bg-slate-50', border: 'border-slate-300', text: 'text-slate-700', activeBg: 'bg-slate-100' },
+                                                { bg: 'bg-blue-50', border: 'border-blue-300', text: 'text-blue-700', activeBg: 'bg-blue-100' },
+                                                { bg: 'bg-amber-50', border: 'border-amber-300', text: 'text-amber-700', activeBg: 'bg-amber-100' },
+                                                { bg: 'bg-red-50', border: 'border-red-300', text: 'text-red-700', activeBg: 'bg-red-100' },
+                                            ][idx] || { bg: 'bg-slate-50', border: 'border-slate-300', text: 'text-slate-700', activeBg: 'bg-slate-100' };
 
                                             return (
-                                                <div className="space-y-2">
-                                                    <div className="text-xs font-bold text-slate-400 mb-2">{filtered.length}名の患者が該当</div>
-                                                    <div className="overflow-x-auto">
-                                                        <table className="w-full text-sm">
-                                                            <thead>
-                                                                <tr className="border-b border-slate-200">
-                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">患者名</th>
-                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">最終来院日</th>
-                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">経過日数</th>
-                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">店舗</th>
-                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">サブスク</th>
-                                                                </tr>
-                                                            </thead>
-                                                            <tbody>
-                                                                {filtered.slice(0, 100).map((p, idx) => (
-                                                                    <tr key={idx} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
-                                                                        <td className="py-2.5 px-3 font-bold text-slate-800">{p.name || '不明'}</td>
-                                                                        <td className="py-2.5 px-3 text-slate-600">{p.lastVisitDate || '-'}</td>
-                                                                        <td className="py-2.5 px-3">
-                                                                            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-black ${
-                                                                                (p.daysSinceLastVisit || 0) >= 90 ? 'bg-red-100 text-red-700' :
-                                                                                (p.daysSinceLastVisit || 0) >= 60 ? 'bg-orange-100 text-orange-700' :
-                                                                                'bg-amber-100 text-amber-700'
-                                                                            }`}>
-                                                                                {p.daysSinceLastVisit || 0}日
-                                                                            </span>
-                                                                        </td>
-                                                                        <td className="py-2.5 px-3 text-slate-600 text-xs">{p.store || '-'}</td>
-                                                                        <td className="py-2.5 px-3">
-                                                                            {p.hasSubscription ? (
-                                                                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-black bg-blue-100 text-blue-700">
-                                                                                    <CreditCard size={10} /> あり
-                                                                                </span>
-                                                                            ) : (
-                                                                                <span className="text-xs text-slate-400">なし</span>
-                                                                            )}
-                                                                        </td>
-                                                                    </tr>
-                                                                ))}
-                                                            </tbody>
-                                                        </table>
-                                                        {filtered.length > 100 && (
-                                                            <div className="text-center py-3 text-xs text-slate-400 font-bold">
-                                                                ...他 {filtered.length - 100}名
-                                                            </div>
-                                                        )}
+                                                <button
+                                                    key={idx}
+                                                    onClick={() => setCustSelectedPeriod(idx)}
+                                                    className={`rounded-2xl border-2 p-4 text-left transition-all ${
+                                                        isSelected
+                                                            ? `${colors.activeBg} ${colors.border} ring-2 ring-offset-1 ring-${colors.border.replace('border-', '')}`
+                                                            : `bg-white border-slate-200 hover:${colors.bg}`
+                                                    }`}
+                                                >
+                                                    <div className={`text-[10px] font-black uppercase tracking-wider mb-1 ${isSelected ? colors.text : 'text-slate-400'}`}>
+                                                        {period.label}
                                                     </div>
-                                                </div>
+                                                    <div className={`text-2xl font-black ${isSelected ? colors.text : 'text-slate-800'}`}>
+                                                        {period.count}名
+                                                    </div>
+                                                    {period.subsCount > 0 && (
+                                                        <div className="mt-1 text-[10px] font-bold text-red-500">
+                                                            うちサブスク継続: {period.subsCount}名
+                                                        </div>
+                                                    )}
+                                                </button>
                                             );
-                                        })()}
+                                        })}
                                     </div>
+
+                                    {/* 選択された月の離反者テーブル */}
+                                    {custSelectedPeriod != null && custMonthlyChurn[custSelectedPeriod] && (() => {
+                                        const period = custMonthlyChurn[custSelectedPeriod];
+                                        const filtered = period.patients.filter(p => {
+                                            if (!custSearchQuery) return true;
+                                            return (p.name || '').includes(custSearchQuery);
+                                        });
+
+                                        return (
+                                            <div className="bg-white rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                                                <div className="bg-gradient-to-r from-amber-500 to-orange-400 p-4 md:p-5 text-white">
+                                                    <h2 className="font-black text-base md:text-lg flex items-center gap-2">
+                                                        <AlertCircle size={20} /> {period.label}
+                                                    </h2>
+                                                    <p className="text-amber-100 text-xs font-bold mt-1">{period.description}</p>
+                                                </div>
+
+                                                {/* 検索 */}
+                                                <div className="p-3 md:p-4 border-b border-slate-100">
+                                                    <input
+                                                        type="text"
+                                                        value={custSearchQuery}
+                                                        onChange={(e) => setCustSearchQuery(e.target.value)}
+                                                        placeholder="患者名で検索..."
+                                                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-300"
+                                                    />
+                                                </div>
+
+                                                <div className="p-3 md:p-4">
+                                                    {filtered.length === 0 ? (
+                                                        <div className="text-center py-12 text-slate-400">
+                                                            <Users size={40} className="mx-auto mb-3 opacity-20" />
+                                                            <p className="text-sm font-bold">{period.patients.length === 0 ? 'この期間の離反者はいません' : '該当する患者はいません'}</p>
+                                                        </div>
+                                                    ) : (
+                                                        <div className="space-y-2">
+                                                            <div className="text-xs font-bold text-slate-400 mb-2">
+                                                                {filtered.length}名が該当
+                                                                {period.subsCount > 0 && (
+                                                                    <span className="ml-2 text-red-500">（サブスク継続中: {period.subsCount}名）</span>
+                                                                )}
+                                                            </div>
+                                                            <div className="overflow-x-auto">
+                                                                <table className="w-full text-sm">
+                                                                    <thead>
+                                                                        <tr className="border-b border-slate-200">
+                                                                            <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">患者名</th>
+                                                                            <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">最終来院日</th>
+                                                                            <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">店舗</th>
+                                                                            <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">決済継続</th>
+                                                                        </tr>
+                                                                    </thead>
+                                                                    <tbody>
+                                                                        {filtered.slice(0, 200).map((p, pidx) => (
+                                                                            <tr key={pidx} className={`border-b border-slate-50 transition-colors ${
+                                                                                p.hasSubscription ? 'bg-red-50/50 hover:bg-red-50' : 'hover:bg-slate-50'
+                                                                            }`}>
+                                                                                <td className="py-2.5 px-3 font-bold text-slate-800">{p.name || '不明'}</td>
+                                                                                <td className="py-2.5 px-3 text-slate-600">{p.lastVisitDate || '-'}</td>
+                                                                                <td className="py-2.5 px-3 text-slate-600 text-xs">{p.store || '-'}</td>
+                                                                                <td className="py-2.5 px-3">
+                                                                                    {p.hasSubscription ? (
+                                                                                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-black bg-red-100 text-red-700">
+                                                                                            <AlertCircle size={10} /> 決済継続中
+                                                                                            {p.monthlyAmount ? ` ¥${p.monthlyAmount.toLocaleString()}/月` : ''}
+                                                                                        </span>
+                                                                                    ) : (
+                                                                                        <span className="text-xs text-slate-400">なし</span>
+                                                                                    )}
+                                                                                </td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                                {filtered.length > 200 && (
+                                                                    <div className="text-center py-3 text-xs text-slate-400 font-bold">
+                                                                        ...他 {filtered.length - 200}名
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
+                                </div>
+                            )}
+
+                            {/* 離反者データなし表示 */}
+                            {custActiveTab === 'churn' && !custLoading && !custError && custMonthlyChurn.length === 0 && (
+                                <div className="bg-white rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 p-12 text-center animate-fade-in">
+                                    <Users size={48} className="mx-auto mb-4 text-slate-200" />
+                                    <p className="text-sm font-bold text-slate-400">離反者データがありません</p>
+                                    <p className="text-xs text-slate-300 mt-1">右上のリロードボタンでデータを取得してください</p>
                                 </div>
                             )}
 
@@ -10003,23 +10049,23 @@
                                             <CreditCard size={20} /> サブスク決済アラート
                                         </h2>
                                         <p className="text-red-100 text-xs font-bold mt-1">
-                                            サブスク決済が発生しているが来院していない患者
+                                            来院していないのにサブスク決済が継続している患者
                                         </p>
                                     </div>
 
                                     <div className="p-3 md:p-4">
-                                        {custSubsAlert.length === 0 ? (
+                                        {custSubsAlerts.length === 0 ? (
                                             <div className="text-center py-12 text-slate-400">
                                                 <CreditCard size={40} className="mx-auto mb-3 opacity-20" />
-                                                <p className="text-sm font-bold">{custPatients.length === 0 ? 'データを取得してください' : '決済アラートはありません'}</p>
-                                                <p className="text-xs mt-1 text-slate-300">来院していないのにサブスク決済が発生している患者はいません</p>
+                                                <p className="text-sm font-bold">{custMonthlyChurn.length === 0 ? 'データを取得してください' : '決済アラートはありません'}</p>
+                                                <p className="text-xs mt-1 text-slate-300">離反者の中にサブスク決済が継続している人はいません</p>
                                             </div>
                                         ) : (
                                             <div className="space-y-2">
                                                 <div className="bg-red-50 border border-red-200 rounded-xl p-3 mb-4">
                                                     <p className="text-xs font-bold text-red-700">
                                                         <AlertCircle size={12} className="inline mr-1" />
-                                                        以下の{custSubsAlert.length}名はサブスク決済が発生していますが、30日以上来院がありません。確認が必要です。
+                                                        以下の{custSubsAlerts.length}名は来院していないのにサブスク決済が継続しています。至急確認してください。
                                                     </p>
                                                 </div>
                                                 <div className="overflow-x-auto">
@@ -10028,20 +10074,20 @@
                                                             <tr className="border-b border-slate-200">
                                                                 <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">患者名</th>
                                                                 <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">最終来院日</th>
-                                                                <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">経過日数</th>
+                                                                <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">離反時期</th>
                                                                 <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">決済額/月</th>
                                                                 <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">店舗</th>
                                                                 <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">ステータス</th>
                                                             </tr>
                                                         </thead>
                                                         <tbody>
-                                                            {custSubsAlert.map((p, idx) => (
+                                                            {custSubsAlerts.map((p, idx) => (
                                                                 <tr key={idx} className="border-b border-slate-50 hover:bg-red-50/50 transition-colors">
                                                                     <td className="py-2.5 px-3 font-bold text-slate-800">{p.name || '不明'}</td>
                                                                     <td className="py-2.5 px-3 text-slate-600">{p.lastVisitDate || '-'}</td>
                                                                     <td className="py-2.5 px-3">
-                                                                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-black bg-red-100 text-red-700">
-                                                                            {p.daysSinceLastVisit || 0}日
+                                                                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-700">
+                                                                            {p.churnPeriod || '-'}
                                                                         </span>
                                                                     </td>
                                                                     <td className="py-2.5 px-3 font-bold text-slate-800">{p.monthlyAmount ? `¥${p.monthlyAmount.toLocaleString()}` : '-'}</td>
@@ -10058,105 +10104,6 @@
                                                 </div>
                                             </div>
                                         )}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* ── 全患者一覧タブ ── */}
-                            {custActiveTab === 'all' && !custLoading && (
-                                <div className="bg-white rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 overflow-hidden animate-fade-in-up">
-                                    <div className="bg-gradient-to-r from-brand-500 to-brand-400 p-4 md:p-5 text-white">
-                                        <h2 className="font-black text-base md:text-lg flex items-center gap-2">
-                                            <Users size={20} /> 全患者一覧
-                                        </h2>
-                                        <p className="text-brand-100 text-xs font-bold mt-1">
-                                            患者データベースに登録された全患者
-                                        </p>
-                                    </div>
-
-                                    {/* 検索 */}
-                                    <div className="p-3 md:p-4 border-b border-slate-100">
-                                        <input
-                                            type="text"
-                                            value={custSearchQuery}
-                                            onChange={(e) => setCustSearchQuery(e.target.value)}
-                                            placeholder="患者名で検索..."
-                                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-300"
-                                        />
-                                    </div>
-
-                                    <div className="p-3 md:p-4">
-                                        {(() => {
-                                            const filtered = custPatients.filter(p => {
-                                                if (custSearchQuery) {
-                                                    return (p.name || '').includes(custSearchQuery);
-                                                }
-                                                return true;
-                                            });
-
-                                            if (filtered.length === 0) {
-                                                return (
-                                                    <div className="text-center py-12 text-slate-400">
-                                                        <Users size={40} className="mx-auto mb-3 opacity-20" />
-                                                        <p className="text-sm font-bold">{custPatients.length === 0 ? 'データを取得してください' : '該当する患者はいません'}</p>
-                                                    </div>
-                                                );
-                                            }
-
-                                            return (
-                                                <div className="space-y-2">
-                                                    <div className="text-xs font-bold text-slate-400 mb-2">{filtered.length}名の患者</div>
-                                                    <div className="overflow-x-auto">
-                                                        <table className="w-full text-sm">
-                                                            <thead>
-                                                                <tr className="border-b border-slate-200">
-                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">患者名</th>
-                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">最終来院日</th>
-                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">経過日数</th>
-                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">店舗</th>
-                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">サブスク</th>
-                                                                </tr>
-                                                            </thead>
-                                                            <tbody>
-                                                                {filtered.slice(0, 200).map((p, idx) => (
-                                                                    <tr key={idx} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
-                                                                        <td className="py-2.5 px-3 font-bold text-slate-800">{p.name || '不明'}</td>
-                                                                        <td className="py-2.5 px-3 text-slate-600">{p.lastVisitDate || '-'}</td>
-                                                                        <td className="py-2.5 px-3">
-                                                                            {p.daysSinceLastVisit != null ? (
-                                                                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-black ${
-                                                                                    (p.daysSinceLastVisit) >= 90 ? 'bg-red-100 text-red-700' :
-                                                                                    (p.daysSinceLastVisit) >= 60 ? 'bg-orange-100 text-orange-700' :
-                                                                                    (p.daysSinceLastVisit) >= 30 ? 'bg-amber-100 text-amber-700' :
-                                                                                    'bg-emerald-100 text-emerald-700'
-                                                                                }`}>
-                                                                                    {p.daysSinceLastVisit}日
-                                                                                </span>
-                                                                            ) : '-'}
-                                                                        </td>
-                                                                        <td className="py-2.5 px-3 text-slate-600 text-xs">{p.store || '-'}</td>
-                                                                        <td className="py-2.5 px-3">
-                                                                            {p.hasSubscription ? (
-                                                                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-black bg-blue-100 text-blue-700">
-                                                                                    <CreditCard size={10} /> あり
-                                                                                </span>
-                                                                            ) : (
-                                                                                <span className="text-xs text-slate-400">なし</span>
-                                                                            )}
-                                                                        </td>
-                                                                    </tr>
-                                                                ))}
-                                                            </tbody>
-                                                        </table>
-                                                        {filtered.length > 200 && (
-                                                            <div className="text-center py-3 text-xs text-slate-400 font-bold">
-                                                                ...他 {filtered.length - 200}名
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            );
-                                        })()}
                                     </div>
                                 </div>
                             )}

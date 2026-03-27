@@ -5,6 +5,7 @@
 
 export const config = {
   api: { bodyParser: false },
+  maxDuration: 60,
 };
 
 // ── Square SDK 遅延読み込み ──
@@ -21,24 +22,19 @@ async function getSquareSubscribers() {
 
   const allSubscribers = [];
 
-  for (const config of tokenConfigs) {
+  for (const cfg of tokenConfigs) {
     try {
       const { Client, Environment } = await getSquareModule();
       const client = new Client({
-        accessToken: config.token,
-        environment: config.env === 'sandbox' ? Environment.Sandbox : Environment.Production,
+        accessToken: cfg.token,
+        environment: cfg.env === 'sandbox' ? Environment.Sandbox : Environment.Production,
       });
 
-      // サブスクリプション一覧を取得
       let cursor = undefined;
       const subscriptions = [];
       do {
         const resp = await client.subscriptionsApi.searchSubscriptions({
-          query: {
-            filter: {
-              locationIds: undefined,
-            },
-          },
+          query: { filter: { locationIds: undefined } },
           cursor,
         });
         if (resp.result.subscriptions) {
@@ -47,14 +43,12 @@ async function getSquareSubscribers() {
         cursor = resp.result.cursor;
       } while (cursor);
 
-      // アクティブなサブスクのみ（ACTIVE状態）
       const activeSubscriptions = subscriptions.filter(s => s.status === 'ACTIVE');
 
       // 顧客IDを収集してバッチで名前取得
       const customerIds = [...new Set(activeSubscriptions.map(s => s.customerId).filter(Boolean))];
       const customerNames = {};
 
-      // 10件ずつバッチで顧客情報取得
       for (let i = 0; i < customerIds.length; i += 10) {
         const batch = customerIds.slice(i, i + 10);
         const promises = batch.map(async (cid) => {
@@ -77,12 +71,12 @@ async function getSquareSubscribers() {
           name: customerNames[sub.customerId] || sub.customerId || '不明',
           customerId: sub.customerId,
           monthlyAmount: planAmount ? Number(planAmount) : 0,
-          store: config.name || '',
+          store: cfg.name || '',
           subscriptionId: sub.id,
         });
       }
     } catch (err) {
-      console.error(`[customers] Square API error (${config.name}):`, err.message);
+      console.error(`[customers] Square API error (${cfg.name}):`, err.message);
     }
   }
 
@@ -108,6 +102,54 @@ function getTokenConfigs() {
   return [];
 }
 
+// ── 月別離反者を計算 ──
+function computeMonthlyChurn(patients) {
+  // 対象期間: 2025年11月〜2026年3月
+  const periods = [
+    { label: '11月の離反', activeMonth: '2025-11', churnMonth: '2025-12', description: '2025年11月に来院 → 12月に未来院' },
+    { label: '12月の離反', activeMonth: '2025-12', churnMonth: '2026-01', description: '2025年12月に来院 → 2026年1月に未来院' },
+    { label: '1月の離反', activeMonth: '2026-01', churnMonth: '2026-02', description: '2026年1月に来院 → 2月に未来院' },
+    { label: '2月の離反（予測）', activeMonth: '2026-02', churnMonth: '2026-03', description: '2026年2月に来院 → 3月現在まだ未来院' },
+  ];
+
+  const results = [];
+
+  for (const period of periods) {
+    const [activeYear, activeMonthNum] = period.activeMonth.split('-').map(Number);
+    const [churnYear, churnMonthNum] = period.churnMonth.split('-').map(Number);
+
+    const churnedPatients = patients.filter(p => {
+      if (!p.lastVisitDate) return false;
+      const lastVisit = parseJapaneseDate(p.lastVisitDate);
+      if (!lastVisit) return false;
+
+      const lvYear = lastVisit.getFullYear();
+      const lvMonth = lastVisit.getMonth() + 1; // 1-based
+
+      // 最終来院がactiveMonth（来院していた月）に該当
+      // = 最終来院日がactiveMonth中 → つまりchurnMonth以降は来ていない
+      if (lvYear === activeYear && lvMonth === activeMonthNum) {
+        return true;
+      }
+      return false;
+    });
+
+    results.push({
+      ...period,
+      patients: churnedPatients.map(p => ({
+        name: p.name,
+        lastVisitDate: p.lastVisitDate,
+        store: p.store || '',
+        phone: p.phone || '',
+        hasSubscription: false, // 後で付与
+      })),
+      count: churnedPatients.length,
+    });
+  }
+
+  return results;
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -121,11 +163,12 @@ export default async function handler(req, res) {
     if (!gasUrl) {
       return res.status(500).json({
         error: 'PATIENT_DB_GAS_URL is not configured',
-        message: 'Vercelの環境変数に PATIENT_DB_GAS_URL を設定してください。患者データベースのGAS WebアプリURLが必要です。',
+        message: 'Vercelの環境変数に PATIENT_DB_GAS_URL を設定してください。',
+        setupRequired: true,
       });
     }
 
-    // 患者データとSquareサブスクを並列取得
+    // 患者データとSquareサブスクを並列取得（タイムアウト付き）
     const [patientsResult, squareSubscribers] = await Promise.all([
       fetchPatientData(gasUrl),
       getSquareSubscribers().catch(err => {
@@ -135,85 +178,62 @@ export default async function handler(req, res) {
     ]);
 
     const patients = patientsResult;
-    const today = new Date();
 
-    // 各患者の経過日数を計算
-    const patientsWithDays = patients.map(p => {
-      let daysSinceLastVisit = null;
-      if (p.lastVisitDate) {
-        const lastVisit = parseJapaneseDate(p.lastVisitDate);
-        if (lastVisit) {
-          daysSinceLastVisit = Math.floor((today - lastVisit) / (1000 * 60 * 60 * 24));
+    // 月別離反者を計算
+    const monthlyChurn = computeMonthlyChurn(patients);
+
+    // Square照合: サブスク契約者名のセット
+    const subscriberMap = {};
+    for (const sub of squareSubscribers) {
+      const normalized = normalizeJapaneseName(sub.name);
+      subscriberMap[normalized] = sub;
+    }
+
+    // 離反者にサブスクフラグを付与
+    for (const period of monthlyChurn) {
+      for (const p of period.patients) {
+        const normalized = normalizeJapaneseName(p.name);
+        const sub = subscriberMap[normalized];
+        if (sub) {
+          p.hasSubscription = true;
+          p.monthlyAmount = sub.monthlyAmount;
+          p.subscriptionStore = sub.store;
         }
       }
-      return { ...p, daysSinceLastVisit };
-    });
+      // サブスクありを先頭に、その後は最終来院日の降順
+      period.patients.sort((a, b) => {
+        if (a.hasSubscription && !b.hasSubscription) return -1;
+        if (!a.hasSubscription && b.hasSubscription) return 1;
+        return 0;
+      });
+      period.subsCount = period.patients.filter(p => p.hasSubscription).length;
+    }
 
-    // 30日以上来院がない患者
-    const noVisitPatients = patientsWithDays
-      .filter(p => p.daysSinceLastVisit !== null && p.daysSinceLastVisit >= 30)
-      .sort((a, b) => b.daysSinceLastVisit - a.daysSinceLastVisit);
-
-    // サブスク決済が発生しているが来院していない患者を照合
-    const subsAlerts = [];
-    if (squareSubscribers.length > 0) {
-      for (const sub of squareSubscribers) {
-        // 名前で照合（部分一致）
-        const matchedPatient = patientsWithDays.find(p => {
-          if (!p.name || !sub.name) return false;
-          const pName = normalizeJapaneseName(p.name);
-          const sName = normalizeJapaneseName(sub.name);
-          return pName === sName || pName.includes(sName) || sName.includes(pName);
-        });
-
-        if (matchedPatient && matchedPatient.daysSinceLastVisit !== null && matchedPatient.daysSinceLastVisit >= 30) {
-          subsAlerts.push({
-            name: matchedPatient.name,
-            lastVisitDate: matchedPatient.lastVisitDate,
-            daysSinceLastVisit: matchedPatient.daysSinceLastVisit,
-            monthlyAmount: sub.monthlyAmount,
-            store: sub.store || matchedPatient.store || '',
-            subscriptionId: sub.subscriptionId,
-            hasSubscription: true,
-          });
-        } else if (!matchedPatient) {
-          // 患者DBに見つからないサブスク契約者
-          subsAlerts.push({
-            name: sub.name,
-            lastVisitDate: null,
-            daysSinceLastVisit: null,
-            monthlyAmount: sub.monthlyAmount,
-            store: sub.store || '',
-            subscriptionId: sub.subscriptionId,
-            hasSubscription: true,
-            notInDatabase: true,
+    // サブスク決済アラート: 全離反者の中でサブスクが続いている人
+    const allSubsAlerts = [];
+    for (const period of monthlyChurn) {
+      for (const p of period.patients) {
+        if (p.hasSubscription) {
+          allSubsAlerts.push({
+            ...p,
+            churnPeriod: period.label,
+            churnDescription: period.description,
           });
         }
       }
     }
 
-    // 患者にサブスクフラグを追加
-    const subscriberNames = new Set(squareSubscribers.map(s => normalizeJapaneseName(s.name)));
-    const enrichedPatients = patientsWithDays.map(p => ({
-      ...p,
-      hasSubscription: subscriberNames.has(normalizeJapaneseName(p.name || '')),
-    }));
-    const enrichedNoVisit = noVisitPatients.map(p => ({
-      ...p,
-      hasSubscription: subscriberNames.has(normalizeJapaneseName(p.name || '')),
-    }));
-
     res.setHeader('Cache-Control', 's-maxage=120, stale-while-revalidate=300');
     return res.status(200).json({
-      patients: enrichedPatients,
-      noVisitPatients: enrichedNoVisit,
-      subsAlerts,
+      monthlyChurn,
+      subsAlerts: allSubsAlerts,
       summary: {
-        totalPatients: enrichedPatients.length,
-        noVisitCount: enrichedNoVisit.length,
-        subsAlertCount: subsAlerts.length,
+        totalPatients: patients.length,
+        totalChurned: monthlyChurn.reduce((sum, p) => sum + p.count, 0),
+        subsAlertCount: allSubsAlerts.length,
         squareSubscribers: squareSubscribers.length,
       },
+      fetchedAt: new Date().toISOString(),
     });
   } catch (err) {
     console.error('[customers] Error:', err);
@@ -221,85 +241,73 @@ export default async function handler(req, res) {
   }
 }
 
-// ── GASから患者データを取得 ──
+// ── GASから患者データを取得（30秒タイムアウト） ──
 async function fetchPatientData(gasUrl) {
-  const response = await fetch(gasUrl, {
-    method: 'GET',
-    headers: { 'Accept': 'application/json' },
-    redirect: 'follow',
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
 
-  if (!response.ok) {
-    throw new Error(`GAS API returned ${response.status}`);
-  }
+  try {
+    const response = await fetch(gasUrl, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' },
+      redirect: 'follow',
+      signal: controller.signal,
+    });
 
-  const data = await response.json();
+    if (!response.ok) {
+      throw new Error(`GAS API returned ${response.status}`);
+    }
 
-  // GASから返されるデータ形式に応じてパース
-  // 期待形式: { patients: [{ name, lastVisitDate, store, ... }] }
-  // または配列形式: [{ name, lastVisitDate, store, ... }]
-  if (Array.isArray(data)) {
-    return data;
-  }
-  if (data.patients && Array.isArray(data.patients)) {
-    return data.patients;
-  }
-  // スプレッドシートの行データが直接返ってくる場合
-  if (data.values && Array.isArray(data.values)) {
-    return parseSpreadsheetRows(data.values);
-  }
+    const data = await response.json();
 
-  console.warn('[customers] Unexpected GAS response format:', Object.keys(data));
-  return [];
+    if (Array.isArray(data)) return data;
+    if (data.patients && Array.isArray(data.patients)) return data.patients;
+    if (data.values && Array.isArray(data.values)) return parseSpreadsheetRows(data.values);
+
+    console.warn('[customers] Unexpected GAS response format:', Object.keys(data));
+    return [];
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
-// ── スプレッドシートの行データをパース ──
 function parseSpreadsheetRows(rows) {
   if (rows.length < 2) return [];
   const headers = rows[0];
   const nameIdx = headers.findIndex(h => h && (h.includes('患者名') || h.includes('氏名') || h.includes('名前')));
   const lastVisitIdx = headers.findIndex(h => h && (h.includes('最終来院') || h.includes('最終来店')));
   const storeIdx = headers.findIndex(h => h && (h.includes('店舗') || h.includes('院')));
+  const phoneIdx = headers.findIndex(h => h && (h.includes('電話') || h.includes('TEL')));
 
   return rows.slice(1).map(row => ({
     name: nameIdx >= 0 ? (row[nameIdx] || '') : '',
     lastVisitDate: lastVisitIdx >= 0 ? (row[lastVisitIdx] || '') : '',
     store: storeIdx >= 0 ? (row[storeIdx] || '') : '',
+    phone: phoneIdx >= 0 ? (row[phoneIdx] || '') : '',
   })).filter(p => p.name);
 }
 
-// ── 日付パーサー（日本語形式対応） ──
+// ── 日付パーサー ──
 function parseJapaneseDate(dateStr) {
   if (!dateStr) return null;
   const str = String(dateStr).trim();
 
-  // YYYY/MM/DD or YYYY-MM-DD
   const isoMatch = str.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
-  if (isoMatch) {
-    return new Date(Number(isoMatch[1]), Number(isoMatch[2]) - 1, Number(isoMatch[3]));
-  }
+  if (isoMatch) return new Date(Number(isoMatch[1]), Number(isoMatch[2]) - 1, Number(isoMatch[3]));
 
-  // MM/DD/YYYY
   const usMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-  if (usMatch) {
-    return new Date(Number(usMatch[3]), Number(usMatch[1]) - 1, Number(usMatch[2]));
-  }
+  if (usMatch) return new Date(Number(usMatch[3]), Number(usMatch[1]) - 1, Number(usMatch[2]));
 
-  // 日本語: YYYY年MM月DD日
   const jpMatch = str.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
-  if (jpMatch) {
-    return new Date(Number(jpMatch[1]), Number(jpMatch[2]) - 1, Number(jpMatch[3]));
-  }
+  if (jpMatch) return new Date(Number(jpMatch[1]), Number(jpMatch[2]) - 1, Number(jpMatch[3]));
 
-  // Date.parseで最終手段
   const d = new Date(str);
   return isNaN(d.getTime()) ? null : d;
 }
 
-// ── 名前の正規化（照合用） ──
 function normalizeJapaneseName(name) {
   return (name || '')
-    .replace(/[\s\u3000]+/g, '') // 全角半角スペース除去
-    .replace(/[\(\)（）]/g, '') // 括弧除去
+    .replace(/[\s\u3000]+/g, '')
+    .replace(/[\(\)（）]/g, '')
     .trim();
 }

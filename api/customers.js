@@ -368,7 +368,7 @@ export default async function handler(req, res) {
       email: s.email ? s.email.split('@')[0].slice(0, 3) + '***@...' : 'なし',
     }));
 
-    res.setHeader('Cache-Control', 's-maxage=120, stale-while-revalidate=300');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     return res.status(200).json({
       monthlyChurn,
       subsAlerts: allSubsAlerts,

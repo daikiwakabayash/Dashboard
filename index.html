@@ -1247,6 +1247,8 @@
             const [custSearchQuery, setCustSearchQuery] = useState('');
             const [custLastFetched, setCustLastFetched] = useState(null);
             const [custSetupRequired, setCustSetupRequired] = useState(false);
+            const [custSquareErrors, setCustSquareErrors] = useState([]);
+            const [custSquareDebug, setCustSquareDebug] = useState('');
 
             // ── 経理・ファイナンスタブ用 State ──
             const [finActiveTab, setFinActiveTab] = useState('overview'); // overview | pl | bs | cashflow | qa
@@ -1657,6 +1659,8 @@
                     setCustMonthlyChurn(data.monthlyChurn || []);
                     setCustSubsAlerts(data.subsAlerts || []);
                     setCustSummary(data.summary || null);
+                    setCustSquareErrors(data.squareErrors || []);
+                    setCustSquareDebug(data.squareDebug || '');
                     setCustLastFetched(new Date().toLocaleString('ja-JP'));
                     if (data.monthlyChurn?.length > 0 && !custSelectedPeriod) {
                         setCustSelectedPeriod(data.monthlyChurn.length - 1);
@@ -9870,6 +9874,26 @@
                                 </div>
                             )}
 
+                            {/* Squareエラー表示 */}
+                            {!custLoading && custSquareErrors.length > 0 && (
+                                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 animate-fade-in">
+                                    <div className="flex items-start gap-3">
+                                        <AlertCircle size={20} className="text-amber-500 mt-0.5 flex-shrink-0" />
+                                        <div className="space-y-1">
+                                            <p className="text-sm text-amber-700 font-bold">Square API エラー</p>
+                                            {custSquareErrors.map((e, i) => (
+                                                <p key={i} className="text-xs text-amber-600">
+                                                    <span className="font-bold">{e.account}:</span> {e.error}
+                                                </p>
+                                            ))}
+                                            {custSquareDebug && (
+                                                <p className="text-[10px] text-amber-400 mt-2">Debug: {custSquareDebug}</p>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
                             {/* ローディング */}
                             {custLoading && (
                                 <div className="flex items-center justify-center py-20 animate-fade-in">
@@ -9899,6 +9923,9 @@
                                     <div className="bg-white rounded-2xl border border-blue-200 p-4 card-hover">
                                         <div className="text-[10px] font-black text-blue-500 uppercase tracking-wider mb-1">Square契約者</div>
                                         <div className="text-2xl font-black text-blue-600">{(custSummary.squareSubscribers || 0).toLocaleString()}</div>
+                                        {custSummary.matchedCount > 0 && (
+                                            <div className="text-[10px] text-emerald-500 font-bold mt-1">照合済: {custSummary.matchedCount}名</div>
+                                        )}
                                     </div>
                                 </div>
                             )}
@@ -10005,8 +10032,10 @@
                                                                             }`}>
                                                                                 <td className="py-2.5 px-3 font-bold text-slate-800">
                                                                                     {p.name || '不明'}
-                                                                                    {p.squareName && p.squareName !== p.name && (
-                                                                                        <span className="block text-[10px] text-blue-400 font-normal">Square: {p.squareName}</span>
+                                                                                    {p.squareName && (
+                                                                                        <span className="block text-[10px] text-blue-400 font-normal">
+                                                                                            Square: {p.squareName}{p.matchMethod ? ` (${p.matchMethod})` : ''}
+                                                                                        </span>
                                                                                     )}
                                                                                 </td>
                                                                                 <td className="py-2.5 px-3 text-slate-600">{p.lastVisitDate || '-'}</td>

@@ -18,12 +18,14 @@ async function getSquareModule() {
 // ── Square サブスク顧客を詳細付きで取得 ──
 async function getSquareSubscribers() {
   const tokenConfigs = getTokenConfigs();
-  if (tokenConfigs.length === 0) return { subscribers: [], debug: 'No tokens configured' };
+  if (tokenConfigs.length === 0) return { subscribers: [], debug: 'SQUARE_TOKENS 未設定', errors: [] };
 
   const allSubscribers = [];
   const debugInfo = [];
+  const errors = [];
 
   for (const cfg of tokenConfigs) {
+    const accountName = cfg.name || '(名前なし)';
     try {
       const { Client, Environment } = await getSquareModule();
       const client = new Client({
@@ -31,15 +33,24 @@ async function getSquareSubscribers() {
         environment: cfg.env === 'sandbox' ? Environment.Sandbox : Environment.Production,
       });
 
-      // 1. ロケーション一覧を取得（店舗名用）
+      // 1. ロケーション一覧を取得（認証チェック兼用）
       const locationNames = {};
+      let locResp;
       try {
-        const locResp = await client.locationsApi.listLocations();
+        locResp = await client.locationsApi.listLocations();
         for (const loc of (locResp.result.locations || [])) {
           locationNames[loc.id] = loc.name || loc.id;
         }
       } catch (e) {
-        console.error(`[customers] Locations fetch error (${cfg.name}):`, e.message);
+        const msg = e.message || String(e);
+        if (msg.includes('UNAUTHORIZED') || msg.includes('401')) {
+          errors.push({ account: accountName, error: 'トークン認証エラー（UNAUTHORIZED）。Square Developer Dashboardでトークンを再生成してください。' });
+          debugInfo.push(`${accountName}: UNAUTHORIZED - スキップ`);
+          continue;
+        }
+        errors.push({ account: accountName, error: `Locations取得エラー: ${msg}` });
+        debugInfo.push(`${accountName}: Locations error - ${msg}`);
+        continue;
       }
 
       // 2. サブスクリプション一覧を取得
@@ -57,9 +68,9 @@ async function getSquareSubscribers() {
       } while (cursor);
 
       const activeSubscriptions = subscriptions.filter(s => s.status === 'ACTIVE');
-      debugInfo.push(`${cfg.name || 'account'}: ${subscriptions.length} total subs, ${activeSubscriptions.length} active`);
+      debugInfo.push(`${accountName}: ${subscriptions.length}件中 ${activeSubscriptions.length}件アクティブ`);
 
-      // 3. 顧客IDを収集してバッチで詳細取得（名前・電話・メール）
+      // 3. 顧客詳細をバッチ取得（名前・電話・メール）
       const customerIds = [...new Set(activeSubscriptions.map(s => s.customerId).filter(Boolean))];
       const customerDetails = {};
 
@@ -86,8 +97,7 @@ async function getSquareSubscribers() {
         results.forEach(r => { customerDetails[r.id] = r; });
       }
 
-      // 4. インボイス取得（決済回数・合計金額・最終決済日用）
-      // 全ロケーションのインボイスを取得
+      // 4. インボイス取得（決済回数・合計金額・最終決済日）
       const invoicesByCustomer = {};
       const locationIds = Object.keys(locationNames);
 
@@ -104,31 +114,29 @@ async function getSquareSubscribers() {
               if (!custId) continue;
               if (!invoicesByCustomer[custId]) invoicesByCustomer[custId] = [];
 
-              // PAID or PARTIALLY_PAIDのインボイスのみカウント
               if (inv.status === 'PAID' || inv.status === 'PARTIALLY_PAID') {
                 const pr = inv.paymentRequests?.[0];
                 const amount = pr?.computedAmountMoney?.amount || pr?.totalCompletedAmountMoney?.amount || 0;
                 invoicesByCustomer[custId].push({
                   amount: Number(amount),
                   date: pr?.dueDate || inv.createdAt?.split('T')[0] || '',
-                  status: inv.status,
                 });
               }
             }
             invCursor = invResp.result.cursor;
           } while (invCursor);
         } catch (e) {
-          console.error(`[customers] Invoices fetch error (${locId}):`, e.message);
+          // インボイス取得エラーは致命的ではないのでログのみ
+          console.error(`[customers] Invoices error (${locId}):`, e.message);
         }
       }
 
       // 5. サブスクリプションごとにデータをまとめる
       for (const sub of activeSubscriptions) {
         const customer = customerDetails[sub.customerId] || { name: '不明', phone: '', email: '' };
-        const storeName = locationNames[sub.locationId] || cfg.name || '';
+        const storeName = locationNames[sub.locationId] || accountName;
         const invoices = invoicesByCustomer[sub.customerId] || [];
 
-        // 決済回数・合計金額・最終決済日を計算
         const paymentCount = invoices.length;
         const totalAmount = invoices.reduce((sum, inv) => sum + inv.amount, 0);
         const lastPaymentDate = invoices.length > 0
@@ -155,12 +163,12 @@ async function getSquareSubscribers() {
         });
       }
     } catch (err) {
-      console.error(`[customers] Square API error (${cfg.name}):`, err.message);
-      debugInfo.push(`${cfg.name || 'account'}: ERROR - ${err.message}`);
+      errors.push({ account: accountName, error: err.message });
+      debugInfo.push(`${accountName}: ERROR - ${err.message}`);
     }
   }
 
-  return { subscribers: allSubscribers, debug: debugInfo.join('; ') };
+  return { subscribers: allSubscribers, debug: debugInfo.join(' / '), errors };
 }
 
 function getTokenConfigs() {
@@ -192,17 +200,13 @@ function computeMonthlyChurn(patients) {
   ];
 
   const results = [];
-
   for (const period of periods) {
     const [activeYear, activeMonthNum] = period.activeMonth.split('-').map(Number);
-
     const churnedPatients = patients.filter(p => {
       if (!p.lastVisitDate) return false;
       const lastVisit = parseJapaneseDate(p.lastVisitDate);
       if (!lastVisit) return false;
-      const lvYear = lastVisit.getFullYear();
-      const lvMonth = lastVisit.getMonth() + 1;
-      return lvYear === activeYear && lvMonth === activeMonthNum;
+      return lastVisit.getFullYear() === activeYear && (lastVisit.getMonth() + 1) === activeMonthNum;
     });
 
     results.push({
@@ -217,44 +221,55 @@ function computeMonthlyChurn(patients) {
       count: churnedPatients.length,
     });
   }
-
   return results;
 }
 
-// ── 名前照合ロジック（複数手段で照合） ──
-function matchPatientToSubscriber(patient, subscriberMap, subscribersByPhone) {
-  const pName = normalizeJapaneseName(patient.name);
-
-  // 1. フルネーム完全一致
-  if (subscriberMap[pName]) return subscriberMap[pName];
-
-  // 2. スペースなし/あり両方試行（「田中太郎」vs「田中 太郎」）
-  // subscriberMapは既にスペース除去済みなので、患者名もスペース除去して比較
-  // → これは normalizeJapaneseName で既に実施済み
-
-  // 3. 姓名逆順の照合（「太郎田中」→「田中太郎」）
-  for (const [key, sub] of Object.entries(subscriberMap)) {
-    // 姓+名 vs 名+姓の照合
-    if (sub.familyName && sub.givenName) {
-      const reversed = normalizeJapaneseName(sub.givenName + sub.familyName);
-      if (pName === reversed) return sub;
-    }
-    // 部分一致（患者名がSubscriber名を含む or 逆）
-    if (pName.length >= 2 && key.length >= 2) {
-      if (pName.includes(key) || key.includes(pName)) return sub;
+// ── 照合ロジック: 電話番号メイン + 名前サブ ──
+function matchPatientToSubscriber(patient, subscribersByPhone, subscribersByEmail, subscribersByName) {
+  // 1. 電話番号照合（最優先 — 漢字/カタカナ問題を回避）
+  if (patient.phone) {
+    const normalized = normalizePhone(patient.phone);
+    if (normalized.length >= 8 && subscribersByPhone[normalized]) {
+      return { match: subscribersByPhone[normalized], method: '電話番号' };
     }
   }
 
-  // 4. 電話番号照合（補助的）
-  if (patient.phone && subscribersByPhone[normalizePhone(patient.phone)]) {
-    return subscribersByPhone[normalizePhone(patient.phone)];
+  // 2. メールアドレス照合
+  if (patient.email) {
+    const normalizedEmail = (patient.email || '').toLowerCase().trim();
+    if (normalizedEmail && subscribersByEmail[normalizedEmail]) {
+      return { match: subscribersByEmail[normalizedEmail], method: 'メール' };
+    }
+  }
+
+  // 3. 名前照合（完全一致 — 同じ文字体系の場合のみマッチ）
+  const pName = normalizeJapaneseName(patient.name);
+  if (pName && subscribersByName[pName]) {
+    return { match: subscribersByName[pName], method: '名前一致' };
+  }
+
+  // 4. 部分一致（姓名逆順含む）
+  for (const [key, sub] of Object.entries(subscribersByName)) {
+    if (sub.familyName && sub.givenName) {
+      const reversed = normalizeJapaneseName(sub.givenName + sub.familyName);
+      if (pName === reversed) return { match: sub, method: '名前(逆順)' };
+    }
+    if (pName.length >= 2 && key.length >= 2) {
+      if (pName.includes(key) || key.includes(pName)) {
+        return { match: sub, method: '名前(部分)' };
+      }
+    }
   }
 
   return null;
 }
 
 function normalizePhone(phone) {
-  return (phone || '').replace(/[\s\-\(\)（）+]/g, '').replace(/^0/, '');
+  // 全角→半角変換 + 記号除去 + 先頭0除去
+  return (phone || '')
+    .replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+    .replace(/[\s\-\(\)（）+＋・]/g, '')
+    .replace(/^0/, '');
 }
 
 export default async function handler(req, res) {
@@ -281,7 +296,7 @@ export default async function handler(req, res) {
       new Promise((_, reject) => setTimeout(() => reject(new Error('Square API timeout (120s)')), 120000)),
     ]).catch(err => {
       console.error('[customers] Square fetch skipped:', err.message);
-      return { subscribers: [], debug: `Error: ${err.message}` };
+      return { subscribers: [], debug: `Error: ${err.message}`, errors: [{ account: 'ALL', error: err.message }] };
     });
 
     const [patientsResult, squareResult] = await Promise.all([
@@ -292,35 +307,49 @@ export default async function handler(req, res) {
     const patients = patientsResult;
     const squareSubscribers = squareResult.subscribers || [];
     const squareDebug = squareResult.debug || '';
+    const squareErrors = squareResult.errors || [];
 
     // 月別離反者を計算
     const monthlyChurn = computeMonthlyChurn(patients);
 
-    // Square照合用マップ作成
-    const subscriberMap = {};
+    // Square照合用インデックス作成
     const subscribersByPhone = {};
+    const subscribersByEmail = {};
+    const subscribersByName = {};
+
     for (const sub of squareSubscribers) {
-      const normalized = normalizeJapaneseName(sub.name);
-      subscriberMap[normalized] = sub;
+      // 電話番号インデックス
       if (sub.phone) {
-        subscribersByPhone[normalizePhone(sub.phone)] = sub;
+        const normalized = normalizePhone(sub.phone);
+        if (normalized.length >= 8) subscribersByPhone[normalized] = sub;
       }
+      // メールインデックス
+      if (sub.email) {
+        subscribersByEmail[sub.email.toLowerCase().trim()] = sub;
+      }
+      // 名前インデックス
+      const normalizedName = normalizeJapaneseName(sub.name);
+      if (normalizedName) subscribersByName[normalizedName] = sub;
     }
 
     // 離反者にSquareデータを付与
     let totalMatched = 0;
+    const matchMethods = {};
     for (const period of monthlyChurn) {
       for (const p of period.patients) {
-        const matched = matchPatientToSubscriber(p, subscriberMap, subscribersByPhone);
-        if (matched) {
+        const result = matchPatientToSubscriber(p, subscribersByPhone, subscribersByEmail, subscribersByName);
+        if (result) {
+          const { match, method } = result;
           p.hasSubscription = true;
-          p.monthlyAmount = matched.monthlyAmount;
-          p.subscriptionStore = matched.store;
-          p.paymentCount = matched.paymentCount;
-          p.totalAmount = matched.totalAmount;
-          p.lastPaymentDate = matched.lastPaymentDate;
-          p.squareName = matched.name; // 照合確認用
+          p.monthlyAmount = match.monthlyAmount;
+          p.subscriptionStore = match.store;
+          p.paymentCount = match.paymentCount;
+          p.totalAmount = match.totalAmount;
+          p.lastPaymentDate = match.lastPaymentDate;
+          p.squareName = match.name;
+          p.matchMethod = method;
           totalMatched++;
+          matchMethods[method] = (matchMethods[method] || 0) + 1;
         }
       }
       period.patients.sort((a, b) => {
@@ -336,14 +365,17 @@ export default async function handler(req, res) {
     for (const period of monthlyChurn) {
       for (const p of period.patients) {
         if (p.hasSubscription) {
-          allSubsAlerts.push({
-            ...p,
-            churnPeriod: period.label,
-            churnDescription: period.description,
-          });
+          allSubsAlerts.push({ ...p, churnPeriod: period.label, churnDescription: period.description });
         }
       }
     }
+
+    // デバッグ用: Square側のサンプルデータ（上位5件）
+    const squareSample = squareSubscribers.slice(0, 5).map(s => ({
+      name: s.name,
+      phone: s.phone ? s.phone.slice(0, 4) + '****' : 'なし',
+      email: s.email ? s.email.split('@')[0].slice(0, 3) + '***@...' : 'なし',
+    }));
 
     res.setHeader('Cache-Control', 's-maxage=120, stale-while-revalidate=300');
     return res.status(200).json({
@@ -355,9 +387,12 @@ export default async function handler(req, res) {
         subsAlertCount: allSubsAlerts.length,
         squareSubscribers: squareSubscribers.length,
         matchedCount: totalMatched,
+        matchMethods,
       },
       squareAvailable: squareSubscribers.length > 0,
       squareDebug,
+      squareErrors,
+      squareSample,
       fetchedAt: new Date().toISOString(),
     });
   } catch (err) {
@@ -378,9 +413,7 @@ async function fetchPatientData(gasUrl) {
       redirect: 'follow',
       signal: controller.signal,
     });
-
     if (!response.ok) throw new Error(`GAS API returned ${response.status}`);
-
     const data = await response.json();
 
     if (Array.isArray(data)) return data;
@@ -413,23 +446,19 @@ function parseSpreadsheetRows(rows) {
 function parseJapaneseDate(dateStr) {
   if (!dateStr) return null;
   const str = String(dateStr).trim();
-
   const isoMatch = str.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
   if (isoMatch) return new Date(Number(isoMatch[1]), Number(isoMatch[2]) - 1, Number(isoMatch[3]));
-
   const usMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
   if (usMatch) return new Date(Number(usMatch[3]), Number(usMatch[1]) - 1, Number(usMatch[2]));
-
   const jpMatch = str.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
   if (jpMatch) return new Date(Number(jpMatch[1]), Number(jpMatch[2]) - 1, Number(jpMatch[3]));
-
   const d = new Date(str);
   return isNaN(d.getTime()) ? null : d;
 }
 
 function normalizeJapaneseName(name) {
   return (name || '')
-    .replace(/[\s\u3000]+/g, '') // 全角半角スペース除去
-    .replace(/[\(\)（）]/g, '') // 括弧除去
+    .replace(/[\s\u3000]+/g, '')
+    .replace(/[\(\)（）]/g, '')
     .trim();
 }

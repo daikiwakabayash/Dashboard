@@ -1,7 +1,8 @@
-// ── 顧客管理API: 患者DB（GAS）× Square サブスクの照合 ──────────────
+// ── 顧客管理API v4: 患者DB（GAS）× Square サブスクの照合 ──────────────
 // 環境変数:
 //   PATIENT_DB_GAS_URL - 患者データベース用GAS WebアプリURL
 //   SQUARE_TOKENS      - Square APIトークン（JSON配列）
+const API_VERSION = 'v4-omori-only';
 
 export const config = {
   api: { bodyParser: false },
@@ -162,13 +163,17 @@ function getTokenConfigs(accountFilter) {
     }];
   }
 
-  // アカウントフィルター: 指定されたアカウントのみ使用
+  // アカウントフィルター: 指定されたアカウントのみ使用（マッチなしなら空配列）
   if (accountFilter && tokens.length > 0) {
     const filtered = tokens.filter(t =>
       (t.name || '').includes(accountFilter) || accountFilter.includes(t.name || '')
     );
-    if (filtered.length > 0) return filtered;
-    console.warn(`[customers] Account filter "${accountFilter}" matched no tokens, using all`);
+    if (filtered.length > 0) {
+      console.log(`[customers] Account filter "${accountFilter}" matched ${filtered.length} token(s): ${filtered.map(t => t.name).join(', ')}`);
+      return filtered;
+    }
+    console.warn(`[customers] Account filter "${accountFilter}" matched 0 of ${tokens.length} tokens. Available: ${tokens.map(t => t.name || '(no name)').join(', ')}`);
+    return []; // フィルターにマッチしなければ空（全アカウント取得を防止）
   }
   return tokens;
 }
@@ -379,6 +384,7 @@ export default async function handler(req, res) {
       squareDebug,
       squareErrors,
       squareSample,
+      apiVersion: API_VERSION,
       fetchedAt: new Date().toISOString(),
     });
   } catch (err) {

@@ -1671,6 +1671,28 @@
             };
 
             // 顧客データ取得
+            // キャッシュからデータ復元（ページ読み込み時に即表示）
+            const CUST_CACHE_KEY = 'naoru_cust_cache';
+            const CUST_CACHE_TTL = 30 * 60 * 1000; // 30分
+            useEffect(() => {
+                try {
+                    const cached = localStorage.getItem(CUST_CACHE_KEY);
+                    if (cached) {
+                        const { data, timestamp } = JSON.parse(cached);
+                        if (Date.now() - timestamp < CUST_CACHE_TTL && data.monthlyChurn) {
+                            setCustMonthlyChurn(data.monthlyChurn);
+                            setCustSubsAlerts(data.subsAlerts || []);
+                            setCustSummary(data.summary || null);
+                            setCustSquareDebug(data.squareDebug || '');
+                            setCustLastFetched(new Date(timestamp).toLocaleString('ja-JP') + ' (キャッシュ)');
+                            if (data.monthlyChurn.length > 0 && !custSelectedPeriod) {
+                                setCustSelectedPeriod(data.monthlyChurn.length - 1);
+                            }
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+            }, []);
+
             const fetchCustomerData = async () => {
                 setCustLoading(true);
                 setCustError(null);
@@ -1717,6 +1739,7 @@
                                 const activeSubs = subscriptions.filter(s => s.status === 'ACTIVE');
 
                                 // サブスクリプション×顧客名をマッピング
+                                const subsByPhone = {};
                                 const subsByName = {};
                                 const allSubs = [];
                                 for (const sub of activeSubs) {
@@ -1758,7 +1781,6 @@
                                 // 離反者にSquareデータを付与
                                 let totalMatched = 0;
                                 const matchMethods = {};
-                                const subsByPhone = {}; // metrics APIには電話番号なし
                                 const updatedChurn = monthlyChurn.map(period => {
                                     const updatedPatients = period.patients.map(p => {
                                         const result = matchPatientToSquare(p, subsByPhone, subsByName);
@@ -1795,16 +1817,33 @@
                                 }
                                 setCustSubsAlerts(alerts);
 
-                                setCustSummary(prev => prev ? {
-                                    ...prev,
+                                const mergedSummary = {
+                                    ...(data.summary || {}),
                                     squareSubscribers: allSubs.length,
                                     matchedCount: totalMatched,
                                     matchMethods,
                                     subsAlertCount: alerts.length,
-                                } : prev);
+                                };
+                                setCustSummary(mergedSummary);
+
+                                // キャッシュ保存（30分間有効）
+                                try {
+                                    const debugStr = `[${data.apiVersion || ''}] Square: ${allSubs.length}件取得`;
+                                    localStorage.setItem(CUST_CACHE_KEY, JSON.stringify({
+                                        data: { monthlyChurn: updatedChurn, subsAlerts: alerts, summary: mergedSummary, squareDebug: debugStr },
+                                        timestamp: Date.now(),
+                                    }));
+                                } catch (e) { /* quota exceeded etc */ }
                             }
                         } else {
                             setCustSquareDebug(prev => prev + ' 大森院アカウント未検出');
+                            // Square無しでもキャッシュ保存
+                            try {
+                                localStorage.setItem(CUST_CACHE_KEY, JSON.stringify({
+                                    data: { monthlyChurn, subsAlerts: [], summary: data.summary, squareDebug: '' },
+                                    timestamp: Date.now(),
+                                }));
+                            } catch (e) { /* ignore */ }
                         }
                     } catch (sqErr) {
                         console.warn('[customers] Square cross-ref failed (non-blocking):', sqErr.message);

@@ -5,7 +5,7 @@
 
 export const config = {
   api: { bodyParser: false },
-  maxDuration: 60,
+  maxDuration: 300,
 };
 
 // ── Square SDK 遅延読み込み ──
@@ -168,13 +168,19 @@ export default async function handler(req, res) {
       });
     }
 
-    // 患者データとSquareサブスクを並列取得（タイムアウト付き）
+    // 患者データとSquareサブスクを並列取得
+    // Square APIは45秒タイムアウト（遅い場合は患者データだけで返す）
+    const squareWithTimeout = Promise.race([
+      getSquareSubscribers(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Square API timeout')), 45000)),
+    ]).catch(err => {
+      console.error('[customers] Square fetch skipped:', err.message);
+      return [];
+    });
+
     const [patientsResult, squareSubscribers] = await Promise.all([
       fetchPatientData(gasUrl),
-      getSquareSubscribers().catch(err => {
-        console.error('[customers] Square fetch error:', err.message);
-        return [];
-      }),
+      squareWithTimeout,
     ]);
 
     const patients = patientsResult;
@@ -233,6 +239,7 @@ export default async function handler(req, res) {
         subsAlertCount: allSubsAlerts.length,
         squareSubscribers: squareSubscribers.length,
       },
+      squareAvailable: squareSubscribers.length > 0,
       fetchedAt: new Date().toISOString(),
     });
   } catch (err) {

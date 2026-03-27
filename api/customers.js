@@ -2,7 +2,7 @@
 // 環境変数:
 //   PATIENT_DB_GAS_URL - 患者データベース用GAS WebアプリURL
 //   SQUARE_TOKENS      - Square APIトークン（JSON配列）
-const API_VERSION = 'v4-omori-only';
+const API_VERSION = 'v5-listcustomers';
 
 export const config = {
   api: { bodyParser: false },
@@ -71,34 +71,30 @@ async function getSquareSubscribers(accountFilter) {
       const activeSubscriptions = subscriptions.filter(s => s.status === 'ACTIVE');
       debugInfo.push(`${accountName}: ${subscriptions.length}件中 ${activeSubscriptions.length}件アクティブ`);
 
-      // 3. 顧客詳細をバッチ取得（名前・電話・メール）
-      const customerIds = [...new Set(activeSubscriptions.map(s => s.customerId).filter(Boolean))];
+      // 3. 全顧客を一括取得（listCustomers — retrieveCustomerの1件ずつ取得より圧倒的に高速）
       const customerDetails = {};
-
-      for (let i = 0; i < customerIds.length; i += 10) {
-        const batch = customerIds.slice(i, i + 10);
-        const promises = batch.map(async (cid) => {
-          try {
-            const resp = await client.customersApi.retrieveCustomer(cid);
-            const c = resp.result.customer;
-            const name = [c.familyName, c.givenName].filter(Boolean).join('');
-            return {
-              id: cid,
-              name: name || c.emailAddress || cid,
+      try {
+        let custCursor = undefined;
+        do {
+          const custResp = await client.customersApi.listCustomers({ cursor: custCursor, limit: 100 });
+          for (const c of (custResp.result.customers || [])) {
+            customerDetails[c.id] = {
+              id: c.id,
+              name: [c.familyName, c.givenName].filter(Boolean).join('') || c.emailAddress || c.id,
               familyName: c.familyName || '',
               givenName: c.givenName || '',
               phone: c.phoneNumber || '',
               email: c.emailAddress || '',
             };
-          } catch {
-            return { id: cid, name: cid, familyName: '', givenName: '', phone: '', email: '' };
           }
-        });
-        const results = await Promise.all(promises);
-        results.forEach(r => { customerDetails[r.id] = r; });
+          custCursor = custResp.result.cursor;
+        } while (custCursor);
+        debugInfo.push(`顧客${Object.keys(customerDetails).length}件取得`);
+      } catch (e) {
+        debugInfo.push(`顧客一括取得エラー: ${e.message}`);
       }
 
-      // 4. サブスクリプションごとにデータをまとめる（インボイス取得はスキップ — 高速化）
+      // 4. サブスクリプションごとにデータをまとめる
       // 決済回数はstartDate→chargedThroughDateの月数で推算
       for (const sub of activeSubscriptions) {
         const customer = customerDetails[sub.customerId] || { name: '不明', phone: '', email: '' };

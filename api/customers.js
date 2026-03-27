@@ -2,7 +2,7 @@
 // 環境変数:
 //   PATIENT_DB_GAS_URL - 患者データベース用GAS WebアプリURL
 //   SQUARE_TOKENS      - Square APIトークン（JSON配列）
-const API_VERSION = 'v5-listcustomers';
+const API_VERSION = 'v6-batch-customers';
 
 export const config = {
   api: { bodyParser: false },
@@ -71,13 +71,25 @@ async function getSquareSubscribers(accountFilter) {
       const activeSubscriptions = subscriptions.filter(s => s.status === 'ACTIVE');
       debugInfo.push(`${accountName}: ${subscriptions.length}件中 ${activeSubscriptions.length}件アクティブ`);
 
-      // 3. 全顧客を一括取得（listCustomers — retrieveCustomerの1件ずつ取得より圧倒的に高速）
+      // 3. サブスク顧客のみバッチ取得（全顧客取得はタイムアウトするため）
       const customerDetails = {};
-      try {
-        let custCursor = undefined;
-        do {
-          const custResp = await client.customersApi.listCustomers({ cursor: custCursor, limit: 100 });
-          for (const c of (custResp.result.customers || [])) {
+      const uniqueCustomerIds = [...new Set(activeSubscriptions.map(s => s.customerId).filter(Boolean))];
+      debugInfo.push(`対象顧客: ${uniqueCustomerIds.length}件`);
+
+      // 20件ずつ並列で取得（高速化）
+      const BATCH_SIZE = 20;
+      for (let i = 0; i < uniqueCustomerIds.length; i += BATCH_SIZE) {
+        const batch = uniqueCustomerIds.slice(i, i + BATCH_SIZE);
+        const results = await Promise.allSettled(
+          batch.map(id =>
+            client.customersApi.retrieveCustomer(id)
+              .then(r => r.result.customer)
+              .catch(() => null)
+          )
+        );
+        for (const r of results) {
+          if (r.status === 'fulfilled' && r.value) {
+            const c = r.value;
             customerDetails[c.id] = {
               id: c.id,
               name: [c.familyName, c.givenName].filter(Boolean).join('') || c.emailAddress || c.id,
@@ -87,12 +99,9 @@ async function getSquareSubscribers(accountFilter) {
               email: c.emailAddress || '',
             };
           }
-          custCursor = custResp.result.cursor;
-        } while (custCursor);
-        debugInfo.push(`顧客${Object.keys(customerDetails).length}件取得`);
-      } catch (e) {
-        debugInfo.push(`顧客一括取得エラー: ${e.message}`);
+        }
       }
+      debugInfo.push(`顧客${Object.keys(customerDetails).length}件取得成功`);
 
       // 4. サブスクリプションごとにデータをまとめる
       // 決済回数はstartDate→chargedThroughDateの月数で推算
@@ -280,7 +289,7 @@ export default async function handler(req, res) {
     // 患者データとSquareサブスクを並列取得
     const squareWithTimeout = Promise.race([
       getSquareSubscribers(accountFilter),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Square API timeout (120s)')), 120000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Square API timeout (60s)')), 60000)),
     ]).catch(err => {
       console.error('[customers] Square fetch skipped:', err.message);
       return { subscribers: [], debug: `Error: ${err.message}`, errors: [{ account: 'ALL', error: err.message }] };

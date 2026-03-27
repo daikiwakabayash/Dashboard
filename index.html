@@ -740,7 +740,7 @@
         const GAS_API_URL = '/api/gas-proxy?type=business';
         const MARKETING_API_URL = '/api/gas-proxy?type=marketing';
         const SQUARE_API_URL = '/api/square/metrics';
-        const TASKS_API_URL = '/api/tasks';
+        const CUSTOMERS_API_URL = '/api/customers';
         const CACHE_KEY = 'dashboard_data_cache';
         const MARKETING_CACHE_KEY = 'marketing_data_cache';
         const SQUARE_CACHE_KEY = 'square_data_cache_v6'; // v6: locationIdデータ整合性修正
@@ -1236,23 +1236,16 @@
                 try { localStorage.setItem('naoru_plan_links', JSON.stringify(planLinks)); } catch {}
             }, [planLinks]);
 
-            // ── スタッフタスク管理用 State ──
-            const [taskGoals, setTaskGoals] = useState([]);
-            const [taskItems, setTaskItems] = useState([]);
-            const [taskLoading, setTaskLoading] = useState(false);
-            const [taskError, setTaskError] = useState(null);
-            const [taskSaving, setTaskSaving] = useState(false);
-            const [taskYearMonth, setTaskYearMonth] = useState(() => {
-                const now = new Date();
-                return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-            });
-            const [taskActiveWeek, setTaskActiveWeek] = useState(1);
-            const [taskNewGoalTitle, setTaskNewGoalTitle] = useState('');
-            const [taskNewItemTitle, setTaskNewItemTitle] = useState('');
-            const [taskNewItemAssignee, setTaskNewItemAssignee] = useState('');
-            const [taskNewItemGoalId, setTaskNewItemGoalId] = useState('');
-            const [taskEditingGoal, setTaskEditingGoal] = useState(null);
-            const [taskEditingItem, setTaskEditingItem] = useState(null);
+            // ── 顧客管理用 State ──
+            const [custLoading, setCustLoading] = useState(false);
+            const [custError, setCustError] = useState(null);
+            const [custPatients, setCustPatients] = useState([]);
+            const [custNoVisit, setCustNoVisit] = useState([]);
+            const [custSubsAlert, setCustSubsAlert] = useState([]);
+            const [custActiveTab, setCustActiveTab] = useState('novisit');
+            const [custThresholdDays, setCustThresholdDays] = useState(30);
+            const [custSearchQuery, setCustSearchQuery] = useState('');
+            const [custLastFetched, setCustLastFetched] = useState(null);
 
             // ── 経理・ファイナンスタブ用 State ──
             const [finActiveTab, setFinActiveTab] = useState('overview'); // overview | pl | bs | cashflow | qa
@@ -1646,74 +1639,35 @@
             }, [finMessages, finLoading]);
 
             // タスクデータ取得
-            const fetchTasks = async (ym) => {
-                setTaskLoading(true);
-                setTaskError(null);
+            // 顧客データ取得
+            const fetchCustomerData = async () => {
+                setCustLoading(true);
+                setCustError(null);
                 try {
-                    const url = ym ? `${TASKS_API_URL}?yearMonth=${encodeURIComponent(ym)}` : TASKS_API_URL;
-                    const response = await fetch(url);
-                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const response = await fetch(CUSTOMERS_API_URL);
+                    if (!response.ok) {
+                        const errData = await response.json().catch(() => ({}));
+                        throw new Error(errData.message || `HTTP ${response.status}`);
+                    }
                     const data = await response.json();
-                    setTaskGoals(data.goals || []);
-                    setTaskItems(data.tasks || []);
+                    setCustPatients(data.patients || []);
+                    setCustNoVisit(data.noVisitPatients || []);
+                    setCustSubsAlert(data.subsAlerts || []);
+                    setCustLastFetched(new Date().toLocaleString('ja-JP'));
                 } catch (err) {
-                    console.error('[tasks] Fetch error:', err);
-                    setTaskError(err.message);
+                    console.error('[customers] Fetch error:', err);
+                    setCustError(err.message);
                 } finally {
-                    setTaskLoading(false);
+                    setCustLoading(false);
                 }
             };
 
-            // タスク操作（POST）
-            const taskAction = async (body) => {
-                setTaskSaving(true);
-                try {
-                    const response = await fetch(TASKS_API_URL, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body),
-                    });
-                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                    const result = await response.json();
-                    // 成功後に再取得
-                    await fetchTasks(taskYearMonth);
-                    return result;
-                } catch (err) {
-                    console.error('[tasks] Action error:', err);
-                    setTaskError(err.message);
-                    return null;
-                } finally {
-                    setTaskSaving(false);
-                }
-            };
-
-            // タスクページ表示時にデータ取得
+            // 顧客管理ページ表示時にデータ取得
             useEffect(() => {
-                if (currentPage === 'tasks') {
-                    fetchTasks(taskYearMonth);
+                if (currentPage === 'customers' && custPatients.length === 0 && !custLoading) {
+                    fetchCustomerData();
                 }
-            }, [currentPage, taskYearMonth]);
-
-            // 週番号ヘルパー: 対象月の週数を計算
-            const getWeeksInMonth = (ym) => {
-                if (!ym) return [1, 2, 3, 4];
-                const [y, m] = ym.split('-').map(Number);
-                const firstDay = new Date(y, m - 1, 1);
-                const lastDay = new Date(y, m, 0);
-                const totalDays = lastDay.getDate();
-                const weeks = Math.ceil(totalDays / 7);
-                return Array.from({ length: weeks }, (_, i) => i + 1);
-            };
-
-            // 週の日付範囲を取得
-            const getWeekDateRange = (ym, weekNum) => {
-                if (!ym) return '';
-                const [y, m] = ym.split('-').map(Number);
-                const startDay = (weekNum - 1) * 7 + 1;
-                const lastDay = new Date(y, m, 0).getDate();
-                const endDay = Math.min(weekNum * 7, lastDay);
-                return `${m}/${startDay}〜${m}/${endDay}`;
-            };
+            }, [currentPage]);
 
             // 初期店舗選択: rawDataが読み込まれたら最初の店舗を選択
             useEffect(() => {
@@ -9835,8 +9789,8 @@
                         </div>
                     )}
 
-                    {/* ===== スタッフタスク管理タブ ===== */}
-                    {currentPage === 'tasks' && (
+                    {/* ===== 顧客管理タブ ===== */}
+                    {currentPage === 'customers' && (
                         <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900 w-full">
                             <div className="space-y-4 md:space-y-6">
 
@@ -9845,507 +9799,364 @@
                                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                                     <div className="space-y-1">
                                         <div className="inline-flex items-center gap-2 px-2 md:px-3 py-1 bg-gradient-to-r from-brand-100 to-amber-100 text-brand-600 rounded-full text-[10px] md:text-xs font-black uppercase tracking-widest mb-1">
-                                            <ClipboardCheck size={12} className="md:hidden" /><ClipboardCheck size={14} className="hidden md:block" /> Task Management
+                                            <Users size={12} className="md:hidden" /><Users size={14} className="hidden md:block" /> Customer Management
                                         </div>
-                                        <h1 className="text-xl md:text-3xl font-black tracking-tight text-slate-900 italic">スタッフタスク管理</h1>
-                                        <p className="text-xs text-slate-400 font-bold">月次目標を設定し、週次MTGでタスクの進捗を管理</p>
+                                        <h1 className="text-xl md:text-3xl font-black tracking-tight text-slate-900 italic">顧客管理</h1>
+                                        <p className="text-xs text-slate-400 font-bold">患者データベースとSquareサブスクを照合し、未来院・決済アラートを管理</p>
                                     </div>
-
-                                    {/* 月選択 */}
                                     <div className="flex items-center gap-2">
                                         <button
-                                            onClick={() => {
-                                                const [y, m] = taskYearMonth.split('-').map(Number);
-                                                const prev = m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`;
-                                                setTaskYearMonth(prev);
-                                            }}
-                                            className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 transition-colors text-slate-600"
-                                        >
-                                            <ChevronDown size={16} className="rotate-90" />
-                                        </button>
-                                        <div className="px-4 py-2 bg-brand-50 rounded-xl font-black text-brand-600 text-sm min-w-[140px] text-center">
-                                            <Calendar size={14} className="inline mr-1.5 -mt-0.5" />
-                                            {taskYearMonth.replace('-', '年') + '月'}
-                                        </div>
-                                        <button
-                                            onClick={() => {
-                                                const [y, m] = taskYearMonth.split('-').map(Number);
-                                                const next = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
-                                                setTaskYearMonth(next);
-                                            }}
-                                            className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 transition-colors text-slate-600"
-                                        >
-                                            <ChevronDown size={16} className="-rotate-90" />
-                                        </button>
-                                        <button
-                                            onClick={() => fetchTasks(taskYearMonth)}
-                                            disabled={taskLoading}
+                                            onClick={() => fetchCustomerData()}
+                                            disabled={custLoading}
                                             className="p-2 rounded-xl bg-brand-500 text-white hover:bg-brand-600 disabled:opacity-50 transition-colors"
                                             title="再読み込み"
                                         >
-                                            <RefreshCw size={16} className={taskLoading ? 'animate-spin' : ''} />
+                                            <RefreshCw size={16} className={custLoading ? 'animate-spin' : ''} />
                                         </button>
+                                        {custLastFetched && (
+                                            <span className="text-[10px] text-slate-400 font-bold">最終取得: {custLastFetched}</span>
+                                        )}
                                     </div>
+                                </div>
+
+                                {/* タブ切替 */}
+                                <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
+                                    {[
+                                        { id: 'novisit', label: '未来院アラート', icon: React.createElement(AlertCircle, { size: 14 }) },
+                                        { id: 'subsalert', label: 'サブスク決済アラート', icon: React.createElement(CreditCard, { size: 14 }) },
+                                        { id: 'all', label: '全患者一覧', icon: React.createElement(Users, { size: 14 }) },
+                                    ].map(tab => (
+                                        <button
+                                            key={tab.id}
+                                            onClick={() => setCustActiveTab(tab.id)}
+                                            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold transition-all ${
+                                                custActiveTab === tab.id
+                                                    ? 'bg-white text-brand-600 shadow-sm'
+                                                    : 'text-slate-500 hover:text-slate-700'
+                                            }`}
+                                        >
+                                            {tab.icon} {tab.label}
+                                        </button>
+                                    ))}
                                 </div>
                             </header>
 
                             {/* エラー表示 */}
-                            {taskError && (
+                            {custError && (
                                 <div className="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm text-red-700 font-bold flex items-center gap-2 animate-fade-in">
                                     <AlertCircle size={16} />
-                                    {taskError === 'TASKS_GAS_URL is not configured'
-                                        ? 'TASKS_GAS_URL が未設定です。Vercel環境変数に設定してください。'
-                                        : `エラー: ${taskError}`
-                                    }
+                                    {custError}
                                 </div>
                             )}
 
                             {/* ローディング */}
-                            {taskLoading && taskGoals.length === 0 && (
+                            {custLoading && custPatients.length === 0 && (
                                 <div className="flex items-center justify-center py-20 animate-fade-in">
                                     <div className="text-center space-y-3">
                                         <Loader2 size={32} className="animate-spin text-brand-400 mx-auto" />
-                                        <p className="text-sm font-bold text-slate-400">タスクデータを読み込み中...</p>
+                                        <p className="text-sm font-bold text-slate-400">患者データを読み込み中...</p>
                                     </div>
                                 </div>
                             )}
 
-                            {/* メインコンテンツ: 2カラムレイアウト */}
-                            {(!taskLoading || taskGoals.length > 0) && (
-                                <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 md:gap-6">
+                            {/* サマリーカード */}
+                            {!custLoading && (custNoVisit.length > 0 || custSubsAlert.length > 0 || custPatients.length > 0) && (
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 animate-fade-in-up">
+                                    <div className="bg-white rounded-2xl border border-slate-200 p-4 card-hover">
+                                        <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-1">総患者数</div>
+                                        <div className="text-2xl font-black text-slate-800">{custPatients.length.toLocaleString()}</div>
+                                    </div>
+                                    <div className="bg-white rounded-2xl border border-amber-200 p-4 card-hover">
+                                        <div className="text-[10px] font-black text-amber-500 uppercase tracking-wider mb-1">未来院 (30日+)</div>
+                                        <div className="text-2xl font-black text-amber-600">{custNoVisit.length.toLocaleString()}</div>
+                                    </div>
+                                    <div className="bg-white rounded-2xl border border-red-200 p-4 card-hover">
+                                        <div className="text-[10px] font-black text-red-500 uppercase tracking-wider mb-1">決済アラート</div>
+                                        <div className="text-2xl font-black text-red-600">{custSubsAlert.length.toLocaleString()}</div>
+                                    </div>
+                                    <div className="bg-white rounded-2xl border border-emerald-200 p-4 card-hover">
+                                        <div className="text-[10px] font-black text-emerald-500 uppercase tracking-wider mb-1">来院中</div>
+                                        <div className="text-2xl font-black text-emerald-600">{(custPatients.length - custNoVisit.length).toLocaleString()}</div>
+                                    </div>
+                                </div>
+                            )}
 
-                                    {/* ── 左カラム: 月次目標 ── */}
-                                    <div className="lg:col-span-4 space-y-4">
-                                        <div className="bg-white rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 overflow-hidden animate-fade-in-up">
-                                            {/* 月次目標ヘッダー */}
-                                            <div className="bg-gradient-to-r from-brand-500 to-brand-400 p-4 md:p-5 text-white">
-                                                <h2 className="font-black text-base md:text-lg flex items-center gap-2">
-                                                    <Target size={20} /> 月次目標
-                                                </h2>
-                                                <p className="text-brand-100 text-xs font-bold mt-1">
-                                                    {taskYearMonth.replace('-', '年') + '月'}の目標
-                                                </p>
-                                                {/* 進捗サマリー */}
-                                                {taskGoals.length > 0 && (() => {
-                                                    const done = taskGoals.filter(g => g.completed).length;
-                                                    const total = taskGoals.length;
-                                                    const pct = Math.round((done / total) * 100);
-                                                    return (
-                                                        <div className="mt-3">
-                                                            <div className="flex justify-between text-xs font-bold text-white/80 mb-1">
-                                                                <span>達成率</span>
-                                                                <span>{done}/{total} ({pct}%)</span>
-                                                            </div>
-                                                            <div className="w-full h-2 bg-white/20 rounded-full overflow-hidden">
-                                                                <div className="h-full bg-white rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
-                                                            </div>
-                                                        </div>
-                                                    );
-                                                })()}
-                                            </div>
+                            {/* ── 未来院アラートタブ ── */}
+                            {custActiveTab === 'novisit' && !custLoading && (
+                                <div className="bg-white rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 overflow-hidden animate-fade-in-up">
+                                    <div className="bg-gradient-to-r from-amber-500 to-orange-400 p-4 md:p-5 text-white">
+                                        <h2 className="font-black text-base md:text-lg flex items-center gap-2">
+                                            <AlertCircle size={20} /> 未来院アラート
+                                        </h2>
+                                        <p className="text-amber-100 text-xs font-bold mt-1">
+                                            {custThresholdDays}日以上来院がない患者をピックアップ
+                                        </p>
+                                    </div>
 
-                                            {/* 目標リスト */}
-                                            <div className="p-3 md:p-4 space-y-2">
-                                                {taskGoals.length === 0 && !taskLoading && (
-                                                    <div className="text-center py-8 text-slate-400">
-                                                        <Target size={32} className="mx-auto mb-2 opacity-30" />
-                                                        <p className="text-sm font-bold">目標が未設定です</p>
-                                                        <p className="text-xs mt-1">下のフォームから追加してください</p>
-                                                    </div>
-                                                )}
-                                                {taskGoals.map((goal, idx) => (
-                                                    <div
-                                                        key={goal.id || idx}
-                                                        className={`group flex items-start gap-3 p-3 rounded-xl border transition-all duration-200 ${
-                                                            goal.completed
-                                                                ? 'bg-emerald-50 border-emerald-200'
-                                                                : taskNewItemGoalId === goal.id
-                                                                    ? 'bg-brand-50 border-brand-300 shadow-sm'
-                                                                    : 'bg-white border-slate-200 hover:border-brand-200 hover:shadow-sm'
-                                                        } cursor-pointer`}
-                                                        onClick={() => setTaskNewItemGoalId(taskNewItemGoalId === goal.id ? '' : goal.id)}
-                                                    >
-                                                        {/* チェックボックス */}
-                                                        <button
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                taskAction({ action: 'toggleGoal', id: goal.id, completed: !goal.completed });
-                                                            }}
-                                                            disabled={taskSaving}
-                                                            className={`mt-0.5 flex-shrink-0 w-5 h-5 rounded-md border-2 flex items-center justify-center transition-all duration-200 ${
-                                                                goal.completed
-                                                                    ? 'bg-emerald-500 border-emerald-500 text-white'
-                                                                    : 'border-slate-300 hover:border-brand-400 hover:bg-brand-50'
-                                                            }`}
-                                                        >
-                                                            {goal.completed && <Check size={12} />}
-                                                        </button>
-
-                                                        <div className="flex-1 min-w-0">
-                                                            <div className={`font-bold text-sm ${goal.completed ? 'line-through text-slate-400' : 'text-slate-800'}`}>
-                                                                {goal.title}
-                                                            </div>
-                                                            {goal.description && (
-                                                                <div className="text-xs text-slate-400 mt-0.5 truncate">{goal.description}</div>
-                                                            )}
-                                                            {/* 紐づくタスクのミニ進捗 */}
-                                                            {(() => {
-                                                                const related = taskItems.filter(t => t.goalId === goal.id);
-                                                                if (related.length === 0) return null;
-                                                                const relDone = related.filter(t => t.completed).length;
-                                                                return (
-                                                                    <div className="flex items-center gap-2 mt-1.5">
-                                                                        <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                                                                            <div className="h-full bg-brand-400 rounded-full transition-all duration-300" style={{ width: `${(relDone / related.length) * 100}%` }} />
-                                                                        </div>
-                                                                        <span className="text-[10px] font-bold text-slate-400">{relDone}/{related.length}</span>
-                                                                    </div>
-                                                                );
-                                                            })()}
-                                                        </div>
-
-                                                        {/* 削除ボタン */}
-                                                        <button
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                if (confirm('この目標と関連タスクを削除しますか？')) {
-                                                                    taskAction({ action: 'deleteGoal', id: goal.id });
-                                                                }
-                                                            }}
-                                                            disabled={taskSaving}
-                                                            className="flex-shrink-0 opacity-0 group-hover:opacity-100 p-1 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-all"
-                                                        >
-                                                            <Trash2 size={14} />
-                                                        </button>
-                                                    </div>
-                                                ))}
-
-                                                {/* 新規目標追加フォーム */}
-                                                <div className="flex gap-2 mt-3 pt-3 border-t border-slate-100">
-                                                    <input
-                                                        type="text"
-                                                        value={taskNewGoalTitle}
-                                                        onChange={(e) => setTaskNewGoalTitle(e.target.value)}
-                                                        onKeyPress={(e) => {
-                                                            if (e.key === 'Enter' && taskNewGoalTitle.trim()) {
-                                                                taskAction({ action: 'upsertGoal', yearMonth: taskYearMonth, title: taskNewGoalTitle.trim() });
-                                                                setTaskNewGoalTitle('');
-                                                            }
-                                                        }}
-                                                        placeholder="新しい月次目標を追加..."
-                                                        className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-transparent"
-                                                        disabled={taskSaving}
-                                                    />
-                                                    <button
-                                                        onClick={() => {
-                                                            if (taskNewGoalTitle.trim()) {
-                                                                taskAction({ action: 'upsertGoal', yearMonth: taskYearMonth, title: taskNewGoalTitle.trim() });
-                                                                setTaskNewGoalTitle('');
-                                                            }
-                                                        }}
-                                                        disabled={!taskNewGoalTitle.trim() || taskSaving}
-                                                        className="px-3 py-2 bg-brand-500 text-white rounded-xl hover:bg-brand-600 disabled:opacity-50 transition-colors"
-                                                    >
-                                                        <Plus size={16} />
-                                                    </button>
-                                                </div>
-                                            </div>
+                                    {/* フィルター */}
+                                    <div className="p-3 md:p-4 border-b border-slate-100 flex flex-col sm:flex-row gap-3">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-xs font-bold text-slate-500">未来院日数:</span>
+                                            <select
+                                                value={custThresholdDays}
+                                                onChange={(e) => setCustThresholdDays(Number(e.target.value))}
+                                                className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-300"
+                                            >
+                                                <option value={30}>30日以上</option>
+                                                <option value={60}>60日以上</option>
+                                                <option value={90}>90日以上</option>
+                                            </select>
+                                        </div>
+                                        <div className="flex-1">
+                                            <input
+                                                type="text"
+                                                value={custSearchQuery}
+                                                onChange={(e) => setCustSearchQuery(e.target.value)}
+                                                placeholder="患者名で検索..."
+                                                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-300"
+                                            />
                                         </div>
                                     </div>
 
-                                    {/* ── 右カラム: 週次タスク ── */}
-                                    <div className="lg:col-span-8 space-y-4">
-                                        <div className="bg-white rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 overflow-hidden animate-fade-in-up stagger-2">
-                                            {/* 週次ヘッダー + 週タブ */}
-                                            <div className="border-b border-slate-200">
-                                                <div className="p-4 md:p-5 pb-0">
-                                                    <h2 className="font-black text-base md:text-lg text-slate-800 flex items-center gap-2 mb-3">
-                                                        <Calendar size={20} className="text-brand-400" /> 週次タスク
-                                                        {taskNewItemGoalId && (
-                                                            <span className="text-xs font-bold text-brand-500 bg-brand-50 px-2 py-0.5 rounded-full ml-2">
-                                                                目標選択中: {taskGoals.find(g => g.id === taskNewItemGoalId)?.title?.substring(0, 15) || ''}
-                                                            </span>
-                                                        )}
-                                                    </h2>
-                                                </div>
-                                                {/* 週タブ */}
-                                                <div className="flex px-4 md:px-5 gap-1 overflow-x-auto scrollbar-thin">
-                                                    {getWeeksInMonth(taskYearMonth).map(w => {
-                                                        const weekTasks = taskItems.filter(t => t.weekNumber === w || t.weekNumber === String(w));
-                                                        const weekDone = weekTasks.filter(t => t.completed).length;
-                                                        const isActive = taskActiveWeek === w;
-                                                        return (
-                                                            <button
-                                                                key={w}
-                                                                onClick={() => setTaskActiveWeek(w)}
-                                                                className={`relative px-4 py-2.5 text-sm font-bold rounded-t-xl transition-all whitespace-nowrap ${
-                                                                    isActive
-                                                                        ? 'bg-brand-50 text-brand-600 border-b-2 border-brand-500'
-                                                                        : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'
-                                                                }`}
-                                                            >
-                                                                W{w}
-                                                                <span className="text-[10px] ml-1 opacity-70">{getWeekDateRange(taskYearMonth, w)}</span>
-                                                                {weekTasks.length > 0 && (
-                                                                    <span className={`ml-1.5 inline-flex items-center justify-center min-w-[18px] h-[18px] text-[10px] font-black rounded-full px-1 ${
-                                                                        weekDone === weekTasks.length && weekTasks.length > 0
-                                                                            ? 'bg-emerald-100 text-emerald-700'
-                                                                            : isActive
-                                                                                ? 'bg-brand-100 text-brand-600'
-                                                                                : 'bg-slate-100 text-slate-500'
-                                                                    }`}>
-                                                                        {weekDone}/{weekTasks.length}
-                                                                    </span>
-                                                                )}
-                                                            </button>
-                                                        );
-                                                    })}
-                                                </div>
-                                            </div>
+                                    <div className="p-3 md:p-4">
+                                        {(() => {
+                                            const filtered = custNoVisit
+                                                .filter(p => {
+                                                    const daysSince = p.daysSinceLastVisit || 0;
+                                                    if (daysSince < custThresholdDays) return false;
+                                                    if (custSearchQuery) {
+                                                        return (p.name || '').includes(custSearchQuery);
+                                                    }
+                                                    return true;
+                                                })
+                                                .sort((a, b) => (b.daysSinceLastVisit || 0) - (a.daysSinceLastVisit || 0));
 
-                                            {/* 週次タスクリスト */}
-                                            <div className="p-3 md:p-5">
-                                                {(() => {
-                                                    const weekTasks = taskItems.filter(t =>
-                                                        (t.weekNumber === taskActiveWeek || t.weekNumber === String(taskActiveWeek))
-                                                    );
-
-                                                    // 目標別にグルーピング
-                                                    const groupedByGoal = {};
-                                                    const noGoalTasks = [];
-                                                    weekTasks.forEach(t => {
-                                                        if (t.goalId) {
-                                                            if (!groupedByGoal[t.goalId]) groupedByGoal[t.goalId] = [];
-                                                            groupedByGoal[t.goalId].push(t);
-                                                        } else {
-                                                            noGoalTasks.push(t);
-                                                        }
-                                                    });
-
-                                                    const renderTask = (task, idx) => (
-                                                        <div
-                                                            key={task.id || idx}
-                                                            className={`group flex items-center gap-3 p-3 rounded-xl border transition-all duration-200 ${
-                                                                task.completed
-                                                                    ? 'bg-slate-50 border-slate-100'
-                                                                    : 'bg-white border-slate-200 hover:border-brand-200 hover:shadow-sm'
-                                                            }`}
-                                                        >
-                                                            <button
-                                                                onClick={() => taskAction({ action: 'toggleTask', id: task.id, completed: !task.completed })}
-                                                                disabled={taskSaving}
-                                                                className={`flex-shrink-0 w-5 h-5 rounded-md border-2 flex items-center justify-center transition-all duration-200 ${
-                                                                    task.completed
-                                                                        ? 'bg-emerald-500 border-emerald-500 text-white'
-                                                                        : 'border-slate-300 hover:border-brand-400 hover:bg-brand-50'
-                                                                }`}
-                                                            >
-                                                                {task.completed && <Check size={12} />}
-                                                            </button>
-
-                                                            <div className="flex-1 min-w-0">
-                                                                <div className={`font-bold text-sm ${task.completed ? 'line-through text-slate-400' : 'text-slate-800'}`}>
-                                                                    {task.title}
-                                                                </div>
-                                                                {task.assignee && (
-                                                                    <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-400 mt-0.5">
-                                                                        <Users size={10} /> {task.assignee}
-                                                                    </span>
-                                                                )}
-                                                            </div>
-
-                                                            <button
-                                                                onClick={() => {
-                                                                    if (confirm('このタスクを削除しますか？')) {
-                                                                        taskAction({ action: 'deleteTask', id: task.id });
-                                                                    }
-                                                                }}
-                                                                disabled={taskSaving}
-                                                                className="flex-shrink-0 opacity-0 group-hover:opacity-100 p-1 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-all"
-                                                            >
-                                                                <Trash2 size={14} />
-                                                            </button>
-                                                        </div>
-                                                    );
-
-                                                    return (
-                                                        <div className="space-y-4">
-                                                            {/* 目標別グループ */}
-                                                            {taskGoals.map(goal => {
-                                                                const tasks = groupedByGoal[goal.id] || [];
-                                                                return (
-                                                                    <div key={goal.id}>
-                                                                        <div className="flex items-center gap-2 mb-2">
-                                                                            <CircleDot size={14} className={`${goal.completed ? 'text-emerald-500' : 'text-brand-400'}`} />
-                                                                            <span className={`text-xs font-black uppercase tracking-wider ${goal.completed ? 'text-emerald-600' : 'text-brand-500'}`}>
-                                                                                {goal.title}
-                                                                            </span>
-                                                                            {tasks.length > 0 && (
-                                                                                <span className="text-[10px] font-bold text-slate-400">
-                                                                                    ({tasks.filter(t => t.completed).length}/{tasks.length})
-                                                                                </span>
-                                                                            )}
-                                                                        </div>
-                                                                        {tasks.length > 0 ? (
-                                                                            <div className="space-y-1.5 ml-5">
-                                                                                {tasks.map(renderTask)}
-                                                                            </div>
-                                                                        ) : (
-                                                                            <div className="ml-5 text-xs text-slate-300 font-bold py-2">
-                                                                                この週にはタスクがありません
-                                                                            </div>
-                                                                        )}
-                                                                    </div>
-                                                                );
-                                                            })}
-
-                                                            {/* 目標未紐づけタスク */}
-                                                            {noGoalTasks.length > 0 && (
-                                                                <div>
-                                                                    <div className="flex items-center gap-2 mb-2">
-                                                                        <CircleDot size={14} className="text-slate-400" />
-                                                                        <span className="text-xs font-black uppercase tracking-wider text-slate-400">その他</span>
-                                                                    </div>
-                                                                    <div className="space-y-1.5 ml-5">
-                                                                        {noGoalTasks.map(renderTask)}
-                                                                    </div>
-                                                                </div>
-                                                            )}
-
-                                                            {/* 空状態 */}
-                                                            {weekTasks.length === 0 && taskGoals.length === 0 && (
-                                                                <div className="text-center py-12 text-slate-400">
-                                                                    <ClipboardCheck size={40} className="mx-auto mb-3 opacity-20" />
-                                                                    <p className="text-sm font-bold">タスクがありません</p>
-                                                                    <p className="text-xs mt-1">左の月次目標を追加してから、タスクを作成してください</p>
-                                                                </div>
-                                                            )}
-
-                                                            {/* 新規タスク追加フォーム */}
-                                                            <div className="mt-4 pt-4 border-t border-slate-100">
-                                                                <div className="flex flex-col sm:flex-row gap-2">
-                                                                    <input
-                                                                        type="text"
-                                                                        value={taskNewItemTitle}
-                                                                        onChange={(e) => setTaskNewItemTitle(e.target.value)}
-                                                                        onKeyPress={(e) => {
-                                                                            if (e.key === 'Enter' && taskNewItemTitle.trim()) {
-                                                                                taskAction({
-                                                                                    action: 'upsertTask',
-                                                                                    yearMonth: taskYearMonth,
-                                                                                    weekNumber: taskActiveWeek,
-                                                                                    goalId: taskNewItemGoalId || '',
-                                                                                    title: taskNewItemTitle.trim(),
-                                                                                    assignee: taskNewItemAssignee.trim(),
-                                                                                });
-                                                                                setTaskNewItemTitle('');
-                                                                                setTaskNewItemAssignee('');
-                                                                            }
-                                                                        }}
-                                                                        placeholder={`W${taskActiveWeek} のタスクを追加...`}
-                                                                        className="flex-1 px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-transparent"
-                                                                        disabled={taskSaving}
-                                                                    />
-                                                                    <input
-                                                                        type="text"
-                                                                        value={taskNewItemAssignee}
-                                                                        onChange={(e) => setTaskNewItemAssignee(e.target.value)}
-                                                                        onKeyPress={(e) => {
-                                                                            if (e.key === 'Enter' && taskNewItemTitle.trim()) {
-                                                                                taskAction({
-                                                                                    action: 'upsertTask',
-                                                                                    yearMonth: taskYearMonth,
-                                                                                    weekNumber: taskActiveWeek,
-                                                                                    goalId: taskNewItemGoalId || '',
-                                                                                    title: taskNewItemTitle.trim(),
-                                                                                    assignee: taskNewItemAssignee.trim(),
-                                                                                });
-                                                                                setTaskNewItemTitle('');
-                                                                                setTaskNewItemAssignee('');
-                                                                            }
-                                                                        }}
-                                                                        placeholder="担当者（任意）"
-                                                                        className="w-full sm:w-32 px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-transparent"
-                                                                        disabled={taskSaving}
-                                                                    />
-                                                                    <select
-                                                                        value={taskNewItemGoalId}
-                                                                        onChange={(e) => setTaskNewItemGoalId(e.target.value)}
-                                                                        className="w-full sm:w-40 px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-transparent"
-                                                                    >
-                                                                        <option value="">目標に紐づけ</option>
-                                                                        {taskGoals.map(g => (
-                                                                            <option key={g.id} value={g.id}>{g.title}</option>
-                                                                        ))}
-                                                                    </select>
-                                                                    <button
-                                                                        onClick={() => {
-                                                                            if (taskNewItemTitle.trim()) {
-                                                                                taskAction({
-                                                                                    action: 'upsertTask',
-                                                                                    yearMonth: taskYearMonth,
-                                                                                    weekNumber: taskActiveWeek,
-                                                                                    goalId: taskNewItemGoalId || '',
-                                                                                    title: taskNewItemTitle.trim(),
-                                                                                    assignee: taskNewItemAssignee.trim(),
-                                                                                });
-                                                                                setTaskNewItemTitle('');
-                                                                                setTaskNewItemAssignee('');
-                                                                            }
-                                                                        }}
-                                                                        disabled={!taskNewItemTitle.trim() || taskSaving}
-                                                                        className="px-4 py-2.5 bg-brand-500 text-white rounded-xl hover:bg-brand-600 disabled:opacity-50 transition-colors font-bold text-sm flex items-center gap-1.5 whitespace-nowrap btn-brand"
-                                                                    >
-                                                                        <Plus size={16} /> 追加
-                                                                    </button>
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    );
-                                                })()}
-                                            </div>
-                                        </div>
-
-                                        {/* ── 週次サマリーカード ── */}
-                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 animate-fade-in-up stagger-3">
-                                            {getWeeksInMonth(taskYearMonth).slice(0, 4).map(w => {
-                                                const wt = taskItems.filter(t => t.weekNumber === w || t.weekNumber === String(w));
-                                                const done = wt.filter(t => t.completed).length;
-                                                const total = wt.length;
-                                                const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+                                            if (filtered.length === 0) {
                                                 return (
-                                                    <div
-                                                        key={w}
-                                                        onClick={() => setTaskActiveWeek(w)}
-                                                        className={`card-hover p-3 md:p-4 rounded-xl md:rounded-2xl border cursor-pointer transition-all ${
-                                                            taskActiveWeek === w
-                                                                ? 'bg-brand-50 border-brand-300 shadow-sm'
-                                                                : 'bg-white border-slate-200'
-                                                        }`}
-                                                    >
-                                                        <div className="flex items-center justify-between mb-2">
-                                                            <span className={`text-xs font-black ${taskActiveWeek === w ? 'text-brand-600' : 'text-slate-500'}`}>
-                                                                W{w}
-                                                            </span>
-                                                            <span className={`text-[10px] font-bold ${pct === 100 && total > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
-                                                                {total > 0 ? `${pct}%` : '-'}
-                                                            </span>
-                                                        </div>
-                                                        <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
-                                                            <div
-                                                                className={`h-full rounded-full transition-all duration-500 ${
-                                                                    pct === 100 && total > 0 ? 'bg-emerald-500' : 'bg-brand-400'
-                                                                }`}
-                                                                style={{ width: `${pct}%` }}
-                                                            />
-                                                        </div>
-                                                        <div className="text-[10px] text-slate-400 font-bold mt-1.5">
-                                                            {getWeekDateRange(taskYearMonth, w)}
-                                                        </div>
+                                                    <div className="text-center py-12 text-slate-400">
+                                                        <Users size={40} className="mx-auto mb-3 opacity-20" />
+                                                        <p className="text-sm font-bold">{custNoVisit.length === 0 ? 'データを取得してください' : '該当する患者はいません'}</p>
                                                     </div>
                                                 );
-                                            })}
-                                        </div>
+                                            }
+
+                                            return (
+                                                <div className="space-y-2">
+                                                    <div className="text-xs font-bold text-slate-400 mb-2">{filtered.length}名の患者が該当</div>
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-sm">
+                                                            <thead>
+                                                                <tr className="border-b border-slate-200">
+                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">患者名</th>
+                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">最終来院日</th>
+                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">経過日数</th>
+                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">店舗</th>
+                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">サブスク</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                {filtered.slice(0, 100).map((p, idx) => (
+                                                                    <tr key={idx} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
+                                                                        <td className="py-2.5 px-3 font-bold text-slate-800">{p.name || '不明'}</td>
+                                                                        <td className="py-2.5 px-3 text-slate-600">{p.lastVisitDate || '-'}</td>
+                                                                        <td className="py-2.5 px-3">
+                                                                            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-black ${
+                                                                                (p.daysSinceLastVisit || 0) >= 90 ? 'bg-red-100 text-red-700' :
+                                                                                (p.daysSinceLastVisit || 0) >= 60 ? 'bg-orange-100 text-orange-700' :
+                                                                                'bg-amber-100 text-amber-700'
+                                                                            }`}>
+                                                                                {p.daysSinceLastVisit || 0}日
+                                                                            </span>
+                                                                        </td>
+                                                                        <td className="py-2.5 px-3 text-slate-600 text-xs">{p.store || '-'}</td>
+                                                                        <td className="py-2.5 px-3">
+                                                                            {p.hasSubscription ? (
+                                                                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-black bg-blue-100 text-blue-700">
+                                                                                    <CreditCard size={10} /> あり
+                                                                                </span>
+                                                                            ) : (
+                                                                                <span className="text-xs text-slate-400">なし</span>
+                                                                            )}
+                                                                        </td>
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                        {filtered.length > 100 && (
+                                                            <div className="text-center py-3 text-xs text-slate-400 font-bold">
+                                                                ...他 {filtered.length - 100}名
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })()}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* ── サブスク決済アラートタブ ── */}
+                            {custActiveTab === 'subsalert' && !custLoading && (
+                                <div className="bg-white rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 overflow-hidden animate-fade-in-up">
+                                    <div className="bg-gradient-to-r from-red-500 to-rose-400 p-4 md:p-5 text-white">
+                                        <h2 className="font-black text-base md:text-lg flex items-center gap-2">
+                                            <CreditCard size={20} /> サブスク決済アラート
+                                        </h2>
+                                        <p className="text-red-100 text-xs font-bold mt-1">
+                                            サブスク決済が発生しているが来院していない患者
+                                        </p>
+                                    </div>
+
+                                    <div className="p-3 md:p-4">
+                                        {custSubsAlert.length === 0 ? (
+                                            <div className="text-center py-12 text-slate-400">
+                                                <CreditCard size={40} className="mx-auto mb-3 opacity-20" />
+                                                <p className="text-sm font-bold">{custPatients.length === 0 ? 'データを取得してください' : '決済アラートはありません'}</p>
+                                                <p className="text-xs mt-1 text-slate-300">来院していないのにサブスク決済が発生している患者はいません</p>
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-2">
+                                                <div className="bg-red-50 border border-red-200 rounded-xl p-3 mb-4">
+                                                    <p className="text-xs font-bold text-red-700">
+                                                        <AlertCircle size={12} className="inline mr-1" />
+                                                        以下の{custSubsAlert.length}名はサブスク決済が発生していますが、30日以上来院がありません。確認が必要です。
+                                                    </p>
+                                                </div>
+                                                <div className="overflow-x-auto">
+                                                    <table className="w-full text-sm">
+                                                        <thead>
+                                                            <tr className="border-b border-slate-200">
+                                                                <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">患者名</th>
+                                                                <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">最終来院日</th>
+                                                                <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">経過日数</th>
+                                                                <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">決済額/月</th>
+                                                                <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">店舗</th>
+                                                                <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">ステータス</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            {custSubsAlert.map((p, idx) => (
+                                                                <tr key={idx} className="border-b border-slate-50 hover:bg-red-50/50 transition-colors">
+                                                                    <td className="py-2.5 px-3 font-bold text-slate-800">{p.name || '不明'}</td>
+                                                                    <td className="py-2.5 px-3 text-slate-600">{p.lastVisitDate || '-'}</td>
+                                                                    <td className="py-2.5 px-3">
+                                                                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-black bg-red-100 text-red-700">
+                                                                            {p.daysSinceLastVisit || 0}日
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="py-2.5 px-3 font-bold text-slate-800">{p.monthlyAmount ? `¥${p.monthlyAmount.toLocaleString()}` : '-'}</td>
+                                                                    <td className="py-2.5 px-3 text-slate-600 text-xs">{p.store || '-'}</td>
+                                                                    <td className="py-2.5 px-3">
+                                                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-black bg-red-100 text-red-700">
+                                                                            <AlertCircle size={10} /> 要確認
+                                                                        </span>
+                                                                    </td>
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* ── 全患者一覧タブ ── */}
+                            {custActiveTab === 'all' && !custLoading && (
+                                <div className="bg-white rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 overflow-hidden animate-fade-in-up">
+                                    <div className="bg-gradient-to-r from-brand-500 to-brand-400 p-4 md:p-5 text-white">
+                                        <h2 className="font-black text-base md:text-lg flex items-center gap-2">
+                                            <Users size={20} /> 全患者一覧
+                                        </h2>
+                                        <p className="text-brand-100 text-xs font-bold mt-1">
+                                            患者データベースに登録された全患者
+                                        </p>
+                                    </div>
+
+                                    {/* 検索 */}
+                                    <div className="p-3 md:p-4 border-b border-slate-100">
+                                        <input
+                                            type="text"
+                                            value={custSearchQuery}
+                                            onChange={(e) => setCustSearchQuery(e.target.value)}
+                                            placeholder="患者名で検索..."
+                                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-300"
+                                        />
+                                    </div>
+
+                                    <div className="p-3 md:p-4">
+                                        {(() => {
+                                            const filtered = custPatients.filter(p => {
+                                                if (custSearchQuery) {
+                                                    return (p.name || '').includes(custSearchQuery);
+                                                }
+                                                return true;
+                                            });
+
+                                            if (filtered.length === 0) {
+                                                return (
+                                                    <div className="text-center py-12 text-slate-400">
+                                                        <Users size={40} className="mx-auto mb-3 opacity-20" />
+                                                        <p className="text-sm font-bold">{custPatients.length === 0 ? 'データを取得してください' : '該当する患者はいません'}</p>
+                                                    </div>
+                                                );
+                                            }
+
+                                            return (
+                                                <div className="space-y-2">
+                                                    <div className="text-xs font-bold text-slate-400 mb-2">{filtered.length}名の患者</div>
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-sm">
+                                                            <thead>
+                                                                <tr className="border-b border-slate-200">
+                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">患者名</th>
+                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">最終来院日</th>
+                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">経過日数</th>
+                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">店舗</th>
+                                                                    <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">サブスク</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                {filtered.slice(0, 200).map((p, idx) => (
+                                                                    <tr key={idx} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
+                                                                        <td className="py-2.5 px-3 font-bold text-slate-800">{p.name || '不明'}</td>
+                                                                        <td className="py-2.5 px-3 text-slate-600">{p.lastVisitDate || '-'}</td>
+                                                                        <td className="py-2.5 px-3">
+                                                                            {p.daysSinceLastVisit != null ? (
+                                                                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-black ${
+                                                                                    (p.daysSinceLastVisit) >= 90 ? 'bg-red-100 text-red-700' :
+                                                                                    (p.daysSinceLastVisit) >= 60 ? 'bg-orange-100 text-orange-700' :
+                                                                                    (p.daysSinceLastVisit) >= 30 ? 'bg-amber-100 text-amber-700' :
+                                                                                    'bg-emerald-100 text-emerald-700'
+                                                                                }`}>
+                                                                                    {p.daysSinceLastVisit}日
+                                                                                </span>
+                                                                            ) : '-'}
+                                                                        </td>
+                                                                        <td className="py-2.5 px-3 text-slate-600 text-xs">{p.store || '-'}</td>
+                                                                        <td className="py-2.5 px-3">
+                                                                            {p.hasSubscription ? (
+                                                                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-black bg-blue-100 text-blue-700">
+                                                                                    <CreditCard size={10} /> あり
+                                                                                </span>
+                                                                            ) : (
+                                                                                <span className="text-xs text-slate-400">なし</span>
+                                                                            )}
+                                                                        </td>
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                        {filtered.length > 200 && (
+                                                            <div className="text-center py-3 text-xs text-slate-400 font-bold">
+                                                                ...他 {filtered.length - 200}名
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })()}
                                     </div>
                                 </div>
                             )}
@@ -12599,7 +12410,7 @@
                 { id: 'marketing', label: 'マーケティング', icon: <Megaphone size={20} />, mobileIcon: <Megaphone size={18} /> },
                 { id: 'square', label: 'サブスク分析', icon: <CreditCard size={20} />, mobileIcon: <CreditCard size={18} /> },
                 { id: 'planning', label: '事業計画', icon: <Target size={20} />, mobileIcon: <Target size={18} /> },
-                { id: 'tasks', label: 'タスク管理', icon: <ClipboardCheck size={20} />, mobileIcon: <ClipboardCheck size={18} /> },
+                { id: 'customers', label: '顧客管理', icon: <Users size={20} />, mobileIcon: <Users size={18} /> },
                 { id: 'finance', label: '経理・財務', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} /> }
             ];
 

@@ -16,8 +16,8 @@ async function getSquareModule() {
 }
 
 // ── Square サブスク顧客を詳細付きで取得 ──
-async function getSquareSubscribers() {
-  const tokenConfigs = getTokenConfigs();
+async function getSquareSubscribers(accountFilter) {
+  const tokenConfigs = getTokenConfigs(accountFilter);
   if (tokenConfigs.length === 0) return { subscribers: [], debug: 'SQUARE_TOKENS 未設定', errors: [] };
 
   const allSubscribers = [];
@@ -171,23 +171,33 @@ async function getSquareSubscribers() {
   return { subscribers: allSubscribers, debug: debugInfo.join(' / '), errors };
 }
 
-function getTokenConfigs() {
+function getTokenConfigs(accountFilter) {
+  let tokens = [];
   if (process.env.SQUARE_TOKENS) {
     try {
-      const tokens = JSON.parse(process.env.SQUARE_TOKENS.trim());
-      if (Array.isArray(tokens) && tokens.length > 0) return tokens;
+      const parsed = JSON.parse(process.env.SQUARE_TOKENS.trim());
+      if (Array.isArray(parsed) && parsed.length > 0) tokens = parsed;
     } catch (e) {
       console.error('[customers] SQUARE_TOKENS parse error:', e.message);
     }
   }
-  if (process.env.SQUARE_ACCESS_TOKEN) {
-    return [{
+  if (tokens.length === 0 && process.env.SQUARE_ACCESS_TOKEN) {
+    tokens = [{
       name: '',
       token: process.env.SQUARE_ACCESS_TOKEN,
       env: process.env.SQUARE_ENVIRONMENT || 'production',
     }];
   }
-  return [];
+
+  // アカウントフィルター: 指定されたアカウントのみ使用
+  if (accountFilter && tokens.length > 0) {
+    const filtered = tokens.filter(t =>
+      (t.name || '').includes(accountFilter) || accountFilter.includes(t.name || '')
+    );
+    if (filtered.length > 0) return filtered;
+    console.warn(`[customers] Account filter "${accountFilter}" matched no tokens, using all`);
+  }
+  return tokens;
 }
 
 // ── 月別離反者を計算 ──
@@ -290,9 +300,12 @@ export default async function handler(req, res) {
       });
     }
 
+    // accountパラメータでSquareアカウントを絞り込み（例: ?account=大森院）
+    const accountFilter = req.query?.account || '大森院';
+
     // 患者データとSquareサブスクを並列取得
     const squareWithTimeout = Promise.race([
-      getSquareSubscribers(),
+      getSquareSubscribers(accountFilter),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Square API timeout (120s)')), 120000)),
     ]).catch(err => {
       console.error('[customers] Square fetch skipped:', err.message);

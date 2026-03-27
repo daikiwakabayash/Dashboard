@@ -97,53 +97,26 @@ async function getSquareSubscribers(accountFilter) {
         results.forEach(r => { customerDetails[r.id] = r; });
       }
 
-      // 4. インボイス取得（決済回数・合計金額・最終決済日）
-      const invoicesByCustomer = {};
-      const locationIds = Object.keys(locationNames);
-
-      for (const locId of locationIds) {
-        try {
-          let invCursor = undefined;
-          do {
-            const invResp = await client.invoicesApi.listInvoices({
-              locationId: locId,
-              cursor: invCursor,
-            });
-            for (const inv of (invResp.result.invoices || [])) {
-              const custId = inv.primaryRecipient?.customerId;
-              if (!custId) continue;
-              if (!invoicesByCustomer[custId]) invoicesByCustomer[custId] = [];
-
-              if (inv.status === 'PAID' || inv.status === 'PARTIALLY_PAID') {
-                const pr = inv.paymentRequests?.[0];
-                const amount = pr?.computedAmountMoney?.amount || pr?.totalCompletedAmountMoney?.amount || 0;
-                invoicesByCustomer[custId].push({
-                  amount: Number(amount),
-                  date: pr?.dueDate || inv.createdAt?.split('T')[0] || '',
-                });
-              }
-            }
-            invCursor = invResp.result.cursor;
-          } while (invCursor);
-        } catch (e) {
-          // インボイス取得エラーは致命的ではないのでログのみ
-          console.error(`[customers] Invoices error (${locId}):`, e.message);
-        }
-      }
-
-      // 5. サブスクリプションごとにデータをまとめる
+      // 4. サブスクリプションごとにデータをまとめる（インボイス取得はスキップ — 高速化）
+      // 決済回数はstartDate→chargedThroughDateの月数で推算
       for (const sub of activeSubscriptions) {
         const customer = customerDetails[sub.customerId] || { name: '不明', phone: '', email: '' };
         const storeName = locationNames[sub.locationId] || accountName;
-        const invoices = invoicesByCustomer[sub.customerId] || [];
 
-        const paymentCount = invoices.length;
-        const totalAmount = invoices.reduce((sum, inv) => sum + inv.amount, 0);
-        const lastPaymentDate = invoices.length > 0
-          ? invoices.sort((a, b) => (b.date || '').localeCompare(a.date || ''))[0].date
-          : sub.chargedThroughDate || '';
-
+        // startDate→chargedThroughDateの月数で決済回数を推算
+        let paymentCount = 0;
+        let totalAmount = 0;
         const planAmount = sub.planVariationData?.phases?.[0]?.orderTemplate?.lineItems?.[0]?.basePriceMoney?.amount;
+        const monthlyAmt = planAmount ? Number(planAmount) : 0;
+
+        if (sub.startDate && sub.chargedThroughDate) {
+          const start = new Date(sub.startDate);
+          const charged = new Date(sub.chargedThroughDate);
+          if (!isNaN(start.getTime()) && !isNaN(charged.getTime())) {
+            paymentCount = Math.max(1, Math.round((charged - start) / (30.44 * 24 * 60 * 60 * 1000)));
+            totalAmount = monthlyAmt * paymentCount;
+          }
+        }
 
         allSubscribers.push({
           name: customer.name,
@@ -157,7 +130,7 @@ async function getSquareSubscribers(accountFilter) {
           subscriptionId: sub.id,
           paymentCount,
           totalAmount,
-          lastPaymentDate,
+          lastPaymentDate: sub.chargedThroughDate || '',
           startDate: sub.startDate || '',
           chargedThroughDate: sub.chargedThroughDate || '',
         });

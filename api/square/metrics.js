@@ -251,9 +251,10 @@ async function fetchAllSubscriptions(client, locationIds, diag, timeoutMs = 1800
           break;
         } catch (err) {
           const is500 = err.statusCode >= 500 || (err.message && err.message.includes('500'));
-          if (is500 && attempt < 2) {
+          const isNetworkError = !err.statusCode && err.message && /ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|network/i.test(err.message);
+          if ((is500 || isNetworkError) && attempt < 2) {
             const delay = 1000 * (attempt + 1); // 1s, 2s
-            console.warn(`  Subscriptions 500 error (${locId}), retry ${attempt + 1}/2 in ${delay}ms...`);
+            console.warn(`  Subscriptions ${isNetworkError ? 'network' : '500'} error (${locId}), retry ${attempt + 1}/2 in ${delay}ms...`);
             await new Promise(r => setTimeout(r, delay));
             continue;
           }
@@ -420,9 +421,10 @@ async function fetchSalesFromPayments(token, env, locationIds, diag, timeoutMs =
           break;
         } catch (err) {
           const is500 = err.statusCode >= 500;
-          if (is500 && attempt < 2) {
+          const isNetworkError = !err.statusCode && err.message && /ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|network/i.test(err.message);
+          if ((is500 || isNetworkError) && attempt < 2) {
             const delay = 1000 * (attempt + 1);
-            console.warn(`  Payments API 500 error (${locId}), retry ${attempt + 1}/2 in ${delay}ms...`);
+            console.warn(`  Payments API ${isNetworkError ? 'network' : '500'} error (${locId}), retry ${attempt + 1}/2 in ${delay}ms...`);
             await new Promise(r => setTimeout(r, delay));
             continue;
           }
@@ -482,9 +484,10 @@ async function fetchSalesFromPayments(token, env, locationIds, diag, timeoutMs =
           break;
         } catch (err) {
           const is500 = err.statusCode >= 500;
-          if (is500 && attempt < 2) {
+          const isNetworkError = !err.statusCode && err.message && /ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|network/i.test(err.message);
+          if ((is500 || isNetworkError) && attempt < 2) {
             const delay = 1000 * (attempt + 1);
-            console.warn(`  Refunds API 500 error (${locId}), retry ${attempt + 1}/2 in ${delay}ms...`);
+            console.warn(`  Refunds API ${isNetworkError ? 'network' : '500'} error (${locId}), retry ${attempt + 1}/2 in ${delay}ms...`);
             await new Promise(r => setTimeout(r, delay));
             continue;
           }
@@ -578,46 +581,61 @@ async function fetchInvoices(client, locationIds, diag, timeoutMs = 180000) {
         if (locCount > 0) errors.push(`${locId}: ページネーション途中 (${locCount}件取得済)`);
         break;
       }
-      try {
-        const { result } = await client.invoicesApi.searchInvoices({
-          query: {
-            filter: { locationIds: [locId] },
-            sort: { field: 'INVOICE_SORT_DATE', order: 'DESC' },
-          },
-          cursor,
-        });
-        if (result.invoices) {
-          for (const inv of result.invoices) {
-            // 25ヶ月以上前のインボイスはスキップ（DESCソートなので以降も古い）
-            if (inv.createdAt && inv.createdAt < cutoffStr) {
-              reachedCutoff = true;
-              break;
+      let succeeded = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const { result } = await client.invoicesApi.searchInvoices({
+            query: {
+              filter: { locationIds: [locId] },
+              sort: { field: 'INVOICE_SORT_DATE', order: 'DESC' },
+            },
+            cursor,
+          });
+          if (result.invoices) {
+            for (const inv of result.invoices) {
+              if (inv.createdAt && inv.createdAt < cutoffStr) {
+                reachedCutoff = true;
+                break;
+              }
+              const pr = inv.paymentRequests && inv.paymentRequests[0];
+              allInvoices.push({
+                id: inv.id,
+                customerId: inv.primaryRecipient ? inv.primaryRecipient.customerId : null,
+                subscriptionId: inv.subscriptionId || null,
+                status: inv.status,
+                amount: pr ? toNumber(pr.computedAmountMoney && pr.computedAmountMoney.amount) : 0,
+                dueDate: pr ? pr.dueDate : null,
+                createdAt: inv.createdAt,
+                locationId: locId,
+              });
+              locCount++;
             }
-            const pr = inv.paymentRequests && inv.paymentRequests[0];
-            allInvoices.push({
-              id: inv.id,
-              customerId: inv.primaryRecipient ? inv.primaryRecipient.customerId : null,
-              subscriptionId: inv.subscriptionId || null,
-              status: inv.status,
-              amount: pr ? toNumber(pr.computedAmountMoney && pr.computedAmountMoney.amount) : 0,
-              dueDate: pr ? pr.dueDate : null,
-              createdAt: inv.createdAt,
-              locationId: locId,
-            });
-            locCount++;
           }
+          if (reachedCutoff) {
+            cursor = undefined;
+          } else {
+            cursor = result.cursor;
+          }
+          succeeded = true;
+          break;
+        } catch (err) {
+          const is500 = err.statusCode >= 500;
+          const isNetworkError = !err.statusCode && err.message && /ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|network/i.test(err.message);
+          if ((is500 || isNetworkError) && attempt < 2) {
+            const delay = 1000 * (attempt + 1);
+            console.warn(`  Invoices ${isNetworkError ? 'network' : '500'} error (${locId}), retry ${attempt + 1}/2 in ${delay}ms...`);
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
+          const errMsg = extractApiError(err);
+          console.error(`  Invoices error (${locId}):`, errMsg);
+          errors.push(`${locId}: ${errMsg}`);
+          cursor = undefined;
+          succeeded = true;
+          break;
         }
-        if (reachedCutoff) {
-          cursor = undefined; // 打ち切り
-        } else {
-          cursor = result.cursor;
-        }
-      } catch (err) {
-        const errMsg = extractApiError(err);
-        console.error(`  Invoices error (${locId}):`, errMsg);
-        errors.push(`${locId}: ${errMsg}`);
-        cursor = undefined;
       }
+      if (!succeeded) cursor = undefined;
     } while (cursor);
   });
   // ロケーション別並列取得で同一インボイスが複数返される場合があるためIDで重複排除
@@ -652,25 +670,41 @@ async function fetchAllCustomers(client, diag) {
   let hasError = false;
   let errorMsg = '';
   do {
-    try {
-      const { result } = cursor
-        ? await client.customersApi.listCustomers(cursor)
-        : await client.customersApi.listCustomers();
-      if (result.customers) {
-        for (const c of result.customers) {
-          customers[c.id] = {
-            name: `${c.familyName || ''} ${c.givenName || ''}`.trim() || c.id,
-            phone: c.phoneNumber || '',
-          };
+    let succeeded = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const { result } = cursor
+          ? await client.customersApi.listCustomers(cursor)
+          : await client.customersApi.listCustomers();
+        if (result.customers) {
+          for (const c of result.customers) {
+            customers[c.id] = {
+              name: `${c.familyName || ''} ${c.givenName || ''}`.trim() || c.id,
+              phone: c.phoneNumber || '',
+            };
+          }
         }
+        cursor = result.cursor;
+        succeeded = true;
+        break;
+      } catch (err) {
+        const is500 = err.statusCode >= 500;
+        const isNetworkError = !err.statusCode && err.message && /ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|network/i.test(err.message);
+        if ((is500 || isNetworkError) && attempt < 2) {
+          const delay = 1000 * (attempt + 1);
+          console.warn(`  Customers API ${isNetworkError ? 'network' : '500'} error, retry ${attempt + 1}/2 in ${delay}ms...`);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        errorMsg = extractApiError(err);
+        console.error('  Customers API error:', errorMsg);
+        hasError = true;
+        cursor = undefined;
+        succeeded = true;
+        break;
       }
-      cursor = result.cursor;
-    } catch (err) {
-      errorMsg = extractApiError(err);
-      console.error('  Customers API error:', errorMsg);
-      hasError = true;
-      cursor = undefined;
     }
+    if (!succeeded) cursor = undefined;
   } while (cursor);
   const count = Object.keys(customers).length;
   if (diag) {

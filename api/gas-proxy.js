@@ -3,6 +3,10 @@
 //   GAS_API_URL       - 経営データ用GAS URL
 //   MARKETING_API_URL - マーケティングデータ用GAS URL
 
+export const config = {
+  maxDuration: 60,
+};
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -30,11 +34,16 @@ export default async function handler(req, res) {
   }
 
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 55000);
+
     const response = await fetch(targetUrl, {
       method: 'GET',
       headers: { 'Accept': 'application/json' },
       redirect: 'follow',
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       throw new Error(`GAS API returned ${response.status}`);
@@ -47,6 +56,9 @@ export default async function handler(req, res) {
     return res.status(200).json(data);
   } catch (err) {
     console.error(`GAS proxy error (${type}):`, err);
-    return res.status(502).json({ error: 'Failed to fetch from GAS API', message: err.message });
+    const message = err.name === 'AbortError'
+      ? 'GAS APIがタイムアウトしました（55秒）'
+      : err.message;
+    return res.status(502).json({ error: 'Failed to fetch from GAS API', message });
   }
 }

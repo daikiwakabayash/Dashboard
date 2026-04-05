@@ -660,6 +660,7 @@ async function fetchAllCustomers(client, diag) {
         for (const c of result.customers) {
           customers[c.id] = {
             name: `${c.familyName || ''} ${c.givenName || ''}`.trim() || c.id,
+            phone: c.phoneNumber || '',
           };
         }
       }

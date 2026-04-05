@@ -1247,6 +1247,8 @@
             const [custSearchQuery, setCustSearchQuery] = useState('');
             const [custLastFetched, setCustLastFetched] = useState(null);
             const [custSetupRequired, setCustSetupRequired] = useState(false);
+            const [custSquareErrors, setCustSquareErrors] = useState([]);
+            const [custSquareDebug, setCustSquareDebug] = useState('');
 
             // ── 経理・ファイナンスタブ用 State ──
             const [finActiveTab, setFinActiveTab] = useState('overview'); // overview | pl | bs | cashflow | qa
@@ -1639,13 +1641,68 @@
                 }
             }, [finMessages, finLoading]);
 
+            // 電話番号正規化（照合用）
+            const normalizePhone = (phone) => {
+                return (phone || '')
+                    .replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+                    .replace(/[\s\-\(\)（）+＋・]/g, '')
+                    .replace(/^0/, '');
+            };
+
+            // 名前正規化
+            const normalizeJapaneseName = (name) => {
+                return (name || '').replace(/[\s\u3000]+/g, '').replace(/[\(\)（）]/g, '').trim();
+            };
+
+            // 患者とSquare契約者の照合（電話番号・名前）
+            const matchPatientToSquare = (patient, subsByPhone, subsByName) => {
+                // 1. 電話番号一致（最優先）
+                if (patient.phone) {
+                    const norm = normalizePhone(patient.phone);
+                    if (norm.length >= 8 && subsByPhone[norm]) return { match: subsByPhone[norm], method: '電話番号' };
+                }
+                const pName = normalizeJapaneseName(patient.name);
+                // 2. 名前完全一致
+                if (pName && subsByName[pName]) return { match: subsByName[pName], method: '名前一致' };
+                // 3. 名前部分一致
+                for (const [key, sub] of Object.entries(subsByName)) {
+                    if (pName.length >= 2 && key.length >= 2 && (pName.includes(key) || key.includes(pName))) {
+                        return { match: sub, method: '名前(部分)' };
+                    }
+                }
+                return null;
+            };
+
             // 顧客データ取得
+            // キャッシュからデータ復元（ページ読み込み時に即表示）
+            const CUST_CACHE_KEY = 'naoru_cust_cache';
+            const CUST_CACHE_TTL = 30 * 60 * 1000; // 30分
+            useEffect(() => {
+                try {
+                    const cached = localStorage.getItem(CUST_CACHE_KEY);
+                    if (cached) {
+                        const { data, timestamp } = JSON.parse(cached);
+                        if (Date.now() - timestamp < CUST_CACHE_TTL && data.monthlyChurn) {
+                            setCustMonthlyChurn(data.monthlyChurn);
+                            setCustSubsAlerts(data.subsAlerts || []);
+                            setCustSummary(data.summary || null);
+                            setCustSquareDebug(data.squareDebug || '');
+                            setCustLastFetched(new Date(timestamp).toLocaleString('ja-JP') + ' (キャッシュ)');
+                            if (data.monthlyChurn.length > 0 && !custSelectedPeriod) {
+                                setCustSelectedPeriod(data.monthlyChurn.length - 1);
+                            }
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+            }, []);
+
             const fetchCustomerData = async () => {
                 setCustLoading(true);
                 setCustError(null);
                 setCustSetupRequired(false);
                 try {
-                    const response = await fetch(CUSTOMERS_API_URL);
+                    // 1. 患者データ取得（高速）
+                    const response = await fetch(CUSTOMERS_API_URL + '?_t=' + Date.now());
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok) {
                         if (data.setupRequired) {
@@ -1654,12 +1711,146 @@
                         }
                         throw new Error(data.message || `HTTP ${response.status}`);
                     }
-                    setCustMonthlyChurn(data.monthlyChurn || []);
-                    setCustSubsAlerts(data.subsAlerts || []);
+
+                    const monthlyChurn = data.monthlyChurn || [];
+                    setCustMonthlyChurn(monthlyChurn);
                     setCustSummary(data.summary || null);
+                    setCustSquareDebug(data.apiVersion ? `[${data.apiVersion}]` : '');
+                    setCustSquareErrors([]);
                     setCustLastFetched(new Date().toLocaleString('ja-JP'));
-                    if (data.monthlyChurn?.length > 0 && !custSelectedPeriod) {
-                        setCustSelectedPeriod(data.monthlyChurn.length - 1);
+                    if (monthlyChurn.length > 0 && !custSelectedPeriod) {
+                        setCustSelectedPeriod(monthlyChurn.length - 1);
+                    }
+
+                    // 2. Square データ取得（別途・非ブロッキング）
+                    // /api/square/metrics から大森院のデータを取得して照合
+                    try {
+                        // まずアカウント一覧から大森院のインデックスを取得
+                        const infoResp = await fetch(SQUARE_API_URL + '?info=1');
+                        const infoData = infoResp.ok ? await infoResp.json() : null;
+                        let omoriIdx = -1;
+                        if (infoData?.accounts) {
+                            omoriIdx = infoData.accounts.findIndex(a => (a.name || '').includes('大森'));
+                        }
+
+                        if (omoriIdx >= 0) {
+                            const sqResp = await fetch(SQUARE_API_URL + '?account=' + omoriIdx + '&_t=' + Date.now());
+                            if (sqResp.ok) {
+                                const sqData = await sqResp.json();
+                                const customers = sqData.customers || {};
+                                const subscriptions = sqData.subscriptions || [];
+                                const activeSubs = subscriptions.filter(s => s.status === 'ACTIVE');
+
+                                // サブスクリプション×顧客名をマッピング
+                                const subsByPhone = {};
+                                const subsByName = {};
+                                const allSubs = [];
+                                for (const sub of activeSubs) {
+                                    const cust = customers[sub.customerId];
+                                    const custName = cust ? cust.name : '';
+                                    // 決済回数はstartDate→chargedThroughDateの月数で推算
+                                    let payCount = 0;
+                                    let totalAmt = 0;
+                                    if (sub.startDate && sub.chargedThroughDate) {
+                                        const start = new Date(sub.startDate);
+                                        const charged = new Date(sub.chargedThroughDate);
+                                        if (!isNaN(start) && !isNaN(charged)) {
+                                            payCount = Math.max(1, Math.round((charged - start) / (30.44 * 24 * 60 * 60 * 1000)));
+                                            totalAmt = (sub.monthlyPrice || 0) * payCount;
+                                        }
+                                    }
+                                    const custPhone = cust ? cust.phone : '';
+                                    const subInfo = {
+                                        name: custName,
+                                        phone: custPhone,
+                                        store: (sqData.stores || [])[0]?.name || '大森院',
+                                        monthlyAmount: sub.monthlyPrice || 0,
+                                        paymentCount: payCount,
+                                        totalAmount: totalAmt,
+                                        lastPaymentDate: sub.chargedThroughDate || '',
+                                    };
+                                    allSubs.push(subInfo);
+                                    // 電話番号インデックス（最優先照合）
+                                    if (custPhone) {
+                                        const normPhone = normalizePhone(custPhone);
+                                        if (normPhone.length >= 8) subsByPhone[normPhone] = subInfo;
+                                    }
+                                    // 名前インデックス
+                                    const normName = normalizeJapaneseName(custName);
+                                    if (normName) subsByName[normName] = subInfo;
+                                }
+                                setCustSquareDebug(prev => prev + ` Square: ${allSubs.length}件取得`);
+
+                                // 離反者にSquareデータを付与
+                                let totalMatched = 0;
+                                const matchMethods = {};
+                                const updatedChurn = monthlyChurn.map(period => {
+                                    const updatedPatients = period.patients.map(p => {
+                                        const result = matchPatientToSquare(p, subsByPhone, subsByName);
+                                        if (result) {
+                                            totalMatched++;
+                                            matchMethods[result.method] = (matchMethods[result.method] || 0) + 1;
+                                            return {
+                                                ...p,
+                                                hasSubscription: true,
+                                                monthlyAmount: result.match.monthlyAmount,
+                                                subscriptionStore: result.match.store,
+                                                paymentCount: result.match.paymentCount,
+                                                totalAmount: result.match.totalAmount,
+                                                lastPaymentDate: result.match.lastPaymentDate,
+                                                squareName: result.match.name,
+                                                matchMethod: result.method,
+                                            };
+                                        }
+                                        return p;
+                                    });
+                                    updatedPatients.sort((a, b) => (a.hasSubscription === b.hasSubscription) ? 0 : a.hasSubscription ? -1 : 1);
+                                    return { ...period, patients: updatedPatients, subsCount: updatedPatients.filter(p => p.hasSubscription).length };
+                                });
+                                setCustMonthlyChurn(updatedChurn);
+
+                                // サブスクアラート
+                                const alerts = [];
+                                for (const period of updatedChurn) {
+                                    for (const p of period.patients) {
+                                        if (p.hasSubscription) {
+                                            alerts.push({ ...p, churnPeriod: period.label, churnDescription: period.description });
+                                        }
+                                    }
+                                }
+                                setCustSubsAlerts(alerts);
+
+                                const mergedSummary = {
+                                    ...(data.summary || {}),
+                                    squareSubscribers: allSubs.length,
+                                    matchedCount: totalMatched,
+                                    matchMethods,
+                                    subsAlertCount: alerts.length,
+                                };
+                                setCustSummary(mergedSummary);
+
+                                // キャッシュ保存（30分間有効）
+                                try {
+                                    const debugStr = `[${data.apiVersion || ''}] Square: ${allSubs.length}件取得`;
+                                    localStorage.setItem(CUST_CACHE_KEY, JSON.stringify({
+                                        data: { monthlyChurn: updatedChurn, subsAlerts: alerts, summary: mergedSummary, squareDebug: debugStr },
+                                        timestamp: Date.now(),
+                                    }));
+                                } catch (e) { /* quota exceeded etc */ }
+                            }
+                        } else {
+                            setCustSquareDebug(prev => prev + ' 大森院アカウント未検出');
+                            // Square無しでもキャッシュ保存
+                            try {
+                                localStorage.setItem(CUST_CACHE_KEY, JSON.stringify({
+                                    data: { monthlyChurn, subsAlerts: [], summary: data.summary, squareDebug: '' },
+                                    timestamp: Date.now(),
+                                }));
+                            } catch (e) { /* ignore */ }
+                        }
+                    } catch (sqErr) {
+                        console.warn('[customers] Square cross-ref failed (non-blocking):', sqErr.message);
+                        setCustSquareDebug(prev => prev + ` Square照合エラー: ${sqErr.message}`);
                     }
                 } catch (err) {
                     console.error('[customers] Fetch error:', err);
@@ -2172,32 +2363,8 @@
                     fetchMarketingData(true);
                 }, 6 * 60 * 60 * 1000);
 
-                const handleClickOutside = (event) => {
-                    if (branchMenuRef.current && !branchMenuRef.current.contains(event.target)) {
-                        setIsBranchMenuOpen(false);
-                    }
-                    if (staffMenuRef.current && !staffMenuRef.current.contains(event.target)) {
-                        setIsStaffMenuOpen(false);
-                    }
-                    if (menuDropdownRef.current && !menuDropdownRef.current.contains(event.target)) {
-                        setMenuDropdownOpen(false);
-                    }
-                    if (sqStoreMenuRef.current && !sqStoreMenuRef.current.contains(event.target)) {
-                        setSqStoreMenuOpen(false);
-                    }
-                    if (alertRef.current && !alertRef.current.contains(event.target)) {
-                        setAlertOpen(false);
-                    }
-                    if (planBranchMenuRef.current && !planBranchMenuRef.current.contains(event.target)) {
-                        setPlanBranchMenuOpen(false);
-                    }
-                };
-
-                document.addEventListener("mousedown", handleClickOutside);
-
                 return () => {
                     clearInterval(autoRefreshInterval);
-                    document.removeEventListener("mousedown", handleClickOutside);
                 };
             }, []);
 
@@ -3283,16 +3450,7 @@
                 return Object.values(map);
             }, [sqDrilldown, sqPreprocessed]);
 
-            // マーケティングドロップダウンのクリック外検知
-            useEffect(() => {
-                const handleMktClickOutside = (event) => {
-                    if (mktBranchRef.current && !mktBranchRef.current.contains(event.target)) setMktBranchMenuOpen(false);
-                    if (mktStaffRef.current && !mktStaffRef.current.contains(event.target)) setMktStaffMenuOpen(false);
-                    if (mktMediaRef.current && !mktMediaRef.current.contains(event.target)) setMktMediaMenuOpen(false);
-                };
-                document.addEventListener("mousedown", handleMktClickOutside);
-                return () => document.removeEventListener("mousedown", handleMktClickOutside);
-            }, []);
+            // マーケティングドロップダウンのクリック外検知はPortalDropdownが処理
 
             // UI状態が変更されたらlocalStorageに保存
             useEffect(() => {
@@ -9870,6 +10028,28 @@
                                 </div>
                             )}
 
+                            {/* Squareエラー/デバッグ表示 */}
+                            {!custLoading && (custSquareErrors.length > 0 || custSquareDebug) && (
+                                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 animate-fade-in">
+                                    <div className="flex items-start gap-3">
+                                        <AlertCircle size={20} className="text-amber-500 mt-0.5 flex-shrink-0" />
+                                        <div className="space-y-1">
+                                            {custSquareErrors.length > 0 && (
+                                                <p className="text-sm text-amber-700 font-bold">Square API エラー</p>
+                                            )}
+                                            {custSquareErrors.map((e, i) => (
+                                                <p key={i} className="text-xs text-amber-600">
+                                                    <span className="font-bold">{e.account}:</span> {e.error}
+                                                </p>
+                                            ))}
+                                            {custSquareDebug && (
+                                                <p className="text-[10px] text-amber-400 mt-2">Debug: {custSquareDebug}</p>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
                             {/* ローディング */}
                             {custLoading && (
                                 <div className="flex items-center justify-center py-20 animate-fade-in">
@@ -9899,6 +10079,9 @@
                                     <div className="bg-white rounded-2xl border border-blue-200 p-4 card-hover">
                                         <div className="text-[10px] font-black text-blue-500 uppercase tracking-wider mb-1">Square契約者</div>
                                         <div className="text-2xl font-black text-blue-600">{(custSummary.squareSubscribers || 0).toLocaleString()}</div>
+                                        {custSummary.matchedCount > 0 && (
+                                            <div className="text-[10px] text-emerald-500 font-bold mt-1">照合済: {custSummary.matchedCount}名</div>
+                                        )}
                                     </div>
                                 </div>
                             )}
@@ -9992,7 +10175,10 @@
                                                                             <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">患者名</th>
                                                                             <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">最終来院日</th>
                                                                             <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">店舗</th>
-                                                                            <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">決済継続</th>
+                                                                            <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">決済状況</th>
+                                                                            <th className="text-right py-2 px-3 font-black text-slate-500 text-xs">決済回数</th>
+                                                                            <th className="text-right py-2 px-3 font-black text-slate-500 text-xs">合計金額</th>
+                                                                            <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">最終決済日</th>
                                                                         </tr>
                                                                     </thead>
                                                                     <tbody>
@@ -10000,18 +10186,34 @@
                                                                             <tr key={pidx} className={`border-b border-slate-50 transition-colors ${
                                                                                 p.hasSubscription ? 'bg-red-50/50 hover:bg-red-50' : 'hover:bg-slate-50'
                                                                             }`}>
-                                                                                <td className="py-2.5 px-3 font-bold text-slate-800">{p.name || '不明'}</td>
+                                                                                <td className="py-2.5 px-3 font-bold text-slate-800">
+                                                                                    {p.name || '不明'}
+                                                                                    {p.squareName && (
+                                                                                        <span className="block text-[10px] text-blue-400 font-normal">
+                                                                                            Square: {p.squareName}{p.matchMethod ? ` (${p.matchMethod})` : ''}
+                                                                                        </span>
+                                                                                    )}
+                                                                                </td>
                                                                                 <td className="py-2.5 px-3 text-slate-600">{p.lastVisitDate || '-'}</td>
-                                                                                <td className="py-2.5 px-3 text-slate-600 text-xs">{p.store || '-'}</td>
+                                                                                <td className="py-2.5 px-3 text-slate-600 text-xs">{p.subscriptionStore || p.store || '-'}</td>
                                                                                 <td className="py-2.5 px-3">
                                                                                     {p.hasSubscription ? (
                                                                                         <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-black bg-red-100 text-red-700">
-                                                                                            <AlertCircle size={10} /> 決済継続中
+                                                                                            <AlertCircle size={10} /> 継続中
                                                                                             {p.monthlyAmount ? ` ¥${p.monthlyAmount.toLocaleString()}/月` : ''}
                                                                                         </span>
                                                                                     ) : (
                                                                                         <span className="text-xs text-slate-400">なし</span>
                                                                                     )}
+                                                                                </td>
+                                                                                <td className="py-2.5 px-3 text-right font-bold text-slate-700">
+                                                                                    {p.hasSubscription ? (p.paymentCount != null ? `${p.paymentCount}回` : '-') : '-'}
+                                                                                </td>
+                                                                                <td className="py-2.5 px-3 text-right font-bold text-slate-700">
+                                                                                    {p.hasSubscription && p.totalAmount ? `¥${p.totalAmount.toLocaleString()}` : '-'}
+                                                                                </td>
+                                                                                <td className="py-2.5 px-3 text-slate-600 text-xs">
+                                                                                    {p.hasSubscription ? (p.lastPaymentDate || '-') : '-'}
                                                                                 </td>
                                                                             </tr>
                                                                         ))}
@@ -10076,27 +10278,32 @@
                                                                 <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">最終来院日</th>
                                                                 <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">離反時期</th>
                                                                 <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">決済額/月</th>
+                                                                <th className="text-right py-2 px-3 font-black text-slate-500 text-xs">決済回数</th>
+                                                                <th className="text-right py-2 px-3 font-black text-slate-500 text-xs">合計金額</th>
+                                                                <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">最終決済日</th>
                                                                 <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">店舗</th>
-                                                                <th className="text-left py-2 px-3 font-black text-slate-500 text-xs">ステータス</th>
                                                             </tr>
                                                         </thead>
                                                         <tbody>
                                                             {custSubsAlerts.map((p, idx) => (
                                                                 <tr key={idx} className="border-b border-slate-50 hover:bg-red-50/50 transition-colors">
-                                                                    <td className="py-2.5 px-3 font-bold text-slate-800">{p.name || '不明'}</td>
+                                                                    <td className="py-2.5 px-3 font-bold text-slate-800">
+                                                                        {p.name || '不明'}
+                                                                        {p.squareName && p.squareName !== p.name && (
+                                                                            <span className="block text-[10px] text-blue-400 font-normal">Square: {p.squareName}</span>
+                                                                        )}
+                                                                    </td>
                                                                     <td className="py-2.5 px-3 text-slate-600">{p.lastVisitDate || '-'}</td>
                                                                     <td className="py-2.5 px-3">
                                                                         <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-700">
                                                                             {p.churnPeriod || '-'}
                                                                         </span>
                                                                     </td>
-                                                                    <td className="py-2.5 px-3 font-bold text-slate-800">{p.monthlyAmount ? `¥${p.monthlyAmount.toLocaleString()}` : '-'}</td>
-                                                                    <td className="py-2.5 px-3 text-slate-600 text-xs">{p.store || '-'}</td>
-                                                                    <td className="py-2.5 px-3">
-                                                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-black bg-red-100 text-red-700">
-                                                                            <AlertCircle size={10} /> 要確認
-                                                                        </span>
-                                                                    </td>
+                                                                    <td className="py-2.5 px-3 font-bold text-slate-800">{p.monthlyAmount ? `¥${p.monthlyAmount.toLocaleString()}/月` : '-'}</td>
+                                                                    <td className="py-2.5 px-3 text-right font-bold text-slate-700">{p.paymentCount != null ? `${p.paymentCount}回` : '-'}</td>
+                                                                    <td className="py-2.5 px-3 text-right font-bold text-slate-700">{p.totalAmount ? `¥${p.totalAmount.toLocaleString()}` : '-'}</td>
+                                                                    <td className="py-2.5 px-3 text-slate-600 text-xs">{p.lastPaymentDate || '-'}</td>
+                                                                    <td className="py-2.5 px-3 text-slate-600 text-xs">{p.subscriptionStore || p.store || '-'}</td>
                                                                 </tr>
                                                             ))}
                                                         </tbody>
@@ -11139,6 +11346,7 @@
                                     top: dropdownPos.top,
                                     left: dropdownPos.left,
                                 }}
+                                onClick={e => e.stopPropagation()}
                             >
                             {/* 選択モード表示 */}
                             <div className="flex gap-2 mb-4">

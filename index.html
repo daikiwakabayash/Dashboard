@@ -1067,17 +1067,29 @@
                     const res = await fetch('/api/auth', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
+                        cache: 'no-store',
                         body: JSON.stringify({ action: 'login', password: authPassword })
                     });
-                    const data = await res.json();
-                    if (data.authenticated) {
+                    // レスポンスが JSON でないケース（Vercel 500 HTMLページ等）もハンドリング
+                    const rawText = await res.text();
+                    let data = null;
+                    try { data = rawText ? JSON.parse(rawText) : null; } catch { /* non-JSON */ }
+
+                    if (data && data.authenticated) {
                         localStorage.setItem('naoru_auth_token', data.token);
                         setAuthState({ checking: false, authenticated: true, token: data.token });
+                    } else if (data && data.error) {
+                        setAuthError(data.error);
+                    } else if (!res.ok) {
+                        // サーバーが JSON を返さず落ちている（HTMLエラーページ等）
+                        console.error('[auth] HTTP', res.status, rawText?.slice(0, 200));
+                        setAuthError(`サーバーエラー (HTTP ${res.status})`);
                     } else {
-                        setAuthError(data.error || 'ログインに失敗しました');
+                        setAuthError('ログインに失敗しました');
                     }
                 } catch (err) {
-                    setAuthError('サーバーに接続できません');
+                    console.error('[auth] fetch failed:', err);
+                    setAuthError(`接続エラー: ${err?.message || err}`);
                 }
                 setAuthLoading(false);
             };

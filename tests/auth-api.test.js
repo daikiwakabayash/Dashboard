@@ -105,4 +105,34 @@ describe('認証API - ロジックテスト', () => {
     handler({ method: 'POST', body: { action: 'invalid' } }, res);
     expect(res.statusCode).toBe(400);
   });
+
+  it('req.body が文字列でも処理できる', async () => {
+    process.env.DASHBOARD_PASSWORD = 'test-pw';
+    const { default: handler } = await import('../api/auth.js');
+    const res = createMockRes();
+    handler(
+      { method: 'POST', body: JSON.stringify({ action: 'login', password: 'test-pw' }) },
+      res
+    );
+    expect(res.statusCode).toBe(200);
+    expect(res.body.authenticated).toBe(true);
+  });
+
+  it('req.body が undefined でも 500 HTML ではなく JSON を返す', async () => {
+    process.env.DASHBOARD_PASSWORD = 'test-pw';
+    const { default: handler } = await import('../api/auth.js');
+    const res = createMockRes();
+    handler({ method: 'POST' }, res);
+    // action なし → 400 の JSON レスポンス（クラッシュしない）
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toBeTruthy();
+  });
+
+  it('認証レスポンスはキャッシュさせないヘッダを返す', async () => {
+    process.env.DASHBOARD_PASSWORD = 'test-pw';
+    const { default: handler } = await import('../api/auth.js');
+    const res = createMockRes();
+    handler({ method: 'POST', body: { action: 'login', password: 'test-pw' } }, res);
+    expect(res.headers['Cache-Control']).toMatch(/no-store/);
+  });
 });

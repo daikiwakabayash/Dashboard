@@ -99,6 +99,11 @@
         .scrollbar-thin::-webkit-scrollbar-thumb { background-color: #FFC4A8; border-radius: 20px; }
         .scrollbar-thin::-webkit-scrollbar-thumb:hover { background-color: #FF9D70; }
 
+        /* 経営指標タブのデスクトップ表示を 75% 相当に縮小 (モバイルはそのまま) */
+        @media (min-width: 768px) {
+            .dashboard-compact { zoom: 0.8; }
+        }
+
         /* Mobile Bottom Navigation */
         @media (max-width: 767px) {
             .mobile-card-grid { grid-template-columns: repeat(2, 1fr) !important; }
@@ -834,7 +839,13 @@
 
         // オーナー別の管理店舗マッピング（店舗名は normalizeBranch 後の形で記述）
         const OWNER_BRANCHES = {
-            '野島オーナー': ['千種', '金山', '藤が丘', '伏見', '福岡天神', '福岡姪浜', '姪浜', '熊本'],
+            '野島オーナー': ['千種', '金山', '藤が丘', '伏見', '福岡天神', '姪浜', '熊本'],
+        };
+
+        // allBranches の表記ゆれ（「福岡姪浜」「姪浜」など）も拾えるように部分一致で判定
+        const branchMatchesOwnerTarget = (branch, target) => {
+            if (!branch || !target) return false;
+            return branch === target || branch.includes(target) || target.includes(branch);
         };
 
         // マーケティングデータを標準化
@@ -3585,7 +3596,10 @@
                 setIsOwnerMenuOpen(false);
                 if (!ownerKey) return;
                 const ownerBranches = OWNER_BRANCHES[ownerKey] || [];
-                const present = allBranches.filter(b => ownerBranches.includes(b));
+                // 「姪浜」プリセットが「福岡姪浜」にも一致するよう部分一致で拾う
+                const present = allBranches.filter(b =>
+                    ownerBranches.some(target => branchMatchesOwnerTarget(b, target))
+                );
                 setSelectedBranches(present);
             };
 
@@ -6450,8 +6464,8 @@
                             <img src="/logo.png" alt="NAORU" className="h-8 w-auto object-contain" />
                         </div>
                         {currentPage === 'dashboard' && (
-                            <div className="p-2 md:p-3 lg:p-4 font-sans text-slate-900">
-                                <div className="max-w-[1600px] mx-auto space-y-3 md:space-y-4">
+                            <div className="p-2 md:p-3 lg:p-4 font-sans text-slate-900 dashboard-compact">
+                                <div className="max-w-[2000px] mx-auto space-y-3 md:space-y-4">
 
                         {/* Filter Header */}
                         <header className="flex flex-col gap-2 md:gap-3 bg-white p-3 md:p-4 rounded-2xl shadow-sm border border-slate-200 card-hover animate-fade-in-up">

@@ -6493,25 +6493,12 @@
                             <div className="flex flex-wrap items-center gap-2">
                                 <div className="flex flex-col gap-1">
                                     <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">期間選択</span>
-                                    <DateRangePicker
-                                        startDate={startDate}
-                                        endDate={endDate}
-                                        onDateChange={(start, end) => {
-                                            setStartDate(start);
-                                            setEndDate(end);
-
-                                            // 日付範囲から対象月を計算
-                                            if (start && end) {
-                                                const getMonthString = (date) => {
-                                                    return `${date.getFullYear()}年${date.getMonth() + 1}月`;
-                                                };
-
-                                                const startMonthStr = getMonthString(start);
-                                                const endMonthStr = getMonthString(end);
-
-                                                setStartMonth(startMonthStr);
-                                                setEndMonth(endMonthStr);
-                                            }
+                                    <MonthRangePicker
+                                        startMonth={startMonth}
+                                        endMonth={endMonth}
+                                        onMonthChange={(s, e) => {
+                                            setStartMonth(s);
+                                            setEndMonth(e);
                                         }}
                                         months={months}
                                     />
@@ -11352,6 +11339,45 @@
                     }, children)
                 ),
                 document.body
+            );
+        };
+
+        // 月範囲選択コンポーネント（年月単位のみ・日付不要のシンプル版）
+        const MonthRangePicker = ({ startMonth, endMonth, onMonthChange, months }) => {
+            const selectClass = "bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 md:py-2 text-xs md:text-sm font-bold hover:bg-slate-100 transition-colors shadow-sm outline-none focus:ring-2 focus:ring-brand-400";
+            return (
+                <div className="flex items-center gap-1.5">
+                    <select
+                        value={startMonth || ''}
+                        onChange={(e) => {
+                            const s = e.target.value;
+                            // 開始月が終了月より新しくなったら終了月も合わせる（monthsは降順）
+                            const sIdx = months.indexOf(s);
+                            const eIdx = months.indexOf(endMonth || '');
+                            const newEnd = sIdx !== -1 && eIdx !== -1 && sIdx < eIdx ? s : endMonth;
+                            onMonthChange(s, newEnd);
+                        }}
+                        className={selectClass}
+                    >
+                        {!startMonth && <option value="">選択</option>}
+                        {months.map(m => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                    <span className="text-slate-400 text-xs font-bold">〜</span>
+                    <select
+                        value={endMonth || ''}
+                        onChange={(e) => {
+                            const en = e.target.value;
+                            const sIdx = months.indexOf(startMonth || '');
+                            const eIdx = months.indexOf(en);
+                            const newStart = sIdx !== -1 && eIdx !== -1 && eIdx > sIdx ? en : startMonth;
+                            onMonthChange(newStart, en);
+                        }}
+                        className={selectClass}
+                    >
+                        {!endMonth && <option value="">選択</option>}
+                        {months.map(m => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                </div>
             );
         };
 

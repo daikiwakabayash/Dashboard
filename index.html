@@ -824,6 +824,17 @@
             roas: { excellent: 400, good: 300, average: 200, poor: 100, label: 'ROAS' },
         };
 
+        // オーナー別の管理店舗マッピング（店舗名は normalizeBranch 後の形で記述）
+        const OWNER_BRANCHES = {
+            '野島オーナー': ['千種', '金山', '藤が丘', '伏見', '福岡天神', '姪浜', '熊本'],
+        };
+
+        // allBranches の表記ゆれ（「福岡姪浜」「姪浜」など）も拾えるように部分一致で判定
+        const branchMatchesOwnerTarget = (branch, target) => {
+            if (!branch || !target) return false;
+            return branch === target || branch.includes(target) || target.includes(branch);
+        };
+
         // マーケティングデータを標準化
         const normalizeMarketingData = (rawData) => {
             try {
@@ -1131,8 +1142,11 @@
             const [staffSearchTerm, setStaffSearchTerm] = useState("");
             const [selectedMetrics, setSelectedMetrics] = useState(savedUIState?.selectedMetrics || ['totalSales']);
             const [uiStateLoaded, setUiStateLoaded] = useState(!!savedUIState);
+            const [selectedOwner, setSelectedOwner] = useState('');
+            const [isOwnerMenuOpen, setIsOwnerMenuOpen] = useState(false);
             const branchMenuRef = useRef(null);
             const staffMenuRef = useRef(null);
+            const ownerMenuRef = useRef(null);
 
             // マーケティングダッシュボード用 State
             const [mktData, setMktData] = useState([]);
@@ -3530,6 +3544,21 @@
                         ? prev.filter(b => b !== branch)
                         : [...prev, branch]
                 );
+            };
+
+            // オーナー選択: 配下店舗だけにフィルターをかける
+            const applyOwnerFilter = (ownerKey) => {
+                setSelectedOwner(ownerKey);
+                setIsOwnerMenuOpen(false);
+                if (!ownerKey) {
+                    setSelectedBranches(allBranches);
+                    return;
+                }
+                const ownerBranches = OWNER_BRANCHES[ownerKey] || [];
+                const present = allBranches.filter(b =>
+                    ownerBranches.some(target => branchMatchesOwnerTarget(b, target))
+                );
+                setSelectedBranches(present);
             };
 
             const toggleStaff = (staffName) => {
@@ -6457,6 +6486,46 @@
                                                     <div className="text-center text-sm text-slate-400 py-4">該当する店舗がありません</div>
                                                 )}
                                             </div>
+                                        </div>
+                                    </PortalDropdown>
+                                </div>
+
+                                {/* Owner-Managed Stores Selection */}
+                                <div className="flex flex-col gap-1 min-w-0 w-full sm:min-w-[220px] sm:w-auto relative" ref={ownerMenuRef}>
+                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">オーナー管理店舗</span>
+                                    <button
+                                        onClick={() => setIsOwnerMenuOpen(!isOwnerMenuOpen)}
+                                        className="bg-slate-50 border border-slate-200 rounded-xl px-3 md:px-4 py-2 md:py-2.5 text-sm md:text-base font-bold flex items-center justify-between gap-2 hover:bg-slate-100 transition-colors shadow-sm"
+                                    >
+                                        <span className="truncate">{selectedOwner || "オーナーを選択"}</span>
+                                        <ChevronDown size={18} className={`transition-transform flex-shrink-0 ${isOwnerMenuOpen ? 'rotate-180' : ''}`} />
+                                    </button>
+                                    <PortalDropdown anchorRef={ownerMenuRef} isOpen={isOwnerMenuOpen} onClose={() => setIsOwnerMenuOpen(false)} width={280}>
+                                        <div className="bg-white border border-slate-200 rounded-2xl shadow-xl p-3 space-y-1 w-[280px]">
+                                            <div
+                                                onClick={() => applyOwnerFilter('')}
+                                                className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-50 cursor-pointer transition-colors"
+                                            >
+                                                <div className={`w-5 h-5 rounded-full border flex items-center justify-center ${!selectedOwner ? 'bg-slate-400 border-slate-400' : 'border-slate-300'}`}>
+                                                    {!selectedOwner && <Check size={14} className="text-white" />}
+                                                </div>
+                                                <span className={`text-sm font-bold ${!selectedOwner ? 'text-slate-900' : 'text-slate-500'}`}>解除（全店舗）</span>
+                                            </div>
+                                            {Object.entries(OWNER_BRANCHES).map(([owner, branches]) => (
+                                                <div
+                                                    key={owner}
+                                                    onClick={() => applyOwnerFilter(owner)}
+                                                    className="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-brand-50 cursor-pointer transition-colors"
+                                                >
+                                                    <div className={`w-5 h-5 mt-0.5 rounded-full border flex items-center justify-center flex-shrink-0 ${selectedOwner === owner ? 'bg-brand-500 border-brand-500' : 'border-slate-300'}`}>
+                                                        {selectedOwner === owner && <Check size={14} className="text-white" />}
+                                                    </div>
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className={`text-sm font-black ${selectedOwner === owner ? 'text-slate-900' : 'text-slate-700'}`}>{owner}</div>
+                                                        <div className="text-[10px] text-slate-400 font-bold mt-0.5 leading-snug">{branches.join('・')}</div>
+                                                    </div>
+                                                </div>
+                                            ))}
                                         </div>
                                     </PortalDropdown>
                                 </div>

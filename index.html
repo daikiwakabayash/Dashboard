@@ -6081,6 +6081,8 @@
                 const churnRate = prevMembers > 0 ? Math.round((churnCount / prevMembers) * 100) : 0;
                 const prevSales = prevData.reduce((s, d) => s + vn(d.individualSales), 0);
                 const prevNewCount = prevData.reduce((s, d) => s + vn(d.newCount), 0);
+                // 当該店舗のエリア
+                const branchArea = curData[0]?.area || '';
                 // マーケティング: 媒体別CPA
                 const mktFilter = branchName ? (d => d.branch === branchName) : (() => true);
                 const curMkt = mktData.filter(d => d.month === latestMonth && d.media !== '全媒体合計').filter(mktFilter);
@@ -6121,12 +6123,31 @@
                     const bEnroll = bd.reduce((s, d) => s + vn(d.newEnroll), 0);
                     const bAdSpend = bm.reduce((s, d) => s + (d.adSpend || 0), 0);
                     const bMktNew = bm.reduce((s, d) => s + (d.newCount || 0), 0);
-                    return { branch: b, sales: bSales, newCount: bNew,
+                    return { branch: b, area: bd[0]?.area || '', sales: bSales, newCount: bNew,
                         enrollRate: bNew > 0 ? Math.round((bEnroll / bNew) * 100) : 0,
                         cpa: bMktNew > 0 ? Math.round(bAdSpend / bMktNew) : 0, adSpend: bAdSpend };
                 }).sort((a, b) => b.sales - a.sales);
-                // 月別トレンド（過去6ヶ月）
-                const recentMonths = allMonths.slice(-6);
+                // 同規模・同エリア店舗ベンチマーク（売上±30%以内 or 同エリア）
+                let similarBenchmark = null;
+                if (branchName && totalSales > 0) {
+                    const lowBound = totalSales * 0.7;
+                    const highBound = totalSales * 1.3;
+                    const sameScale = branchRanking.filter(b => b.branch !== branchName && b.sales >= lowBound && b.sales <= highBound);
+                    const sameArea = branchArea ? branchRanking.filter(b => b.branch !== branchName && b.area === branchArea) : [];
+                    const peers = sameScale.length >= 3 ? sameScale : (sameArea.length >= 3 ? sameArea : sameScale.concat(sameArea.filter(s => !sameScale.some(x => x.branch === s.branch))));
+                    if (peers.length > 0) {
+                        const avg = (key) => Math.round(peers.reduce((s, p) => s + (p[key] || 0), 0) / peers.length);
+                        similarBenchmark = {
+                            count: peers.length,
+                            type: sameScale.length >= 3 ? `売上同規模（±30%）` : (sameArea.length >= 3 ? `${branchArea}エリア` : '類似店'),
+                            peers: peers.slice(0, 5).map(p => ({ branch: p.branch, sales: p.sales, newCount: p.newCount, enrollRate: p.enrollRate, cpa: p.cpa })),
+                            avgSales: avg('sales'), avgNewCount: avg('newCount'),
+                            avgEnrollRate: avg('enrollRate'), avgCpa: avg('cpa'),
+                        };
+                    }
+                }
+                // 月別トレンド（過去12ヶ月）
+                const recentMonths = allMonths.slice(-12);
                 const monthlyTrend = recentMonths.map(m => {
                     const md = rawData.filter(d => d.month === m).filter(branchFilter);
                     const mm = mktData.filter(d => d.month === m && d.media !== '全媒体合計').filter(mktFilter);
@@ -6135,15 +6156,28 @@
                     const mEnroll = md.reduce((s, d) => s + vn(d.newEnroll), 0);
                     const mAdSpend = mm.reduce((s, d) => s + (d.adSpend || 0), 0);
                     const mMktNew = mm.reduce((s, d) => s + (d.newCount || 0), 0);
-                    return { month: m, sales: mSales, newCount: mNew,
+                    const mChurn = md.reduce((s, d) => s + vn(d.churnCount), 0);
+                    const mPrevMembers = md.reduce((s, d) => s + vn(d.prevMembers), 0);
+                    return { month: m, sales: mSales, newCount: mNew, adSpend: mAdSpend,
                         enrollRate: mNew > 0 ? Math.round((mEnroll / mNew) * 100) : 0,
+                        churnRate: mPrevMembers > 0 ? Math.round((mChurn / mPrevMembers) * 100) : 0,
                         cpa: mMktNew > 0 ? Math.round(mAdSpend / mMktNew) : 0 };
                 });
+                // 季節性: 年間移動平均と季節指数（前年同月比 当該月／12ヶ月平均）
+                const trendStats = (() => {
+                    if (monthlyTrend.length < 6) return null;
+                    const avgSales = Math.round(monthlyTrend.reduce((s, m) => s + m.sales, 0) / monthlyTrend.length);
+                    const avgNew = Math.round(monthlyTrend.reduce((s, m) => s + m.newCount, 0) / monthlyTrend.length);
+                    const peakSalesMonth = monthlyTrend.reduce((max, m) => m.sales > max.sales ? m : max, monthlyTrend[0]);
+                    const lowSalesMonth = monthlyTrend.reduce((min, m) => m.sales < min.sales ? m : min, monthlyTrend[0]);
+                    return { avgSales, avgNew, peakMonth: peakSalesMonth.month, peakSales: peakSalesMonth.sales,
+                        lowMonth: lowSalesMonth.month, lowSales: lowSalesMonth.sales };
+                })();
                 return {
                     latestMonth, prevMonth, totalSales, totalNewCount, totalNewEnroll, enrollRate,
                     churnRate, cpa, totalAdSpend, prevSales, prevNewCount,
-                    mediaBreakdown, prevMediaMap, branchRanking, monthlyTrend,
-                    branchName: branchName || '全店舗',
+                    mediaBreakdown, prevMediaMap, branchRanking, monthlyTrend, similarBenchmark, trendStats,
+                    branchArea, branchName: branchName || '全店舗',
                 };
             };
 
@@ -6180,20 +6214,90 @@
                     const cpaDiff = prev && prev.newCount > 0 ? '（前月CPA: ¥' + Math.round(prev.adSpend / prev.newCount).toLocaleString() + '）' : '';
                     lines.push(m.media + ': 新規' + m.newCount + '名, CPA ¥' + m.cpa.toLocaleString() + cpaDiff + ', 入会率' + m.enrollRate + '%, 広告費¥' + m.adSpend.toLocaleString() + ', ROAS ' + m.roas + '%');
                 });
-                lines.push('', '【他店舗との比較ランキング（' + a.latestMonth + '）】');
+                lines.push('', '【他店舗との比較ランキング（' + a.latestMonth + ' 売上順）】');
+                // 全店舗多すぎると冗長なので、自店周辺と上位下位のみ
+                const selfIdx = a.branchRanking.findIndex(b => b.branch === branch);
+                const showRanks = new Set();
+                a.branchRanking.slice(0, 5).forEach((_, i) => showRanks.add(i)); // 上位5
+                a.branchRanking.slice(-3).forEach((_, i) => showRanks.add(a.branchRanking.length - 3 + i)); // 下位3
+                if (selfIdx >= 0) {
+                    showRanks.add(selfIdx);
+                    if (selfIdx > 0) showRanks.add(selfIdx - 1);
+                    if (selfIdx < a.branchRanking.length - 1) showRanks.add(selfIdx + 1);
+                }
+                let prevPrinted = -2;
                 a.branchRanking.forEach((b, i) => {
+                    if (!showRanks.has(i)) return;
+                    if (i - prevPrinted > 1) lines.push('  …');
                     const isSelf = b.branch === branch;
-                    lines.push((i + 1) + '位 ' + b.branch + (isSelf ? ' ★' : '') + ': 売上¥' + b.sales.toLocaleString() + ', 新規' + b.newCount + '名, 入会率' + b.enrollRate + '%, CPA¥' + b.cpa.toLocaleString());
+                    lines.push((i + 1) + '位 ' + b.branch + (b.area ? `(${b.area})` : '') + (isSelf ? ' ★' : '') + ': 売上¥' + b.sales.toLocaleString() + ', 新規' + b.newCount + '名, 入会率' + b.enrollRate + '%, CPA¥' + b.cpa.toLocaleString());
+                    prevPrinted = i;
                 });
-                lines.push('', '【月別トレンド（' + a.branchName + ' 過去6ヶ月）】');
+                // 同規模・同エリアベンチマーク
+                if (a.similarBenchmark) {
+                    const sb = a.similarBenchmark;
+                    lines.push('', `【同等店舗ベンチマーク（${sb.type} / ${sb.count}店舗の平均）】`);
+                    lines.push(`平均売上: ¥${sb.avgSales.toLocaleString()}（自店との差: ${a.totalSales >= sb.avgSales ? '+' : ''}¥${(a.totalSales - sb.avgSales).toLocaleString()}）`);
+                    lines.push(`平均新規数: ${sb.avgNewCount}名（自店: ${a.totalNewCount}名、差: ${a.totalNewCount - sb.avgNewCount >= 0 ? '+' : ''}${a.totalNewCount - sb.avgNewCount}）`);
+                    lines.push(`平均入会率: ${sb.avgEnrollRate}%（自店: ${a.enrollRate}%、差: ${a.enrollRate - sb.avgEnrollRate >= 0 ? '+' : ''}${a.enrollRate - sb.avgEnrollRate}pt）`);
+                    lines.push(`平均CPA: ¥${sb.avgCpa.toLocaleString()}（自店: ¥${a.cpa.toLocaleString()}、差: ${a.cpa - sb.avgCpa >= 0 ? '+' : ''}¥${(a.cpa - sb.avgCpa).toLocaleString()}）`);
+                    lines.push(`参照店舗: ${sb.peers.map(p => p.branch).join(', ')}`);
+                }
+                lines.push('', '【月別トレンド（' + a.branchName + ' 過去12ヶ月）】');
                 a.monthlyTrend.forEach(m => {
-                    lines.push(m.month + ': 売上¥' + m.sales.toLocaleString() + ', 新規' + m.newCount + '名, 入会率' + m.enrollRate + '%, CPA¥' + m.cpa.toLocaleString());
+                    lines.push(m.month + ': 売上¥' + m.sales.toLocaleString() + ', 新規' + m.newCount + '名, 入会率' + m.enrollRate + '%, 退会率' + m.churnRate + '%, CPA¥' + m.cpa.toLocaleString() + ', 広告費¥' + m.adSpend.toLocaleString());
                 });
+                if (a.trendStats) {
+                    lines.push('', '【季節性分析（過去12ヶ月）】');
+                    lines.push(`12ヶ月平均売上: ¥${a.trendStats.avgSales.toLocaleString()} / 平均新規数: ${a.trendStats.avgNew}名`);
+                    lines.push(`売上ピーク: ${a.trendStats.peakMonth}（¥${a.trendStats.peakSales.toLocaleString()}） / ボトム: ${a.trendStats.lowMonth}（¥${a.trendStats.lowSales.toLocaleString()}）`);
+                    lines.push(`当月実績の年間平均比: ${a.trendStats.avgSales > 0 ? Math.round((a.totalSales / a.trendStats.avgSales) * 100) : 0}%`);
+                }
+                // 目標達成履歴: 過去12ヶ月の各月実績を現行目標と照合
+                lines.push('', '【目標達成履歴（現行目標を過去12ヶ月に当てはめ）】');
+                const achieveStats = a.monthlyTrend.map(m => ({
+                    month: m.month,
+                    salesAchieved: m.sales >= goalSalesYen,
+                    newAchieved: m.newCount >= planGoals.newCustomers,
+                    enrollAchieved: m.enrollRate >= planGoals.enrollRate,
+                    cpaAchieved: m.cpa > 0 && m.cpa <= planGoals.cpaTarget,
+                }));
+                const totalMonths = achieveStats.length;
+                if (totalMonths > 0) {
+                    const salesAchRate = Math.round((achieveStats.filter(x => x.salesAchieved).length / totalMonths) * 100);
+                    const newAchRate = Math.round((achieveStats.filter(x => x.newAchieved).length / totalMonths) * 100);
+                    const enrollAchRate = Math.round((achieveStats.filter(x => x.enrollAchieved).length / totalMonths) * 100);
+                    const cpaAchRate = Math.round((achieveStats.filter(x => x.cpaAchieved).length / totalMonths) * 100);
+                    lines.push(`売上目標 ¥${goalSalesYen.toLocaleString()}: 過去${totalMonths}ヶ月で${achieveStats.filter(x => x.salesAchieved).length}回達成（${salesAchRate}%）`);
+                    lines.push(`新規${planGoals.newCustomers}名目標: ${achieveStats.filter(x => x.newAchieved).length}回達成（${newAchRate}%）`);
+                    lines.push(`入会率${planGoals.enrollRate}%目標: ${achieveStats.filter(x => x.enrollAchieved).length}回達成（${enrollAchRate}%）`);
+                    lines.push(`CPA¥${planGoals.cpaTarget.toLocaleString()}目標: ${achieveStats.filter(x => x.cpaAchieved).length}回達成（${cpaAchRate}%）`);
+                }
                 lines.push('', '【ギャップ分析】');
                 lines.push(salesGap > 0 ? '売上ギャップ: ¥' + salesGap.toLocaleString() + '（' + Math.round(salesGap / 10000) + '万円不足）' : '売上目標: 達成済み！');
                 lines.push(newGap > 0 ? '新規ギャップ: あと' + newGap + '名必要' : '新規目標: 達成済み！');
                 lines.push(a.enrollRate < planGoals.enrollRate ? '入会率ギャップ: あと' + (planGoals.enrollRate - a.enrollRate) + 'ポイント改善が必要' : '入会率目標: 達成済み！');
                 lines.push(a.cpa > planGoals.cpaTarget && a.cpa > 0 ? 'CPAギャップ: ¥' + (a.cpa - planGoals.cpaTarget).toLocaleString() + '削減が必要' : 'CPA目標: 達成済み！');
+                // Square サブスク・LTV指標（取得できている場合のみ）
+                if (sqMetrics) {
+                    lines.push('', '【サブスク経営指標（Square 全体）】');
+                    lines.push(`アクティブ会員数: ${(sqMetrics.memberCount || 0).toLocaleString()}名（前月: ${(sqMetrics.prevMemberCount || 0).toLocaleString()}名）`);
+                    lines.push(`MRR（月次経常収益）: ¥${(sqMetrics.mrr || 0).toLocaleString()}（前月比: ${sqMetrics.mrrChange >= 0 ? '+' : ''}${sqMetrics.mrrChange || 0}%）`);
+                    lines.push(`ARPU（1人あたり月額）: ¥${Math.round(sqMetrics.arpu || 0).toLocaleString()}`);
+                    lines.push(`LTV（推定）: ¥${Math.round(sqMetrics.ltv || 0).toLocaleString()}`);
+                    lines.push(`月次解約率: ${sqMetrics.churnRate || 0}% / 初月解約率: ${sqMetrics.firstMonthChurn || 0}% / 3ヶ月以内解約: ${sqMetrics.threeMonthChurn || 0}%`);
+                    lines.push(`継続率 3ヶ月: ${sqMetrics.retention3m || 0}% / 6ヶ月: ${sqMetrics.retention6m || 0}% / 12ヶ月: ${sqMetrics.retention12m || 0}%`);
+                }
+                // 業界ベンチマーク自動評価（自店の各指標がどのバンドに入るか）
+                lines.push('', '【業界ベンチマーク自動評価（自店ポジション）】');
+                const evalCpa = a.cpa <= 0 ? 'データなし' : a.cpa < 8000 ? '優秀(<¥8,000)' : a.cpa <= 12000 ? '良好(¥8,000-12,000)' : a.cpa <= 18000 ? '平均(¥12,000-18,000)' : a.cpa <= 25000 ? '要改善(>¥18,000)' : '危険水域(>¥25,000)';
+                const evalEnroll = a.enrollRate >= 55 ? '優秀(>55%)' : a.enrollRate >= 40 ? '良好(40-55%)' : a.enrollRate >= 30 ? '平均(30-40%)' : a.enrollRate >= 20 ? '要改善(<30%)' : '危険水域(<20%)';
+                const evalChurn = a.churnRate <= 0 ? 'データなし' : a.churnRate < 5 ? '優秀(<5%)' : a.churnRate <= 10 ? '良好(5-10%)' : a.churnRate <= 15 ? '平均(10-15%)' : a.churnRate <= 20 ? '要改善(>15%)' : '危険水域(>20%)';
+                const evalNew = a.totalNewCount > 30 ? '優秀(>30名)' : a.totalNewCount >= 20 ? '良好(20-30名)' : a.totalNewCount >= 10 ? '平均(10-20名)' : a.totalNewCount >= 5 ? '要改善(<10名)' : '危険水域(<5名)';
+                lines.push(`CPA ¥${a.cpa.toLocaleString()} → ${evalCpa}`);
+                lines.push(`入会率 ${a.enrollRate}% → ${evalEnroll}`);
+                lines.push(`退会率 ${a.churnRate}% → ${evalChurn}`);
+                lines.push(`新規数 ${a.totalNewCount}名 → ${evalNew}`);
                 // 参考リンク
                 if (planLinks.length > 0) {
                     lines.push('', '【参考リンク（回答の中で関連するものがあれば[タイトル](URL)形式のMarkdownリンクとして積極的に紹介してください）】');
@@ -6204,6 +6308,9 @@
                 lines.push('', '【回答フォーマット指示】');
                 lines.push('- Markdownで構造化して回答してください（## 見出し、**太字**、- 箇条書き、| 表 |）');
                 lines.push('- コンパクトにまとめ、冗長な説明は避けてください');
+                lines.push('- **すべての提案には必ず定量根拠を添える**: 「○○すべき」だけでなく「○○すれば月△△円増。根拠: ××（具体的なデータ）」の形式で示すこと');
+                lines.push('- 同等店舗ベンチマークと業界ベンチマークの両方を引用し、自店ポジションを明確化すること');
+                lines.push('- 過去12ヶ月の達成履歴を踏まえ、目標が現実的か（過去達成率○%）を冒頭で評価すること');
                 lines.push('- 参考リンクが関連する場合は[タイトル](URL)形式で本文中に自然に挿入してください');
                 return lines.join('\n') + '\n\n' + base;
             };
@@ -6228,7 +6335,8 @@
                             question: '【事業計画相談: ' + (planSelectedBranch || '全店') + '】' + msg,
                             history: history.slice(-20),
                             dataContext,
-                            stream: true
+                            stream: true,
+                            thinking: true
                         })
                     });
 

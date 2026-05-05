@@ -1227,6 +1227,7 @@
             const [planInput, setPlanInput] = useState('');
             const [planLoading, setPlanLoading] = useState(false);
             const planChatRef = useRef(null);
+            const planInputRef = useRef(null);
             const [planBranchMenuOpen, setPlanBranchMenuOpen] = useState(false);
             const [planBranchSearch, setPlanBranchSearch] = useState('');
             const planBranchMenuRef = useRef(null);
@@ -6321,7 +6322,10 @@
                 if (!msg || planLoading) return;
 
                 setPlanMessages(prev => [...prev, { type: 'user', content: msg }]);
-                if (!overrideInput) setPlanInput('');
+                if (!overrideInput) {
+                    setPlanInput('');
+                    if (planInputRef.current) planInputRef.current.style.height = '42px';
+                }
                 setPlanLoading(true);
 
                 try {
@@ -10121,12 +10125,20 @@
                                                 )}
                                             </div>
 
-                                            <div className="p-3 border-t border-slate-100 flex gap-2">
-                                                <input type="text" value={planInput}
+                                            <div className="p-3 border-t border-slate-100 flex gap-2 items-end">
+                                                <textarea ref={planInputRef} value={planInput}
                                                     onChange={e => setPlanInput(e.target.value)}
-                                                    onKeyPress={e => e.key === 'Enter' && handlePlanSubmit()}
-                                                    placeholder={planSelectedBranch + ' について質問...'}
-                                                    className="flex-1 bg-slate-50 rounded-xl px-4 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-200 border border-slate-200"
+                                                    onKeyDown={e => {
+                                                        if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                                                            e.preventDefault();
+                                                            handlePlanSubmit();
+                                                        }
+                                                    }}
+                                                    placeholder={planSelectedBranch + ' について質問... （Shift+Enterで改行）'}
+                                                    rows={1}
+                                                    className="flex-1 bg-slate-50 rounded-xl px-4 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-200 border border-slate-200 resize-none overflow-y-auto"
+                                                    style={{ minHeight: '42px', maxHeight: '160px' }}
+                                                    onInput={e => { e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'; }}
                                                     disabled={planLoading}
                                                 />
                                                 <button onClick={() => handlePlanSubmit()} disabled={!planInput.trim() || planLoading}

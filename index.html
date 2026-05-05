@@ -3019,7 +3019,18 @@
                         const ymGlobalActive = subs.filter(s => isActiveAt(s, eom) && (paidSubIds.has(s.id) || s.monthlyPrice > 0));
                         return new Set(ymGlobalActive.map(s => s.customerId));
                     })();
-                    ymCanceledCount = calcMemberChurn(ymPrevActiveIds, ymGlobalActiveIds).churned;
+                    // 解約数: モーダル「解約・一時停止者一覧」と一致させるため、当月にCANCELED/DEACTIVATED/PAUSEDになった
+                    // サブスクを「name + monthlyPrice」でマージしてカウント（sqDrilldownList と同じロジック）
+                    const ymCanceledSubs = filtered.filter(s =>
+                        (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED')
+                        && toYM(s.canceledDate || s.pausedDate) === ym
+                    );
+                    const ymCanceledKeys = new Set();
+                    for (const s of ymCanceledSubs) {
+                        const name = (cust[s.customerId] && cust[s.customerId].name) || s.customerId || '不明';
+                        ymCanceledKeys.add(`${name}|${s.monthlyPrice}`);
+                    }
+                    ymCanceledCount = ymCanceledKeys.size;
                     // 今回のアクティブセットを次回イテレーションの前月データとしてキャッシュ
                     cachedFilteredActiveIds = ymActiveIds;
                     // フォールバック: サブスクデータがない場合はPAIDインボイスベース
@@ -9563,7 +9574,7 @@
                                                 <SquareChart title="MRR推移" icon={<Wallet size={24} />} data={sqMetrics.monthlyTrends} dataKey="mrr" label="MRR" isCurrency={true} color="59, 130, 246" gradientFrom="from-blue-50" gradientTo="to-cyan-50" borderColor="border-blue-200" iconColor="text-blue-600" />
                                             </div>
 
-                                            <SquareBarChart title="月別 入会・解約数" data={sqMetrics.monthlyTrends} onBarClick={(month, type) => setSqDrilldown({ month, type })} />
+                                            <SquareBarChart title="月別 入会・解約/停止数" data={sqMetrics.monthlyTrends} onBarClick={(month, type) => setSqDrilldown({ month, type })} />
 
                                             {/* チャートドリルダウンモーダル */}
                                             {sqDrilldown && (
@@ -12529,7 +12540,7 @@
                                 borderRadius: 6,
                             },
                             {
-                                label: '解約',
+                                label: '解約・停止',
                                 data: data.map(d => d.canceled),
                                 backgroundColor: 'rgba(239, 68, 68, 0.7)',
                                 borderColor: 'rgba(239, 68, 68, 1)',

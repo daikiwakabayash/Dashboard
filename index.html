@@ -826,7 +826,7 @@
             '齋藤敦紀': ['浅草', '錦糸町院', '北千住院'],
             '林勝好': ['池袋', '銀座院', '大塚院', '上北沢院'],
             '林尚弘': ['新宿院'],
-            '若林大樹': ['大井町院', '飯田橋院', '恵比寿院', '武蔵小杉院', '千葉駅院', '勝田台院', '四条烏丸院', '大阪茨木院', '大阪京橋院', '福岡博多院', '長崎諫早院'],
+            '若林大樹': ['飯田橋院', '恵比寿院', '武蔵小杉院', '千葉駅院', '勝田台院', '四条烏丸院', '大阪茨木院', '大阪京橋院', '福岡博多院', '長崎諫早院'],
             '仲野純平': ['荻窪院', '目黒院', '町田院'],
             '澤井寿昌': ['池尻大橋院'],
             '横田裕平': ['大山院'],
@@ -852,6 +852,9 @@
             '宮崎淳': ['長崎大村院'],
             '南拓真': ['大分院', '鹿児島院'],
         };
+
+        // 集計・選択肢から完全除外する店舗（閉院・統合・運用対象外など）
+        const EXCLUDED_BRANCHES = new Set(['大井町院', '大井町']);
 
         // 整体院業界ベンチマーク（市場平均値）
         const SEITAI_BENCHMARKS = {
@@ -2389,7 +2392,7 @@
                                 setStartDate(new Date(parseInt(year), parseInt(month) - 1, 1));
                                 setEndDate(new Date(parseInt(year), parseInt(month), 0));
                             }
-                            const allBranches = Array.from(new Set(displayData.map(d => d.branch)));
+                            const allBranches = Array.from(new Set(displayData.map(d => d.branch))).filter(b => !EXCLUDED_BRANCHES.has(b));
                             if (selectedBranches.length === 0) setSelectedBranches(allBranches);
                         }
                         setLoading(false);
@@ -2430,7 +2433,7 @@
                                 setStartDate(new Date(parseInt(year), parseInt(month) - 1, 1));
                                 setEndDate(new Date(parseInt(year), parseInt(month), 0));
                             }
-                            setSelectedBranches(Array.from(new Set(fetchedData.map(d => d.branch))));
+                            setSelectedBranches(Array.from(new Set(fetchedData.map(d => d.branch))).filter(b => !EXCLUDED_BRANCHES.has(b)));
                         }
 
                         setLastFetchTime(new Date());
@@ -3606,7 +3609,7 @@
             const allBranches = useMemo(() => {
                 const spreadsheetBranches = rawData.map(d => d.branch);
                 const squareBranches = (sqData && sqData.stores) ? sqData.stores.map(s => s.name) : [];
-                return Array.from(new Set([...spreadsheetBranches, ...squareBranches]));
+                return Array.from(new Set([...spreadsheetBranches, ...squareBranches])).filter(b => !EXCLUDED_BRANCHES.has(b));
             }, [rawData, sqData]);
 
             const filteredBranches = useMemo(() => {
@@ -3682,6 +3685,7 @@
 
             const filteredData = useMemo(() => {
                 return rawData.filter(d => {
+                    if (EXCLUDED_BRANCHES.has(d.branch)) return false;
                     const matchMonth = targetMonths.includes(d.month);
                     const matchBranch = selectedBranches.includes(d.branch);
                     const matchOwner = !ownerBranchSet || ownerBranchSet.has(d.branch);
@@ -3703,7 +3707,7 @@
                 return sortMonths(Array.from(new Set(mktData.map(d => d.month).filter(Boolean))));
             }, [mktData]);
 
-            const mktAllBranches = useMemo(() => Array.from(new Set(mktData.map(d => d.branch).filter(Boolean))), [mktData]);
+            const mktAllBranches = useMemo(() => Array.from(new Set(mktData.map(d => d.branch).filter(Boolean))).filter(b => !EXCLUDED_BRANCHES.has(b)), [mktData]);
             const mktAllStaff = useMemo(() => Array.from(new Set(mktData.map(d => d.staff).filter(Boolean))), [mktData]);
             const mktAllMedia = useMemo(() => Array.from(new Set(mktData.map(d => d.media).filter(m => m && m !== '全媒体合計'))), [mktData]);
 
@@ -3862,6 +3866,7 @@
                 return mktData.filter(d => {
                     // 全媒体合計レコードは集計で二重計上されるため除外
                     if (d.media === '全媒体合計') return false;
+                    if (EXCLUDED_BRANCHES.has(d.branch)) return false;
                     const matchMonth = mktTargetMonths.length === 0 || mktTargetMonths.includes(d.month);
                     const matchBranch = mktSelectedBranches.length === 0 || mktSelectedBranches.includes(d.branch);
                     const matchOwner = !ownerBranchSet || ownerBranchSet.has(d.branch);
@@ -6208,7 +6213,7 @@
                     prevMediaMap[d.media].newCount += d.newCount || 0;
                 });
                 // 全店舗ランキング
-                const allBranches = [...new Set(rawData.map(d => d.branch).filter(Boolean))];
+                const allBranches = [...new Set(rawData.map(d => d.branch).filter(Boolean))].filter(b => !EXCLUDED_BRANCHES.has(b));
                 const branchRanking = allBranches.map(b => {
                     const bd = rawData.filter(d => d.month === latestMonth && d.branch === b);
                     const bm = mktData.filter(d => d.month === latestMonth && d.branch === b && d.media !== '全媒体合計');
@@ -9917,7 +9922,7 @@
                                                 <input type="text" placeholder="店舗を検索..." className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-brand-400 outline-none" value={planBranchSearch} onChange={(e) => setPlanBranchSearch(e.target.value)} />
                                             </div>
                                             <div className="overflow-y-auto flex-1 space-y-1">
-                                                {Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).sort()
+                                                {Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).filter(b => !EXCLUDED_BRANCHES.has(b)).sort()
                                                     .filter(b => !planBranchSearch || b.toLowerCase().includes(planBranchSearch.toLowerCase()))
                                                     .map(b => (
                                                         <div key={b} onClick={() => { setPlanSelectedBranch(b); setPlanMessages([]); setPlanBranchMenuOpen(false); setPlanBranchSearch(''); }} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${planSelectedBranch === b ? 'bg-brand-50 text-brand-600' : 'hover:bg-slate-50 text-slate-600'}`}>

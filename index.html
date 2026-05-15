@@ -1265,6 +1265,17 @@
             const [planBranchMenuOpen, setPlanBranchMenuOpen] = useState(false);
             const [planBranchSearch, setPlanBranchSearch] = useState('');
             const planBranchMenuRef = useRef(null);
+            // アクション実績ログ（端末ローカル保存）
+            const [planActions, setPlanActions] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('naoru_plan_actions');
+                    return saved ? JSON.parse(saved) : [];
+                } catch { return []; }
+            });
+            useEffect(() => {
+                try { localStorage.setItem('naoru_plan_actions', JSON.stringify(planActions)); } catch {}
+            }, [planActions]);
+            const [planActionDraft, setPlanActionDraft] = useState(null); // { aiMsgIdx, summary }
             // 参考リンク管理
             const [planLinks, setPlanLinks] = useState(() => {
                 try {
@@ -6156,6 +6167,74 @@
                 };
             };
 
+            // ── 事業計画: アクション実績ログのKPIスナップショット・差分計算 ──
+            const computePlanKpiSnapshot = (branch) => {
+                const a = computePlanActuals(branch);
+                return {
+                    month: a.latestMonth,
+                    sales: a.totalSales,
+                    newCount: a.totalNewCount,
+                    enrollRate: a.enrollRate,
+                    churnRate: a.churnRate,
+                    cpa: a.cpa,
+                };
+            };
+            const computePlanActionDelta = (baseline, result) => {
+                if (!baseline || !result) return null;
+                const pct = (b, r) => (b > 0) ? Math.round((r - b) / b * 1000) / 10 : 0;
+                return {
+                    salesPct: pct(baseline.sales, result.sales),
+                    newPct: pct(baseline.newCount, result.newCount),
+                    enrollPt: Math.round((result.enrollRate - baseline.enrollRate) * 10) / 10,
+                    churnPt: Math.round((result.churnRate - baseline.churnRate) * 10) / 10,
+                    cpaPct: pct(baseline.cpa, result.cpa),
+                };
+            };
+            // 効果スコア: 売上%+新規%+入会率pt×2 − 退会率pt×3 − CPA%×0.5
+            const computePlanActionScore = (delta) => {
+                if (!delta) return null;
+                return Math.round(
+                    (delta.salesPct || 0) * 1.0 +
+                    (delta.newPct || 0) * 1.0 +
+                    (delta.enrollPt || 0) * 2.0 -
+                    (delta.churnPt || 0) * 3.0 -
+                    (delta.cpaPct || 0) * 0.5
+                );
+            };
+            const savePlanAction = (summary, fullText, aiMsgIdx) => {
+                const cleanSummary = (summary || '').trim();
+                if (!cleanSummary) return;
+                const baseline = computePlanKpiSnapshot(planSelectedBranch);
+                const record = {
+                    id: `act_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                    branch: planSelectedBranch || '全店舗',
+                    summary: cleanSummary,
+                    fullText: (fullText || '').slice(0, 4000),
+                    aiMessageIdx: aiMsgIdx == null ? null : aiMsgIdx,
+                    proposedAt: new Date().toISOString(),
+                    baselineMonth: baseline.month,
+                    baselineKPI: baseline,
+                    executedAt: new Date().toISOString(),
+                    resultMonth: null, resultKPI: null, delta: null, score: null,
+                    status: 'executed',
+                };
+                setPlanActions(prev => [record, ...prev]);
+                setPlanActionDraft(null);
+            };
+            const recordPlanActionResult = (id) => {
+                setPlanActions(prev => prev.map(a => {
+                    if (a.id !== id) return a;
+                    const result = computePlanKpiSnapshot(a.branch);
+                    const delta = computePlanActionDelta(a.baselineKPI, result);
+                    const score = computePlanActionScore(delta);
+                    return { ...a, resultMonth: result.month, resultKPI: result, delta, score, status: 'completed' };
+                }));
+            };
+            const deletePlanAction = (id) => {
+                if (!confirm('このアクション記録を削除しますか？')) return;
+                setPlanActions(prev => prev.filter(a => a.id !== id));
+            };
+
             // ── 事業計画: AIデータコンテキスト構築（店舗別＋他店比較） ──
             const buildPlanningContext = (question) => {
                 const base = buildDataContext(question);
@@ -6203,6 +6282,24 @@
                 lines.push(newGap > 0 ? '新規ギャップ: あと' + newGap + '名必要' : '新規目標: 達成済み！');
                 lines.push(a.enrollRate < planGoals.enrollRate ? '入会率ギャップ: あと' + (planGoals.enrollRate - a.enrollRate) + 'ポイント改善が必要' : '入会率目標: 達成済み！');
                 lines.push(a.cpa > planGoals.cpaTarget && a.cpa > 0 ? 'CPAギャップ: ¥' + (a.cpa - planGoals.cpaTarget).toLocaleString() + '削減が必要' : 'CPA目標: 達成済み！');
+                // 過去アクション実績（効果スコア上位のみ反映）
+                const completedActions = planActions.filter(act => act.branch === (branch || '全店舗') && act.status === 'completed' && act.delta);
+                if (completedActions.length > 0) {
+                    const topActions = [...completedActions].sort((x, y) => (y.score || 0) - (x.score || 0)).slice(0, 5);
+                    lines.push('', '【過去の実行アクションと効果（' + (branch || '全店舗') + '・効果スコア上位）】');
+                    lines.push('効果スコア = 売上%+新規%+入会率pt×2 − 退会率pt×3 − CPA%×0.5');
+                    topActions.forEach((act, i) => {
+                        const d = act.delta;
+                        const sign = (v) => (v >= 0 ? '+' : '') + v;
+                        lines.push((i + 1) + '. 「' + act.summary + '」[効果スコア: ' + (act.score || 0) + ']');
+                        lines.push('   ベース月: ' + act.baselineMonth + ' → 結果月: ' + act.resultMonth);
+                        lines.push('   結果: 売上' + sign(d.salesPct) + '%, 新規' + sign(d.newPct) + '%, 入会率' + sign(d.enrollPt) + 'pt, 退会率' + sign(d.churnPt) + 'pt, CPA' + sign(d.cpaPct) + '%');
+                    });
+                    lines.push('上記の効果が高かったアクションに似た方向性を優先的に提案し、似た系統で効果が薄かった/逆効果だったものは避けてください。');
+                    if (completedActions.length > topActions.length) {
+                        lines.push('（他にも ' + (completedActions.length - topActions.length) + ' 件の完了アクションあり・効果スコア下位のため省略）');
+                    }
+                }
                 // 参考リンク
                 if (planLinks.length > 0) {
                     lines.push('', '【参考リンク（回答の中で関連するものがあれば[タイトル](URL)形式のMarkdownリンクとして積極的に紹介してください）】');
@@ -9963,14 +10060,48 @@
                                                     </div>
                                                 )}
                                                 {planMessages.map((msg, idx) => (
-                                                    <div key={idx} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                                    <div key={idx} className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}>
                                                         {msg.type === 'user' ? (
                                                             <div className="max-w-[80%] rounded-2xl px-4 py-2.5 text-sm bg-brand-500 text-white font-bold">
                                                                 <div className="break-words">{msg.content}</div>
                                                             </div>
                                                         ) : (
-                                                            <div className="max-w-[90%] rounded-2xl px-4 py-3 bg-slate-50 border border-slate-200">
-                                                                <div className="break-words plan-ai-response">{renderMarkdown(msg.content)}</div>
+                                                            <div className="max-w-[90%] w-full">
+                                                                <div className="rounded-2xl px-4 py-3 bg-slate-50 border border-slate-200">
+                                                                    <div className="break-words plan-ai-response">{renderMarkdown(msg.content)}</div>
+                                                                </div>
+                                                                {msg.content && !planLoading && (
+                                                                    planActionDraft && planActionDraft.aiMsgIdx === idx ? (
+                                                                        <div className="mt-2 bg-white border border-brand-200 rounded-xl p-3 space-y-2">
+                                                                            <p className="text-xs font-black text-slate-600">このアクションを実行記録に保存</p>
+                                                                            <textarea
+                                                                                value={planActionDraft.summary}
+                                                                                onChange={e => setPlanActionDraft({ ...planActionDraft, summary: e.target.value })}
+                                                                                placeholder="例: ホットペッパー予算を2万円Instagram広告にシフト"
+                                                                                rows={2}
+                                                                                className="w-full bg-slate-50 rounded-lg px-3 py-2 text-xs font-bold border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-200 resize-none"
+                                                                            />
+                                                                            <p className="text-[10px] text-slate-400">保存時点（{planSelectedBranch || '全店舗'} / {computePlanKpiSnapshot(planSelectedBranch).month || '不明'}月）のKPIを起点として記録します</p>
+                                                                            <div className="flex gap-2">
+                                                                                <button onClick={() => savePlanAction(planActionDraft.summary, msg.content, idx)}
+                                                                                    disabled={!planActionDraft.summary.trim()}
+                                                                                    className="px-3 py-1.5 bg-brand-500 text-white rounded-lg text-xs font-black hover:bg-brand-600 disabled:opacity-50">保存</button>
+                                                                                <button onClick={() => setPlanActionDraft(null)}
+                                                                                    className="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-200">キャンセル</button>
+                                                                            </div>
+                                                                        </div>
+                                                                    ) : (
+                                                                        <button
+                                                                            onClick={() => {
+                                                                                const firstAction = (msg.content.match(/(?:^|\n)[-*・]\s+(.+)/) || [])[1] ||
+                                                                                                    (msg.content.match(/(?:^|\n)\d+\.\s+(.+)/) || [])[1] || '';
+                                                                                setPlanActionDraft({ aiMsgIdx: idx, summary: firstAction.replace(/\*\*/g, '').slice(0, 200) });
+                                                                            }}
+                                                                            className="mt-1.5 text-[11px] text-brand-500 hover:text-brand-600 font-black flex items-center gap-1">
+                                                                            <Target size={12} /> このアクションを実行記録に追加
+                                                                        </button>
+                                                                    )
+                                                                )}
                                                             </div>
                                                         )}
                                                     </div>
@@ -10000,6 +10131,117 @@
                                         </div>
                                     </div>
                                 </div>
+
+                                {/* ── アクション実績ログ ── */}
+                                {(() => {
+                                    const targetBranch = planSelectedBranch || '全店舗';
+                                    const branchActions = planActions.filter(act => act.branch === targetBranch);
+                                    const pending = branchActions.filter(act => act.status === 'executed');
+                                    const completed = branchActions.filter(act => act.status === 'completed').sort((x, y) => (y.score || 0) - (x.score || 0));
+                                    const currentMonth = computePlanKpiSnapshot(planSelectedBranch).month;
+                                    return (
+                                        <div className="mt-4 bg-white rounded-xl border border-slate-200 shadow-sm">
+                                            <div className="px-4 py-3 border-b border-slate-100 flex items-center gap-2">
+                                                <Target size={16} className="text-brand-500" />
+                                                <h3 className="text-sm font-black text-slate-700">アクション実績ログ</h3>
+                                                <span className="text-xs text-slate-400 font-bold">{targetBranch}</span>
+                                                <span className="ml-auto text-[10px] text-slate-400 font-bold">完了: {completed.length}件 / 結果待ち: {pending.length}件</span>
+                                            </div>
+                                            {branchActions.length === 0 ? (
+                                                <div className="p-6 text-center text-xs text-slate-400 font-bold">
+                                                    AI回答の「このアクションを実行記録に追加」から保存すると、ここに表示されます。
+                                                </div>
+                                            ) : (
+                                                <div className="p-3 space-y-3">
+                                                    {pending.length > 0 && (
+                                                        <div>
+                                                            <p className="text-[10px] font-black uppercase tracking-widest text-amber-600 mb-1.5">結果待ち（{pending.length}件）</p>
+                                                            <div className="space-y-2">
+                                                                {pending.map(act => {
+                                                                    const canMeasure = currentMonth && act.baselineMonth && currentMonth > act.baselineMonth;
+                                                                    return (
+                                                                        <div key={act.id} className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                                                                            <div className="flex items-start gap-2">
+                                                                                <div className="flex-1 min-w-0">
+                                                                                    <p className="text-xs font-black text-slate-800 break-words">{act.summary}</p>
+                                                                                    <p className="text-[10px] text-slate-500 font-bold mt-1">
+                                                                                        起点: {act.baselineMonth || '不明'}月 / 売上¥{act.baselineKPI.sales.toLocaleString()} / 新規{act.baselineKPI.newCount}名 / 入会率{act.baselineKPI.enrollRate}% / 退会率{act.baselineKPI.churnRate}% / CPA¥{act.baselineKPI.cpa.toLocaleString()}
+                                                                                    </p>
+                                                                                </div>
+                                                                                <div className="flex flex-col gap-1 flex-shrink-0">
+                                                                                    <button onClick={() => recordPlanActionResult(act.id)}
+                                                                                        disabled={!canMeasure}
+                                                                                        title={canMeasure ? '現時点のKPIで結果を確定' : 'ベース月より新しいデータが必要です'}
+                                                                                        className="px-2.5 py-1 bg-emerald-500 text-white rounded-lg text-[11px] font-black hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed">
+                                                                                        結果を確定
+                                                                                    </button>
+                                                                                    <button onClick={() => deletePlanAction(act.id)}
+                                                                                        className="px-2.5 py-1 bg-slate-200 text-slate-600 rounded-lg text-[11px] font-bold hover:bg-slate-300">
+                                                                                        削除
+                                                                                    </button>
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    {completed.length > 0 && (
+                                                        <div>
+                                                            <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600 mb-1.5">完了（{completed.length}件・効果スコア降順）</p>
+                                                            <div className="space-y-2">
+                                                                {completed.map((act, i) => {
+                                                                    const d = act.delta || {};
+                                                                    const sign = (v) => (v == null ? '-' : (v >= 0 ? '+' : '') + v);
+                                                                    const tone = (act.score || 0) > 0 ? 'emerald' : (act.score || 0) < 0 ? 'rose' : 'slate';
+                                                                    return (
+                                                                        <div key={act.id} className={`bg-${tone}-50 border border-${tone}-200 rounded-lg p-3`}>
+                                                                            <div className="flex items-start gap-2 mb-2">
+                                                                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-black bg-${tone}-200 text-${tone}-800`}>#{i + 1} スコア {sign(act.score)}</span>
+                                                                                <p className="text-xs font-black text-slate-800 break-words flex-1 min-w-0">{act.summary}</p>
+                                                                                <button onClick={() => deletePlanAction(act.id)}
+                                                                                    className="px-2 py-0.5 bg-white text-slate-500 rounded text-[10px] font-bold hover:bg-slate-100 flex-shrink-0">
+                                                                                    削除
+                                                                                </button>
+                                                                            </div>
+                                                                            <div className="grid grid-cols-2 md:grid-cols-5 gap-1.5 text-[10px] font-bold">
+                                                                                <div className="bg-white rounded px-2 py-1">
+                                                                                    <span className="text-slate-400 block">売上</span>
+                                                                                    <span className={d.salesPct >= 0 ? 'text-emerald-600' : 'text-rose-600'}>{sign(d.salesPct)}%</span>
+                                                                                </div>
+                                                                                <div className="bg-white rounded px-2 py-1">
+                                                                                    <span className="text-slate-400 block">新規</span>
+                                                                                    <span className={d.newPct >= 0 ? 'text-emerald-600' : 'text-rose-600'}>{sign(d.newPct)}%</span>
+                                                                                </div>
+                                                                                <div className="bg-white rounded px-2 py-1">
+                                                                                    <span className="text-slate-400 block">入会率</span>
+                                                                                    <span className={d.enrollPt >= 0 ? 'text-emerald-600' : 'text-rose-600'}>{sign(d.enrollPt)}pt</span>
+                                                                                </div>
+                                                                                <div className="bg-white rounded px-2 py-1">
+                                                                                    <span className="text-slate-400 block">退会率</span>
+                                                                                    <span className={d.churnPt <= 0 ? 'text-emerald-600' : 'text-rose-600'}>{sign(d.churnPt)}pt</span>
+                                                                                </div>
+                                                                                <div className="bg-white rounded px-2 py-1">
+                                                                                    <span className="text-slate-400 block">CPA</span>
+                                                                                    <span className={d.cpaPct <= 0 ? 'text-emerald-600' : 'text-rose-600'}>{sign(d.cpaPct)}%</span>
+                                                                                </div>
+                                                                            </div>
+                                                                            <p className="text-[10px] text-slate-400 font-bold mt-1.5">{act.baselineMonth} → {act.resultMonth}</p>
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                            <p className="text-[10px] text-slate-400 font-bold mt-2 px-1">
+                                                                効果スコア = 売上%+新規%+入会率pt×2 − 退会率pt×3 − CPA%×0.5。上位5件をAI提案に自動反映します。
+                                                            </p>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })()}
                                 </>);
                             })()}
                         </div>

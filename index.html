@@ -3667,13 +3667,20 @@
             };
 
             // オーナーフィルター: 選択中オーナーに紐づく店舗集合（未選択時はnull = 制限なし）
+            // データ側の店舗名は「大森」「飯田橋院」など院サフィックス有無の揺れがあるため、
+            // 末尾の「院」と空白を取り除いた正規化キーでマッチングする
+            const normalizeBranchKey = (name) => {
+                if (!name) return '';
+                return String(name).replace(/\s+/g, '').replace(/院+$/, '').toLowerCase();
+            };
             const allOwnerNames = useMemo(() => Object.keys(ownerMap).sort(), [ownerMap]);
             const ownerBranchSet = useMemo(() => {
                 if (!selectedOwners || selectedOwners.length === 0) return null;
                 const set = new Set();
-                selectedOwners.forEach(o => (ownerMap[o] || []).forEach(b => set.add(b)));
+                selectedOwners.forEach(o => (ownerMap[o] || []).forEach(b => set.add(normalizeBranchKey(b))));
                 return set;
             }, [selectedOwners, ownerMap]);
+            const matchesOwnerFilter = (branch) => !ownerBranchSet || ownerBranchSet.has(normalizeBranchKey(branch));
             const filteredOwnerNames = useMemo(() => {
                 if (!ownerSearchTerm) return allOwnerNames;
                 const q = ownerSearchTerm.toLowerCase();
@@ -3688,7 +3695,7 @@
                     if (EXCLUDED_BRANCHES.has(d.branch)) return false;
                     const matchMonth = targetMonths.includes(d.month);
                     const matchBranch = selectedBranches.includes(d.branch);
-                    const matchOwner = !ownerBranchSet || ownerBranchSet.has(d.branch);
+                    const matchOwner = matchesOwnerFilter(d.branch);
 
                     // スタッフ名フィルタリング: selectedStaffNamesが空の場合は全て表示
                     const matchStaff = selectedStaffNames.length === 0 || selectedStaffNames.includes(d.name);
@@ -3869,7 +3876,7 @@
                     if (EXCLUDED_BRANCHES.has(d.branch)) return false;
                     const matchMonth = mktTargetMonths.length === 0 || mktTargetMonths.includes(d.month);
                     const matchBranch = mktSelectedBranches.length === 0 || mktSelectedBranches.includes(d.branch);
-                    const matchOwner = !ownerBranchSet || ownerBranchSet.has(d.branch);
+                    const matchOwner = matchesOwnerFilter(d.branch);
                     const matchStaff = mktSelectedStaff.length === 0 || mktSelectedStaff.includes(d.staff);
                     const matchMedia = mktSelectedMedia.length === 0 || mktSelectedMedia.includes(d.media);
                     return matchMonth && matchBranch && matchOwner && matchStaff && matchMedia;
@@ -11652,7 +11659,7 @@
                                         </div>
                                     ) : (
                                         Object.entries(ownerSettingsDraft).sort(([a], [b]) => a.localeCompare(b)).map(([owner, branches]) => {
-                                            const assignedSet = new Set(branches);
+                                            const assignedKeySet = new Set(branches.map(normalizeBranchKey));
                                             return (
                                                 <div key={owner} className="border border-slate-200 rounded-xl p-3 space-y-2">
                                                     <div className="flex items-center justify-between">
@@ -11670,13 +11677,15 @@
                                                         {allBranches.length === 0 ? (
                                                             <span className="text-[11px] text-slate-400 font-bold">店舗データが未読み込みです</span>
                                                         ) : allBranches.map(b => {
-                                                            const on = assignedSet.has(b);
+                                                            const bKey = normalizeBranchKey(b);
+                                                            const on = assignedKeySet.has(bKey);
                                                             return (
                                                                 <button key={b}
                                                                     onClick={() => {
                                                                         const next = { ...ownerSettingsDraft };
                                                                         if (on) {
-                                                                            next[owner] = branches.filter(x => x !== b);
+                                                                            // 正規化キーが一致するエントリをすべて除去（"大森"と"大森院"の両方など）
+                                                                            next[owner] = branches.filter(x => normalizeBranchKey(x) !== bKey);
                                                                         } else {
                                                                             next[owner] = [...branches, b];
                                                                         }

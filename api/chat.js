@@ -151,7 +151,38 @@ export const SYSTEM_PROMPT = `あなたは「NAORUアドバイザー」— 整�
 - データがない項目は「このデータは現在取得できていません」と正直に伝える
 - 店舗名の表記ゆれに柔軟に対応（「千葉」→「千葉駅院」、「恵比寿」→「恵比寿院」等）
 - ユーザーが経営上の相談（戦略、人材、価格設定など）をした場合は、データと業界知見に基づいてアドバイスする
-- 経営に関係ない雑談には簡潔に応じつつ、本来の役割（経営分析）に戻すよう促す`;
+- 経営に関係ない雑談には簡潔に応じつつ、本来の役割（経営分析）に戻すよう促す
+
+## 【事業計画モード時の必須ルール】（質問に「事業計画相談」と書かれている場合）
+
+事業計画コンテキストでは、以下を**必ず**遵守してください：
+
+### 1. 定量根拠の必須化
+- 「○○すべき」だけの提案は禁止。必ず「○○すれば月△△円増、根拠: ××（具体データ）」の形で示す
+- 例: ❌「入会率を上げましょう」 → ⭕「入会率を32%→50%に改善すれば、現在の新規62名×単価7.5万円×18pt = 月+83万円の売上増。根拠: 同等店舗の平均入会率は48%」
+- 期待効果の試算には**必ず計算式を1行で示す**（「現状値 × 改善後 ÷ 現状割合 = 期待効果」のように）
+
+### 2. ベンチマークの三層比較
+コンテキストに以下が含まれている場合、**三層すべてで自店ポジションを評価**する：
+- 自店の前月比・過去12ヶ月平均比（時系列）
+- 同等店舗ベンチマーク（売上同規模 or 同エリア）との差分
+- 業界ベンチマーク（CPA/入会率/退会率の優秀-危険水域）でのバンド評価
+
+### 3. 目標達成可能性の現実評価
+- 過去12ヶ月の達成履歴が提供されている場合、**冒頭で「目標達成可能性: ○○%」を提示**する
+- 過去達成率0%の目標を「達成可能」と即断しない。逆風要因（退会率高騰／新規減速など）を必ず挙げる
+- 「現状の延長線」と「施策実行後」の2シナリオで試算する
+
+### 4. ボトルネック特定の徹底
+売上 = 新規獲得数 × 入会率 × 客単価 × 継続月数 のうち、どれが最も改善ROIが高いかを：
+- 同等店舗との差分が最も大きい変数を特定
+- 業界ベンチマークで自店が「危険水域」にある変数を最優先
+- 改善1ptあたりの売上インパクトを試算して比較
+
+### 5. アクションの実行可能性ランキング
+| 施策 | 期待効果 | 実行難易度 | ROI | 優先順位 |
+|------|----------|------------|-----|----------|
+の表形式で整理し、優先度1位から順に詳細化する`;
 
 // ── Helper: リクエストボディのバリデーション ──────────────────────
 export function validateRequest(body) {
@@ -194,6 +225,9 @@ const MODELS = [
   'claude-haiku-4-5',           // Haiku 4.5（高速・低コストフォールバック）
 ];
 const MAX_TOKENS = 8192;
+// Extended Thinking 用: 思考時はトークン上限を拡張（max_tokens > budget_tokens 必須）
+const THINKING_BUDGET = 4000;
+const THINKING_MAX_TOKENS = 16000;
 
 // ── Vercel Serverless Handler ────────────────────────────────────
 export default async function handler(req, res) {
@@ -225,9 +259,18 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: validation.error });
     }
 
-    const { question, history, dataContext, stream: useStream } = body;
+    const { question, history, dataContext, stream: useStream, thinking: useThinking } = body;
 
     const messages = buildMessages(question, history, dataContext);
+
+    // Extended Thinking が要求された場合、思考用パラメータを構築
+    // - temperature は 1 必須（thinking 有効時の制約）
+    // - max_tokens > budget_tokens 必須
+    const thinkingParams = useThinking ? {
+      thinking: { type: 'enabled', budget_tokens: THINKING_BUDGET },
+      temperature: 1,
+      max_tokens: THINKING_MAX_TOKENS,
+    } : { max_tokens: MAX_TOKENS };
 
     // ── フィードバック動的注入: GAS から改善例を取得してシステムプロンプトに追加 ──
     let systemPrompt = SYSTEM_PROMPT;
@@ -258,9 +301,9 @@ export default async function handler(req, res) {
         try {
           const stream = anthropic.messages.stream({
             model: selectedModel,
-            max_tokens: MAX_TOKENS,
             system: systemPrompt,
             messages,
+            ...thinkingParams,
           });
 
           // ストリーミングイベントをPromiseで待機
@@ -312,9 +355,9 @@ export default async function handler(req, res) {
         console.log(`[chat] Trying model (non-stream): ${selectedModel}`);
         const response = await anthropic.messages.create({
           model: selectedModel,
-          max_tokens: MAX_TOKENS,
           system: systemPrompt,
           messages,
+          ...thinkingParams,
         });
 
         const assistantMessage = response.content

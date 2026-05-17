@@ -824,6 +824,17 @@
             roas: { excellent: 400, good: 300, average: 200, poor: 100, label: 'ROAS' },
         };
 
+        // オーナー別の管理店舗マッピング（店舗名は normalizeBranch 後の形で記述）
+        const OWNER_BRANCHES = {
+            '野島オーナー': ['千種', '金山', '藤が丘', '伏見', '福岡天神', '姪浜', '熊本'],
+        };
+
+        // allBranches の表記ゆれ（「福岡姪浜」「姪浜」など）も拾えるように部分一致で判定
+        const branchMatchesOwnerTarget = (branch, target) => {
+            if (!branch || !target) return false;
+            return branch === target || branch.includes(target) || target.includes(branch);
+        };
+
         // マーケティングデータを標準化
         const normalizeMarketingData = (rawData) => {
             try {
@@ -1131,8 +1142,11 @@
             const [staffSearchTerm, setStaffSearchTerm] = useState("");
             const [selectedMetrics, setSelectedMetrics] = useState(savedUIState?.selectedMetrics || ['totalSales']);
             const [uiStateLoaded, setUiStateLoaded] = useState(!!savedUIState);
+            const [selectedOwner, setSelectedOwner] = useState('');
+            const [isOwnerMenuOpen, setIsOwnerMenuOpen] = useState(false);
             const branchMenuRef = useRef(null);
             const staffMenuRef = useRef(null);
+            const ownerMenuRef = useRef(null);
 
             // マーケティングダッシュボード用 State
             const [mktData, setMktData] = useState([]);
@@ -1213,6 +1227,7 @@
             const [planInput, setPlanInput] = useState('');
             const [planLoading, setPlanLoading] = useState(false);
             const planChatRef = useRef(null);
+            const planInputRef = useRef(null);
             const [planBranchMenuOpen, setPlanBranchMenuOpen] = useState(false);
             const [planBranchSearch, setPlanBranchSearch] = useState('');
             const planBranchMenuRef = useRef(null);
@@ -3005,7 +3020,18 @@
                         const ymGlobalActive = subs.filter(s => isActiveAt(s, eom) && (paidSubIds.has(s.id) || s.monthlyPrice > 0));
                         return new Set(ymGlobalActive.map(s => s.customerId));
                     })();
-                    ymCanceledCount = calcMemberChurn(ymPrevActiveIds, ymGlobalActiveIds).churned;
+                    // 解約数: モーダル「解約・一時停止者一覧」と一致させるため、当月にCANCELED/DEACTIVATED/PAUSEDになった
+                    // サブスクを「name + monthlyPrice」でマージしてカウント（sqDrilldownList と同じロジック）
+                    const ymCanceledSubs = filtered.filter(s =>
+                        (s.status === 'CANCELED' || s.status === 'DEACTIVATED' || s.status === 'PAUSED')
+                        && toYM(s.canceledDate || s.pausedDate) === ym
+                    );
+                    const ymCanceledKeys = new Set();
+                    for (const s of ymCanceledSubs) {
+                        const name = (cust[s.customerId] && cust[s.customerId].name) || s.customerId || '不明';
+                        ymCanceledKeys.add(`${name}|${s.monthlyPrice}`);
+                    }
+                    ymCanceledCount = ymCanceledKeys.size;
                     // 今回のアクティブセットを次回イテレーションの前月データとしてキャッシュ
                     cachedFilteredActiveIds = ymActiveIds;
                     // フォールバック: サブスクデータがない場合はPAIDインボイスベース
@@ -3530,6 +3556,21 @@
                         ? prev.filter(b => b !== branch)
                         : [...prev, branch]
                 );
+            };
+
+            // オーナー選択: 配下店舗だけにフィルターをかける
+            const applyOwnerFilter = (ownerKey) => {
+                setSelectedOwner(ownerKey);
+                setIsOwnerMenuOpen(false);
+                if (!ownerKey) {
+                    setSelectedBranches(allBranches);
+                    return;
+                }
+                const ownerBranches = OWNER_BRANCHES[ownerKey] || [];
+                const present = allBranches.filter(b =>
+                    ownerBranches.some(target => branchMatchesOwnerTarget(b, target))
+                );
+                setSelectedBranches(present);
             };
 
             const toggleStaff = (staffName) => {
@@ -6041,6 +6082,8 @@
                 const churnRate = prevMembers > 0 ? Math.round((churnCount / prevMembers) * 100) : 0;
                 const prevSales = prevData.reduce((s, d) => s + vn(d.individualSales), 0);
                 const prevNewCount = prevData.reduce((s, d) => s + vn(d.newCount), 0);
+                // 当該店舗のエリア
+                const branchArea = curData[0]?.area || '';
                 // マーケティング: 媒体別CPA
                 const mktFilter = branchName ? (d => d.branch === branchName) : (() => true);
                 const curMkt = mktData.filter(d => d.month === latestMonth && d.media !== '全媒体合計').filter(mktFilter);
@@ -6081,12 +6124,31 @@
                     const bEnroll = bd.reduce((s, d) => s + vn(d.newEnroll), 0);
                     const bAdSpend = bm.reduce((s, d) => s + (d.adSpend || 0), 0);
                     const bMktNew = bm.reduce((s, d) => s + (d.newCount || 0), 0);
-                    return { branch: b, sales: bSales, newCount: bNew,
+                    return { branch: b, area: bd[0]?.area || '', sales: bSales, newCount: bNew,
                         enrollRate: bNew > 0 ? Math.round((bEnroll / bNew) * 100) : 0,
                         cpa: bMktNew > 0 ? Math.round(bAdSpend / bMktNew) : 0, adSpend: bAdSpend };
                 }).sort((a, b) => b.sales - a.sales);
-                // 月別トレンド（過去6ヶ月）
-                const recentMonths = allMonths.slice(-6);
+                // 同規模・同エリア店舗ベンチマーク（売上±30%以内 or 同エリア）
+                let similarBenchmark = null;
+                if (branchName && totalSales > 0) {
+                    const lowBound = totalSales * 0.7;
+                    const highBound = totalSales * 1.3;
+                    const sameScale = branchRanking.filter(b => b.branch !== branchName && b.sales >= lowBound && b.sales <= highBound);
+                    const sameArea = branchArea ? branchRanking.filter(b => b.branch !== branchName && b.area === branchArea) : [];
+                    const peers = sameScale.length >= 3 ? sameScale : (sameArea.length >= 3 ? sameArea : sameScale.concat(sameArea.filter(s => !sameScale.some(x => x.branch === s.branch))));
+                    if (peers.length > 0) {
+                        const avg = (key) => Math.round(peers.reduce((s, p) => s + (p[key] || 0), 0) / peers.length);
+                        similarBenchmark = {
+                            count: peers.length,
+                            type: sameScale.length >= 3 ? `売上同規模（±30%）` : (sameArea.length >= 3 ? `${branchArea}エリア` : '類似店'),
+                            peers: peers.slice(0, 5).map(p => ({ branch: p.branch, sales: p.sales, newCount: p.newCount, enrollRate: p.enrollRate, cpa: p.cpa })),
+                            avgSales: avg('sales'), avgNewCount: avg('newCount'),
+                            avgEnrollRate: avg('enrollRate'), avgCpa: avg('cpa'),
+                        };
+                    }
+                }
+                // 月別トレンド（過去12ヶ月）
+                const recentMonths = allMonths.slice(-12);
                 const monthlyTrend = recentMonths.map(m => {
                     const md = rawData.filter(d => d.month === m).filter(branchFilter);
                     const mm = mktData.filter(d => d.month === m && d.media !== '全媒体合計').filter(mktFilter);
@@ -6095,15 +6157,28 @@
                     const mEnroll = md.reduce((s, d) => s + vn(d.newEnroll), 0);
                     const mAdSpend = mm.reduce((s, d) => s + (d.adSpend || 0), 0);
                     const mMktNew = mm.reduce((s, d) => s + (d.newCount || 0), 0);
-                    return { month: m, sales: mSales, newCount: mNew,
+                    const mChurn = md.reduce((s, d) => s + vn(d.churnCount), 0);
+                    const mPrevMembers = md.reduce((s, d) => s + vn(d.prevMembers), 0);
+                    return { month: m, sales: mSales, newCount: mNew, adSpend: mAdSpend,
                         enrollRate: mNew > 0 ? Math.round((mEnroll / mNew) * 100) : 0,
+                        churnRate: mPrevMembers > 0 ? Math.round((mChurn / mPrevMembers) * 100) : 0,
                         cpa: mMktNew > 0 ? Math.round(mAdSpend / mMktNew) : 0 };
                 });
+                // 季節性: 年間移動平均と季節指数（前年同月比 当該月／12ヶ月平均）
+                const trendStats = (() => {
+                    if (monthlyTrend.length < 6) return null;
+                    const avgSales = Math.round(monthlyTrend.reduce((s, m) => s + m.sales, 0) / monthlyTrend.length);
+                    const avgNew = Math.round(monthlyTrend.reduce((s, m) => s + m.newCount, 0) / monthlyTrend.length);
+                    const peakSalesMonth = monthlyTrend.reduce((max, m) => m.sales > max.sales ? m : max, monthlyTrend[0]);
+                    const lowSalesMonth = monthlyTrend.reduce((min, m) => m.sales < min.sales ? m : min, monthlyTrend[0]);
+                    return { avgSales, avgNew, peakMonth: peakSalesMonth.month, peakSales: peakSalesMonth.sales,
+                        lowMonth: lowSalesMonth.month, lowSales: lowSalesMonth.sales };
+                })();
                 return {
                     latestMonth, prevMonth, totalSales, totalNewCount, totalNewEnroll, enrollRate,
                     churnRate, cpa, totalAdSpend, prevSales, prevNewCount,
-                    mediaBreakdown, prevMediaMap, branchRanking, monthlyTrend,
-                    branchName: branchName || '全店舗',
+                    mediaBreakdown, prevMediaMap, branchRanking, monthlyTrend, similarBenchmark, trendStats,
+                    branchArea, branchName: branchName || '全店舗',
                 };
             };
 
@@ -6140,20 +6215,90 @@
                     const cpaDiff = prev && prev.newCount > 0 ? '（前月CPA: ¥' + Math.round(prev.adSpend / prev.newCount).toLocaleString() + '）' : '';
                     lines.push(m.media + ': 新規' + m.newCount + '名, CPA ¥' + m.cpa.toLocaleString() + cpaDiff + ', 入会率' + m.enrollRate + '%, 広告費¥' + m.adSpend.toLocaleString() + ', ROAS ' + m.roas + '%');
                 });
-                lines.push('', '【他店舗との比較ランキング（' + a.latestMonth + '）】');
+                lines.push('', '【他店舗との比較ランキング（' + a.latestMonth + ' 売上順）】');
+                // 全店舗多すぎると冗長なので、自店周辺と上位下位のみ
+                const selfIdx = a.branchRanking.findIndex(b => b.branch === branch);
+                const showRanks = new Set();
+                a.branchRanking.slice(0, 5).forEach((_, i) => showRanks.add(i)); // 上位5
+                a.branchRanking.slice(-3).forEach((_, i) => showRanks.add(a.branchRanking.length - 3 + i)); // 下位3
+                if (selfIdx >= 0) {
+                    showRanks.add(selfIdx);
+                    if (selfIdx > 0) showRanks.add(selfIdx - 1);
+                    if (selfIdx < a.branchRanking.length - 1) showRanks.add(selfIdx + 1);
+                }
+                let prevPrinted = -2;
                 a.branchRanking.forEach((b, i) => {
+                    if (!showRanks.has(i)) return;
+                    if (i - prevPrinted > 1) lines.push('  …');
                     const isSelf = b.branch === branch;
-                    lines.push((i + 1) + '位 ' + b.branch + (isSelf ? ' ★' : '') + ': 売上¥' + b.sales.toLocaleString() + ', 新規' + b.newCount + '名, 入会率' + b.enrollRate + '%, CPA¥' + b.cpa.toLocaleString());
+                    lines.push((i + 1) + '位 ' + b.branch + (b.area ? `(${b.area})` : '') + (isSelf ? ' ★' : '') + ': 売上¥' + b.sales.toLocaleString() + ', 新規' + b.newCount + '名, 入会率' + b.enrollRate + '%, CPA¥' + b.cpa.toLocaleString());
+                    prevPrinted = i;
                 });
-                lines.push('', '【月別トレンド（' + a.branchName + ' 過去6ヶ月）】');
+                // 同規模・同エリアベンチマーク
+                if (a.similarBenchmark) {
+                    const sb = a.similarBenchmark;
+                    lines.push('', `【同等店舗ベンチマーク（${sb.type} / ${sb.count}店舗の平均）】`);
+                    lines.push(`平均売上: ¥${sb.avgSales.toLocaleString()}（自店との差: ${a.totalSales >= sb.avgSales ? '+' : ''}¥${(a.totalSales - sb.avgSales).toLocaleString()}）`);
+                    lines.push(`平均新規数: ${sb.avgNewCount}名（自店: ${a.totalNewCount}名、差: ${a.totalNewCount - sb.avgNewCount >= 0 ? '+' : ''}${a.totalNewCount - sb.avgNewCount}）`);
+                    lines.push(`平均入会率: ${sb.avgEnrollRate}%（自店: ${a.enrollRate}%、差: ${a.enrollRate - sb.avgEnrollRate >= 0 ? '+' : ''}${a.enrollRate - sb.avgEnrollRate}pt）`);
+                    lines.push(`平均CPA: ¥${sb.avgCpa.toLocaleString()}（自店: ¥${a.cpa.toLocaleString()}、差: ${a.cpa - sb.avgCpa >= 0 ? '+' : ''}¥${(a.cpa - sb.avgCpa).toLocaleString()}）`);
+                    lines.push(`参照店舗: ${sb.peers.map(p => p.branch).join(', ')}`);
+                }
+                lines.push('', '【月別トレンド（' + a.branchName + ' 過去12ヶ月）】');
                 a.monthlyTrend.forEach(m => {
-                    lines.push(m.month + ': 売上¥' + m.sales.toLocaleString() + ', 新規' + m.newCount + '名, 入会率' + m.enrollRate + '%, CPA¥' + m.cpa.toLocaleString());
+                    lines.push(m.month + ': 売上¥' + m.sales.toLocaleString() + ', 新規' + m.newCount + '名, 入会率' + m.enrollRate + '%, 退会率' + m.churnRate + '%, CPA¥' + m.cpa.toLocaleString() + ', 広告費¥' + m.adSpend.toLocaleString());
                 });
+                if (a.trendStats) {
+                    lines.push('', '【季節性分析（過去12ヶ月）】');
+                    lines.push(`12ヶ月平均売上: ¥${a.trendStats.avgSales.toLocaleString()} / 平均新規数: ${a.trendStats.avgNew}名`);
+                    lines.push(`売上ピーク: ${a.trendStats.peakMonth}（¥${a.trendStats.peakSales.toLocaleString()}） / ボトム: ${a.trendStats.lowMonth}（¥${a.trendStats.lowSales.toLocaleString()}）`);
+                    lines.push(`当月実績の年間平均比: ${a.trendStats.avgSales > 0 ? Math.round((a.totalSales / a.trendStats.avgSales) * 100) : 0}%`);
+                }
+                // 目標達成履歴: 過去12ヶ月の各月実績を現行目標と照合
+                lines.push('', '【目標達成履歴（現行目標を過去12ヶ月に当てはめ）】');
+                const achieveStats = a.monthlyTrend.map(m => ({
+                    month: m.month,
+                    salesAchieved: m.sales >= goalSalesYen,
+                    newAchieved: m.newCount >= planGoals.newCustomers,
+                    enrollAchieved: m.enrollRate >= planGoals.enrollRate,
+                    cpaAchieved: m.cpa > 0 && m.cpa <= planGoals.cpaTarget,
+                }));
+                const totalMonths = achieveStats.length;
+                if (totalMonths > 0) {
+                    const salesAchRate = Math.round((achieveStats.filter(x => x.salesAchieved).length / totalMonths) * 100);
+                    const newAchRate = Math.round((achieveStats.filter(x => x.newAchieved).length / totalMonths) * 100);
+                    const enrollAchRate = Math.round((achieveStats.filter(x => x.enrollAchieved).length / totalMonths) * 100);
+                    const cpaAchRate = Math.round((achieveStats.filter(x => x.cpaAchieved).length / totalMonths) * 100);
+                    lines.push(`売上目標 ¥${goalSalesYen.toLocaleString()}: 過去${totalMonths}ヶ月で${achieveStats.filter(x => x.salesAchieved).length}回達成（${salesAchRate}%）`);
+                    lines.push(`新規${planGoals.newCustomers}名目標: ${achieveStats.filter(x => x.newAchieved).length}回達成（${newAchRate}%）`);
+                    lines.push(`入会率${planGoals.enrollRate}%目標: ${achieveStats.filter(x => x.enrollAchieved).length}回達成（${enrollAchRate}%）`);
+                    lines.push(`CPA¥${planGoals.cpaTarget.toLocaleString()}目標: ${achieveStats.filter(x => x.cpaAchieved).length}回達成（${cpaAchRate}%）`);
+                }
                 lines.push('', '【ギャップ分析】');
                 lines.push(salesGap > 0 ? '売上ギャップ: ¥' + salesGap.toLocaleString() + '（' + Math.round(salesGap / 10000) + '万円不足）' : '売上目標: 達成済み！');
                 lines.push(newGap > 0 ? '新規ギャップ: あと' + newGap + '名必要' : '新規目標: 達成済み！');
                 lines.push(a.enrollRate < planGoals.enrollRate ? '入会率ギャップ: あと' + (planGoals.enrollRate - a.enrollRate) + 'ポイント改善が必要' : '入会率目標: 達成済み！');
                 lines.push(a.cpa > planGoals.cpaTarget && a.cpa > 0 ? 'CPAギャップ: ¥' + (a.cpa - planGoals.cpaTarget).toLocaleString() + '削減が必要' : 'CPA目標: 達成済み！');
+                // Square サブスク・LTV指標（取得できている場合のみ）
+                if (sqMetrics) {
+                    lines.push('', '【サブスク経営指標（Square 全体）】');
+                    lines.push(`アクティブ会員数: ${(sqMetrics.memberCount || 0).toLocaleString()}名（前月: ${(sqMetrics.prevMemberCount || 0).toLocaleString()}名）`);
+                    lines.push(`MRR（月次経常収益）: ¥${(sqMetrics.mrr || 0).toLocaleString()}（前月比: ${sqMetrics.mrrChange >= 0 ? '+' : ''}${sqMetrics.mrrChange || 0}%）`);
+                    lines.push(`ARPU（1人あたり月額）: ¥${Math.round(sqMetrics.arpu || 0).toLocaleString()}`);
+                    lines.push(`LTV（推定）: ¥${Math.round(sqMetrics.ltv || 0).toLocaleString()}`);
+                    lines.push(`月次解約率: ${sqMetrics.churnRate || 0}% / 初月解約率: ${sqMetrics.firstMonthChurn || 0}% / 3ヶ月以内解約: ${sqMetrics.threeMonthChurn || 0}%`);
+                    lines.push(`継続率 3ヶ月: ${sqMetrics.retention3m || 0}% / 6ヶ月: ${sqMetrics.retention6m || 0}% / 12ヶ月: ${sqMetrics.retention12m || 0}%`);
+                }
+                // 業界ベンチマーク自動評価（自店の各指標がどのバンドに入るか）
+                lines.push('', '【業界ベンチマーク自動評価（自店ポジション）】');
+                const evalCpa = a.cpa <= 0 ? 'データなし' : a.cpa < 8000 ? '優秀(<¥8,000)' : a.cpa <= 12000 ? '良好(¥8,000-12,000)' : a.cpa <= 18000 ? '平均(¥12,000-18,000)' : a.cpa <= 25000 ? '要改善(>¥18,000)' : '危険水域(>¥25,000)';
+                const evalEnroll = a.enrollRate >= 55 ? '優秀(>55%)' : a.enrollRate >= 40 ? '良好(40-55%)' : a.enrollRate >= 30 ? '平均(30-40%)' : a.enrollRate >= 20 ? '要改善(<30%)' : '危険水域(<20%)';
+                const evalChurn = a.churnRate <= 0 ? 'データなし' : a.churnRate < 5 ? '優秀(<5%)' : a.churnRate <= 10 ? '良好(5-10%)' : a.churnRate <= 15 ? '平均(10-15%)' : a.churnRate <= 20 ? '要改善(>15%)' : '危険水域(>20%)';
+                const evalNew = a.totalNewCount > 30 ? '優秀(>30名)' : a.totalNewCount >= 20 ? '良好(20-30名)' : a.totalNewCount >= 10 ? '平均(10-20名)' : a.totalNewCount >= 5 ? '要改善(<10名)' : '危険水域(<5名)';
+                lines.push(`CPA ¥${a.cpa.toLocaleString()} → ${evalCpa}`);
+                lines.push(`入会率 ${a.enrollRate}% → ${evalEnroll}`);
+                lines.push(`退会率 ${a.churnRate}% → ${evalChurn}`);
+                lines.push(`新規数 ${a.totalNewCount}名 → ${evalNew}`);
                 // 参考リンク
                 if (planLinks.length > 0) {
                     lines.push('', '【参考リンク（回答の中で関連するものがあれば[タイトル](URL)形式のMarkdownリンクとして積極的に紹介してください）】');
@@ -6164,6 +6309,9 @@
                 lines.push('', '【回答フォーマット指示】');
                 lines.push('- Markdownで構造化して回答してください（## 見出し、**太字**、- 箇条書き、| 表 |）');
                 lines.push('- コンパクトにまとめ、冗長な説明は避けてください');
+                lines.push('- **すべての提案には必ず定量根拠を添える**: 「○○すべき」だけでなく「○○すれば月△△円増。根拠: ××（具体的なデータ）」の形式で示すこと');
+                lines.push('- 同等店舗ベンチマークと業界ベンチマークの両方を引用し、自店ポジションを明確化すること');
+                lines.push('- 過去12ヶ月の達成履歴を踏まえ、目標が現実的か（過去達成率○%）を冒頭で評価すること');
                 lines.push('- 参考リンクが関連する場合は[タイトル](URL)形式で本文中に自然に挿入してください');
                 return lines.join('\n') + '\n\n' + base;
             };
@@ -6174,7 +6322,10 @@
                 if (!msg || planLoading) return;
 
                 setPlanMessages(prev => [...prev, { type: 'user', content: msg }]);
-                if (!overrideInput) setPlanInput('');
+                if (!overrideInput) {
+                    setPlanInput('');
+                    if (planInputRef.current) planInputRef.current.style.height = '42px';
+                }
                 setPlanLoading(true);
 
                 try {
@@ -6188,7 +6339,8 @@
                             question: '【事業計画相談: ' + (planSelectedBranch || '全店') + '】' + msg,
                             history: history.slice(-20),
                             dataContext,
-                            stream: true
+                            stream: true,
+                            thinking: true
                         })
                     });
 
@@ -6371,13 +6523,13 @@
                                     <div className="inline-flex items-center gap-2 px-2 md:px-3 py-1 bg-gradient-to-r from-brand-100 to-amber-100 text-brand-600 rounded-full text-[10px] md:text-xs font-black uppercase tracking-widest mb-1">
                                         <Activity size={12} className="md:hidden" /><Activity size={14} className="hidden md:block" /> Analytics Dashboard
                                     </div>
-                                    <h1 className="text-xl md:text-3xl font-black tracking-tight text-slate-900 italic">経営指標</h1>
+                                    <h1 className="text-base md:text-2xl font-black tracking-tight text-slate-900 italic">経営指標</h1>
                                 </div>
 
                                 {/* Mobile View Toggle */}
                                 <button
                                     onClick={() => setIsMobileView(!isMobileView)}
-                                    className={`hidden md:flex px-4 py-2 rounded-xl font-bold text-sm items-center gap-2 transition-all ${
+                                    className={`hidden md:flex px-2.5 py-1.5 rounded-lg font-bold text-xs items-center gap-1.5 transition-all ${
                                         isMobileView
                                             ? 'bg-brand-500 text-white shadow-lg'
                                             : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
@@ -6389,7 +6541,7 @@
 
                             <div className="flex flex-wrap items-center gap-2 md:gap-3">
                                 <div className="flex flex-col gap-1">
-                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">期間選択</span>
+                                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">期間選択</span>
                                     <DateRangePicker
                                         startDate={startDate}
                                         endDate={endDate}
@@ -6415,17 +6567,17 @@
                                 </div>
 
                                 <div className="flex flex-col gap-1 min-w-0 w-full sm:min-w-[220px] sm:w-auto relative" ref={branchMenuRef}>
-                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">店舗選択</span>
+                                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">店舗選択</span>
                                     <button
                                         onClick={() => setIsBranchMenuOpen(!isBranchMenuOpen)}
-                                        className="bg-slate-50 border border-slate-200 rounded-xl px-3 md:px-4 py-2 md:py-2.5 text-sm md:text-base font-bold flex items-center justify-between gap-2 hover:bg-slate-100 transition-colors shadow-sm"
+                                        className="bg-slate-50 border border-slate-200 rounded-lg px-2 md:px-2.5 py-1 md:py-1.5 text-[11px] md:text-xs font-bold flex items-center justify-between gap-1.5 hover:bg-slate-100 transition-colors shadow-sm"
                                     >
                                         <span className="truncate">
                                             {selectedBranches.length === allBranches.length ? "全店舗" :
                                             selectedBranches.length === 0 ? "未選択" :
                                             `${selectedBranches[0]}${selectedBranches.length > 1 ? ` 他${selectedBranches.length - 1}件` : ''}`}
                                         </span>
-                                        <ChevronDown size={18} className={`transition-transform flex-shrink-0 ${isBranchMenuOpen ? 'rotate-180' : ''}`} />
+                                        <ChevronDown size={16} className={`transition-transform flex-shrink-0 ${isBranchMenuOpen ? 'rotate-180' : ''}`} />
                                     </button>
                                     <PortalDropdown anchorRef={branchMenuRef} isOpen={isBranchMenuOpen} onClose={() => setIsBranchMenuOpen(false)} width={280}>
                                         <div className="bg-white border border-slate-200 rounded-2xl shadow-xl p-3 space-y-2 max-h-[400px] overflow-hidden flex flex-col w-[280px]">
@@ -6461,19 +6613,59 @@
                                     </PortalDropdown>
                                 </div>
 
+                                {/* Owner-Managed Stores Selection */}
+                                <div className="flex flex-col gap-1 min-w-0 w-full sm:min-w-[220px] sm:w-auto relative" ref={ownerMenuRef}>
+                                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">オーナー管理店舗</span>
+                                    <button
+                                        onClick={() => setIsOwnerMenuOpen(!isOwnerMenuOpen)}
+                                        className="bg-slate-50 border border-slate-200 rounded-lg px-2 md:px-2.5 py-1 md:py-1.5 text-[11px] md:text-xs font-bold flex items-center justify-between gap-1.5 hover:bg-slate-100 transition-colors shadow-sm"
+                                    >
+                                        <span className="truncate">{selectedOwner || "オーナーを選択"}</span>
+                                        <ChevronDown size={16} className={`transition-transform flex-shrink-0 ${isOwnerMenuOpen ? 'rotate-180' : ''}`} />
+                                    </button>
+                                    <PortalDropdown anchorRef={ownerMenuRef} isOpen={isOwnerMenuOpen} onClose={() => setIsOwnerMenuOpen(false)} width={280}>
+                                        <div className="bg-white border border-slate-200 rounded-2xl shadow-xl p-3 space-y-1 w-[280px]">
+                                            <div
+                                                onClick={() => applyOwnerFilter('')}
+                                                className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-50 cursor-pointer transition-colors"
+                                            >
+                                                <div className={`w-5 h-5 rounded-full border flex items-center justify-center ${!selectedOwner ? 'bg-slate-400 border-slate-400' : 'border-slate-300'}`}>
+                                                    {!selectedOwner && <Check size={14} className="text-white" />}
+                                                </div>
+                                                <span className={`text-sm font-bold ${!selectedOwner ? 'text-slate-900' : 'text-slate-500'}`}>解除（全店舗）</span>
+                                            </div>
+                                            {Object.entries(OWNER_BRANCHES).map(([owner, branches]) => (
+                                                <div
+                                                    key={owner}
+                                                    onClick={() => applyOwnerFilter(owner)}
+                                                    className="flex items-start gap-3 px-3 py-2 rounded-lg hover:bg-brand-50 cursor-pointer transition-colors"
+                                                >
+                                                    <div className={`w-5 h-5 mt-0.5 rounded-full border flex items-center justify-center flex-shrink-0 ${selectedOwner === owner ? 'bg-brand-500 border-brand-500' : 'border-slate-300'}`}>
+                                                        {selectedOwner === owner && <Check size={14} className="text-white" />}
+                                                    </div>
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className={`text-sm font-black ${selectedOwner === owner ? 'text-slate-900' : 'text-slate-700'}`}>{owner}</div>
+                                                        <div className="text-[10px] text-slate-400 font-bold mt-0.5 leading-snug">{branches.join('・')}</div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </PortalDropdown>
+                                </div>
+
                                 {/* Staff Name Selection */}
                                 <div className="flex flex-col gap-1 min-w-0 w-full sm:min-w-[220px] sm:w-auto relative" ref={staffMenuRef}>
-                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">スタッフ選択</span>
+                                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">スタッフ選択</span>
                                     <button
                                         onClick={() => setIsStaffMenuOpen(!isStaffMenuOpen)}
-                                        className="bg-slate-50 border border-slate-200 rounded-xl px-3 md:px-4 py-2 md:py-2.5 text-sm md:text-base font-bold flex items-center justify-between gap-2 hover:bg-slate-100 transition-colors shadow-sm"
+                                        className="bg-slate-50 border border-slate-200 rounded-lg px-2 md:px-2.5 py-1 md:py-1.5 text-[11px] md:text-xs font-bold flex items-center justify-between gap-1.5 hover:bg-slate-100 transition-colors shadow-sm"
                                     >
                                         <span className="truncate">
                                             {selectedStaffNames.length === 0 ? "全スタッフ" :
                                             selectedStaffNames.length === 1 ? selectedStaffNames[0] :
                                             `${selectedStaffNames[0]} 他${selectedStaffNames.length - 1}名`}
                                         </span>
-                                        <ChevronDown size={18} className={`transition-transform flex-shrink-0 ${isStaffMenuOpen ? 'rotate-180' : ''}`} />
+                                        <ChevronDown size={16} className={`transition-transform flex-shrink-0 ${isStaffMenuOpen ? 'rotate-180' : ''}`} />
                                     </button>
                                     <PortalDropdown anchorRef={staffMenuRef} isOpen={isStaffMenuOpen} onClose={() => setIsStaffMenuOpen(false)} width={280}>
                                         <div className="bg-white border border-slate-200 rounded-2xl shadow-xl p-3 space-y-2 max-h-[400px] overflow-hidden flex flex-col w-[280px]">
@@ -6511,13 +6703,13 @@
 
                                 {/* Quick Search Box */}
                                 <div className="flex flex-col gap-1 flex-grow min-w-0 w-full sm:min-w-[220px] sm:w-auto">
-                                    <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">クイック検索</span>
+                                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">クイック検索</span>
                                     <div className="relative">
-                                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
+                                        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                                         <input
                                             type="text"
                                             placeholder="スタッフ名・店舗名..."
-                                            className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-base font-bold focus:ring-2 focus:ring-brand-400 outline-none shadow-sm"
+                                            className="w-full pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-[11px] md:text-xs font-bold focus:ring-2 focus:ring-brand-400 outline-none shadow-sm"
                                             value={searchTerm}
                                             onChange={(e) => setSearchTerm(e.target.value)}
                                         />
@@ -6527,10 +6719,10 @@
                                 <div className="flex flex-col gap-2">
                                     <button
                                         onClick={() => { fetchDataFromSpreadsheet(true); fetchMarketingData(true); }}
-                                        className="p-3 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-all shadow-lg flex items-center gap-2 font-black text-sm uppercase tracking-tighter disabled:opacity-50"
+                                        className="px-2.5 py-1.5 md:px-3 md:py-2 bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-all shadow-lg flex items-center gap-1.5 font-black text-[11px] md:text-xs uppercase tracking-tighter disabled:opacity-50"
                                         disabled={loading || mktLoading}
                                     >
-                                        <RefreshCw size={18} className={loading || mktLoading ? 'animate-spin' : ''} /> Sync
+                                        <RefreshCw size={14} className={loading || mktLoading ? 'animate-spin' : ''} /> Sync
                                     </button>
                                     {lastFetchTime && (
                                         <span className="text-xs text-slate-400 text-center">
@@ -6542,7 +6734,7 @@
                         </header>
 
                         {/* Top 8 KPI Grid */}
-                        <div className={`grid gap-2 md:gap-4 ${isMobileView ? 'grid-cols-1' : 'grid-cols-2 sm:grid-cols-2 lg:grid-cols-4'}`}>
+                        <div className={`grid gap-2 md:gap-3 ${isMobileView ? 'grid-cols-1' : 'grid-cols-2 sm:grid-cols-2 lg:grid-cols-4'}`}>
                             <KpiBox title="総売上(個別税込)" value={formatYen(stats.totalSales)} icon={<DollarSign/>} sub="合計実績" color="bg-emerald-600" />
                             <KpiBox title="新規売上" value={formatYen(stats.totalNewSales)} icon={<TrendingUp/>} sub="新規獲得" color="bg-blue-600" />
                             <KpiBox title="継続売上" value={formatYen(stats.totalRecurringSales)} icon={<RefreshCw/>} sub="LTV" color="bg-brand-500" />
@@ -6932,14 +7124,14 @@
                                                 <div className="inline-flex items-center gap-2 px-2 md:px-3 py-1 bg-brand-100 text-brand-600 rounded-full text-[10px] md:text-xs font-black uppercase tracking-widest mb-1 md:mb-2">
                                                     <BarChart3 size={12} /> Charts Dashboard
                                                 </div>
-                                                <h1 className="text-xl sm:text-2xl md:text-3xl font-black tracking-tight text-slate-900 italic">ダッシュボード</h1>
+                                                <h1 className="text-base sm:text-lg md:text-2xl font-black tracking-tight text-slate-900 italic">ダッシュボード</h1>
                                             </div>
                                         </div>
 
                                         {/* フィルター */}
                                         <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-start gap-2 md:gap-3 mb-3 md:mb-4">
                                             <div className="flex flex-col gap-1 w-full sm:w-auto">
-                                                <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">期間選択</span>
+                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">期間選択</span>
                                                 <DateRangePicker
                                                     startDate={startDate}
                                                     endDate={endDate}
@@ -6964,17 +7156,17 @@
                                             </div>
 
                                             <div className="flex flex-col gap-1 w-full sm:w-auto sm:min-w-[220px] relative" ref={branchMenuRef}>
-                                                <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">店舗選択</span>
+                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">店舗選択</span>
                                                 <button
                                                     onClick={() => setIsBranchMenuOpen(!isBranchMenuOpen)}
-                                                    className="bg-slate-50 border border-slate-200 rounded-xl px-3 md:px-4 py-2 md:py-2.5 text-sm md:text-base font-bold flex items-center justify-between gap-2 hover:bg-slate-100 transition-colors shadow-sm"
+                                                    className="bg-slate-50 border border-slate-200 rounded-lg px-2 md:px-2.5 py-1 md:py-1.5 text-[11px] md:text-xs font-bold flex items-center justify-between gap-1.5 hover:bg-slate-100 transition-colors shadow-sm"
                                                 >
                                                     <span className="truncate">
                                                         {selectedBranches.length === allBranches.length ? "全店舗" :
                                                         selectedBranches.length === 0 ? "未選択" :
                                                         `${selectedBranches[0]}${selectedBranches.length > 1 ? ` 他${selectedBranches.length - 1}件` : ''}`}
                                                     </span>
-                                                    <ChevronDown size={18} className={`transition-transform ${isBranchMenuOpen ? 'rotate-180' : ''}`} />
+                                                    <ChevronDown size={16} className={`transition-transform ${isBranchMenuOpen ? 'rotate-180' : ''}`} />
                                                 </button>
                                                 <PortalDropdown anchorRef={branchMenuRef} isOpen={isBranchMenuOpen} onClose={() => setIsBranchMenuOpen(false)} width={280}>
                                                     <div className="bg-white border border-slate-200 rounded-2xl shadow-xl p-3 space-y-2 max-h-[400px] overflow-hidden flex flex-col w-[280px]">
@@ -7000,7 +7192,7 @@
 
                                             {/* Staff Name Selection */}
                                             <div className="flex flex-col gap-1 w-full sm:w-auto sm:min-w-[220px] relative" ref={staffMenuRef}>
-                                                <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">スタッフ選択</span>
+                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">スタッフ選択</span>
                                                 <button
                                                     onClick={() => setIsStaffMenuOpen(!isStaffMenuOpen)}
                                                     className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-base font-bold flex items-center justify-between gap-2 hover:bg-slate-100 transition-colors shadow-sm"
@@ -7010,7 +7202,7 @@
                                                         selectedStaffNames.length === 1 ? selectedStaffNames[0] :
                                                         `${selectedStaffNames[0]} 他${selectedStaffNames.length - 1}名`}
                                                     </span>
-                                                    <ChevronDown size={18} className={`transition-transform ${isStaffMenuOpen ? 'rotate-180' : ''}`} />
+                                                    <ChevronDown size={16} className={`transition-transform ${isStaffMenuOpen ? 'rotate-180' : ''}`} />
                                                 </button>
                                                 <PortalDropdown anchorRef={staffMenuRef} isOpen={isStaffMenuOpen} onClose={() => setIsStaffMenuOpen(false)} width={280}>
                                                     <div className="bg-white border border-slate-200 rounded-2xl shadow-xl p-3 space-y-2 max-h-[400px] overflow-hidden flex flex-col w-[280px]">
@@ -7183,7 +7375,7 @@
                                                     <div className="inline-flex items-center gap-1 md:gap-2 px-2 md:px-3 py-0.5 md:py-1 bg-brand-100 text-brand-600 rounded-full text-[10px] md:text-xs font-black uppercase tracking-widest mb-1">
                                                         <Megaphone size={10} className="md:hidden" /><Megaphone size={14} className="hidden md:block" /> Marketing
                                                     </div>
-                                                    <h1 className="text-lg md:text-3xl font-black tracking-tight text-slate-900 italic">マーケティング</h1>
+                                                    <h1 className="text-base md:text-2xl font-black tracking-tight text-slate-900 italic">マーケティング</h1>
                                                 </div>
                                             </div>
                                             <div className="flex items-center gap-3">
@@ -7211,7 +7403,7 @@
                                                 {/* 期間選択 */}
                                                 {mktMonths.length > 0 && (
                                                     <div className="flex flex-col gap-1 w-full sm:w-auto">
-                                                        <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">期間</span>
+                                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">期間</span>
                                                         <div className="flex items-center gap-1 md:gap-2">
                                                             <select value={mktSelectedMonth} onChange={e => setMktSelectedMonth(e.target.value)} className="bg-slate-50 border border-slate-200 rounded-xl px-2 md:px-3 py-2 md:py-2.5 text-xs md:text-sm font-bold focus:ring-2 focus:ring-brand-400 outline-none flex-1 sm:flex-none">
                                                                 {mktMonths.map(m => <option key={m} value={m}>{m}</option>)}
@@ -7227,7 +7419,7 @@
                                                 {/* 店舗選択 */}
                                                 {mktAllBranches.length > 0 && (
                                                     <div className="flex flex-col gap-1 min-w-0 w-full sm:min-w-[180px] sm:w-auto relative" ref={mktBranchRef}>
-                                                        <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">店舗</span>
+                                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">店舗</span>
                                                         <button onClick={() => setMktBranchMenuOpen(!mktBranchMenuOpen)} className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-bold flex items-center justify-between gap-2 hover:bg-slate-100 transition-colors">
                                                             <span className="truncate">{mktSelectedBranches.length === mktAllBranches.length ? '全店舗' : mktSelectedBranches.length === 0 ? '未選択' : `${mktSelectedBranches[0]}${mktSelectedBranches.length > 1 ? ` 他${mktSelectedBranches.length - 1}件` : ''}`}</span>
                                                             <ChevronDown size={16} className={`transition-transform ${mktBranchMenuOpen ? 'rotate-180' : ''}`} />
@@ -7254,7 +7446,7 @@
                                                 {/* スタッフ選択 */}
                                                 {mktAllStaff.length > 0 && (
                                                     <div className="flex flex-col gap-1 min-w-0 w-full sm:min-w-[180px] sm:w-auto relative" ref={mktStaffRef}>
-                                                        <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">スタッフ</span>
+                                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">スタッフ</span>
                                                         <button onClick={() => setMktStaffMenuOpen(!mktStaffMenuOpen)} className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-bold flex items-center justify-between gap-2 hover:bg-slate-100 transition-colors">
                                                             <span className="truncate">{mktSelectedStaff.length === 0 ? '全スタッフ' : `${mktSelectedStaff[0]}${mktSelectedStaff.length > 1 ? ` 他${mktSelectedStaff.length - 1}名` : ''}`}</span>
                                                             <ChevronDown size={16} className={`transition-transform ${mktStaffMenuOpen ? 'rotate-180' : ''}`} />
@@ -7281,7 +7473,7 @@
                                                 {/* 媒体選択 */}
                                                 {mktAllMedia.length > 0 && (
                                                     <div className="flex flex-col gap-1 min-w-0 w-full sm:min-w-[180px] sm:w-auto relative" ref={mktMediaRef}>
-                                                        <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">媒体</span>
+                                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">媒体</span>
                                                         <button onClick={() => setMktMediaMenuOpen(!mktMediaMenuOpen)} className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-bold flex items-center justify-between gap-2 hover:bg-slate-100 transition-colors">
                                                             <span className="truncate">{mktSelectedMedia.length === 0 ? '全媒体' : `${mktSelectedMedia[0]}${mktSelectedMedia.length > 1 ? ` 他${mktSelectedMedia.length - 1}件` : ''}`}</span>
                                                             <ChevronDown size={16} className={`transition-transform ${mktMediaMenuOpen ? 'rotate-180' : ''}`} />
@@ -7643,72 +7835,72 @@
                                                     ) : (
                                                     <React.Fragment>
                                                     {/* KPI Cards */}
-                                                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 md:gap-4">
-                                                        <div className="bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
+                                                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 md:gap-3">
+                                                        <div className="bg-white p-3 md:p-3.5 rounded-2xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
                                                             <div className="absolute top-0 right-0 w-20 h-20 bg-brand-500 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
-                                                            <div className="flex items-start justify-between mb-2 md:mb-3">
-                                                                <div className="p-2 md:p-3 rounded-xl md:rounded-2xl bg-brand-500 text-white shadow-lg"><Users size={18} className="md:hidden" /><Users size={22} className="hidden md:block" /></div>
-                                                                <span className="text-[10px] md:text-xs font-black text-slate-400 uppercase tracking-widest">集客</span>
+                                                            <div className="flex items-start justify-between mb-2">
+                                                                <div className="p-2 rounded-xl bg-brand-500 text-white shadow-lg"><Users size={16} /></div>
+                                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">集客</span>
                                                             </div>
-                                                            <h3 className="text-xs md:text-sm font-black text-slate-400 mb-0.5 md:mb-1">実来院数</h3>
-                                                            <p className="text-xl md:text-3xl font-black text-slate-900">{mktStats.totalNew}<span className="text-sm md:text-lg text-slate-400 ml-1">名</span></p>
-                                                            {mktStats.totalReservations > 0 && <p className="text-[10px] md:text-xs text-slate-400 font-bold mt-1">予約 {mktStats.totalReservations}名</p>}
+                                                            <h3 className="text-[11px] md:text-xs font-black text-slate-400 mb-0.5">実来院数</h3>
+                                                            <p className="text-lg md:text-xl font-black text-slate-900">{mktStats.totalNew}<span className="text-sm text-slate-400 ml-1">名</span></p>
+                                                            {mktStats.totalReservations > 0 && <p className="text-[10px] text-slate-400 font-bold mt-0.5">予約 {mktStats.totalReservations}名</p>}
                                                         </div>
 
-                                                        <div className="bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
+                                                        <div className="bg-white p-3 md:p-3.5 rounded-2xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
                                                             <div className="absolute top-0 right-0 w-20 h-20 bg-emerald-600 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
-                                                            <div className="flex items-start justify-between mb-2 md:mb-3">
-                                                                <div className="p-2 md:p-3 rounded-xl md:rounded-2xl bg-emerald-600 text-white shadow-lg"><DollarSign size={18} className="md:hidden" /><DollarSign size={22} className="hidden md:block" /></div>
-                                                                <span className="text-[10px] md:text-xs font-black text-slate-400 uppercase tracking-widest">CPA</span>
+                                                            <div className="flex items-start justify-between mb-2">
+                                                                <div className="p-2 rounded-xl bg-emerald-600 text-white shadow-lg"><DollarSign size={16} /></div>
+                                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">CPA</span>
                                                             </div>
-                                                            <h3 className="text-xs md:text-sm font-black text-slate-400 mb-0.5 md:mb-1">平均CPA</h3>
-                                                            <p className="text-xl md:text-3xl font-black text-slate-900">¥{mktStats.avgCpa.toLocaleString()}</p>
+                                                            <h3 className="text-[11px] md:text-xs font-black text-slate-400 mb-0.5">平均CPA</h3>
+                                                            <p className="text-lg md:text-xl font-black text-slate-900">¥{mktStats.avgCpa.toLocaleString()}</p>
                                                         </div>
 
-                                                        <div className="bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
+                                                        <div className="bg-white p-3 md:p-3.5 rounded-2xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
                                                             <div className="absolute top-0 right-0 w-20 h-20 bg-blue-600 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
-                                                            <div className="flex items-start justify-between mb-2 md:mb-3">
-                                                                <div className="p-2 md:p-3 rounded-xl md:rounded-2xl bg-blue-600 text-white shadow-lg"><Target size={18} className="md:hidden" /><Target size={22} className="hidden md:block" /></div>
-                                                                <span className="text-[10px] md:text-xs font-black text-slate-400 uppercase tracking-widest">成約</span>
+                                                            <div className="flex items-start justify-between mb-2">
+                                                                <div className="p-2 rounded-xl bg-blue-600 text-white shadow-lg"><Target size={16} /></div>
+                                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">成約</span>
                                                             </div>
-                                                            <h3 className="text-xs md:text-sm font-black text-slate-400 mb-0.5 md:mb-1">入会率</h3>
-                                                            <p className="text-xl md:text-3xl font-black text-slate-900">{mktStats.enrollRate}<span className="text-sm md:text-lg text-slate-400 ml-1">%</span></p>
-                                                            <p className="text-[10px] md:text-xs text-slate-400 font-bold mt-1">{mktStats.totalEnroll}名入会</p>
+                                                            <h3 className="text-[11px] md:text-xs font-black text-slate-400 mb-0.5">入会率</h3>
+                                                            <p className="text-lg md:text-xl font-black text-slate-900">{mktStats.enrollRate}<span className="text-sm text-slate-400 ml-1">%</span></p>
+                                                            <p className="text-[10px] text-slate-400 font-bold mt-0.5">{mktStats.totalEnroll}名入会</p>
                                                         </div>
 
-                                                        <div className="bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
+                                                        <div className="bg-white p-3 md:p-3.5 rounded-2xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
                                                             <div className="absolute top-0 right-0 w-20 h-20 bg-rose-500 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
-                                                            <div className="flex items-start justify-between mb-2 md:mb-3">
-                                                                <div className="p-2 md:p-3 rounded-xl md:rounded-2xl bg-rose-500 text-white shadow-lg"><AlertCircle size={18} className="md:hidden" /><AlertCircle size={22} className="hidden md:block" /></div>
-                                                                <span className="text-[10px] md:text-xs font-black text-slate-400 uppercase tracking-widest">注意</span>
+                                                            <div className="flex items-start justify-between mb-2">
+                                                                <div className="p-2 rounded-xl bg-rose-500 text-white shadow-lg"><AlertCircle size={16} /></div>
+                                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">注意</span>
                                                             </div>
-                                                            <h3 className="text-xs md:text-sm font-black text-slate-400 mb-0.5 md:mb-1">キャンセル率</h3>
-                                                            <p className="text-xl md:text-3xl font-black text-slate-900">{mktStats.cancelRate}<span className="text-sm md:text-lg text-slate-400 ml-1">%</span></p>
-                                                            <p className="text-[10px] md:text-xs text-slate-400 font-bold mt-1">{mktStats.totalCancel}名キャンセル</p>
+                                                            <h3 className="text-[11px] md:text-xs font-black text-slate-400 mb-0.5">キャンセル率</h3>
+                                                            <p className="text-lg md:text-xl font-black text-slate-900">{mktStats.cancelRate}<span className="text-sm text-slate-400 ml-1">%</span></p>
+                                                            <p className="text-[10px] text-slate-400 font-bold mt-0.5">{mktStats.totalCancel}名キャンセル</p>
                                                         </div>
                                                     </div>
 
                                                     {/* Secondary KPIs */}
-                                                    <div className="grid grid-cols-2 lg:grid-cols-5 gap-2 md:gap-4">
-                                                        <div className="bg-gradient-to-br from-brand-50 to-brand-50 p-3 md:p-5 rounded-xl md:rounded-2xl border border-brand-100">
-                                                            <div className="text-[10px] md:text-xs font-black text-brand-300 uppercase tracking-widest mb-0.5 md:mb-1">広告費合計</div>
-                                                            <div className="text-base md:text-xl font-black text-brand-600">¥{mktStats.totalAdSpend.toLocaleString()}</div>
+                                                    <div className="grid grid-cols-2 lg:grid-cols-5 gap-2 md:gap-3">
+                                                        <div className="bg-gradient-to-br from-brand-50 to-brand-50 p-2.5 md:p-3 rounded-xl border border-brand-100">
+                                                            <div className="text-[10px] font-black text-brand-300 uppercase tracking-widest mb-0.5">広告費合計</div>
+                                                            <div className="text-sm md:text-lg font-black text-brand-600">¥{mktStats.totalAdSpend.toLocaleString()}</div>
                                                         </div>
-                                                        <div className="bg-gradient-to-br from-emerald-50 to-teal-50 p-3 md:p-5 rounded-xl md:rounded-2xl border border-emerald-100">
-                                                            <div className="text-[10px] md:text-xs font-black text-emerald-400 uppercase tracking-widest mb-0.5 md:mb-1">売上合計</div>
-                                                            <div className="text-base md:text-xl font-black text-emerald-700">¥{mktStats.totalRevenue.toLocaleString()}</div>
+                                                        <div className="bg-gradient-to-br from-emerald-50 to-teal-50 p-2.5 md:p-3 rounded-xl border border-emerald-100">
+                                                            <div className="text-[10px] font-black text-emerald-400 uppercase tracking-widest mb-0.5">売上合計</div>
+                                                            <div className="text-sm md:text-lg font-black text-emerald-700">¥{mktStats.totalRevenue.toLocaleString()}</div>
                                                         </div>
-                                                        <div className="bg-gradient-to-br from-blue-50 to-brand-50 p-3 md:p-5 rounded-xl md:rounded-2xl border border-blue-100">
-                                                            <div className="text-[10px] md:text-xs font-black text-blue-400 uppercase tracking-widest mb-0.5 md:mb-1">ROAS</div>
-                                                            <div className="text-base md:text-xl font-black text-blue-700">{mktStats.roas}<span className="text-xs md:text-sm">%</span></div>
+                                                        <div className="bg-gradient-to-br from-blue-50 to-brand-50 p-2.5 md:p-3 rounded-xl border border-blue-100">
+                                                            <div className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-0.5">ROAS</div>
+                                                            <div className="text-sm md:text-lg font-black text-blue-700">{mktStats.roas}<span className="text-xs">%</span></div>
                                                         </div>
-                                                        <div className="bg-gradient-to-br from-amber-50 to-yellow-50 p-3 md:p-5 rounded-xl md:rounded-2xl border border-amber-100">
-                                                            <div className="text-[10px] md:text-xs font-black text-amber-400 uppercase tracking-widest mb-0.5 md:mb-1">平均客単価</div>
-                                                            <div className="text-base md:text-xl font-black text-amber-700">¥{mktStats.avgPrice.toLocaleString()}</div>
+                                                        <div className="bg-gradient-to-br from-amber-50 to-yellow-50 p-2.5 md:p-3 rounded-xl border border-amber-100">
+                                                            <div className="text-[10px] font-black text-amber-400 uppercase tracking-widest mb-0.5">平均客単価</div>
+                                                            <div className="text-sm md:text-lg font-black text-amber-700">¥{mktStats.avgPrice.toLocaleString()}</div>
                                                         </div>
-                                                        <div className="bg-gradient-to-br from-slate-50 to-gray-50 p-3 md:p-5 rounded-xl md:rounded-2xl border border-slate-200">
-                                                            <div className="text-[10px] md:text-xs font-black text-slate-400 uppercase tracking-widest mb-0.5 md:mb-1">口コミ数</div>
-                                                            <div className="text-base md:text-xl font-black text-slate-700">{mktStats.totalReviews}<span className="text-xs md:text-sm">件</span></div>
+                                                        <div className="bg-gradient-to-br from-slate-50 to-gray-50 p-2.5 md:p-3 rounded-xl border border-slate-200">
+                                                            <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-0.5">口コミ数</div>
+                                                            <div className="text-sm md:text-lg font-black text-slate-700">{mktStats.totalReviews}<span className="text-xs">件</span></div>
                                                         </div>
                                                     </div>
 
@@ -9494,7 +9686,7 @@
                                                 <SquareChart title="MRR推移" icon={<Wallet size={24} />} data={sqMetrics.monthlyTrends} dataKey="mrr" label="MRR" isCurrency={true} color="59, 130, 246" gradientFrom="from-blue-50" gradientTo="to-cyan-50" borderColor="border-blue-200" iconColor="text-blue-600" />
                                             </div>
 
-                                            <SquareBarChart title="月別 入会・解約数" data={sqMetrics.monthlyTrends} onBarClick={(month, type) => setSqDrilldown({ month, type })} />
+                                            <SquareBarChart title="月別 入会・解約/停止数" data={sqMetrics.monthlyTrends} onBarClick={(month, type) => setSqDrilldown({ month, type })} />
 
                                             {/* チャートドリルダウンモーダル */}
                                             {sqDrilldown && (
@@ -9933,12 +10125,20 @@
                                                 )}
                                             </div>
 
-                                            <div className="p-3 border-t border-slate-100 flex gap-2">
-                                                <input type="text" value={planInput}
+                                            <div className="p-3 border-t border-slate-100 flex gap-2 items-end">
+                                                <textarea ref={planInputRef} value={planInput}
                                                     onChange={e => setPlanInput(e.target.value)}
-                                                    onKeyPress={e => e.key === 'Enter' && handlePlanSubmit()}
-                                                    placeholder={planSelectedBranch + ' について質問...'}
-                                                    className="flex-1 bg-slate-50 rounded-xl px-4 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-200 border border-slate-200"
+                                                    onKeyDown={e => {
+                                                        if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                                                            e.preventDefault();
+                                                            handlePlanSubmit();
+                                                        }
+                                                    }}
+                                                    placeholder={planSelectedBranch + ' について質問... （Shift+Enterで改行）'}
+                                                    rows={1}
+                                                    className="flex-1 bg-slate-50 rounded-xl px-4 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-200 border border-slate-200 resize-none overflow-y-auto"
+                                                    style={{ minHeight: '42px', maxHeight: '160px' }}
+                                                    onInput={e => { e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'; }}
                                                     disabled={planLoading}
                                                 />
                                                 <button onClick={() => handlePlanSubmit()} disabled={!planInput.trim() || planLoading}
@@ -11302,31 +11502,31 @@
             return (
                 <div className="relative" ref={pickerRef}>
                     {/* メインボタン - 開始日と終了日を分けて表示 */}
-                    <div className="flex bg-slate-50 border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                    <div className="flex bg-slate-50 border border-slate-200 rounded-lg overflow-hidden shadow-sm">
                         <button
                             onClick={() => { setIsOpen(true); setSelectingStart(true); }}
-                            className={`flex-1 px-2 md:px-3 py-2 md:py-2.5 text-xs md:text-sm font-bold flex items-center gap-1.5 md:gap-2 transition-all border-r border-slate-200 ${
+                            className={`flex-1 px-2 md:px-2.5 py-1.5 md:py-2 text-xs md:text-sm font-bold flex items-center gap-1.5 transition-all border-r border-slate-200 ${
                                 isOpen && selectingStart ? 'bg-brand-100 text-brand-600' : 'hover:bg-slate-100'
                             }`}
                         >
-                            <Calendar size={14} className={`flex-shrink-0 ${isOpen && selectingStart ? 'text-brand-400' : 'text-slate-400'}`} />
+                            <Calendar size={12} className={`flex-shrink-0 ${isOpen && selectingStart ? 'text-brand-400' : 'text-slate-400'}`} />
                             <div className="text-left min-w-0">
-                                <div className="text-[9px] md:text-[10px] text-slate-400 uppercase tracking-wider">開始日</div>
-                                <div className={`truncate ${isOpen && selectingStart ? 'text-brand-600' : 'text-slate-900'}`}>
+                                <div className="text-[9px] text-slate-400 uppercase tracking-wider leading-tight">開始日</div>
+                                <div className={`truncate text-[11px] md:text-xs leading-tight ${isOpen && selectingStart ? 'text-brand-600' : 'text-slate-900'}`}>
                                     {startDate ? formatDateJa(startDate) : '選択'}
                                 </div>
                             </div>
                         </button>
                         <button
                             onClick={() => { setIsOpen(true); setSelectingStart(false); }}
-                            className={`flex-1 px-2 md:px-3 py-2 md:py-2.5 text-xs md:text-sm font-bold flex items-center gap-1.5 md:gap-2 transition-all ${
+                            className={`flex-1 px-2 md:px-2.5 py-1.5 md:py-2 text-xs md:text-sm font-bold flex items-center gap-1.5 transition-all ${
                                 isOpen && !selectingStart ? 'bg-brand-100 text-brand-600' : 'hover:bg-slate-100'
                             }`}
                         >
-                            <Calendar size={14} className={`flex-shrink-0 ${isOpen && !selectingStart ? 'text-brand-400' : 'text-slate-400'}`} />
+                            <Calendar size={12} className={`flex-shrink-0 ${isOpen && !selectingStart ? 'text-brand-400' : 'text-slate-400'}`} />
                             <div className="text-left min-w-0">
-                                <div className="text-[9px] md:text-[10px] text-slate-400 uppercase tracking-wider">終了日</div>
-                                <div className={`truncate ${isOpen && !selectingStart ? 'text-brand-600' : 'text-slate-900'}`}>
+                                <div className="text-[9px] text-slate-400 uppercase tracking-wider leading-tight">終了日</div>
+                                <div className={`truncate text-[11px] md:text-xs leading-tight ${isOpen && !selectingStart ? 'text-brand-600' : 'text-slate-900'}`}>
                                     {endDate ? formatDateJa(endDate) : '選択'}
                                 </div>
                             </div>
@@ -12460,7 +12660,7 @@
                                 borderRadius: 6,
                             },
                             {
-                                label: '解約',
+                                label: '解約・停止',
                                 data: data.map(d => d.canceled),
                                 backgroundColor: 'rgba(239, 68, 68, 0.7)',
                                 borderColor: 'rgba(239, 68, 68, 1)',
@@ -12738,17 +12938,17 @@
         };
 
         const KpiBox = ({ title, value, icon, sub, color }) => (
-            <div className="card-hover bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group animate-fade-in-up">
-                <div className={`absolute top-0 right-0 w-24 md:w-32 h-24 md:h-32 ${color} opacity-[0.05] -mr-6 md:-mr-8 -mt-6 md:-mt-8 rounded-full group-hover:scale-125 transition-transform duration-500`} />
-                <div className="flex items-start justify-between mb-2 md:mb-4 relative z-10">
-                    <div className={`p-2 md:p-3 rounded-xl md:rounded-2xl ${color} text-white shadow-lg group-hover:shadow-xl group-hover:scale-105 transition-all duration-300`}>
-                        {React.cloneElement(icon, { size: window.innerWidth < 768 ? 16 : 22 })}
+            <div className="card-hover bg-white p-3 md:p-3.5 rounded-2xl md:rounded-2xl shadow-sm border border-slate-200 relative overflow-hidden group animate-fade-in-up">
+                <div className={`absolute top-0 right-0 w-24 md:w-24 h-24 md:h-24 ${color} opacity-[0.05] -mr-6 md:-mr-6 -mt-6 md:-mt-6 rounded-full group-hover:scale-125 transition-transform duration-500`} />
+                <div className="flex items-start justify-between mb-2 md:mb-2 relative z-10">
+                    <div className={`p-2 md:p-2 rounded-xl md:rounded-xl ${color} text-white shadow-lg group-hover:shadow-xl group-hover:scale-105 transition-all duration-300`}>
+                        {React.cloneElement(icon, { size: window.innerWidth < 768 ? 16 : 16 })}
                     </div>
-                    <div className="text-[10px] md:text-xs font-black text-slate-400 uppercase tracking-widest">{sub}</div>
+                    <div className="text-[10px] md:text-[10px] font-black text-slate-400 uppercase tracking-widest">{sub}</div>
                 </div>
                 <div className="relative z-10">
-                    <h3 className="text-[11px] md:text-sm font-black text-slate-400 mb-1 md:mb-2">{title}</h3>
-                    <p className="text-lg md:text-2xl font-black text-slate-900 tracking-tight">{value}</p>
+                    <h3 className="text-[11px] md:text-xs font-black text-slate-400 mb-1 md:mb-0.5">{title}</h3>
+                    <p className="text-lg md:text-xl font-black text-slate-900 tracking-tight">{value}</p>
                 </div>
             </div>
         );

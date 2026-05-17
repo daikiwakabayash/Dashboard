@@ -815,6 +815,47 @@
             '予算': 'budget',
         };
 
+        // オーナー→担当店舗マッピング（デフォルト・NAORU整骨院グループ実態に基づく）
+        const DEFAULT_OWNER_MAP = {
+            '武田哲也': ['札幌円山院', '新馬場院', '日暮里', '大森院', '人形町院', '中野院', '花園院', '住吉院', '沖縄浦添院', '沖縄コザ院', '沖縄大里院'],
+            '白神雄亮': ['札幌白石院'],
+            '西山喜洋': ['仙台院', '仙台長町院', '泉中央院'],
+            '横浜章智': ['福島院'],
+            '坂東亮輔': ['山形天童院', '山形院'],
+            '及川豪人': ['三鷹院', '国分寺院', '蒲田院'],
+            '齋藤敦紀': ['浅草', '錦糸町院', '北千住院'],
+            '林勝好': ['池袋', '銀座院', '大塚院', '上北沢院'],
+            '林尚弘': ['新宿院'],
+            '若林大樹': ['飯田橋院', '恵比寿院', '武蔵小杉院', '千葉駅院', '勝田台院', '四条烏丸院', '大阪茨木院', '大阪京橋院', '福岡博多院', '長崎諫早院'],
+            '仲野純平': ['荻窪院', '目黒院', '町田院'],
+            '澤井寿昌': ['池尻大橋院'],
+            '横田裕平': ['大山院'],
+            '仲島大勝': ['十条院', '西川口院', '南浦和', '福岡香椎院'],
+            '中山莉奈': ['渋谷院'],
+            '福田竜大': ['笹塚院'],
+            '伊藤誠希': ['横浜関内院', '溝の口院', '上大岡院'],
+            '福本理人': ['鶴見院', '藤沢院', '岡山', '広島院'],
+            '鈴木正昌': ['本厚木', '平塚院'],
+            '中森大三郎': ['相模大野院', '上溝院'],
+            '米谷将吾': ['センター南'],
+            '関輪隆成': ['川越', '太田院'],
+            '西山守': ['春日部院', '大宮'],
+            '野島大輔': ['千種院', '伏見院', '名古屋金山院', '藤が丘院', '静岡院', '福岡天神院', '福岡姪浜院', '熊本院'],
+            '宇良大地': ['名古屋八事院'],
+            '河野良平': ['金沢院'],
+            '菊池英夫': ['新潟'],
+            '鈴木拓也': ['岐阜院'],
+            '若林正樹': ['中百舌鳥院', '天満天六院'],
+            '城間ユウ': ['神戸兵庫院'],
+            '梶原亮平': ['三宮院'],
+            '坂田勇戸': ['広島福山院', '宮崎院'],
+            '宮崎淳': ['長崎大村院'],
+            '南拓真': ['大分院', '鹿児島院'],
+        };
+
+        // 集計・選択肢から完全除外する店舗（閉院・統合・運用対象外など）
+        const EXCLUDED_BRANCHES = new Set(['大井町院', '大井町']);
+
         // 整体院業界ベンチマーク（市場平均値）
         const SEITAI_BENCHMARKS = {
             cpa: { excellent: 5000, good: 8000, average: 12000, poor: 18000, label: 'CPA（来院単価）' },
@@ -1012,6 +1053,55 @@
             }
         };
 
+        class ErrorBoundary extends React.Component {
+            constructor(props) {
+                super(props);
+                this.state = { error: null };
+            }
+            static getDerivedStateFromError(error) {
+                return { error };
+            }
+            componentDidCatch(error, info) {
+                console.error('ErrorBoundary caught:', error, info);
+            }
+            render() {
+                if (this.state.error) {
+                    const err = this.state.error;
+                    return (
+                        <div className="p-6">
+                            <div className="bg-white border-2 border-rose-200 rounded-2xl shadow-sm max-w-3xl mx-auto">
+                                <div className="p-5 border-b border-rose-100">
+                                    <h2 className="text-lg font-black text-rose-700 flex items-center gap-2">
+                                        <AlertCircle size={20} /> {this.props.label || 'このタブ'}でエラーが発生しました
+                                    </h2>
+                                    <p className="text-sm text-slate-600 font-bold mt-1">
+                                        他のタブは引き続き利用できます。下記のエラー内容をスクリーンショットして共有してください。
+                                    </p>
+                                </div>
+                                <div className="p-5 space-y-3">
+                                    <div>
+                                        <p className="text-xs font-black text-slate-400 mb-1">メッセージ</p>
+                                        <pre className="text-xs bg-rose-50 border border-rose-200 rounded-lg p-3 text-rose-700 whitespace-pre-wrap break-all">{err.message || String(err)}</pre>
+                                    </div>
+                                    {err.stack && (
+                                        <details>
+                                            <summary className="text-xs font-black text-slate-500 cursor-pointer hover:text-slate-700">スタックトレース</summary>
+                                            <pre className="text-[10px] bg-slate-50 border border-slate-200 rounded-lg p-3 text-slate-600 whitespace-pre-wrap break-all mt-2">{err.stack}</pre>
+                                        </details>
+                                    )}
+                                    <div className="flex gap-2 pt-2">
+                                        <button onClick={() => this.setState({ error: null })} className="px-4 py-2 bg-slate-900 text-white rounded-xl text-sm font-bold hover:bg-slate-800">再試行</button>
+                                        <button onClick={() => location.reload()} className="px-4 py-2 bg-rose-500 text-white rounded-xl text-sm font-bold hover:bg-rose-600">ページを再読み込み</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    );
+                }
+                return this.props.children;
+            }
+        }
+
         const App = () => {
             console.log('🎯 App component initializing...');
 
@@ -1134,6 +1224,24 @@
             const branchMenuRef = useRef(null);
             const staffMenuRef = useRef(null);
 
+            // オーナーフィルター（店舗→オーナーのマッピングはlocalStorage保持・初回はデフォルトを使用）
+            const [ownerMap, setOwnerMap] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('naoru_owner_map');
+                    return saved ? JSON.parse(saved) : DEFAULT_OWNER_MAP;
+                } catch { return DEFAULT_OWNER_MAP; }
+            });
+            useEffect(() => {
+                try { localStorage.setItem('naoru_owner_map', JSON.stringify(ownerMap)); } catch {}
+            }, [ownerMap]);
+            const [selectedOwners, setSelectedOwners] = useState(savedUIState?.selectedOwners || []);
+            const [isOwnerMenuOpen, setIsOwnerMenuOpen] = useState(false);
+            const [ownerSearchTerm, setOwnerSearchTerm] = useState('');
+            const ownerMenuRef = useRef(null);
+            const [isOwnerSettingsOpen, setIsOwnerSettingsOpen] = useState(false);
+            const [ownerSettingsDraft, setOwnerSettingsDraft] = useState(null); // 編集中マップ
+            const [newOwnerName, setNewOwnerName] = useState('');
+
             // マーケティングダッシュボード用 State
             const [mktData, setMktData] = useState([]);
             const [mktLoading, setMktLoading] = useState(false);
@@ -1216,6 +1324,17 @@
             const [planBranchMenuOpen, setPlanBranchMenuOpen] = useState(false);
             const [planBranchSearch, setPlanBranchSearch] = useState('');
             const planBranchMenuRef = useRef(null);
+            // アクション実績ログ（端末ローカル保存）
+            const [planActions, setPlanActions] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('naoru_plan_actions');
+                    return saved ? JSON.parse(saved) : [];
+                } catch { return []; }
+            });
+            useEffect(() => {
+                try { localStorage.setItem('naoru_plan_actions', JSON.stringify(planActions)); } catch {}
+            }, [planActions]);
+            const [planActionDraft, setPlanActionDraft] = useState(null); // { aiMsgIdx, summary }
             // 参考リンク管理
             const [planLinks, setPlanLinks] = useState(() => {
                 try {
@@ -2273,7 +2392,7 @@
                                 setStartDate(new Date(parseInt(year), parseInt(month) - 1, 1));
                                 setEndDate(new Date(parseInt(year), parseInt(month), 0));
                             }
-                            const allBranches = Array.from(new Set(displayData.map(d => d.branch)));
+                            const allBranches = Array.from(new Set(displayData.map(d => d.branch))).filter(b => !EXCLUDED_BRANCHES.has(b));
                             if (selectedBranches.length === 0) setSelectedBranches(allBranches);
                         }
                         setLoading(false);
@@ -2314,7 +2433,7 @@
                                 setStartDate(new Date(parseInt(year), parseInt(month) - 1, 1));
                                 setEndDate(new Date(parseInt(year), parseInt(month), 0));
                             }
-                            setSelectedBranches(Array.from(new Set(fetchedData.map(d => d.branch))));
+                            setSelectedBranches(Array.from(new Set(fetchedData.map(d => d.branch))).filter(b => !EXCLUDED_BRANCHES.has(b)));
                         }
 
                         setLastFetchTime(new Date());
@@ -3465,6 +3584,7 @@
                     endDate: endDate ? endDate.toISOString() : null,
                     selectedBranches,
                     selectedStaffNames,
+                    selectedOwners,
                     selectedMetrics,
                     // マーケティングダッシュボード状態
                     mktSelectedBranches,
@@ -3476,7 +3596,7 @@
                 };
                 saveUIState(uiState);
                 setUiStateLoaded(true);
-            }, [currentPage, startMonth, endMonth, startDate, endDate, selectedBranches, selectedStaffNames, selectedMetrics, mktSelectedBranches, mktSelectedStaff, mktSelectedMedia, mktSelectedMonth, mktEndMonth, mktActiveTab]);
+            }, [currentPage, startMonth, endMonth, startDate, endDate, selectedBranches, selectedStaffNames, selectedOwners, selectedMetrics, mktSelectedBranches, mktSelectedStaff, mktSelectedMedia, mktSelectedMonth, mktEndMonth, mktActiveTab]);
 
             const months = useMemo(() => {
                 return Array.from(new Set(rawData.map(d => d.month))).sort((a, b) => {
@@ -3489,7 +3609,7 @@
             const allBranches = useMemo(() => {
                 const spreadsheetBranches = rawData.map(d => d.branch);
                 const squareBranches = (sqData && sqData.stores) ? sqData.stores.map(s => s.name) : [];
-                return Array.from(new Set([...spreadsheetBranches, ...squareBranches]));
+                return Array.from(new Set([...spreadsheetBranches, ...squareBranches])).filter(b => !EXCLUDED_BRANCHES.has(b));
             }, [rawData, sqData]);
 
             const filteredBranches = useMemo(() => {
@@ -3546,10 +3666,36 @@
                 return Math.floor(num);
             };
 
+            // オーナーフィルター: 選択中オーナーに紐づく店舗集合（未選択時はnull = 制限なし）
+            // データ側の店舗名は「大森」「飯田橋院」など院サフィックス有無の揺れがあるため、
+            // 末尾の「院」と空白を取り除いた正規化キーでマッチングする
+            const normalizeBranchKey = (name) => {
+                if (!name) return '';
+                return String(name).replace(/\s+/g, '').replace(/院+$/, '').toLowerCase();
+            };
+            const allOwnerNames = useMemo(() => Object.keys(ownerMap).sort(), [ownerMap]);
+            const ownerBranchSet = useMemo(() => {
+                if (!selectedOwners || selectedOwners.length === 0) return null;
+                const set = new Set();
+                selectedOwners.forEach(o => (ownerMap[o] || []).forEach(b => set.add(normalizeBranchKey(b))));
+                return set;
+            }, [selectedOwners, ownerMap]);
+            const matchesOwnerFilter = (branch) => !ownerBranchSet || ownerBranchSet.has(normalizeBranchKey(branch));
+            const filteredOwnerNames = useMemo(() => {
+                if (!ownerSearchTerm) return allOwnerNames;
+                const q = ownerSearchTerm.toLowerCase();
+                return allOwnerNames.filter(n => n.toLowerCase().includes(q));
+            }, [allOwnerNames, ownerSearchTerm]);
+            const toggleOwner = (name) => {
+                setSelectedOwners(prev => prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name]);
+            };
+
             const filteredData = useMemo(() => {
                 return rawData.filter(d => {
+                    if (EXCLUDED_BRANCHES.has(d.branch)) return false;
                     const matchMonth = targetMonths.includes(d.month);
                     const matchBranch = selectedBranches.includes(d.branch);
+                    const matchOwner = matchesOwnerFilter(d.branch);
 
                     // スタッフ名フィルタリング: selectedStaffNamesが空の場合は全て表示
                     const matchStaff = selectedStaffNames.length === 0 || selectedStaffNames.includes(d.name);
@@ -3559,16 +3705,16 @@
                                         d.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
                                         d.branch.toLowerCase().includes(searchTerm.toLowerCase());
 
-                    return matchMonth && matchBranch && matchStaff && matchSearch;
+                    return matchMonth && matchBranch && matchOwner && matchStaff && matchSearch;
                 });
-            }, [rawData, targetMonths, selectedBranches, selectedStaffNames, searchTerm]);
+            }, [rawData, targetMonths, selectedBranches, selectedStaffNames, ownerBranchSet, searchTerm]);
 
             // ===== マーケティング用 useMemo =====
             const mktMonths = useMemo(() => {
                 return sortMonths(Array.from(new Set(mktData.map(d => d.month).filter(Boolean))));
             }, [mktData]);
 
-            const mktAllBranches = useMemo(() => Array.from(new Set(mktData.map(d => d.branch).filter(Boolean))), [mktData]);
+            const mktAllBranches = useMemo(() => Array.from(new Set(mktData.map(d => d.branch).filter(Boolean))).filter(b => !EXCLUDED_BRANCHES.has(b)), [mktData]);
             const mktAllStaff = useMemo(() => Array.from(new Set(mktData.map(d => d.staff).filter(Boolean))), [mktData]);
             const mktAllMedia = useMemo(() => Array.from(new Set(mktData.map(d => d.media).filter(m => m && m !== '全媒体合計'))), [mktData]);
 
@@ -3727,13 +3873,15 @@
                 return mktData.filter(d => {
                     // 全媒体合計レコードは集計で二重計上されるため除外
                     if (d.media === '全媒体合計') return false;
+                    if (EXCLUDED_BRANCHES.has(d.branch)) return false;
                     const matchMonth = mktTargetMonths.length === 0 || mktTargetMonths.includes(d.month);
                     const matchBranch = mktSelectedBranches.length === 0 || mktSelectedBranches.includes(d.branch);
+                    const matchOwner = matchesOwnerFilter(d.branch);
                     const matchStaff = mktSelectedStaff.length === 0 || mktSelectedStaff.includes(d.staff);
                     const matchMedia = mktSelectedMedia.length === 0 || mktSelectedMedia.includes(d.media);
-                    return matchMonth && matchBranch && matchStaff && matchMedia;
+                    return matchMonth && matchBranch && matchOwner && matchStaff && matchMedia;
                 });
-            }, [mktData, mktTargetMonths, mktSelectedBranches, mktSelectedStaff, mktSelectedMedia]);
+            }, [mktData, mktTargetMonths, mktSelectedBranches, mktSelectedStaff, mktSelectedMedia, ownerBranchSet]);
 
             // マーケティングKPI集計
             const mktStats = useMemo(() => {
@@ -6072,7 +6220,7 @@
                     prevMediaMap[d.media].newCount += d.newCount || 0;
                 });
                 // 全店舗ランキング
-                const allBranches = [...new Set(rawData.map(d => d.branch).filter(Boolean))];
+                const allBranches = [...new Set(rawData.map(d => d.branch).filter(Boolean))].filter(b => !EXCLUDED_BRANCHES.has(b));
                 const branchRanking = allBranches.map(b => {
                     const bd = rawData.filter(d => d.month === latestMonth && d.branch === b);
                     const bm = mktData.filter(d => d.month === latestMonth && d.branch === b && d.media !== '全媒体合計');
@@ -6105,6 +6253,74 @@
                     mediaBreakdown, prevMediaMap, branchRanking, monthlyTrend,
                     branchName: branchName || '全店舗',
                 };
+            };
+
+            // ── 事業計画: アクション実績ログのKPIスナップショット・差分計算 ──
+            const computePlanKpiSnapshot = (branch) => {
+                const a = computePlanActuals(branch);
+                return {
+                    month: a.latestMonth,
+                    sales: a.totalSales,
+                    newCount: a.totalNewCount,
+                    enrollRate: a.enrollRate,
+                    churnRate: a.churnRate,
+                    cpa: a.cpa,
+                };
+            };
+            const computePlanActionDelta = (baseline, result) => {
+                if (!baseline || !result) return null;
+                const pct = (b, r) => (b > 0) ? Math.round((r - b) / b * 1000) / 10 : 0;
+                return {
+                    salesPct: pct(baseline.sales, result.sales),
+                    newPct: pct(baseline.newCount, result.newCount),
+                    enrollPt: Math.round((result.enrollRate - baseline.enrollRate) * 10) / 10,
+                    churnPt: Math.round((result.churnRate - baseline.churnRate) * 10) / 10,
+                    cpaPct: pct(baseline.cpa, result.cpa),
+                };
+            };
+            // 効果スコア: 売上%+新規%+入会率pt×2 − 退会率pt×3 − CPA%×0.5
+            const computePlanActionScore = (delta) => {
+                if (!delta) return null;
+                return Math.round(
+                    (delta.salesPct || 0) * 1.0 +
+                    (delta.newPct || 0) * 1.0 +
+                    (delta.enrollPt || 0) * 2.0 -
+                    (delta.churnPt || 0) * 3.0 -
+                    (delta.cpaPct || 0) * 0.5
+                );
+            };
+            const savePlanAction = (summary, fullText, aiMsgIdx) => {
+                const cleanSummary = (summary || '').trim();
+                if (!cleanSummary) return;
+                const baseline = computePlanKpiSnapshot(planSelectedBranch);
+                const record = {
+                    id: `act_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                    branch: planSelectedBranch || '全店舗',
+                    summary: cleanSummary,
+                    fullText: (fullText || '').slice(0, 4000),
+                    aiMessageIdx: aiMsgIdx == null ? null : aiMsgIdx,
+                    proposedAt: new Date().toISOString(),
+                    baselineMonth: baseline.month,
+                    baselineKPI: baseline,
+                    executedAt: new Date().toISOString(),
+                    resultMonth: null, resultKPI: null, delta: null, score: null,
+                    status: 'executed',
+                };
+                setPlanActions(prev => [record, ...prev]);
+                setPlanActionDraft(null);
+            };
+            const recordPlanActionResult = (id) => {
+                setPlanActions(prev => prev.map(a => {
+                    if (a.id !== id) return a;
+                    const result = computePlanKpiSnapshot(a.branch);
+                    const delta = computePlanActionDelta(a.baselineKPI, result);
+                    const score = computePlanActionScore(delta);
+                    return { ...a, resultMonth: result.month, resultKPI: result, delta, score, status: 'completed' };
+                }));
+            };
+            const deletePlanAction = (id) => {
+                if (!confirm('このアクション記録を削除しますか？')) return;
+                setPlanActions(prev => prev.filter(a => a.id !== id));
             };
 
             // ── 事業計画: AIデータコンテキスト構築（店舗別＋他店比較） ──
@@ -6154,6 +6370,24 @@
                 lines.push(newGap > 0 ? '新規ギャップ: あと' + newGap + '名必要' : '新規目標: 達成済み！');
                 lines.push(a.enrollRate < planGoals.enrollRate ? '入会率ギャップ: あと' + (planGoals.enrollRate - a.enrollRate) + 'ポイント改善が必要' : '入会率目標: 達成済み！');
                 lines.push(a.cpa > planGoals.cpaTarget && a.cpa > 0 ? 'CPAギャップ: ¥' + (a.cpa - planGoals.cpaTarget).toLocaleString() + '削減が必要' : 'CPA目標: 達成済み！');
+                // 過去アクション実績（効果スコア上位のみ反映）
+                const completedActions = planActions.filter(act => act.branch === (branch || '全店舗') && act.status === 'completed' && act.delta);
+                if (completedActions.length > 0) {
+                    const topActions = [...completedActions].sort((x, y) => (y.score || 0) - (x.score || 0)).slice(0, 5);
+                    lines.push('', '【過去の実行アクションと効果（' + (branch || '全店舗') + '・効果スコア上位）】');
+                    lines.push('効果スコア = 売上%+新規%+入会率pt×2 − 退会率pt×3 − CPA%×0.5');
+                    topActions.forEach((act, i) => {
+                        const d = act.delta;
+                        const sign = (v) => (v >= 0 ? '+' : '') + v;
+                        lines.push((i + 1) + '. 「' + act.summary + '」[効果スコア: ' + (act.score || 0) + ']');
+                        lines.push('   ベース月: ' + act.baselineMonth + ' → 結果月: ' + act.resultMonth);
+                        lines.push('   結果: 売上' + sign(d.salesPct) + '%, 新規' + sign(d.newPct) + '%, 入会率' + sign(d.enrollPt) + 'pt, 退会率' + sign(d.churnPt) + 'pt, CPA' + sign(d.cpaPct) + '%');
+                    });
+                    lines.push('上記の効果が高かったアクションに似た方向性を優先的に提案し、似た系統で効果が薄かった/逆効果だったものは避けてください。');
+                    if (completedActions.length > topActions.length) {
+                        lines.push('（他にも ' + (completedActions.length - topActions.length) + ' 件の完了アクションあり・効果スコア下位のため省略）');
+                    }
+                }
                 // 参考リンク
                 if (planLinks.length > 0) {
                     lines.push('', '【参考リンク（回答の中で関連するものがあれば[タイトル](URL)形式のMarkdownリンクとして積極的に紹介してください）】');
@@ -6361,17 +6595,17 @@
                             <img src="/logo.png" alt="NAORU" className="h-8 w-auto object-contain" />
                         </div>
                         {currentPage === 'dashboard' && (
-                            <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
-                                <div className="max-w-[1600px] mx-auto space-y-4 md:space-y-6">
+                            <div className="p-3 md:p-4 font-sans text-slate-900">
+                                <div className="max-w-[1600px] mx-auto space-y-3 md:space-y-4">
 
                         {/* Filter Header */}
-                        <header className="flex flex-col gap-3 md:gap-4 bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 card-hover animate-fade-in-up">
-                            <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 md:gap-6">
-                                <div className="space-y-1 flex-1">
-                                    <div className="inline-flex items-center gap-2 px-2 md:px-3 py-1 bg-gradient-to-r from-brand-100 to-amber-100 text-brand-600 rounded-full text-[10px] md:text-xs font-black uppercase tracking-widest mb-1">
-                                        <Activity size={12} className="md:hidden" /><Activity size={14} className="hidden md:block" /> Analytics Dashboard
+                        <header className="flex flex-col gap-2 md:gap-3 bg-white p-3 md:p-4 rounded-2xl shadow-sm border border-slate-200 card-hover animate-fade-in-up">
+                            <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-2 md:gap-4">
+                                <div className="space-y-0.5 flex-1">
+                                    <div className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-gradient-to-r from-brand-100 to-amber-100 text-brand-600 rounded-full text-[10px] font-black uppercase tracking-widest">
+                                        <Activity size={11} /> Analytics Dashboard
                                     </div>
-                                    <h1 className="text-xl md:text-3xl font-black tracking-tight text-slate-900 italic">経営指標</h1>
+                                    <h1 className="text-lg md:text-2xl font-black tracking-tight text-slate-900 italic">経営指標</h1>
                                 </div>
 
                                 {/* Mobile View Toggle */}
@@ -6461,6 +6695,72 @@
                                     </PortalDropdown>
                                 </div>
 
+                                {/* Owner Selection */}
+                                <div className="flex flex-col gap-1 min-w-0 w-full sm:min-w-[220px] sm:w-auto relative" ref={ownerMenuRef}>
+                                    <div className="flex items-center justify-between px-1">
+                                        <span className="text-xs font-black text-slate-400 uppercase tracking-widest">オーナー選択</span>
+                                        <button onClick={() => { setOwnerSettingsDraft(JSON.parse(JSON.stringify(ownerMap))); setIsOwnerSettingsOpen(true); }}
+                                            className="text-[10px] font-black text-brand-500 hover:text-brand-600">設定</button>
+                                    </div>
+                                    <button
+                                        onClick={() => setIsOwnerMenuOpen(!isOwnerMenuOpen)}
+                                        className="bg-slate-50 border border-slate-200 rounded-xl px-3 md:px-4 py-2 md:py-2.5 text-sm md:text-base font-bold flex items-center justify-between gap-2 hover:bg-slate-100 transition-colors shadow-sm"
+                                    >
+                                        <span className="truncate">
+                                            {allOwnerNames.length === 0 ? '未設定' :
+                                             selectedOwners.length === 0 ? '全オーナー' :
+                                             selectedOwners.length === 1 ? selectedOwners[0] :
+                                             `${selectedOwners[0]} 他${selectedOwners.length - 1}名`}
+                                        </span>
+                                        <ChevronDown size={18} className={`transition-transform flex-shrink-0 ${isOwnerMenuOpen ? 'rotate-180' : ''}`} />
+                                    </button>
+                                    <PortalDropdown anchorRef={ownerMenuRef} isOpen={isOwnerMenuOpen} onClose={() => setIsOwnerMenuOpen(false)} width={280}>
+                                        <div className="bg-white border border-slate-200 rounded-2xl shadow-xl p-3 space-y-2 max-h-[400px] overflow-hidden flex flex-col w-[280px]">
+                                            {allOwnerNames.length === 0 ? (
+                                                <div className="text-center py-6 px-3">
+                                                    <p className="text-xs font-bold text-slate-500 mb-2">オーナーが未設定です</p>
+                                                    <button onClick={() => { setOwnerSettingsDraft({}); setIsOwnerSettingsOpen(true); setIsOwnerMenuOpen(false); }}
+                                                        className="text-xs font-black text-white bg-brand-500 hover:bg-brand-600 px-3 py-1.5 rounded-lg">オーナーを登録</button>
+                                                </div>
+                                            ) : (
+                                                <>
+                                                    <div className="flex items-center justify-between p-2 border-b border-slate-100 mb-1">
+                                                        <button onClick={() => setSelectedOwners([])} className="text-xs font-black text-brand-500 hover:bg-brand-50 px-3 py-1.5 rounded">全解除</button>
+                                                        <button onClick={() => setSelectedOwners(allOwnerNames)} className="text-xs font-black text-slate-400 hover:bg-slate-50 px-3 py-1.5 rounded">全選択</button>
+                                                    </div>
+                                                    <div className="relative px-2 pb-2">
+                                                        <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                                                        <input
+                                                            type="text"
+                                                            placeholder="オーナー名を検索..."
+                                                            className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-brand-400 outline-none"
+                                                            value={ownerSearchTerm}
+                                                            onChange={(e) => setOwnerSearchTerm(e.target.value)}
+                                                        />
+                                                    </div>
+                                                    <div className="overflow-y-auto flex-1 space-y-1">
+                                                        {filteredOwnerNames.length > 0 ? (
+                                                            filteredOwnerNames.map(o => (
+                                                                <div key={o} onClick={() => toggleOwner(o)} className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-brand-50 cursor-pointer transition-colors">
+                                                                    <div className={`w-5 h-5 rounded border flex items-center justify-center ${selectedOwners.includes(o) ? 'bg-brand-500 border-brand-500' : 'border-slate-300'}`}>
+                                                                        {selectedOwners.includes(o) && <Check size={14} className="text-white" />}
+                                                                    </div>
+                                                                    <div className="flex-1 min-w-0">
+                                                                        <span className={`text-sm font-bold block truncate ${selectedOwners.includes(o) ? 'text-slate-900' : 'text-slate-500'}`}>{o}</span>
+                                                                        <span className="text-[10px] text-slate-400 font-bold">{(ownerMap[o] || []).length}店舗</span>
+                                                                    </div>
+                                                                </div>
+                                                            ))
+                                                        ) : (
+                                                            <div className="text-center text-sm text-slate-400 py-4">該当するオーナーがいません</div>
+                                                        )}
+                                                    </div>
+                                                </>
+                                            )}
+                                        </div>
+                                    </PortalDropdown>
+                                </div>
+
                                 {/* Staff Name Selection */}
                                 <div className="flex flex-col gap-1 min-w-0 w-full sm:min-w-[220px] sm:w-auto relative" ref={staffMenuRef}>
                                     <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">スタッフ選択</span>
@@ -6542,7 +6842,7 @@
                         </header>
 
                         {/* Top 8 KPI Grid */}
-                        <div className={`grid gap-2 md:gap-4 ${isMobileView ? 'grid-cols-1' : 'grid-cols-2 sm:grid-cols-2 lg:grid-cols-4'}`}>
+                        <div className={`grid gap-2 md:gap-3 ${isMobileView ? 'grid-cols-1' : 'grid-cols-2 sm:grid-cols-2 lg:grid-cols-4'}`}>
                             <KpiBox title="総売上(個別税込)" value={formatYen(stats.totalSales)} icon={<DollarSign/>} sub="合計実績" color="bg-emerald-600" />
                             <KpiBox title="新規売上" value={formatYen(stats.totalNewSales)} icon={<TrendingUp/>} sub="新規獲得" color="bg-blue-600" />
                             <KpiBox title="継続売上" value={formatYen(stats.totalRecurringSales)} icon={<RefreshCw/>} sub="LTV" color="bg-brand-500" />
@@ -6923,21 +7223,21 @@
 
                         {/* ダッシュボード */}
                         {currentPage === 'charts' && (
-                            <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
-                                <div className="max-w-[1600px] mx-auto space-y-4 md:space-y-6">
+                            <div className="p-3 md:p-4 font-sans text-slate-900">
+                                <div className="max-w-[1600px] mx-auto space-y-3 md:space-y-4">
                                     {/* ヘッダー */}
-                                    <header className="bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
-                                        <div className="flex items-center justify-between mb-3 md:mb-4">
+                                    <header className="bg-white p-3 md:p-4 rounded-2xl shadow-sm border border-slate-200">
+                                        <div className="flex items-center justify-between mb-2 md:mb-3">
                                             <div>
-                                                <div className="inline-flex items-center gap-2 px-2 md:px-3 py-1 bg-brand-100 text-brand-600 rounded-full text-[10px] md:text-xs font-black uppercase tracking-widest mb-1 md:mb-2">
-                                                    <BarChart3 size={12} /> Charts Dashboard
+                                                <div className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-brand-100 text-brand-600 rounded-full text-[10px] font-black uppercase tracking-widest mb-1">
+                                                    <BarChart3 size={11} /> Charts Dashboard
                                                 </div>
-                                                <h1 className="text-xl sm:text-2xl md:text-3xl font-black tracking-tight text-slate-900 italic">ダッシュボード</h1>
+                                                <h1 className="text-lg md:text-2xl font-black tracking-tight text-slate-900 italic">ダッシュボード</h1>
                                             </div>
                                         </div>
 
                                         {/* フィルター */}
-                                        <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-start gap-2 md:gap-3 mb-3 md:mb-4">
+                                        <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-start gap-2 md:gap-3 mb-2 md:mb-3">
                                             <div className="flex flex-col gap-1 w-full sm:w-auto">
                                                 <span className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">期間選択</span>
                                                 <DateRangePicker
@@ -7036,9 +7336,9 @@
                                         </div>
 
                                         {/* 指標選択 */}
-                                        <div className="border-t border-slate-200 pt-3 md:pt-4">
-                                            <span className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 md:mb-3 block">表示する指標を選択</span>
-                                            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 md:gap-3">
+                                        <div className="border-t border-slate-200 pt-2 md:pt-3">
+                                            <span className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 block">表示する指標を選択</span>
+                                            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
                                                 {[
                                                     { id: 'totalSales', label: '全体売り上げ', icon: <DollarSign size={16} /> },
                                                     { id: 'productivity', label: '個人生産性', icon: <TrendingUp size={16} /> },
@@ -7056,24 +7356,24 @@
                                                                     : [...prev, metric.id]
                                                             );
                                                         }}
-                                                        className={`flex items-center gap-2 md:gap-3 px-3 md:px-4 py-2.5 md:py-3 rounded-xl cursor-pointer transition-all border-2 ${
+                                                        className={`flex items-center gap-2 px-2.5 md:px-3 py-2 md:py-2.5 rounded-xl cursor-pointer transition-all border-2 ${
                                                             selectedMetrics.includes(metric.id)
                                                                 ? 'bg-brand-50 border-brand-400'
                                                                 : 'bg-slate-50 border-slate-200 hover:border-slate-300'
                                                         }`}
                                                     >
-                                                        <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
+                                                        <div className={`w-4 h-4 md:w-5 md:h-5 rounded border-2 flex items-center justify-center ${
                                                             selectedMetrics.includes(metric.id)
                                                                 ? 'bg-brand-500 border-brand-500'
                                                                 : 'border-slate-300'
                                                         }`}>
-                                                            {selectedMetrics.includes(metric.id) && <Check size={14} className="text-white" />}
+                                                            {selectedMetrics.includes(metric.id) && <Check size={12} className="text-white" />}
                                                         </div>
-                                                        <div className="flex items-center gap-2">
+                                                        <div className="flex items-center gap-1.5 md:gap-2 min-w-0">
                                                             <span className={selectedMetrics.includes(metric.id) ? 'text-brand-600' : 'text-slate-400'}>
                                                                 {metric.icon}
                                                             </span>
-                                                            <span className={`text-sm font-bold ${
+                                                            <span className={`text-xs md:text-sm font-bold truncate ${
                                                                 selectedMetrics.includes(metric.id) ? 'text-slate-900' : 'text-slate-600'
                                                             }`}>
                                                                 {metric.label}
@@ -7086,7 +7386,7 @@
                                     </header>
 
                                     {/* グラフ表示エリア */}
-                                    <div className="grid grid-cols-1 gap-6">
+                                    <div className="grid grid-cols-1 gap-4">
                                         {selectedMetrics.length === 0 && (
                                             <div className="bg-white p-12 rounded-3xl shadow-sm border border-slate-200 text-center">
                                                 <BarChart3 size={64} className="mx-auto text-slate-300 mb-4" />
@@ -7168,31 +7468,30 @@
 
                         {/* マーケティング */}
                         {currentPage === 'marketing' && (
-                            <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
-                                <div className="max-w-[1800px] mx-auto space-y-4 md:space-y-6">
+                            <div className="p-3 md:p-4 font-sans text-slate-900">
+                                <div className="max-w-[1800px] mx-auto space-y-3 md:space-y-4">
 
                                     {/* Header */}
-                                    <header className="flex flex-col gap-3 md:gap-4 bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
-                                        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 md:gap-4">
-                                            <div className="flex items-center gap-3 md:gap-4">
-                                                <div className="p-2 md:p-3 bg-gradient-to-br from-brand-400 to-amber-400 rounded-xl md:rounded-2xl text-white shadow-lg flex-shrink-0">
-                                                    <Megaphone size={22} className="md:hidden" />
-                                                    <Megaphone size={28} className="hidden md:block" />
+                                    <header className="flex flex-col gap-2 md:gap-3 bg-white p-3 md:p-4 rounded-2xl shadow-sm border border-slate-200">
+                                        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-2 md:gap-3">
+                                            <div className="flex items-center gap-2 md:gap-3">
+                                                <div className="p-2 bg-gradient-to-br from-brand-400 to-amber-400 rounded-xl text-white shadow-md flex-shrink-0">
+                                                    <Megaphone size={18} />
                                                 </div>
                                                 <div>
-                                                    <div className="inline-flex items-center gap-1 md:gap-2 px-2 md:px-3 py-0.5 md:py-1 bg-brand-100 text-brand-600 rounded-full text-[10px] md:text-xs font-black uppercase tracking-widest mb-1">
-                                                        <Megaphone size={10} className="md:hidden" /><Megaphone size={14} className="hidden md:block" /> Marketing
+                                                    <div className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-brand-100 text-brand-600 rounded-full text-[10px] font-black uppercase tracking-widest mb-0.5">
+                                                        <Megaphone size={10} /> Marketing
                                                     </div>
-                                                    <h1 className="text-lg md:text-3xl font-black tracking-tight text-slate-900 italic">マーケティング</h1>
+                                                    <h1 className="text-lg md:text-2xl font-black tracking-tight text-slate-900 italic">マーケティング</h1>
                                                 </div>
                                             </div>
-                                            <div className="flex items-center gap-3">
+                                            <div className="flex items-center gap-2">
                                                 <button
                                                     onClick={() => fetchMarketingData(true)}
-                                                    className="p-3 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-all shadow-lg flex items-center gap-2 font-black text-sm uppercase tracking-tighter disabled:opacity-50"
+                                                    className="px-3 py-2 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-all shadow-md flex items-center gap-2 font-black text-xs uppercase tracking-tighter disabled:opacity-50"
                                                     disabled={mktLoading}
                                                 >
-                                                    <RefreshCw size={18} className={mktLoading ? 'animate-spin' : ''} /> Sync
+                                                    <RefreshCw size={14} className={mktLoading ? 'animate-spin' : ''} /> Sync
                                                 </button>
                                                 {mktLastFetch && (
                                                     <div className="text-right">
@@ -7643,72 +7942,72 @@
                                                     ) : (
                                                     <React.Fragment>
                                                     {/* KPI Cards */}
-                                                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 md:gap-4">
-                                                        <div className="bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
-                                                            <div className="absolute top-0 right-0 w-20 h-20 bg-brand-500 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
-                                                            <div className="flex items-start justify-between mb-2 md:mb-3">
-                                                                <div className="p-2 md:p-3 rounded-xl md:rounded-2xl bg-brand-500 text-white shadow-lg"><Users size={18} className="md:hidden" /><Users size={22} className="hidden md:block" /></div>
-                                                                <span className="text-[10px] md:text-xs font-black text-slate-400 uppercase tracking-widest">集客</span>
+                                                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 md:gap-3">
+                                                        <div className="bg-white p-3 rounded-2xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
+                                                            <div className="absolute top-0 right-0 w-16 h-16 bg-brand-500 opacity-[0.03] -mr-5 -mt-5 rounded-full group-hover:scale-110 transition-transform" />
+                                                            <div className="flex items-start justify-between mb-2">
+                                                                <div className="p-1.5 md:p-2 rounded-xl bg-brand-500 text-white shadow-md"><Users size={16} /></div>
+                                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">集客</span>
                                                             </div>
-                                                            <h3 className="text-xs md:text-sm font-black text-slate-400 mb-0.5 md:mb-1">実来院数</h3>
-                                                            <p className="text-xl md:text-3xl font-black text-slate-900">{mktStats.totalNew}<span className="text-sm md:text-lg text-slate-400 ml-1">名</span></p>
-                                                            {mktStats.totalReservations > 0 && <p className="text-[10px] md:text-xs text-slate-400 font-bold mt-1">予約 {mktStats.totalReservations}名</p>}
+                                                            <h3 className="text-[11px] md:text-xs font-black text-slate-400 mb-0.5">実来院数</h3>
+                                                            <p className="text-base md:text-xl font-black text-slate-900">{mktStats.totalNew}<span className="text-xs md:text-sm text-slate-400 ml-1">名</span></p>
+                                                            {mktStats.totalReservations > 0 && <p className="text-[10px] text-slate-400 font-bold mt-0.5">予約 {mktStats.totalReservations}名</p>}
                                                         </div>
 
-                                                        <div className="bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
-                                                            <div className="absolute top-0 right-0 w-20 h-20 bg-emerald-600 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
-                                                            <div className="flex items-start justify-between mb-2 md:mb-3">
-                                                                <div className="p-2 md:p-3 rounded-xl md:rounded-2xl bg-emerald-600 text-white shadow-lg"><DollarSign size={18} className="md:hidden" /><DollarSign size={22} className="hidden md:block" /></div>
-                                                                <span className="text-[10px] md:text-xs font-black text-slate-400 uppercase tracking-widest">CPA</span>
+                                                        <div className="bg-white p-3 rounded-2xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
+                                                            <div className="absolute top-0 right-0 w-16 h-16 bg-emerald-600 opacity-[0.03] -mr-5 -mt-5 rounded-full group-hover:scale-110 transition-transform" />
+                                                            <div className="flex items-start justify-between mb-2">
+                                                                <div className="p-1.5 md:p-2 rounded-xl bg-emerald-600 text-white shadow-md"><DollarSign size={16} /></div>
+                                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">CPA</span>
                                                             </div>
-                                                            <h3 className="text-xs md:text-sm font-black text-slate-400 mb-0.5 md:mb-1">平均CPA</h3>
-                                                            <p className="text-xl md:text-3xl font-black text-slate-900">¥{mktStats.avgCpa.toLocaleString()}</p>
+                                                            <h3 className="text-[11px] md:text-xs font-black text-slate-400 mb-0.5">平均CPA</h3>
+                                                            <p className="text-base md:text-xl font-black text-slate-900">¥{mktStats.avgCpa.toLocaleString()}</p>
                                                         </div>
 
-                                                        <div className="bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
-                                                            <div className="absolute top-0 right-0 w-20 h-20 bg-blue-600 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
-                                                            <div className="flex items-start justify-between mb-2 md:mb-3">
-                                                                <div className="p-2 md:p-3 rounded-xl md:rounded-2xl bg-blue-600 text-white shadow-lg"><Target size={18} className="md:hidden" /><Target size={22} className="hidden md:block" /></div>
-                                                                <span className="text-[10px] md:text-xs font-black text-slate-400 uppercase tracking-widest">成約</span>
+                                                        <div className="bg-white p-3 rounded-2xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
+                                                            <div className="absolute top-0 right-0 w-16 h-16 bg-blue-600 opacity-[0.03] -mr-5 -mt-5 rounded-full group-hover:scale-110 transition-transform" />
+                                                            <div className="flex items-start justify-between mb-2">
+                                                                <div className="p-1.5 md:p-2 rounded-xl bg-blue-600 text-white shadow-md"><Target size={16} /></div>
+                                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">成約</span>
                                                             </div>
-                                                            <h3 className="text-xs md:text-sm font-black text-slate-400 mb-0.5 md:mb-1">入会率</h3>
-                                                            <p className="text-xl md:text-3xl font-black text-slate-900">{mktStats.enrollRate}<span className="text-sm md:text-lg text-slate-400 ml-1">%</span></p>
-                                                            <p className="text-[10px] md:text-xs text-slate-400 font-bold mt-1">{mktStats.totalEnroll}名入会</p>
+                                                            <h3 className="text-[11px] md:text-xs font-black text-slate-400 mb-0.5">入会率</h3>
+                                                            <p className="text-base md:text-xl font-black text-slate-900">{mktStats.enrollRate}<span className="text-xs md:text-sm text-slate-400 ml-1">%</span></p>
+                                                            <p className="text-[10px] text-slate-400 font-bold mt-0.5">{mktStats.totalEnroll}名入会</p>
                                                         </div>
 
-                                                        <div className="bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
-                                                            <div className="absolute top-0 right-0 w-20 h-20 bg-rose-500 opacity-[0.03] -mr-6 -mt-6 rounded-full group-hover:scale-110 transition-transform" />
-                                                            <div className="flex items-start justify-between mb-2 md:mb-3">
-                                                                <div className="p-2 md:p-3 rounded-xl md:rounded-2xl bg-rose-500 text-white shadow-lg"><AlertCircle size={18} className="md:hidden" /><AlertCircle size={22} className="hidden md:block" /></div>
-                                                                <span className="text-[10px] md:text-xs font-black text-slate-400 uppercase tracking-widest">注意</span>
+                                                        <div className="bg-white p-3 rounded-2xl shadow-sm border border-slate-200 relative overflow-hidden group hover:shadow-md transition-all">
+                                                            <div className="absolute top-0 right-0 w-16 h-16 bg-rose-500 opacity-[0.03] -mr-5 -mt-5 rounded-full group-hover:scale-110 transition-transform" />
+                                                            <div className="flex items-start justify-between mb-2">
+                                                                <div className="p-1.5 md:p-2 rounded-xl bg-rose-500 text-white shadow-md"><AlertCircle size={16} /></div>
+                                                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">注意</span>
                                                             </div>
-                                                            <h3 className="text-xs md:text-sm font-black text-slate-400 mb-0.5 md:mb-1">キャンセル率</h3>
-                                                            <p className="text-xl md:text-3xl font-black text-slate-900">{mktStats.cancelRate}<span className="text-sm md:text-lg text-slate-400 ml-1">%</span></p>
-                                                            <p className="text-[10px] md:text-xs text-slate-400 font-bold mt-1">{mktStats.totalCancel}名キャンセル</p>
+                                                            <h3 className="text-[11px] md:text-xs font-black text-slate-400 mb-0.5">キャンセル率</h3>
+                                                            <p className="text-base md:text-xl font-black text-slate-900">{mktStats.cancelRate}<span className="text-xs md:text-sm text-slate-400 ml-1">%</span></p>
+                                                            <p className="text-[10px] text-slate-400 font-bold mt-0.5">{mktStats.totalCancel}名キャンセル</p>
                                                         </div>
                                                     </div>
 
                                                     {/* Secondary KPIs */}
-                                                    <div className="grid grid-cols-2 lg:grid-cols-5 gap-2 md:gap-4">
-                                                        <div className="bg-gradient-to-br from-brand-50 to-brand-50 p-3 md:p-5 rounded-xl md:rounded-2xl border border-brand-100">
-                                                            <div className="text-[10px] md:text-xs font-black text-brand-300 uppercase tracking-widest mb-0.5 md:mb-1">広告費合計</div>
-                                                            <div className="text-base md:text-xl font-black text-brand-600">¥{mktStats.totalAdSpend.toLocaleString()}</div>
+                                                    <div className="grid grid-cols-2 lg:grid-cols-5 gap-2 md:gap-3">
+                                                        <div className="bg-gradient-to-br from-brand-50 to-brand-50 p-2.5 md:p-3 rounded-xl border border-brand-100">
+                                                            <div className="text-[10px] font-black text-brand-300 uppercase tracking-widest mb-0.5">広告費合計</div>
+                                                            <div className="text-sm md:text-base font-black text-brand-600">¥{mktStats.totalAdSpend.toLocaleString()}</div>
                                                         </div>
-                                                        <div className="bg-gradient-to-br from-emerald-50 to-teal-50 p-3 md:p-5 rounded-xl md:rounded-2xl border border-emerald-100">
-                                                            <div className="text-[10px] md:text-xs font-black text-emerald-400 uppercase tracking-widest mb-0.5 md:mb-1">売上合計</div>
-                                                            <div className="text-base md:text-xl font-black text-emerald-700">¥{mktStats.totalRevenue.toLocaleString()}</div>
+                                                        <div className="bg-gradient-to-br from-emerald-50 to-teal-50 p-2.5 md:p-3 rounded-xl border border-emerald-100">
+                                                            <div className="text-[10px] font-black text-emerald-400 uppercase tracking-widest mb-0.5">売上合計</div>
+                                                            <div className="text-sm md:text-base font-black text-emerald-700">¥{mktStats.totalRevenue.toLocaleString()}</div>
                                                         </div>
-                                                        <div className="bg-gradient-to-br from-blue-50 to-brand-50 p-3 md:p-5 rounded-xl md:rounded-2xl border border-blue-100">
-                                                            <div className="text-[10px] md:text-xs font-black text-blue-400 uppercase tracking-widest mb-0.5 md:mb-1">ROAS</div>
-                                                            <div className="text-base md:text-xl font-black text-blue-700">{mktStats.roas}<span className="text-xs md:text-sm">%</span></div>
+                                                        <div className="bg-gradient-to-br from-blue-50 to-brand-50 p-2.5 md:p-3 rounded-xl border border-blue-100">
+                                                            <div className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-0.5">ROAS</div>
+                                                            <div className="text-sm md:text-base font-black text-blue-700">{mktStats.roas}<span className="text-xs">%</span></div>
                                                         </div>
-                                                        <div className="bg-gradient-to-br from-amber-50 to-yellow-50 p-3 md:p-5 rounded-xl md:rounded-2xl border border-amber-100">
-                                                            <div className="text-[10px] md:text-xs font-black text-amber-400 uppercase tracking-widest mb-0.5 md:mb-1">平均客単価</div>
-                                                            <div className="text-base md:text-xl font-black text-amber-700">¥{mktStats.avgPrice.toLocaleString()}</div>
+                                                        <div className="bg-gradient-to-br from-amber-50 to-yellow-50 p-2.5 md:p-3 rounded-xl border border-amber-100">
+                                                            <div className="text-[10px] font-black text-amber-400 uppercase tracking-widest mb-0.5">平均客単価</div>
+                                                            <div className="text-sm md:text-base font-black text-amber-700">¥{mktStats.avgPrice.toLocaleString()}</div>
                                                         </div>
-                                                        <div className="bg-gradient-to-br from-slate-50 to-gray-50 p-3 md:p-5 rounded-xl md:rounded-2xl border border-slate-200">
-                                                            <div className="text-[10px] md:text-xs font-black text-slate-400 uppercase tracking-widest mb-0.5 md:mb-1">口コミ数</div>
-                                                            <div className="text-base md:text-xl font-black text-slate-700">{mktStats.totalReviews}<span className="text-xs md:text-sm">件</span></div>
+                                                        <div className="bg-gradient-to-br from-slate-50 to-gray-50 p-2.5 md:p-3 rounded-xl border border-slate-200">
+                                                            <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-0.5">口コミ数</div>
+                                                            <div className="text-sm md:text-base font-black text-slate-700">{mktStats.totalReviews}<span className="text-xs">件</span></div>
                                                         </div>
                                                     </div>
 
@@ -8988,22 +9287,22 @@
 
                         {/* サブスク分析 (Square) */}
                         {currentPage === 'square' && (
-                            <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
-                                <div className="max-w-[1600px] mx-auto space-y-4 md:space-y-6">
+                            <ErrorBoundary label="サブスク分析" key={`sq-${sqStore}-${sqMonth}`}>
+                            <div className="p-3 md:p-4 font-sans text-slate-900">
+                                <div className="max-w-[1600px] mx-auto space-y-3 md:space-y-4">
 
                                     {/* Header + Filters */}
-                                    <header className="flex flex-col gap-3 md:gap-4 bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
-                                        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 md:gap-4">
-                                            <div className="flex items-center gap-3 md:gap-4">
-                                                <div className="p-2 md:p-3 bg-gradient-to-br from-blue-600 to-cyan-500 rounded-xl md:rounded-2xl text-white shadow-lg flex-shrink-0">
-                                                    <CreditCard size={22} className="md:hidden" />
-                                                    <CreditCard size={28} className="hidden md:block" />
+                                    <header className="flex flex-col gap-2 md:gap-3 bg-white p-3 md:p-4 rounded-2xl shadow-sm border border-slate-200">
+                                        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-2 md:gap-3">
+                                            <div className="flex items-center gap-2 md:gap-3">
+                                                <div className="p-2 bg-gradient-to-br from-blue-600 to-cyan-500 rounded-xl text-white shadow-md flex-shrink-0">
+                                                    <CreditCard size={18} />
                                                 </div>
                                                 <div>
-                                                    <div className="inline-flex items-center gap-1 md:gap-2 px-2 md:px-3 py-0.5 md:py-1 bg-blue-100 text-blue-700 rounded-full text-[10px] md:text-xs font-black uppercase tracking-widest mb-1">
-                                                        <Repeat size={10} className="md:hidden" /><Repeat size={14} className="hidden md:block" /> Subscription
+                                                    <div className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-[10px] font-black uppercase tracking-widest mb-0.5">
+                                                        <Repeat size={10} /> Subscription
                                                     </div>
-                                                    <h1 className="text-xl md:text-3xl font-black tracking-tight text-slate-900 italic">サブスク分析</h1>
+                                                    <h1 className="text-lg md:text-2xl font-black tracking-tight text-slate-900 italic">サブスク分析</h1>
                                                 </div>
                                             </div>
                                             <div className="flex items-center gap-2 md:gap-3 flex-wrap">
@@ -9262,25 +9561,25 @@
                                         <>
                                             {/* ① 会員 & 収益 KPI */}
                                             <div>
-                                                <h2 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-2 md:mb-3 flex items-center gap-2"><Users size={14} /> 会員 & 収益</h2>
-                                                <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-2 md:gap-4">
+                                                <h2 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-2 flex items-center gap-2"><Users size={14} /> 会員 & 収益</h2>
+                                                <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-2 md:gap-3">
                                                     {[
-                                                        { label: 'アクティブ会員数', value: `${sqMetrics.memberCount.toLocaleString()}名`, sub: sqMetrics.memberCount !== sqMetrics.prevMemberCount ? `前月比 ${sqMetrics.memberCount - sqMetrics.prevMemberCount >= 0 ? '+' : ''}${sqMetrics.memberCount - sqMetrics.prevMemberCount}名` : null, up: sqMetrics.memberCount >= sqMetrics.prevMemberCount, icon: <Users size={22} />, color: 'orange' },
-                                                        { label: '総MRR', value: `¥${sqMetrics.mrr.toLocaleString()}`, sub: sqMetrics.mrrChange !== 0 ? `前月比 ${sqMetrics.mrrChange >= 0 ? '+' : ''}${sqMetrics.mrrChange}%` : null, up: sqMetrics.mrrChange >= 0, icon: <Wallet size={22} />, color: 'blue' },
-                                                        { label: 'ARPU', value: `¥${sqMetrics.arpu.toLocaleString()}`, sub: 'サブスク決済額÷会員数', icon: <DollarSign size={22} />, color: 'cyan', neutral: true },
-                                                        { label: '総売上高', value: sqMetrics.totalSales >= 10000 ? `¥${(sqMetrics.totalSales/10000).toFixed(1)}万` : `¥${sqMetrics.totalSales.toLocaleString()}`, sub: 'Square売上合計（税込）', icon: <TrendingUp size={22} />, color: 'emerald', neutral: true },
-                                                        { label: '返品', value: sqMetrics.totalRefunds > 0 ? (sqMetrics.totalRefunds >= 10000 ? `-¥${(sqMetrics.totalRefunds/10000).toFixed(1)}万` : `-¥${sqMetrics.totalRefunds.toLocaleString()}`) : '¥0', sub: '返金・払戻', icon: <RefreshCw size={22} />, color: 'rose', neutral: true, warn: sqMetrics.totalRefunds > 0 },
-                                                        { label: '解約率', value: `${sqMetrics.churnRate}%`, sub: `${sqMetrics.churnedCount}名 / 前月${sqMetrics.churnBase}名`, icon: <UserMinus size={22} />, color: 'orange', neutral: true, warn: sqMetrics.churnRate > 5 },
-                                                        { label: 'LTV', value: sqMetrics.ltv >= 10000 ? `¥${(sqMetrics.ltv/10000).toFixed(1)}万` : `¥${sqMetrics.ltv.toLocaleString()}`, sub: '顧客生涯価値', icon: <DollarSign size={22} />, color: 'amber', neutral: true },
+                                                        { label: 'アクティブ会員数', value: `${sqMetrics.memberCount.toLocaleString()}名`, sub: sqMetrics.memberCount !== sqMetrics.prevMemberCount ? `前月比 ${sqMetrics.memberCount - sqMetrics.prevMemberCount >= 0 ? '+' : ''}${sqMetrics.memberCount - sqMetrics.prevMemberCount}名` : null, up: sqMetrics.memberCount >= sqMetrics.prevMemberCount, icon: <Users size={18} />, color: 'orange' },
+                                                        { label: '総MRR', value: `¥${sqMetrics.mrr.toLocaleString()}`, sub: sqMetrics.mrrChange !== 0 ? `前月比 ${sqMetrics.mrrChange >= 0 ? '+' : ''}${sqMetrics.mrrChange}%` : null, up: sqMetrics.mrrChange >= 0, icon: <Wallet size={18} />, color: 'blue' },
+                                                        { label: 'ARPU', value: `¥${sqMetrics.arpu.toLocaleString()}`, sub: 'サブスク決済額÷会員数', icon: <DollarSign size={18} />, color: 'cyan', neutral: true },
+                                                        { label: '総売上高', value: sqMetrics.totalSales >= 10000 ? `¥${(sqMetrics.totalSales/10000).toFixed(1)}万` : `¥${sqMetrics.totalSales.toLocaleString()}`, sub: 'Square売上合計（税込）', icon: <TrendingUp size={18} />, color: 'emerald', neutral: true },
+                                                        { label: '返品', value: sqMetrics.totalRefunds > 0 ? (sqMetrics.totalRefunds >= 10000 ? `-¥${(sqMetrics.totalRefunds/10000).toFixed(1)}万` : `-¥${sqMetrics.totalRefunds.toLocaleString()}`) : '¥0', sub: '返金・払戻', icon: <RefreshCw size={18} />, color: 'rose', neutral: true, warn: sqMetrics.totalRefunds > 0 },
+                                                        { label: '解約率', value: `${sqMetrics.churnRate}%`, sub: `${sqMetrics.churnedCount}名 / 前月${sqMetrics.churnBase}名`, icon: <UserMinus size={18} />, color: 'orange', neutral: true, warn: sqMetrics.churnRate > 5 },
+                                                        { label: 'LTV', value: sqMetrics.ltv >= 10000 ? `¥${(sqMetrics.ltv/10000).toFixed(1)}万` : `¥${sqMetrics.ltv.toLocaleString()}`, sub: '顧客生涯価値', icon: <DollarSign size={18} />, color: 'amber', neutral: true },
                                                     ].map((kpi, idx) => (
-                                                        <div key={idx} className={`p-3 md:p-5 rounded-xl md:rounded-2xl shadow-sm border hover:shadow-md transition-all ${kpi.warn ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200'}`}>
-                                                            <div className={`p-1.5 md:p-2.5 rounded-lg md:rounded-xl bg-${kpi.color}-500 text-white shadow-lg inline-block mb-2 md:mb-3`}>
-                                                                {React.cloneElement(kpi.icon, { size: window.innerWidth < 768 ? 16 : 22 })}
+                                                        <div key={idx} className={`p-3 rounded-xl shadow-sm border hover:shadow-md transition-all ${kpi.warn ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200'}`}>
+                                                            <div className={`p-1.5 md:p-2 rounded-lg bg-${kpi.color}-500 text-white shadow-md inline-block mb-1.5 md:mb-2`}>
+                                                                {React.cloneElement(kpi.icon, { size: window.innerWidth < 768 ? 14 : 16 })}
                                                             </div>
-                                                            <h3 className="text-[10px] md:text-xs font-black text-slate-400 mb-0.5 md:mb-1">{kpi.label}</h3>
-                                                            <p className={`text-base md:text-xl font-black tracking-tight ${kpi.warn ? 'text-rose-600' : 'text-slate-900'}`}>{kpi.value}</p>
+                                                            <h3 className="text-[10px] font-black text-slate-400 mb-0.5">{kpi.label}</h3>
+                                                            <p className={`text-sm md:text-base font-black tracking-tight ${kpi.warn ? 'text-rose-600' : 'text-slate-900'}`}>{kpi.value}</p>
                                                             {kpi.sub && (
-                                                                <p className={`text-[10px] md:text-xs font-bold mt-0.5 md:mt-1 ${kpi.neutral ? 'text-slate-400' : kpi.up ? 'text-emerald-600' : 'text-rose-600'}`}>
+                                                                <p className={`text-[10px] font-bold mt-0.5 ${kpi.neutral ? 'text-slate-400' : kpi.up ? 'text-emerald-600' : 'text-rose-600'}`}>
                                                                     {kpi.sub}
                                                                 </p>
                                                             )}
@@ -9602,6 +9901,7 @@
                                     )}
                                 </div>
                             </div>
+                            </ErrorBoundary>
                         )}
                     </div>
 
@@ -9629,7 +9929,7 @@
                                                 <input type="text" placeholder="店舗を検索..." className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-brand-400 outline-none" value={planBranchSearch} onChange={(e) => setPlanBranchSearch(e.target.value)} />
                                             </div>
                                             <div className="overflow-y-auto flex-1 space-y-1">
-                                                {Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).sort()
+                                                {Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).filter(b => !EXCLUDED_BRANCHES.has(b)).sort()
                                                     .filter(b => !planBranchSearch || b.toLowerCase().includes(planBranchSearch.toLowerCase()))
                                                     .map(b => (
                                                         <div key={b} onClick={() => { setPlanSelectedBranch(b); setPlanMessages([]); setPlanBranchMenuOpen(false); setPlanBranchSearch(''); }} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${planSelectedBranch === b ? 'bg-brand-50 text-brand-600' : 'hover:bg-slate-50 text-slate-600'}`}>
@@ -9912,14 +10212,48 @@
                                                     </div>
                                                 )}
                                                 {planMessages.map((msg, idx) => (
-                                                    <div key={idx} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                                    <div key={idx} className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}>
                                                         {msg.type === 'user' ? (
                                                             <div className="max-w-[80%] rounded-2xl px-4 py-2.5 text-sm bg-brand-500 text-white font-bold">
                                                                 <div className="break-words">{msg.content}</div>
                                                             </div>
                                                         ) : (
-                                                            <div className="max-w-[90%] rounded-2xl px-4 py-3 bg-slate-50 border border-slate-200">
-                                                                <div className="break-words plan-ai-response">{renderMarkdown(msg.content)}</div>
+                                                            <div className="max-w-[90%] w-full">
+                                                                <div className="rounded-2xl px-4 py-3 bg-slate-50 border border-slate-200">
+                                                                    <div className="break-words plan-ai-response">{renderMarkdown(msg.content)}</div>
+                                                                </div>
+                                                                {msg.content && !planLoading && (
+                                                                    planActionDraft && planActionDraft.aiMsgIdx === idx ? (
+                                                                        <div className="mt-2 bg-white border border-brand-200 rounded-xl p-3 space-y-2">
+                                                                            <p className="text-xs font-black text-slate-600">このアクションを実行記録に保存</p>
+                                                                            <textarea
+                                                                                value={planActionDraft.summary}
+                                                                                onChange={e => setPlanActionDraft({ ...planActionDraft, summary: e.target.value })}
+                                                                                placeholder="例: ホットペッパー予算を2万円Instagram広告にシフト"
+                                                                                rows={2}
+                                                                                className="w-full bg-slate-50 rounded-lg px-3 py-2 text-xs font-bold border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-200 resize-none"
+                                                                            />
+                                                                            <p className="text-[10px] text-slate-400">保存時点（{planSelectedBranch || '全店舗'} / {computePlanKpiSnapshot(planSelectedBranch).month || '不明'}月）のKPIを起点として記録します</p>
+                                                                            <div className="flex gap-2">
+                                                                                <button onClick={() => savePlanAction(planActionDraft.summary, msg.content, idx)}
+                                                                                    disabled={!planActionDraft.summary.trim()}
+                                                                                    className="px-3 py-1.5 bg-brand-500 text-white rounded-lg text-xs font-black hover:bg-brand-600 disabled:opacity-50">保存</button>
+                                                                                <button onClick={() => setPlanActionDraft(null)}
+                                                                                    className="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-200">キャンセル</button>
+                                                                            </div>
+                                                                        </div>
+                                                                    ) : (
+                                                                        <button
+                                                                            onClick={() => {
+                                                                                const firstAction = (msg.content.match(/(?:^|\n)[-*・]\s+(.+)/) || [])[1] ||
+                                                                                                    (msg.content.match(/(?:^|\n)\d+\.\s+(.+)/) || [])[1] || '';
+                                                                                setPlanActionDraft({ aiMsgIdx: idx, summary: firstAction.replace(/\*\*/g, '').slice(0, 200) });
+                                                                            }}
+                                                                            className="mt-1.5 text-[11px] text-brand-500 hover:text-brand-600 font-black flex items-center gap-1">
+                                                                            <Target size={12} /> このアクションを実行記録に追加
+                                                                        </button>
+                                                                    )
+                                                                )}
                                                             </div>
                                                         )}
                                                     </div>
@@ -9949,6 +10283,117 @@
                                         </div>
                                     </div>
                                 </div>
+
+                                {/* ── アクション実績ログ ── */}
+                                {(() => {
+                                    const targetBranch = planSelectedBranch || '全店舗';
+                                    const branchActions = planActions.filter(act => act.branch === targetBranch);
+                                    const pending = branchActions.filter(act => act.status === 'executed');
+                                    const completed = branchActions.filter(act => act.status === 'completed').sort((x, y) => (y.score || 0) - (x.score || 0));
+                                    const currentMonth = computePlanKpiSnapshot(planSelectedBranch).month;
+                                    return (
+                                        <div className="mt-4 bg-white rounded-xl border border-slate-200 shadow-sm">
+                                            <div className="px-4 py-3 border-b border-slate-100 flex items-center gap-2">
+                                                <Target size={16} className="text-brand-500" />
+                                                <h3 className="text-sm font-black text-slate-700">アクション実績ログ</h3>
+                                                <span className="text-xs text-slate-400 font-bold">{targetBranch}</span>
+                                                <span className="ml-auto text-[10px] text-slate-400 font-bold">完了: {completed.length}件 / 結果待ち: {pending.length}件</span>
+                                            </div>
+                                            {branchActions.length === 0 ? (
+                                                <div className="p-6 text-center text-xs text-slate-400 font-bold">
+                                                    AI回答の「このアクションを実行記録に追加」から保存すると、ここに表示されます。
+                                                </div>
+                                            ) : (
+                                                <div className="p-3 space-y-3">
+                                                    {pending.length > 0 && (
+                                                        <div>
+                                                            <p className="text-[10px] font-black uppercase tracking-widest text-amber-600 mb-1.5">結果待ち（{pending.length}件）</p>
+                                                            <div className="space-y-2">
+                                                                {pending.map(act => {
+                                                                    const canMeasure = currentMonth && act.baselineMonth && currentMonth > act.baselineMonth;
+                                                                    return (
+                                                                        <div key={act.id} className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                                                                            <div className="flex items-start gap-2">
+                                                                                <div className="flex-1 min-w-0">
+                                                                                    <p className="text-xs font-black text-slate-800 break-words">{act.summary}</p>
+                                                                                    <p className="text-[10px] text-slate-500 font-bold mt-1">
+                                                                                        起点: {act.baselineMonth || '不明'}月 / 売上¥{act.baselineKPI.sales.toLocaleString()} / 新規{act.baselineKPI.newCount}名 / 入会率{act.baselineKPI.enrollRate}% / 退会率{act.baselineKPI.churnRate}% / CPA¥{act.baselineKPI.cpa.toLocaleString()}
+                                                                                    </p>
+                                                                                </div>
+                                                                                <div className="flex flex-col gap-1 flex-shrink-0">
+                                                                                    <button onClick={() => recordPlanActionResult(act.id)}
+                                                                                        disabled={!canMeasure}
+                                                                                        title={canMeasure ? '現時点のKPIで結果を確定' : 'ベース月より新しいデータが必要です'}
+                                                                                        className="px-2.5 py-1 bg-emerald-500 text-white rounded-lg text-[11px] font-black hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed">
+                                                                                        結果を確定
+                                                                                    </button>
+                                                                                    <button onClick={() => deletePlanAction(act.id)}
+                                                                                        className="px-2.5 py-1 bg-slate-200 text-slate-600 rounded-lg text-[11px] font-bold hover:bg-slate-300">
+                                                                                        削除
+                                                                                    </button>
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    {completed.length > 0 && (
+                                                        <div>
+                                                            <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600 mb-1.5">完了（{completed.length}件・効果スコア降順）</p>
+                                                            <div className="space-y-2">
+                                                                {completed.map((act, i) => {
+                                                                    const d = act.delta || {};
+                                                                    const sign = (v) => (v == null ? '-' : (v >= 0 ? '+' : '') + v);
+                                                                    const tone = (act.score || 0) > 0 ? 'emerald' : (act.score || 0) < 0 ? 'rose' : 'slate';
+                                                                    return (
+                                                                        <div key={act.id} className={`bg-${tone}-50 border border-${tone}-200 rounded-lg p-3`}>
+                                                                            <div className="flex items-start gap-2 mb-2">
+                                                                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-black bg-${tone}-200 text-${tone}-800`}>#{i + 1} スコア {sign(act.score)}</span>
+                                                                                <p className="text-xs font-black text-slate-800 break-words flex-1 min-w-0">{act.summary}</p>
+                                                                                <button onClick={() => deletePlanAction(act.id)}
+                                                                                    className="px-2 py-0.5 bg-white text-slate-500 rounded text-[10px] font-bold hover:bg-slate-100 flex-shrink-0">
+                                                                                    削除
+                                                                                </button>
+                                                                            </div>
+                                                                            <div className="grid grid-cols-2 md:grid-cols-5 gap-1.5 text-[10px] font-bold">
+                                                                                <div className="bg-white rounded px-2 py-1">
+                                                                                    <span className="text-slate-400 block">売上</span>
+                                                                                    <span className={d.salesPct >= 0 ? 'text-emerald-600' : 'text-rose-600'}>{sign(d.salesPct)}%</span>
+                                                                                </div>
+                                                                                <div className="bg-white rounded px-2 py-1">
+                                                                                    <span className="text-slate-400 block">新規</span>
+                                                                                    <span className={d.newPct >= 0 ? 'text-emerald-600' : 'text-rose-600'}>{sign(d.newPct)}%</span>
+                                                                                </div>
+                                                                                <div className="bg-white rounded px-2 py-1">
+                                                                                    <span className="text-slate-400 block">入会率</span>
+                                                                                    <span className={d.enrollPt >= 0 ? 'text-emerald-600' : 'text-rose-600'}>{sign(d.enrollPt)}pt</span>
+                                                                                </div>
+                                                                                <div className="bg-white rounded px-2 py-1">
+                                                                                    <span className="text-slate-400 block">退会率</span>
+                                                                                    <span className={d.churnPt <= 0 ? 'text-emerald-600' : 'text-rose-600'}>{sign(d.churnPt)}pt</span>
+                                                                                </div>
+                                                                                <div className="bg-white rounded px-2 py-1">
+                                                                                    <span className="text-slate-400 block">CPA</span>
+                                                                                    <span className={d.cpaPct <= 0 ? 'text-emerald-600' : 'text-rose-600'}>{sign(d.cpaPct)}%</span>
+                                                                                </div>
+                                                                            </div>
+                                                                            <p className="text-[10px] text-slate-400 font-bold mt-1.5">{act.baselineMonth} → {act.resultMonth}</p>
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                            <p className="text-[10px] text-slate-400 font-bold mt-2 px-1">
+                                                                効果スコア = 売上%+新規%+入会率pt×2 − 退会率pt×3 − CPA%×0.5。上位5件をAI提案に自動反映します。
+                                                            </p>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })()}
                                 </>);
                             })()}
                         </div>
@@ -9956,18 +10401,18 @@
 
                     {/* ===== 顧客管理タブ ===== */}
                     {currentPage === 'customers' && (
-                        <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900 w-full">
-                            <div className="space-y-4 md:space-y-6">
+                        <div className="p-3 md:p-4 font-sans text-slate-900 w-full">
+                            <div className="space-y-3 md:space-y-4">
 
                             {/* ── ヘッダー ── */}
-                            <header className="flex flex-col gap-3 md:gap-4 bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 card-hover animate-fade-in-up">
-                                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                                    <div className="space-y-1">
-                                        <div className="inline-flex items-center gap-2 px-2 md:px-3 py-1 bg-gradient-to-r from-brand-100 to-amber-100 text-brand-600 rounded-full text-[10px] md:text-xs font-black uppercase tracking-widest mb-1">
-                                            <Users size={12} className="md:hidden" /><Users size={14} className="hidden md:block" /> Customer Management
+                            <header className="flex flex-col gap-2 md:gap-3 bg-white p-3 md:p-4 rounded-2xl shadow-sm border border-slate-200 card-hover animate-fade-in-up">
+                                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                    <div className="space-y-0.5">
+                                        <div className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-gradient-to-r from-brand-100 to-amber-100 text-brand-600 rounded-full text-[10px] font-black uppercase tracking-widest">
+                                            <Users size={11} /> Customer Management
                                         </div>
-                                        <h1 className="text-xl md:text-3xl font-black tracking-tight text-slate-900 italic">顧客管理</h1>
-                                        <p className="text-xs text-slate-400 font-bold">月別離反者の抽出とSquareサブスク決済状況の照合</p>
+                                        <h1 className="text-lg md:text-2xl font-black tracking-tight text-slate-900 italic">顧客管理</h1>
+                                        <p className="text-[11px] text-slate-400 font-bold">月別離反者の抽出とSquareサブスク決済状況の照合</p>
                                     </div>
                                     <div className="flex items-center gap-2">
                                         <button
@@ -10321,23 +10766,22 @@
 
                     {/* ===== 経理・財務タブ ===== */}
                     {currentPage === 'finance' && (
-                        <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900 w-full">
-                            <div className="space-y-4 md:space-y-6">
+                        <div className="p-3 md:p-4 font-sans text-slate-900 w-full">
+                            <div className="space-y-3 md:space-y-4">
 
                             {/* ── ヘッダー ── */}
-                            <header className="flex flex-col gap-3 md:gap-4 bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 card-hover animate-fade-in-up">
-                                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                                    <div className="flex items-center gap-3 md:gap-4">
-                                        <div className="p-2 md:p-3 bg-gradient-to-br from-emerald-500 to-teal-500 rounded-xl md:rounded-2xl text-white shadow-lg flex-shrink-0">
-                                            <Banknote size={22} className="md:hidden" />
-                                            <Banknote size={28} className="hidden md:block" />
+                            <header className="flex flex-col gap-2 md:gap-3 bg-white p-3 md:p-4 rounded-2xl shadow-sm border border-slate-200 card-hover animate-fade-in-up">
+                                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                    <div className="flex items-center gap-2 md:gap-3">
+                                        <div className="p-2 bg-gradient-to-br from-emerald-500 to-teal-500 rounded-xl text-white shadow-md flex-shrink-0">
+                                            <Banknote size={18} />
                                         </div>
                                         <div>
-                                            <div className="inline-flex items-center gap-1 md:gap-2 px-2 md:px-3 py-0.5 md:py-1 bg-emerald-100 text-emerald-700 rounded-full text-[10px] md:text-xs font-black uppercase tracking-widest mb-1">
-                                                <Banknote size={10} className="md:hidden" /><Banknote size={14} className="hidden md:block" /> Finance
+                                            <div className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-[10px] font-black uppercase tracking-widest mb-0.5">
+                                                <Banknote size={10} /> Finance
                                             </div>
-                                            <h1 className="text-lg md:text-3xl font-black tracking-tight text-slate-900 italic">経理・財務</h1>
-                                            <p className="text-xs text-slate-400 font-bold">損益計算書・貸借対照表・キャッシュフロー分析</p>
+                                            <h1 className="text-lg md:text-2xl font-black tracking-tight text-slate-900 italic">経理・財務</h1>
+                                            <p className="text-[11px] text-slate-400 font-bold">損益計算書・貸借対照表・キャッシュフロー分析</p>
                                         </div>
                                     </div>
                                     <div className="flex items-center gap-2 flex-wrap justify-end">
@@ -11154,6 +11598,126 @@
                             )}
                         </button>
                     </div>
+
+                    {/* オーナー設定モーダル */}
+                    {isOwnerSettingsOpen && ownerSettingsDraft !== null && (
+                        <div className="fixed inset-0 bg-black/50 z-[60] flex items-end md:items-center justify-center md:p-4" onClick={() => { setIsOwnerSettingsOpen(false); setOwnerSettingsDraft(null); setNewOwnerName(''); }}>
+                            <div className="bg-white w-full md:max-w-2xl md:rounded-2xl rounded-t-2xl shadow-2xl max-h-[90vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+                                <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+                                    <div>
+                                        <h2 className="text-lg font-black text-slate-900">オーナー設定</h2>
+                                        <p className="text-xs text-slate-400 font-bold mt-0.5">オーナー名と担当店舗の紐づけ（端末ローカル保存）</p>
+                                    </div>
+                                    <button onClick={() => { setIsOwnerSettingsOpen(false); setOwnerSettingsDraft(null); setNewOwnerName(''); }}
+                                        className="text-slate-400 hover:text-slate-600 text-2xl leading-none">×</button>
+                                </div>
+                                <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+                                    {/* デフォルト読み込み */}
+                                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-3">
+                                        <div className="flex-1">
+                                            <p className="text-xs font-black text-amber-800">プリセット（NAORU整骨院グループ標準）</p>
+                                            <p className="text-[11px] text-amber-700 font-bold mt-0.5">35オーナー・93店舗のデフォルト割り当てを読み込みます。現在の編集内容は上書きされます。</p>
+                                        </div>
+                                        <button
+                                            onClick={() => {
+                                                if (!confirm('デフォルトのオーナー→店舗マッピングを読み込みます。現在の編集内容は破棄されますがよろしいですか？')) return;
+                                                setOwnerSettingsDraft(JSON.parse(JSON.stringify(DEFAULT_OWNER_MAP)));
+                                            }}
+                                            className="px-3 py-1.5 bg-amber-500 text-white rounded-lg text-xs font-black hover:bg-amber-600 flex-shrink-0">デフォルト読込</button>
+                                    </div>
+
+                                    {/* 新規オーナー追加 */}
+                                    <div className="bg-brand-50 border border-brand-200 rounded-xl p-3">
+                                        <p className="text-xs font-black text-brand-700 mb-2">新規オーナーを追加</p>
+                                        <div className="flex gap-2">
+                                            <input type="text" value={newOwnerName}
+                                                onChange={e => setNewOwnerName(e.target.value)}
+                                                onKeyPress={e => {
+                                                    if (e.key === 'Enter' && newOwnerName.trim() && !ownerSettingsDraft[newOwnerName.trim()]) {
+                                                        setOwnerSettingsDraft({ ...ownerSettingsDraft, [newOwnerName.trim()]: [] });
+                                                        setNewOwnerName('');
+                                                    }
+                                                }}
+                                                placeholder="例: 田中オーナー"
+                                                className="flex-1 px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-300" />
+                                            <button
+                                                onClick={() => {
+                                                    const name = newOwnerName.trim();
+                                                    if (!name || ownerSettingsDraft[name]) return;
+                                                    setOwnerSettingsDraft({ ...ownerSettingsDraft, [name]: [] });
+                                                    setNewOwnerName('');
+                                                }}
+                                                disabled={!newOwnerName.trim() || !!ownerSettingsDraft[newOwnerName.trim()]}
+                                                className="px-4 py-2 bg-brand-500 text-white rounded-lg text-sm font-black hover:bg-brand-600 disabled:opacity-40">追加</button>
+                                        </div>
+                                    </div>
+
+                                    {/* オーナー一覧 */}
+                                    {Object.keys(ownerSettingsDraft).length === 0 ? (
+                                        <div className="text-center py-8 text-sm text-slate-400 font-bold">
+                                            まだオーナーが登録されていません。上の入力欄から追加してください。
+                                        </div>
+                                    ) : (
+                                        Object.entries(ownerSettingsDraft).sort(([a], [b]) => a.localeCompare(b)).map(([owner, branches]) => {
+                                            const assignedKeySet = new Set(branches.map(normalizeBranchKey));
+                                            return (
+                                                <div key={owner} className="border border-slate-200 rounded-xl p-3 space-y-2">
+                                                    <div className="flex items-center justify-between">
+                                                        <p className="text-sm font-black text-slate-800">{owner} <span className="text-xs text-slate-400 font-bold">（{branches.length}店舗）</span></p>
+                                                        <button
+                                                            onClick={() => {
+                                                                if (!confirm(`オーナー「${owner}」を削除しますか？`)) return;
+                                                                const next = { ...ownerSettingsDraft };
+                                                                delete next[owner];
+                                                                setOwnerSettingsDraft(next);
+                                                            }}
+                                                            className="text-xs font-bold text-rose-500 hover:text-rose-600">削除</button>
+                                                    </div>
+                                                    <div className="flex flex-wrap gap-1.5">
+                                                        {allBranches.length === 0 ? (
+                                                            <span className="text-[11px] text-slate-400 font-bold">店舗データが未読み込みです</span>
+                                                        ) : allBranches.map(b => {
+                                                            const bKey = normalizeBranchKey(b);
+                                                            const on = assignedKeySet.has(bKey);
+                                                            return (
+                                                                <button key={b}
+                                                                    onClick={() => {
+                                                                        const next = { ...ownerSettingsDraft };
+                                                                        if (on) {
+                                                                            // 正規化キーが一致するエントリをすべて除去（"大森"と"大森院"の両方など）
+                                                                            next[owner] = branches.filter(x => normalizeBranchKey(x) !== bKey);
+                                                                        } else {
+                                                                            next[owner] = [...branches, b];
+                                                                        }
+                                                                        setOwnerSettingsDraft(next);
+                                                                    }}
+                                                                    className={`text-[11px] font-black px-2.5 py-1 rounded-full border transition-colors ${on ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-slate-500 border-slate-200 hover:border-brand-300'}`}>
+                                                                    {b}
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })
+                                    )}
+                                </div>
+                                <div className="px-5 py-3 border-t border-slate-200 flex justify-end gap-2">
+                                    <button onClick={() => { setIsOwnerSettingsOpen(false); setOwnerSettingsDraft(null); setNewOwnerName(''); }}
+                                        className="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-bold hover:bg-slate-200">キャンセル</button>
+                                    <button onClick={() => {
+                                            setOwnerMap(ownerSettingsDraft);
+                                            // 削除されたオーナーが選択中なら外す
+                                            setSelectedOwners(prev => prev.filter(o => ownerSettingsDraft[o]));
+                                            setIsOwnerSettingsOpen(false);
+                                            setOwnerSettingsDraft(null);
+                                            setNewOwnerName('');
+                                        }}
+                                        className="px-4 py-2 bg-brand-500 text-white rounded-lg text-sm font-black hover:bg-brand-600">保存</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         };
@@ -11655,39 +12219,39 @@
             };
 
             return (
-                <div className="bg-white rounded-2xl md:rounded-3xl shadow-lg border-2 border-slate-200 overflow-hidden hover:shadow-xl transition-shadow">
-                    <div className="bg-gradient-to-r from-brand-50 to-blue-50 p-3 md:p-6 border-b-2 border-slate-200">
-                        <div className="flex items-center justify-between mb-2 md:mb-4">
-                            <div className="flex items-center gap-2 md:gap-3">
-                                <div className="text-brand-500 bg-white p-2 md:p-3 rounded-lg md:rounded-xl shadow-sm">{React.cloneElement(icon, { size: window.innerWidth < 768 ? 16 : 20 })}</div>
-                                <h3 className="text-base md:text-2xl font-black text-slate-900">{title}</h3>
+                <div className="bg-white rounded-2xl shadow-md border border-slate-200 overflow-hidden hover:shadow-lg transition-shadow">
+                    <div className="bg-gradient-to-r from-brand-50 to-blue-50 p-3 md:p-4 border-b border-slate-200">
+                        <div className="flex items-center justify-between mb-2 md:mb-3">
+                            <div className="flex items-center gap-2">
+                                <div className="text-brand-500 bg-white p-1.5 md:p-2 rounded-lg shadow-sm">{React.cloneElement(icon, { size: window.innerWidth < 768 ? 14 : 18 })}</div>
+                                <h3 className="text-sm md:text-lg font-black text-slate-900">{title}</h3>
                             </div>
                         </div>
 
                         {/* サマリー統計 */}
-                        <div className="grid grid-cols-3 gap-2 md:gap-4 mt-2 md:mt-4">
-                            <div className="bg-white p-2 md:p-4 rounded-lg md:rounded-xl shadow-sm">
-                                <div className="text-[9px] md:text-xs font-black text-slate-400 uppercase tracking-wider mb-0.5 md:mb-1">
+                        <div className="grid grid-cols-3 gap-2 md:gap-3 mt-2">
+                            <div className="bg-white p-2 md:p-2.5 rounded-lg shadow-sm">
+                                <div className="text-[9px] md:text-[10px] font-black text-slate-400 uppercase tracking-wider mb-0.5">
                                     {aggregation === 'sum' ? '合計' : '期間平均'}
                                 </div>
-                                <div className="text-sm md:text-xl font-black text-slate-900">{formatValue(aggregation === 'sum' ? totalValue : Math.round(totalValue / targetMonths.length))}</div>
+                                <div className="text-xs md:text-base font-black text-slate-900">{formatValue(aggregation === 'sum' ? totalValue : Math.round(totalValue / targetMonths.length))}</div>
                             </div>
-                            <div className="bg-white p-2 md:p-4 rounded-lg md:rounded-xl shadow-sm">
-                                <div className="text-[9px] md:text-xs font-black text-slate-400 uppercase tracking-wider mb-0.5 md:mb-1">最新月</div>
-                                <div className="text-sm md:text-xl font-black text-slate-900">{formatValue(lastMonthValue)}</div>
+                            <div className="bg-white p-2 md:p-2.5 rounded-lg shadow-sm">
+                                <div className="text-[9px] md:text-[10px] font-black text-slate-400 uppercase tracking-wider mb-0.5">最新月</div>
+                                <div className="text-xs md:text-base font-black text-slate-900">{formatValue(lastMonthValue)}</div>
                             </div>
-                            <div className="bg-white p-2 md:p-4 rounded-lg md:rounded-xl shadow-sm">
-                                <div className="text-[9px] md:text-xs font-black text-slate-400 uppercase tracking-wider mb-0.5 md:mb-1">前月比</div>
-                                <div className={`text-sm md:text-xl font-black ${changePercent >= 0 ? 'text-emerald-600' : 'text-rose-600'} flex items-center gap-0.5 md:gap-1`}>
-                                    {changePercent >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
+                            <div className="bg-white p-2 md:p-2.5 rounded-lg shadow-sm">
+                                <div className="text-[9px] md:text-[10px] font-black text-slate-400 uppercase tracking-wider mb-0.5">前月比</div>
+                                <div className={`text-xs md:text-base font-black ${changePercent >= 0 ? 'text-emerald-600' : 'text-rose-600'} flex items-center gap-0.5`}>
+                                    {changePercent >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
                                     {changePercent >= 0 ? '+' : ''}{changePercent}%
                                 </div>
                             </div>
                         </div>
                     </div>
 
-                    <div className="p-2 md:p-6">
-                        <div style={{ height: window.innerWidth < 768 ? '280px' : '500px' }}>
+                    <div className="p-2 md:p-4">
+                        <div style={{ height: window.innerWidth < 768 ? '260px' : '420px' }}>
                             <canvas ref={chartRef}></canvas>
                         </div>
                     </div>
@@ -12738,28 +13302,28 @@
         };
 
         const KpiBox = ({ title, value, icon, sub, color }) => (
-            <div className="card-hover bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 relative overflow-hidden group animate-fade-in-up">
-                <div className={`absolute top-0 right-0 w-24 md:w-32 h-24 md:h-32 ${color} opacity-[0.05] -mr-6 md:-mr-8 -mt-6 md:-mt-8 rounded-full group-hover:scale-125 transition-transform duration-500`} />
-                <div className="flex items-start justify-between mb-2 md:mb-4 relative z-10">
-                    <div className={`p-2 md:p-3 rounded-xl md:rounded-2xl ${color} text-white shadow-lg group-hover:shadow-xl group-hover:scale-105 transition-all duration-300`}>
-                        {React.cloneElement(icon, { size: window.innerWidth < 768 ? 16 : 22 })}
+            <div className="card-hover bg-white p-3 md:p-4 rounded-2xl shadow-sm border border-slate-200 relative overflow-hidden group animate-fade-in-up">
+                <div className={`absolute top-0 right-0 w-20 md:w-24 h-20 md:h-24 ${color} opacity-[0.05] -mr-5 md:-mr-6 -mt-5 md:-mt-6 rounded-full group-hover:scale-125 transition-transform duration-500`} />
+                <div className="flex items-start justify-between mb-2 relative z-10">
+                    <div className={`p-1.5 md:p-2 rounded-xl ${color} text-white shadow-md group-hover:shadow-lg group-hover:scale-105 transition-all duration-300`}>
+                        {React.cloneElement(icon, { size: window.innerWidth < 768 ? 14 : 18 })}
                     </div>
-                    <div className="text-[10px] md:text-xs font-black text-slate-400 uppercase tracking-widest">{sub}</div>
+                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{sub}</div>
                 </div>
                 <div className="relative z-10">
-                    <h3 className="text-[11px] md:text-sm font-black text-slate-400 mb-1 md:mb-2">{title}</h3>
-                    <p className="text-lg md:text-2xl font-black text-slate-900 tracking-tight">{value}</p>
+                    <h3 className="text-[11px] md:text-xs font-black text-slate-400 mb-0.5 md:mb-1">{title}</h3>
+                    <p className="text-base md:text-xl font-black text-slate-900 tracking-tight">{value}</p>
                 </div>
             </div>
         );
 
         const RankCard = ({ title, data, valKey, suffix = "", isCurrency = false, isPercent = false, reverseColor = false, fixFn = null, icon = null, accentColor = "text-brand-500", secondaryKey = null, secondarySuffix = "" }) => (
-            <div className="card-hover bg-white p-3 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 animate-fade-in-up">
-                <h3 className="text-[10px] md:text-xs font-black uppercase tracking-widest text-slate-400 mb-3 md:mb-5 flex items-center justify-between">
+            <div className="card-hover bg-white p-3 md:p-4 rounded-2xl shadow-sm border border-slate-200 animate-fade-in-up">
+                <h3 className="text-[10px] md:text-xs font-black uppercase tracking-widest text-slate-400 mb-2 md:mb-3 flex items-center justify-between">
                     <span className="flex items-center gap-1.5 md:gap-2">{icon} {title}</span>
                     <Trophy size={14} className="opacity-20" />
                 </h3>
-                <div className="space-y-2.5 md:space-y-4">
+                <div className="space-y-2 md:space-y-2.5">
                     {data.map((staff, idx) => (
                         <div key={idx} className="flex items-center justify-between group">
                             <div className="flex items-center gap-2 md:gap-3 min-w-0 flex-1">

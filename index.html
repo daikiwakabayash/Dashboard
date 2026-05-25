@@ -824,15 +824,55 @@
             roas: { excellent: 400, good: 300, average: 200, poor: 100, label: 'ROAS' },
         };
 
-        // オーナー別の管理店舗マッピング（店舗名は normalizeBranch 後の形で記述）
+        // オーナー別の管理店舗マッピング（NAORU整骨院グループ管理表ベース）
+        // 店舗名は branchMatchesOwnerTarget により部分一致で判定するため、
+        // 「○○院」サフィックスは省略した短縮形で記述（"千種院"も"千種"でマッチ）
         const OWNER_BRANCHES = {
-            '野島オーナー': ['千種', '金山', '藤が丘', '伏見', '福岡天神', '姪浜', '熊本'],
+            '武田哲也オーナー': ['札幌円山', '新馬場', '日暮里', '大森', '人形町', '中野', '花園', '住吉', '沖縄浦添', '沖縄コザ', '沖縄大里'],
+            '白神雄亮オーナー': ['札幌白石'],
+            '西山喜洋オーナー': ['仙台', '仙台長町', '泉中央'],
+            '横浜章智オーナー': ['福島'],
+            '坂東亮輔オーナー': ['山形天童', '山形'],
+            '及川豪人オーナー': ['三鷹', '国分寺', '蒲田'],
+            '齋藤敦紀オーナー': ['浅草', '錦糸町', '北千住'],
+            '林勝好オーナー': ['池袋', '銀座', '大塚', '上北沢'],
+            '林尚弘オーナー': ['新宿'],
+            '若林大樹オーナー': ['飯田橋', '恵比寿', '武蔵小杉', '千葉駅', '勝田台', '四条烏丸', '大阪茨木', '大阪京橋', '福岡博多', '長崎諫早'],
+            '仲野純平オーナー': ['荻窪', '目黒', '町田'],
+            '澤井寿昌オーナー': ['池尻大橋'],
+            '横田裕平オーナー': ['大山'],
+            '仲島大勝オーナー': ['十条', '西川口', '南浦和', '福岡香椎'],
+            '中山莉奈オーナー': ['渋谷'],
+            '福田竜大オーナー': ['笹塚'],
+            '伊藤誠希オーナー': ['横浜関内', '溝の口', '上大岡'],
+            '福本理人オーナー': ['鶴見', '藤沢', '岡山', '広島'],
+            '鈴木正昌オーナー': ['本厚木', '平塚'],
+            '中森大三郎オーナー': ['相模大野', '上溝'],
+            '米谷将吾オーナー': ['センター南'],
+            '関輪隆成オーナー': ['川越', '太田'],
+            '西山守オーナー': ['春日部', '大宮'],
+            '野島オーナー': ['千種', '伏見', '名古屋金山', '藤が丘', '静岡', '福岡天神', '福岡姪浜', '熊本'],
+            '宇良大地オーナー': ['名古屋八事'],
+            '河野良平オーナー': ['金沢'],
+            '菊池英夫オーナー': ['新潟'],
+            '鈴木拓也オーナー': ['岐阜'],
+            '若林正樹オーナー': ['中百舌鳥', '天満天六'],
+            '城間ユウオーナー': ['神戸兵庫'],
+            '梶原亮平オーナー': ['三宮'],
+            '坂田勇戸オーナー': ['広島福山', '宮崎'],
+            '宮崎淳オーナー': ['長崎大村'],
+            '南拓真オーナー': ['大分', '鹿児島'],
         };
 
-        // allBranches の表記ゆれ（「福岡姪浜」「姪浜」など）も拾えるように部分一致で判定
+        // 集計・選択肢から完全除外する店舗（閉院・統合・運用対象外など）
+        const EXCLUDED_BRANCHES = new Set(['大井町院', '大井町']);
+
+        // 店舗名の表記ゆれ（「大森」⇔「大森院」）を吸収するため正規化キーで完全一致判定
+        // （部分一致だと「広島」が「広島福山」も拾うなどの誤マッチが起きるため）
+        const normalizeBranchKey = (s) => String(s || '').replace(/\s+/g, '').replace(/院+$/, '');
         const branchMatchesOwnerTarget = (branch, target) => {
             if (!branch || !target) return false;
-            return branch === target || branch.includes(target) || target.includes(branch);
+            return normalizeBranchKey(branch) === normalizeBranchKey(target);
         };
 
         // マーケティングデータを標準化
@@ -2288,7 +2328,7 @@
                                 setStartDate(new Date(parseInt(year), parseInt(month) - 1, 1));
                                 setEndDate(new Date(parseInt(year), parseInt(month), 0));
                             }
-                            const allBranches = Array.from(new Set(displayData.map(d => d.branch)));
+                            const allBranches = Array.from(new Set(displayData.map(d => d.branch))).filter(b => !EXCLUDED_BRANCHES.has(b));
                             if (selectedBranches.length === 0) setSelectedBranches(allBranches);
                         }
                         setLoading(false);
@@ -2329,7 +2369,7 @@
                                 setStartDate(new Date(parseInt(year), parseInt(month) - 1, 1));
                                 setEndDate(new Date(parseInt(year), parseInt(month), 0));
                             }
-                            setSelectedBranches(Array.from(new Set(fetchedData.map(d => d.branch))));
+                            setSelectedBranches(Array.from(new Set(fetchedData.map(d => d.branch))).filter(b => !EXCLUDED_BRANCHES.has(b)));
                         }
 
                         setLastFetchTime(new Date());
@@ -3515,7 +3555,7 @@
             const allBranches = useMemo(() => {
                 const spreadsheetBranches = rawData.map(d => d.branch);
                 const squareBranches = (sqData && sqData.stores) ? sqData.stores.map(s => s.name) : [];
-                return Array.from(new Set([...spreadsheetBranches, ...squareBranches]));
+                return Array.from(new Set([...spreadsheetBranches, ...squareBranches])).filter(b => !EXCLUDED_BRANCHES.has(b));
             }, [rawData, sqData]);
 
             const filteredBranches = useMemo(() => {
@@ -3589,6 +3629,7 @@
 
             const filteredData = useMemo(() => {
                 return rawData.filter(d => {
+                    if (EXCLUDED_BRANCHES.has(d.branch)) return false;
                     const matchMonth = targetMonths.includes(d.month);
                     const matchBranch = selectedBranches.includes(d.branch);
 
@@ -3609,7 +3650,7 @@
                 return sortMonths(Array.from(new Set(mktData.map(d => d.month).filter(Boolean))));
             }, [mktData]);
 
-            const mktAllBranches = useMemo(() => Array.from(new Set(mktData.map(d => d.branch).filter(Boolean))), [mktData]);
+            const mktAllBranches = useMemo(() => Array.from(new Set(mktData.map(d => d.branch).filter(Boolean))).filter(b => !EXCLUDED_BRANCHES.has(b)), [mktData]);
             const mktAllStaff = useMemo(() => Array.from(new Set(mktData.map(d => d.staff).filter(Boolean))), [mktData]);
             const mktAllMedia = useMemo(() => Array.from(new Set(mktData.map(d => d.media).filter(m => m && m !== '全媒体合計'))), [mktData]);
 
@@ -3768,6 +3809,7 @@
                 return mktData.filter(d => {
                     // 全媒体合計レコードは集計で二重計上されるため除外
                     if (d.media === '全媒体合計') return false;
+                    if (EXCLUDED_BRANCHES.has(d.branch)) return false;
                     const matchMonth = mktTargetMonths.length === 0 || mktTargetMonths.includes(d.month);
                     const matchBranch = mktSelectedBranches.length === 0 || mktSelectedBranches.includes(d.branch);
                     const matchStaff = mktSelectedStaff.length === 0 || mktSelectedStaff.includes(d.staff);
@@ -6115,7 +6157,7 @@
                     prevMediaMap[d.media].newCount += d.newCount || 0;
                 });
                 // 全店舗ランキング
-                const allBranches = [...new Set(rawData.map(d => d.branch).filter(Boolean))];
+                const allBranches = [...new Set(rawData.map(d => d.branch).filter(Boolean))].filter(b => !EXCLUDED_BRANCHES.has(b));
                 const branchRanking = allBranches.map(b => {
                     const bd = rawData.filter(d => d.month === latestMonth && d.branch === b);
                     const bm = mktData.filter(d => d.month === latestMonth && d.branch === b && d.media !== '全媒体合計');
@@ -9821,7 +9863,7 @@
                                                 <input type="text" placeholder="店舗を検索..." className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-brand-400 outline-none" value={planBranchSearch} onChange={(e) => setPlanBranchSearch(e.target.value)} />
                                             </div>
                                             <div className="overflow-y-auto flex-1 space-y-1">
-                                                {Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).sort()
+                                                {Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).filter(b => !EXCLUDED_BRANCHES.has(b)).sort()
                                                     .filter(b => !planBranchSearch || b.toLowerCase().includes(planBranchSearch.toLowerCase()))
                                                     .map(b => (
                                                         <div key={b} onClick={() => { setPlanSelectedBranch(b); setPlanMessages([]); setPlanBranchMenuOpen(false); setPlanBranchSearch(''); }} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${planSelectedBranch === b ? 'bg-brand-50 text-brand-600' : 'hover:bg-slate-50 text-slate-600'}`}>

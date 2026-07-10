@@ -364,8 +364,18 @@ async function fetchSalesFromPayments(token, env, locationIds, diag, timeoutMs =
   const baseUrl = env === 'production'
     ? 'https://connect.squareup.com'
     : 'https://connect.squareupsandbox.com';
+  // 決済・返金の取得期間: フロントの月セレクター（直近12ヶ月）で選べる全月をカバー。
+  // かつ「月初」にスナップする。
+  // 旧実装は「now から2ヶ月前の同日時刻」を起点にしていたため、
+  //   (1) 境界月（2ヶ月前の月）の月初〜起点日の決済が欠落し、
+  //       Invoices由来のMRR（25ヶ月分取得）より総売上が小さくなる不整合が発生
+  //   (2) 3ヶ月以上前の月は総売上がほぼ0になっていた
+  // 総売上高は「選択した単月のSquare決済合計（店舗別）」なので、選択可能な全月で
+  // 完全な単月合計になるよう13ヶ月前の月初を起点にする（12ヶ月＋バッファ1ヶ月）。
   const beginTime = new Date();
-  beginTime.setMonth(beginTime.getMonth() - 2); // 決済・返金は直近2ヶ月のみ取得（データ量削減）
+  beginTime.setMonth(beginTime.getMonth() - 13);
+  beginTime.setDate(1);
+  beginTime.setHours(0, 0, 0, 0);
   const beginStr = beginTime.toISOString();
   const errors = [];
   const startTime = Date.now();

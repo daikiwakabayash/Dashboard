@@ -2476,27 +2476,45 @@
                         : (resp || {});
                 const byDayRaw = s.by_day || s.byDay || [];
                 const byStaffRaw = s.by_staff || s.byStaff || [];
+                // 媒体別・決済別を日次内訳から合算（マーケ分析用）
+                const mediaMap = {}, payMap = {};
+                byDayRaw.forEach(d => {
+                    (d.media_breakdown || []).forEach(m => { const k = m.name || '未設定'; mediaMap[k] = (mediaMap[k] || 0) + soNum(m, 'count'); });
+                    (d.payment_breakdown || []).forEach(p => { if (p.is_sales === false) return; const k = p.name || '未設定'; payMap[k] = (payMap[k] || 0) + soNum(p, 'amount'); });
+                });
+                const media = Object.entries(mediaMap).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+                const payments = Object.entries(payMap).map(([name, amount]) => ({ name, amount })).sort((a, b) => b.amount - a.amount);
                 return {
                     grossSales: soNum(s, 'gross_sales', 'grossSales'),
                     consumedSales: soNum(s, 'consumed_sales', 'consumedSales'),
                     digestSales: soNum(s, 'digest_sales', 'digestSales'),
+                    newSales: soNum(s, 'new_customer_sales', 'newCustomerSales'),
+                    repeatSales: soNum(s, 'repeat_customer_sales', 'repeatCustomerSales'),
                     newVisit: soNum(s, 'new_visit_count', 'newVisitCount'),
                     repeatVisit: soNum(s, 'repeat_visit_count', 'repeatVisitCount'),
                     cancel: soNum(s, 'cancel_count', 'cancelCount'),
                     noShow: soNum(s, 'no_show_count', 'noShowCount'),
+                    utilization: soNum(s, 'period_utilization_rate', 'utilizationRate'),
+                    refund: soNum(s, 'refund_amount', 'refundAmount'),
                     byDay: byDayRaw.map(d => ({
                         date: d.date || d.day || '',
                         gross: soNum(d, 'gross_sales', 'grossSales', 'gross'),
                         consumed: soNum(d, 'consumed_sales', 'consumedSales', 'consumed'),
-                        visits: soNum(d, 'visit_count', 'visits', 'new_visit_count') + soNum(d, 'repeat_visit_count'),
+                        visits: soNum(d, 'visit_count', 'visits'),
+                        cancel: soNum(d, 'cancel_count'),
+                        util: soNum(d, 'utilization_rate'),
                     })),
                     byStaff: byStaffRaw.map(st => ({
                         id: String(st.staff_id ?? st.id ?? st.staffId ?? ''),
                         name: st.staff_name || st.name || st.staffName || '(不明)',
                         gross: soNum(st, 'gross_sales', 'grossSales', 'gross'),
                         consumed: soNum(st, 'consumed_sales', 'consumedSales', 'consumed'),
-                        visits: soNum(st, 'visit_count', 'visits'),
+                        avgTicket: soNum(st, 'avg_ticket', 'avgTicket'),
+                        util: soNum(st, 'utilization_rate', 'utilizationRate'),
+                        treatments: soNum(st, 'treatment_count', 'item_count', 'treatments'),
+                        newCount: soNum(st, 'new_count', 'newCount'),
                     })),
+                    media, payments,
                 };
             };
             // 環境変数未設定時に UI を確認できるデモデータ（NAORU 店舗を模擬）
@@ -2533,15 +2551,23 @@
                 const newVisit = Math.round(totalVisits * 0.32);
                 const byStaff = staffs.map(st => {
                     const share = 0.6 + soSeed(st.id + from) * 0.9;
-                    return { id: st.id, name: st.name, gross: Math.round(grossSales * share / staffs.length / 1000) * 1000,
-                             consumed: 0, visits: Math.round(totalVisits * share / staffs.length) };
+                    const g = Math.round(grossSales * share / staffs.length / 1000) * 1000;
+                    const tr = Math.round(totalVisits * share / staffs.length);
+                    return { id: st.id, name: st.name, gross: g, consumed: Math.round(g * 0.88),
+                             avgTicket: tr ? Math.round(g / tr) : 0, util: Math.round(20 + soSeed(st.id) * 20),
+                             treatments: tr, newCount: Math.round(tr * 0.35) };
                 }).sort((a, b) => b.gross - a.gross);
-                byStaff.forEach(s => { s.consumed = Math.round(s.gross * 0.88); });
+                const demoMediaNames = ['ホットペッパー', 'META', 'HP', '紹介', 'Aチラシ 1,000円', 'TikTok', 'その他'];
+                const media = demoMediaNames.map((name, i) => ({ name, count: Math.round(totalVisits * (0.28 - i * 0.035) * (0.7 + soSeed(name) * 0.6)) }))
+                    .filter(m => m.count > 0).sort((a, b) => b.count - a.count);
                 return {
                     grossSales, consumedSales, digestSales: Math.round(grossSales * 0.94),
+                    newSales: Math.round(grossSales * 0.31), repeatSales: grossSales - Math.round(grossSales * 0.31),
                     newVisit, repeatVisit: totalVisits - newVisit,
                     cancel: Math.round(totalVisits * 0.05), noShow: Math.round(totalVisits * 0.012),
-                    byDay: days, byStaff,
+                    utilization: 26, refund: 0,
+                    byDay: days, byStaff, media,
+                    payments: [{ name: 'スクエア', amount: Math.round(grossSales * 0.78) }, { name: '現金', amount: Math.round(grossSales * 0.22) }],
                 };
             };
 
@@ -10255,22 +10281,30 @@
                                             </div>
 
                                             {/* サブ指標 */}
-                                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
+                                            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 md:gap-4">
                                                 <div className="bg-white p-3 md:p-4 rounded-xl border border-slate-200">
-                                                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-0.5">新規来店</div>
-                                                    <div className="text-lg md:text-2xl font-black text-emerald-600">{s.newVisit.toLocaleString()}</div>
+                                                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-0.5">新規売上</div>
+                                                    <div className="text-base md:text-xl font-black text-emerald-600">{soYen(s.newSales)}</div>
+                                                </div>
+                                                <div className="bg-white p-3 md:p-4 rounded-xl border border-slate-200">
+                                                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-0.5">継続売上</div>
+                                                    <div className="text-base md:text-xl font-black text-slate-700">{soYen(s.repeatSales)}</div>
+                                                </div>
+                                                <div className="bg-white p-3 md:p-4 rounded-xl border border-slate-200">
+                                                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-0.5">期間稼働率</div>
+                                                    <div className="text-base md:text-xl font-black text-teal-600">{s.utilization ? s.utilization.toFixed(1) + '%' : '—'}</div>
                                                 </div>
                                                 <div className="bg-white p-3 md:p-4 rounded-xl border border-slate-200">
                                                     <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-0.5">再来店</div>
-                                                    <div className="text-lg md:text-2xl font-black text-slate-700">{s.repeatVisit.toLocaleString()}</div>
+                                                    <div className="text-base md:text-xl font-black text-slate-700">{s.repeatVisit.toLocaleString()}</div>
                                                 </div>
                                                 <div className="bg-white p-3 md:p-4 rounded-xl border border-slate-200">
                                                     <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-0.5">キャンセル</div>
-                                                    <div className="text-lg md:text-2xl font-black text-amber-600">{s.cancel.toLocaleString()}</div>
+                                                    <div className="text-base md:text-xl font-black text-amber-600">{s.cancel.toLocaleString()}</div>
                                                 </div>
                                                 <div className="bg-white p-3 md:p-4 rounded-xl border border-slate-200">
                                                     <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-0.5">無断キャンセル</div>
-                                                    <div className="text-lg md:text-2xl font-black text-rose-600">{s.noShow.toLocaleString()}</div>
+                                                    <div className="text-base md:text-xl font-black text-rose-600">{s.noShow.toLocaleString()}</div>
                                                 </div>
                                             </div>
 
@@ -10319,8 +10353,11 @@
                                                                     <th className="pb-2 pr-2">スタッフ</th>
                                                                     <th className="pb-2 px-2 text-right">粗売上</th>
                                                                     <th className="pb-2 px-2 text-right hidden sm:table-cell">消化売上</th>
-                                                                    <th className="pb-2 px-2 text-right hidden md:table-cell">来店</th>
-                                                                    <th className="pb-2 pl-2 w-[28%]">構成比</th>
+                                                                    <th className="pb-2 px-2 text-right hidden md:table-cell">客単価</th>
+                                                                    <th className="pb-2 px-2 text-right hidden lg:table-cell">施術数</th>
+                                                                    <th className="pb-2 px-2 text-right hidden lg:table-cell">新規</th>
+                                                                    <th className="pb-2 px-2 text-right hidden md:table-cell">稼働率</th>
+                                                                    <th className="pb-2 pl-2 w-[20%]">構成比</th>
                                                                 </tr>
                                                             </thead>
                                                             <tbody>
@@ -10329,10 +10366,13 @@
                                                                     return (
                                                                         <tr key={st.id || i} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
                                                                             <td className="py-2.5 pr-2 font-black text-slate-300">{i + 1}</td>
-                                                                            <td className="py-2.5 pr-2 font-bold text-slate-800">{st.name}</td>
+                                                                            <td className="py-2.5 pr-2 font-bold text-slate-800 whitespace-nowrap">{st.name}</td>
                                                                             <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(st.gross)}</td>
                                                                             <td className="py-2.5 px-2 text-right font-bold text-slate-500 hidden sm:table-cell">{soYen(st.consumed)}</td>
-                                                                            <td className="py-2.5 px-2 text-right font-bold text-slate-500 hidden md:table-cell">{st.visits.toLocaleString()}</td>
+                                                                            <td className="py-2.5 px-2 text-right font-bold text-slate-500 hidden md:table-cell">{st.avgTicket ? soYen(st.avgTicket) : '—'}</td>
+                                                                            <td className="py-2.5 px-2 text-right font-bold text-slate-500 hidden lg:table-cell">{st.treatments.toLocaleString()}</td>
+                                                                            <td className="py-2.5 px-2 text-right font-bold text-emerald-600 hidden lg:table-cell">{st.newCount.toLocaleString()}</td>
+                                                                            <td className="py-2.5 px-2 text-right font-bold text-slate-500 hidden md:table-cell">{st.util ? st.util.toFixed(1) + '%' : '—'}</td>
                                                                             <td className="py-2.5 pl-2">
                                                                                 <div className="flex items-center gap-2">
                                                                                     <div className="flex-1 bg-slate-100 rounded-full h-2 overflow-hidden"><div className="bg-gradient-to-r from-emerald-500 to-teal-400 h-2 rounded-full" style={{ width: `${pct}%` }}></div></div>
@@ -10344,11 +10384,69 @@
                                                                 })}
                                                             </tbody>
                                                         </table>
-                                                        {soStaff === 'all' && (
-                                                            <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 来店数・キャンセル等の内訳は店舗単位の集計です。スタッフ別は売上のみ按分表示しています。</p>
+                                                        {soStaff !== 'all' && (
+                                                            <p className="text-[11px] text-slate-400 mt-3 font-bold">※ キャンセル・無断キャンセルは店舗単位の集計です（スタッフ単位の内訳はSalonOne分析APIの範囲外）。</p>
                                                         )}
                                                     </div>
                                                 )}
+                                            </div>
+
+                                            {/* 媒体別内訳（マーケ分析）＋ 決済内訳 */}
+                                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
+                                                {/* 媒体別（流入元）内訳 */}
+                                                <div className="lg:col-span-2 bg-white p-4 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
+                                                    <div className="flex items-center gap-2 mb-4">
+                                                        <Megaphone size={18} className="text-emerald-600" />
+                                                        <h2 className="text-base md:text-lg font-black text-slate-900">媒体別 来店内訳</h2>
+                                                        <span className="text-xs font-bold text-slate-400 ml-auto">流入元ベース・{s.byDay.length}日分</span>
+                                                    </div>
+                                                    {(!s.media || s.media.length === 0) ? (
+                                                        <p className="text-center text-slate-400 font-bold py-8">媒体別データはありません</p>
+                                                    ) : (() => {
+                                                        const mediaTotal = s.media.reduce((a, m) => a + m.count, 0) || 1;
+                                                        const maxM = Math.max(...s.media.map(m => m.count), 1);
+                                                        return (
+                                                            <div className="space-y-2.5">
+                                                                {s.media.map((m, i) => (
+                                                                    <div key={i} className="flex items-center gap-3">
+                                                                        <span className="w-28 md:w-32 text-xs md:text-sm font-bold text-slate-700 truncate flex-shrink-0">{m.name}</span>
+                                                                        <div className="flex-1 bg-slate-100 rounded-full h-4 overflow-hidden">
+                                                                            <div className="bg-gradient-to-r from-emerald-500 to-teal-400 h-4 rounded-full flex items-center justify-end pr-2" style={{ width: `${Math.max(6, Math.round(m.count / maxM * 100))}%` }}>
+                                                                                <span className="text-[10px] font-black text-white">{m.count}</span>
+                                                                            </div>
+                                                                        </div>
+                                                                        <span className="w-10 text-right text-[11px] font-black text-slate-500 flex-shrink-0">{Math.round(m.count / mediaTotal * 100)}%</span>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        );
+                                                    })()}
+                                                </div>
+                                                {/* 決済内訳 */}
+                                                <div className="bg-white p-4 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
+                                                    <div className="flex items-center gap-2 mb-4">
+                                                        <CreditCard size={18} className="text-emerald-600" />
+                                                        <h2 className="text-base md:text-lg font-black text-slate-900">決済内訳</h2>
+                                                    </div>
+                                                    {(!s.payments || s.payments.length === 0) ? (
+                                                        <p className="text-center text-slate-400 font-bold py-8">決済データはありません</p>
+                                                    ) : (() => {
+                                                        const payTotal = s.payments.reduce((a, p) => a + p.amount, 0) || 1;
+                                                        return (
+                                                            <div className="space-y-3">
+                                                                {s.payments.map((p, i) => (
+                                                                    <div key={i}>
+                                                                        <div className="flex items-baseline justify-between mb-1">
+                                                                            <span className="text-xs md:text-sm font-bold text-slate-700">{p.name}</span>
+                                                                            <span className="text-sm font-black text-slate-900">{soYen(p.amount)}</span>
+                                                                        </div>
+                                                                        <div className="bg-slate-100 rounded-full h-2 overflow-hidden"><div className="bg-gradient-to-r from-emerald-500 to-teal-400 h-2 rounded-full" style={{ width: `${Math.round(p.amount / payTotal * 100)}%` }}></div></div>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        );
+                                                    })()}
+                                                </div>
                                             </div>
                                         </>
                                     )}

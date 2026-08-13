@@ -41,12 +41,14 @@ api/
   chat.js           # Claude AI チャットAPI（フィードバック動的注入対応）
   feedback.js       # フィードバックAPI（GAS連携・取得/送信）
   health.js         # ヘルスチェック
+  salonone.js       # SalonOne 分析APIプロキシ（APIキー隠蔽・GET限定・許可リスト）
   square/
     metrics.js      # Square サブスクデータ集計
     test.js         # Square API接続テスト
 lib/
   markdown.js       # Markdownパーサー（テスト用分離モジュール）
   plan-calc.js      # 事業計画計算ロジック（テスト用分離モジュール）
+  salonone.js       # SalonOne API連携ロジック（エンドポイント許可リスト・検証・URL組立）
 gas/
   feedback-gas-sample.js  # フィードバック用GASサンプルスクリプト
 tests/              # Vitestテスト
@@ -62,6 +64,17 @@ tests/              # Vitestテスト
   - `ANTHROPIC_API_KEY` — Claude AI APIキー
   - `SQUARE_TOKENS` — Square APIトークン（JSON配列）
   - `FEEDBACK_GAS_URL` — フィードバック用GAS WebアプリURL（オプション）
+  - `SALONONE_API_KEY` — SalonOne 分析APIのアクセスキー（運営が「API連携」から発行・再表示不可）
+  - `SALONONE_API_BASE` — SalonOne 分析APIのベースURL上書き（オプション・既定は本番）
+
+## SalonOne 分析API連携
+SalonOne（`https://salonone.net`）の**読み取り専用**分析APIと連携する。
+- **認証**: 運営発行のアクセスキーをヘッダ `X-SalonOne-Api-Key` に付与。キーは `SALONONE_API_KEY` 環境変数でサーバー側に隠蔽し、`/api/salonone` プロキシ経由でのみ利用（フロントに出さない）
+- **フロント呼び出し**: `fetchSalonOne('sales/summary', { from, to })` / `/api/salonone?resource=<name>&...`
+- **疎通確認**: `GET /api/salonone?diagnostic=1`（`/meta` への到達性を段階検査）
+- **利用可能リソース**: `meta` / `sales/summary` / `shops` / `staffs` / `menus` / `menu-categories` / `visit-sources` / `customer-tags` / `customers` / `appointments` / `appointment-menus`
+- **制約**: GETのみ・ブランド単位でスコープ・レート制限60/分（`X-RateLimit-*`透過）・明細の日時はUTC（JST表示は+9h、`utcToJstIso`）
+- ロジックは `lib/salonone.js` に分離し `tests/salonone.test.js` でカバー
 
 ## 開発ルール
 - `index.html` を編集したら `npm test` を実行して構造テストを通す

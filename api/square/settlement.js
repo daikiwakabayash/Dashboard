@@ -97,6 +97,36 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
+  // SQUARE_TOKENS のJSON構文エラー診断（値はマスク）
+  if (req.query.diagnose === '1') {
+    const raw = (process.env.SQUARE_TOKENS || '').trim();
+    if (!raw) return res.status(200).json({ hasSquareTokens: false });
+    const mask = (s) => s
+      .replace(/"token"\s*:\s*"[^"]*"/g, '"token":"***"')
+      .replace(/"access_token"\s*:\s*"[^"]*"/g, '"access_token":"***"')
+      .replace(/(EAA|sq0|sk_)[A-Za-z0-9_\-]{10,}/g, '***');
+    let out = { rawLength: raw.length };
+    try {
+      const t = JSON.parse(raw);
+      out.ok = true; out.parsedCount = Array.isArray(t) ? t.length : 'not-array';
+      out.names = Array.isArray(t) ? t.map((x, i) => x.name || `(${i})`) : undefined;
+    } catch (e) {
+      out.ok = false; out.error = e.message;
+      const pm = e.message.match(/position (\d+)/);
+      if (pm) {
+        const pos = parseInt(pm[1], 10);
+        out.position = pos;
+        const s = Math.max(0, pos - 70), en = Math.min(raw.length, pos + 40);
+        out.contextBefore = mask(raw.slice(s, pos));
+        out.charAtError = raw[pos];
+        out.contextAfter = mask(raw.slice(pos, en));
+        out.hint = 'contextBefore の末尾と contextAfter の先頭の境目付近に構文エラー（カンマ抜け・括弧不整合・未エスケープの引用符など）があります';
+      }
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(200).json(out);
+  }
+
   const tokens = parseTokens();
   if (tokens.length === 0) {
     return res.status(500).json({ error: 'SQUARE_TOKENS/SQUARE_ACCESS_TOKEN is not configured', setupRequired: true });

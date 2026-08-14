@@ -126,16 +126,19 @@ export default async function handler(req, res) {
     const beginIso = new Date(Date.UTC(y, m - 1, 1, -9, 0, 0)).toISOString();
     const endIso = new Date(Date.UTC(y, m, 1, -9, 0, 0)).toISOString();
 
-    // マッチするロケーションを全アカウントから探索
+    // 店舗識別は SQUARE_TOKENS の name（店舗名）。まず name で候補アカウントを絞り、
+    // 該当アカウントのみ locations を取得（全88アカウントを走査せず高速化）。
+    const candidateTokens = req.query.location_id
+      ? tokens
+      : tokens.filter(t => normName(t.name || '').includes(locQuery) || (t.name || '').includes(locQuery));
     const matches = [];
-    for (const t of tokens) {
+    for (const t of candidateTokens) {
       const env = t.env || 'production';
       let locs;
       try { locs = await listLocations(t.token, env); } catch (e) { continue; }
       for (const l of locs) {
-        const hit = req.query.location_id ? String(l.id) === String(req.query.location_id)
-          : (normName(l.name).includes(locQuery) || (l.name || '').includes(locQuery));
-        if (hit) matches.push({ token: t.token, env, account: t.name || '(main)', location: l });
+        if (req.query.location_id && String(l.id) !== String(req.query.location_id)) continue;
+        matches.push({ token: t.token, env, account: t.name || '(main)', location: l });
       }
     }
     if (matches.length === 0) return res.status(404).json({ error: `ロケーション「${locQuery || req.query.location_id}」が見つかりません`, hint: '?locations=1 で一覧を確認' });

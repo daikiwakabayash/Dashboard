@@ -2509,6 +2509,7 @@
                         name: st.staff_name || st.name || st.staffName || '(不明)',
                         gross: soNum(st, 'gross_sales', 'grossSales', 'gross'),
                         consumed: soNum(st, 'consumed_sales', 'consumedSales', 'consumed'),
+                        digest: soNum(st, 'digest_sales', 'digestSales', 'digest'),
                         avgTicket: soNum(st, 'avg_ticket', 'avgTicket'),
                         util: soNum(st, 'utilization_rate', 'utilizationRate'),
                         treatments: soNum(st, 'treatment_count', 'item_count', 'treatments'),
@@ -2555,7 +2556,7 @@
                     const share = 0.6 + soSeed(st.id + from) * 0.9;
                     const g = Math.round(grossSales * share / staffs.length / 1000) * 1000;
                     const tr = Math.round(totalVisits * share / staffs.length);
-                    return { id: st.id, name: st.name, gross: g, consumed: Math.round(g * 0.88),
+                    return { id: st.id, name: st.name, gross: g, consumed: Math.round(g * 0.88), digest: Math.round(g * 0.9),
                              avgTicket: tr ? Math.round(g / tr) : 0, util: Math.round(20 + soSeed(st.id) * 20),
                              treatments: tr, newCount: Math.round(tr * 0.35),
                              gReview: Math.round(soSeed(st.id + 'g') * 12), hReview: Math.round(soSeed(st.id + 'h') * 10) };
@@ -10262,19 +10263,19 @@
                                             {/* KPI カード */}
                                             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
                                                 <div className="bg-gradient-to-br from-emerald-600 to-teal-500 text-white p-4 md:p-5 rounded-2xl shadow-lg">
-                                                    <div className="flex items-center gap-2 mb-1 opacity-90"><DollarSign size={16} /><span className="text-[11px] md:text-xs font-black uppercase tracking-wider">粗売上</span></div>
+                                                    <div className="flex items-center gap-2 mb-1 opacity-90"><DollarSign size={16} /><span className="text-[11px] md:text-xs font-black uppercase tracking-wider">売上</span></div>
                                                     <div className="text-xl md:text-3xl font-black tracking-tight">{soYen(s.grossSales)}</div>
-                                                    <div className="text-[10px] md:text-xs font-bold opacity-80 mt-1">購入時点で計上</div>
+                                                    <div className="text-[10px] md:text-xs font-bold opacity-80 mt-1">総売上・購入時点で計上</div>
                                                 </div>
                                                 <div className="bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-slate-200">
                                                     <div className="flex items-center gap-2 mb-1 text-slate-400"><Activity size={16} /><span className="text-[11px] md:text-xs font-black uppercase tracking-wider">消化売上</span></div>
-                                                    <div className="text-xl md:text-3xl font-black tracking-tight text-slate-900">{soYen(s.consumedSales)}</div>
-                                                    <div className="text-[10px] md:text-xs font-bold text-slate-400 mt-1">施術提供時点（失効益含む）</div>
+                                                    <div className="text-xl md:text-3xl font-black tracking-tight text-slate-900">{soYen(s.digestSales)}</div>
+                                                    <div className="text-[10px] md:text-xs font-bold text-slate-400 mt-1">会計完了ベース（SalonOne一致）</div>
                                                 </div>
                                                 <div className="bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-slate-200">
-                                                    <div className="flex items-center gap-2 mb-1 text-slate-400"><CreditCard size={16} /><span className="text-[11px] md:text-xs font-black uppercase tracking-wider">会計済み売上</span></div>
-                                                    <div className="text-xl md:text-3xl font-black tracking-tight text-slate-900">{soYen(s.digestSales)}</div>
-                                                    <div className="text-[10px] md:text-xs font-bold text-slate-400 mt-1">会計完了ベース</div>
+                                                    <div className="flex items-center gap-2 mb-1 text-slate-400"><TrendingUp size={16} /><span className="text-[11px] md:text-xs font-black uppercase tracking-wider">新規売上</span></div>
+                                                    <div className="text-xl md:text-3xl font-black tracking-tight text-emerald-600">{soYen(s.newSales)}</div>
+                                                    <div className="text-[10px] md:text-xs font-bold text-slate-400 mt-1">新規顧客の売上</div>
                                                 </div>
                                                 <div className="bg-white p-4 md:p-5 rounded-2xl shadow-sm border border-slate-200">
                                                     <div className="flex items-center gap-2 mb-1 text-slate-400"><Users size={16} /><span className="text-[11px] md:text-xs font-black uppercase tracking-wider">来店数</span></div>
@@ -10284,11 +10285,7 @@
                                             </div>
 
                                             {/* サブ指標 */}
-                                            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 md:gap-4">
-                                                <div className="bg-white p-3 md:p-4 rounded-xl border border-slate-200">
-                                                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-0.5">新規売上</div>
-                                                    <div className="text-base md:text-xl font-black text-emerald-600">{soYen(s.newSales)}</div>
-                                                </div>
+                                            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 md:gap-4">
                                                 <div className="bg-white p-3 md:p-4 rounded-xl border border-slate-200">
                                                     <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-0.5">継続売上</div>
                                                     <div className="text-base md:text-xl font-black text-slate-700">{soYen(s.repeatSales)}</div>
@@ -10315,7 +10312,7 @@
                                             <div className="bg-white p-4 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
                                                 <div className="flex items-center gap-2 mb-4">
                                                     <BarChart3 size={18} className="text-emerald-600" />
-                                                    <h2 className="text-base md:text-lg font-black text-slate-900">日別 粗売上</h2>
+                                                    <h2 className="text-base md:text-lg font-black text-slate-900">日別 売上</h2>
                                                     <span className="text-xs font-bold text-slate-400 ml-auto">{shopName}・{soFrom} 〜 {soTo}</span>
                                                 </div>
                                                 {s.byDay.length === 0 ? (
@@ -10354,7 +10351,7 @@
                                                                 <tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200">
                                                                     <th className="pb-2 pr-2">#</th>
                                                                     <th className="pb-2 pr-2">スタッフ</th>
-                                                                    <th className="pb-2 px-2 text-right">粗売上</th>
+                                                                    <th className="pb-2 px-2 text-right">売上</th>
                                                                     <th className="pb-2 px-2 text-right hidden sm:table-cell">消化売上</th>
                                                                     <th className="pb-2 px-2 text-right hidden md:table-cell">客単価</th>
                                                                     <th className="pb-2 px-2 text-right hidden lg:table-cell">施術数</th>
@@ -10373,7 +10370,7 @@
                                                                             <td className="py-2.5 pr-2 font-black text-slate-300">{i + 1}</td>
                                                                             <td className="py-2.5 pr-2 font-bold text-slate-800 whitespace-nowrap">{st.name}</td>
                                                                             <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(st.gross)}</td>
-                                                                            <td className="py-2.5 px-2 text-right font-bold text-slate-500 hidden sm:table-cell">{soYen(st.consumed)}</td>
+                                                                            <td className="py-2.5 px-2 text-right font-bold text-slate-500 hidden sm:table-cell">{soYen(st.digest)}</td>
                                                                             <td className="py-2.5 px-2 text-right font-bold text-slate-500 hidden md:table-cell">{st.avgTicket ? soYen(st.avgTicket) : '—'}</td>
                                                                             <td className="py-2.5 px-2 text-right font-bold text-slate-500 hidden lg:table-cell">{st.treatments.toLocaleString()}</td>
                                                                             <td className="py-2.5 px-2 text-right font-bold text-emerald-600 hidden lg:table-cell">{st.newCount.toLocaleString()}</td>

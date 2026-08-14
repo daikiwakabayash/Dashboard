@@ -1254,6 +1254,9 @@
             const [soSetupRequired, setSoSetupRequired] = useState(false);
             const [soDemo, setSoDemo] = useState(false);        // デモデータ表示中か
             const [soLastFetch, setSoLastFetch] = useState(null);
+            const [soChannels, setSoChannels] = useState([]);   // マーケ: 媒体別 新規獲得
+            const [soStaffMk, setSoStaffMk] = useState([]);     // マーケ: 担当者別 新規獲得
+            const [soRetention, setSoRetention] = useState(null); // マーケ: 継続顧客サマリ
             const [soShop, setSoShop] = useState('all');        // 店舗フィルタ（'all' | shop_id）
             const [soStaff, setSoStaff] = useState('all');      // スタッフフィルタ（'all' | staff_id）
             const [soFrom, setSoFrom] = useState(soDefaultRange.from);
@@ -2520,6 +2523,38 @@
                     media, payments,
                 };
             };
+            // マーケ 媒体別（/marketing/by-channel）を正規化。予約か売上がある行のみ、予約数降順。
+            const normalizeMkChannels = (resp) => {
+                const arr = (resp && resp.data) || (Array.isArray(resp) ? resp : []);
+                return arr.map(c => ({
+                    id: c.visit_source_id, name: c.name || '未設定', platform: c.platform_type,
+                    booking: soNum(c, 'booking_count'), visit: soNum(c, 'visit_count'),
+                    remaining: soNum(c, 'remaining_count'), cancel: soNum(c, 'cancel_count'),
+                    join: soNum(c, 'join_count'), joinRate: soNum(c, 'join_rate'),
+                    sales: soNum(c, 'sales'), adSpend: soNum(c, 'ad_spend'), cpa: soNum(c, 'cpa'), roas: soNum(c, 'roas'),
+                })).filter(c => c.booking > 0 || c.sales > 0).sort((a, b) => b.booking - a.booking);
+            };
+            // マーケ 担当者別（/marketing/by-staff）。is_total を先頭、以降は新規予約降順。
+            // 購入率は管理画面と同じ「購入数÷新規来店数」で算出。
+            const normalizeMkStaff = (resp) => {
+                const arr = (resp && resp.data) || (Array.isArray(resp) ? resp : []);
+                const rows = arr.map(s => ({
+                    id: s.staff_id, name: s.staff_name || '未割当', isTotal: !!s.is_total,
+                    booking: soNum(s, 'new_booking_count'), visit: soNum(s, 'new_visit_count'),
+                    remaining: soNum(s, 'remaining_count'), cancel: soNum(s, 'cancel_count'),
+                    purchase: soNum(s, 'purchase_count'), amount: soNum(s, 'purchase_amount'),
+                    unit: soNum(s, 'purchase_unit_price'), sales: soNum(s, 'new_customer_sales_total'),
+                }));
+                rows.forEach(r => { r.purchaseRate = r.visit ? Math.round(r.purchase / r.visit * 1000) / 10 : 0; });
+                const total = rows.filter(r => r.isTotal);
+                const staff = rows.filter(r => !r.isTotal).sort((a, b) => b.booking - a.booking);
+                return [...total, ...staff];
+            };
+            const normalizeMkRetention = (resp) => {
+                const r = (resp && resp.data) || resp || null;
+                return r && r.summary ? r.summary : (r || null);
+            };
+
             // 環境変数未設定時に UI を確認できるデモデータ（NAORU 店舗を模擬）
             const soDemoShops = [
                 { id: '1', name: '恵比寿院' }, { id: '2', name: '千葉駅院' }, { id: '3', name: '大森院' },
@@ -2590,7 +2625,19 @@
                         setSoDemo(true);
                         setSoShops(soDemoShops);
                         setSoStaffs(soDemoStaffs);
-                        setSoSummary(buildSalonOneDemo(soFrom, soTo, soShop, soStaff));
+                        const demo = buildSalonOneDemo(soFrom, soTo, soShop, soStaff);
+                        setSoSummary(demo);
+                        // デモ用マーケ集計（実データの形を模擬）
+                        setSoChannels((demo.media || []).map(m => {
+                            const booking = Math.round(m.count * 1.4) + 1, visit = m.count, join = Math.round(visit * 0.16);
+                            return { name: m.name, booking, visit, remaining: booking - visit, cancel: Math.max(0, booking - visit - 1),
+                                     join, joinRate: visit ? Math.round(join / visit * 1000) / 10 : 0, sales: m.count * 8000, adSpend: 0, cpa: 0, roas: 0 };
+                        }));
+                        setSoStaffMk(normalizeMkStaff({ data: [
+                            { staff_name: '全体', is_total: true, new_booking_count: demo.byStaff.reduce((a,s)=>a+Math.round(s.newCount*1.3),0), new_visit_count: demo.byStaff.reduce((a,s)=>a+s.newCount,0), cancel_count: 3, purchase_count: demo.byStaff.reduce((a,s)=>a+Math.round(s.newCount*0.2),0), purchase_amount: 123750, purchase_unit_price: 24750 },
+                            ...demo.byStaff.map(s => ({ staff_name: s.name, new_booking_count: Math.round(s.newCount*1.3), new_visit_count: s.newCount, cancel_count: 1, purchase_count: Math.round(s.newCount*0.2), purchase_amount: Math.round(s.newCount*0.2)*24750, purchase_unit_price: 24750 })),
+                        ]}));
+                        setSoRetention({ join_count: 12, active_count: 11, churn_count: 1, continuation_rate: 91.7, churn_rate: 8.3, avg_purchases: 1.3 });
                         setSoLastFetch(new Date());
                         return;
                     }
@@ -2603,6 +2650,17 @@
                     setSoDemo(false);
                     setSoSummary(normalizeSalonSummary(json));
                     setSoLastFetch(new Date());
+
+                    // マーケ集計（SalonOne計算値・管理画面と一致）を並列取得
+                    (async () => {
+                        const mp = new URLSearchParams({ from: soFrom, to: soTo });
+                        if (soShop !== 'all') mp.set('shop_id', soShop);
+                        const getMk = (name) => fetch(`${SALONONE_API_URL}?resource=marketing/${name}&${mp.toString()}`).then(r => r.json()).catch(() => null);
+                        const [ch, st, rt] = await Promise.all([getMk('by-channel'), getMk('by-staff'), getMk('retention')]);
+                        setSoChannels(normalizeMkChannels(ch));
+                        setSoStaffMk(normalizeMkStaff(st));
+                        setSoRetention(normalizeMkRetention(rt));
+                    })();
 
                     // 店舗・スタッフの選択肢は初回のみ取得
                     if (soShops.length === 0 || force) {
@@ -10393,13 +10451,109 @@
                                                 )}
                                             </div>
 
+                                            {/* ===== マーケ分析（SalonOne集計・管理画面と一致） ===== */}
+                                            <div className="bg-gradient-to-br from-emerald-50 to-teal-50 border border-emerald-100 rounded-2xl md:rounded-3xl p-4 md:p-6 space-y-4 md:space-y-5">
+                                                <div className="flex items-center gap-2 flex-wrap">
+                                                    <Megaphone size={18} className="text-emerald-600" />
+                                                    <h2 className="text-base md:text-lg font-black text-slate-900">マーケ分析 <span className="text-slate-400 font-bold text-sm">/ 新規獲得</span></h2>
+                                                    <span className="px-2 py-0.5 bg-emerald-600 text-white rounded-full text-[10px] font-black">SalonOne一致</span>
+                                                    <span className="text-xs font-bold text-slate-400 ml-auto hidden sm:inline">期間に初めて予約した新規客が母集団</span>
+                                                </div>
+
+                                                {/* 継続サマリー */}
+                                                {soRetention && (
+                                                    <div className="grid grid-cols-2 md:grid-cols-5 gap-2 md:gap-3">
+                                                        {[
+                                                            { l: '入会数', v: soNum(soRetention, 'join_count'), c: 'text-emerald-600' },
+                                                            { l: '継続数', v: soNum(soRetention, 'active_count'), c: 'text-slate-800' },
+                                                            { l: '離反数', v: soNum(soRetention, 'churn_count'), c: 'text-rose-600' },
+                                                            { l: '継続率', v: soNum(soRetention, 'continuation_rate'), c: 'text-teal-600', suf: '%' },
+                                                            { l: '平均購入回数', v: soNum(soRetention, 'avg_purchases'), c: 'text-slate-800', suf: '回' },
+                                                        ].map((k, i) => (
+                                                            <div key={i} className="bg-white rounded-xl p-3 border border-emerald-100">
+                                                                <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider mb-0.5">{k.l}</div>
+                                                                <div className={`text-lg md:text-2xl font-black ${k.c}`}>{k.v.toLocaleString()}{k.suf || ''}</div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+
+                                                {/* 媒体別 新規獲得 */}
+                                                <div className="bg-white rounded-2xl border border-emerald-100 p-4 md:p-5">
+                                                    <h3 className="text-sm md:text-base font-black text-slate-800 mb-3 flex items-center gap-2"><MapPin size={15} className="text-emerald-600" />媒体別 新規獲得</h3>
+                                                    {soChannels.length === 0 ? (<p className="text-center text-slate-400 font-bold py-6 text-sm">媒体別データはありません</p>) : (
+                                                        <div className="overflow-x-auto">
+                                                            <table className="w-full text-sm">
+                                                                <thead><tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200">
+                                                                    <th className="pb-2 pr-2">媒体</th>
+                                                                    <th className="pb-2 px-2 text-right">予約</th>
+                                                                    <th className="pb-2 px-2 text-right">来店</th>
+                                                                    <th className="pb-2 px-2 text-right">入会</th>
+                                                                    <th className="pb-2 px-2 text-right" title="入会数÷来店数（管理画面と同じ）">入会率</th>
+                                                                    <th className="pb-2 px-2 text-right hidden sm:table-cell">ｷｬﾝｾﾙ</th>
+                                                                    <th className="pb-2 pl-2 text-right">売上</th>
+                                                                </tr></thead>
+                                                                <tbody>
+                                                                    {soChannels.map((c, i) => (
+                                                                        <tr key={i} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                                                                            <td className="py-2 pr-2 font-bold text-slate-800 whitespace-nowrap">{c.name}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-slate-700">{c.booking}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-slate-700">{c.visit}</td>
+                                                                            <td className="py-2 px-2 text-right font-black text-emerald-600">{c.join}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-slate-500">{c.joinRate ? c.joinRate.toFixed(1) + '%' : '—'}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-amber-600 hidden sm:table-cell">{c.cancel}</td>
+                                                                            <td className="py-2 pl-2 text-right font-black text-slate-900">{soYen(c.sales)}</td>
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    )}
+                                                    <p className="text-[10px] text-slate-400 mt-2 font-bold">※ 入会率＝入会数÷来店数（管理画面と同一定義。初回予約が先の契約が分子に入り100%超となる場合あり）</p>
+                                                </div>
+
+                                                {/* 担当者別 新規獲得 */}
+                                                <div className="bg-white rounded-2xl border border-emerald-100 p-4 md:p-5">
+                                                    <h3 className="text-sm md:text-base font-black text-slate-800 mb-3 flex items-center gap-2"><Users size={15} className="text-emerald-600" />担当者別 新規獲得</h3>
+                                                    {soStaffMk.length === 0 ? (<p className="text-center text-slate-400 font-bold py-6 text-sm">担当者別データはありません</p>) : (
+                                                        <div className="overflow-x-auto">
+                                                            <table className="w-full text-sm">
+                                                                <thead><tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200">
+                                                                    <th className="pb-2 pr-2">担当</th>
+                                                                    <th className="pb-2 px-2 text-right">新規予約</th>
+                                                                    <th className="pb-2 px-2 text-right">来店</th>
+                                                                    <th className="pb-2 px-2 text-right hidden sm:table-cell">ｷｬﾝｾﾙ</th>
+                                                                    <th className="pb-2 px-2 text-right">購入</th>
+                                                                    <th className="pb-2 px-2 text-right" title="購入数÷新規来店数">購入率</th>
+                                                                    <th className="pb-2 pl-2 text-right">購入金額</th>
+                                                                </tr></thead>
+                                                                <tbody>
+                                                                    {soStaffMk.map((st, i) => (
+                                                                        <tr key={i} className={`border-b border-slate-100 ${st.isTotal ? 'bg-emerald-50/70' : 'hover:bg-slate-50'} transition-colors`}>
+                                                                            <td className={`py-2 pr-2 whitespace-nowrap ${st.isTotal ? 'font-black text-slate-900' : 'font-bold text-slate-800'}`}>{st.isTotal ? '全体' : st.name}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-slate-700">{st.booking}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-slate-700">{st.visit}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-amber-600 hidden sm:table-cell">{st.cancel}</td>
+                                                                            <td className="py-2 px-2 text-right font-black text-emerald-600">{st.purchase}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-slate-500">{st.purchaseRate ? st.purchaseRate.toFixed(1) + '%' : '0%'}</td>
+                                                                            <td className="py-2 pl-2 text-right font-black text-slate-900">{soYen(st.amount)}</td>
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    )}
+                                                    <p className="text-[10px] text-slate-400 mt-2 font-bold">※ 購入率＝購入数÷新規来店数（管理画面と同一定義）。担当はその顧客の初回予約担当。広告費・CPA・ROASはSalonOne側で広告費が未入力のため¥0。</p>
+                                                </div>
+                                            </div>
+
                                             {/* 媒体別内訳（マーケ分析）＋ 決済内訳 */}
                                             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
                                                 {/* 媒体別（流入元）内訳 */}
                                                 <div className="lg:col-span-2 bg-white p-4 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
                                                     <div className="flex items-center gap-2 mb-4">
                                                         <Megaphone size={18} className="text-emerald-600" />
-                                                        <h2 className="text-base md:text-lg font-black text-slate-900">媒体別 来店内訳</h2>
+                                                        <h2 className="text-base md:text-lg font-black text-slate-900">媒体別 総来店（全顧客・参考）</h2>
                                                         <span className="text-xs font-bold text-slate-400 ml-auto">流入元ベース・{s.byDay.length}日分</span>
                                                     </div>
                                                     {(!s.media || s.media.length === 0) ? (

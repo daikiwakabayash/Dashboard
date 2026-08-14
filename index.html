@@ -1271,6 +1271,78 @@
             const [soAiLoading, setSoAiLoading] = useState(false);
             useEffect(() => { try { localStorage.setItem('salonone_plan_goals_v1', JSON.stringify(soPlanGoals)); } catch {} }, [soPlanGoals]);
             useEffect(() => { try { localStorage.setItem('salonone_actions_v1', JSON.stringify(soActions)); } catch {} }, [soActions]);
+
+            // ===== 返金明細書（FC精算）タブ =====
+            const stDefaultMonth = (() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}`; })();
+            const [stShopId, setStShopId] = useState('');          // SalonOne shop_id
+            const [stMonth, setStMonth] = useState(stDefaultMonth);
+            const [stSalon, setStSalon] = useState(null);          // SalonOne 決済内訳
+            const [stSquare, setStSquare] = useState(null);        // Square 精算
+            const [stLoading, setStLoading] = useState(false);
+            const [stError, setStError] = useState(null);
+            const [stManual, setStManual] = useState(() => { try { return JSON.parse(localStorage.getItem('settlement_manual_v1') || '{}'); } catch { return {}; } });
+            const stShopMenuRef = useRef(null);
+            const [stShopMenuOpen, setStShopMenuOpen] = useState(false);
+            const [stShopSearch, setStShopSearch] = useState('');
+            useEffect(() => { try { localStorage.setItem('settlement_manual_v1', JSON.stringify(stManual)); } catch {} }, [stManual]);
+            const stKey = () => `${stShopId}_${stMonth}`;
+            const stManualDefault = { royaltyRate: 15, taxRate: 10, spotip: 10000, metaAds: [], adjustments: [] };
+            const stM = { ...stManualDefault, ...(stManual[stKey()] || {}) };
+            const stSetM = (patch) => setStManual(prev => ({ ...prev, [stKey()]: { ...stManualDefault, ...(prev[stKey()] || {}), ...patch } }));
+
+            const fetchSettlement = async () => {
+                if (!stShopId) return;
+                setStLoading(true); setStError(null); setStSalon(null); setStSquare(null);
+                const shop = (soShops.length ? soShops : soDemoShops).find(s => String(s.id) === String(stShopId));
+                const shopName = shop ? shop.name : '';
+                const core = shopName.replace('NAORU整体', '').replace('NAORU', '').replace(/院$/, '').trim();
+                const [y, m] = stMonth.split('-').map(Number);
+                const from = `${stMonth}-01`;
+                const to = `${stMonth}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
+                try {
+                    // SalonOne 決済内訳
+                    const soRes = await fetch(`${SALONONE_API_URL}?resource=sales/summary&from=${from}&to=${to}&shop_id=${stShopId}`);
+                    const soJson = await soRes.json().catch(() => ({}));
+                    if (soRes.ok && soJson.data) {
+                        const s = soJson.data; const pay = {};
+                        (s.by_day || []).forEach(d => (d.payment_breakdown || []).forEach(p => { pay[p.name] = (pay[p.name] || 0) + soNum(p, 'amount'); }));
+                        const pick = (...keys) => keys.reduce((a, k) => a + Object.entries(pay).filter(([n]) => n.includes(k)).reduce((x, [, v]) => x + v, 0), 0);
+                        setStSalon({
+                            gross: soNum(s, 'gross_sales'),
+                            cash: pick('現金'),
+                            square: Object.entries(pay).filter(([n]) => n.includes('スクエア')).reduce((a, [, v]) => a + v, 0),
+                            hpb: pick('HPBポイント', 'ホットペッパー'),
+                            payments: Object.entries(pay).map(([name, amount]) => ({ name, amount })).sort((a, b) => b.amount - a.amount),
+                        });
+                    } else {
+                        setStSalon({ error: soJson?.error?.code || `HTTP ${soRes.status}` });
+                    }
+                    // Square 精算
+                    try {
+                        const sqRes = await fetch(`/api/square/settlement?month=${stMonth}&location=${encodeURIComponent(core)}`);
+                        const sqJson = await sqRes.json().catch(() => ({}));
+                        if (sqRes.ok && sqJson.squareGrossSales !== undefined) setStSquare(sqJson);
+                        else setStSquare({ error: sqJson?.error || `HTTP ${sqRes.status}` });
+                    } catch (e) { setStSquare({ error: e.message }); }
+                } catch (err) {
+                    setStError(err.message);
+                } finally { setStLoading(false); }
+            };
+            useEffect(() => {
+                if (currentPage !== 'settlement' || !stShopId) return;
+                fetchSettlement();
+            }, [currentPage, stShopId, stMonth]);
+            // 返金明細書タブを開いたら SalonOne 店舗一覧を用意
+            useEffect(() => {
+                if (currentPage === 'settlement' && soShops.length === 0) {
+                    fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`).then(r => r.json()).then(j => {
+                        const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? ''), name: s.name || `店舗${s.id}` }));
+                        if (arr.length) { setSoShops(arr); if (!stShopId) setStShopId(arr[0].id); }
+                    }).catch(() => {});
+                } else if (currentPage === 'settlement' && soShops.length && !stShopId) {
+                    setStShopId(soShops[0].id);
+                }
+            }, [currentPage]);
             const [soShopSel, setSoShopSel] = useState([]);     // 店舗フィルタ（[]=全店舗 / shop_id配列）
             const [soStaffSel, setSoStaffSel] = useState([]);   // スタッフフィルタ（[]=全スタッフ / staff_id配列）
             const [soOwner, setSoOwner] = useState('');         // オーナー選択（空=なし）
@@ -11239,6 +11311,166 @@
                         })()}
                     </div>
 
+                    {/* ===== 返金明細書（FC精算）タブ ===== */}
+                    {currentPage === 'settlement' && (() => {
+                        const shopList = (soShops.length ? soShops : soDemoShops);
+                        const shop = shopList.find(s => String(s.id) === String(stShopId));
+                        const shopName = shop ? shop.name : '（店舗を選択）';
+                        const owner = shop ? soShopOwner(shop.name) : null;
+                        const yen = (n) => '¥' + Math.round(Number(n) || 0).toLocaleString();
+                        // 各値
+                        const cash = stSalon && !stSalon.error ? stSalon.cash : 0;
+                        const hpb = stSalon && !stSalon.error ? stSalon.hpb : 0;
+                        const soSquare = stSalon && !stSalon.error ? stSalon.square : 0;
+                        const sqGross = stSquare && !stSquare.error ? stSquare.squareGrossSales : null;
+                        const sqFees = stSquare && !stSquare.error ? stSquare.squareFees : 0;
+                        const sqRefunds = stSquare && !stSquare.error ? stSquare.refunds : 0;
+                        const squareSales = sqGross != null ? sqGross : soSquare;   // スクエア売上（Square優先）
+                        // 照合: SalonOneスクエア = Square(総決済 - 返金)
+                        const sqNet = sqGross != null ? (sqGross - sqRefunds) : null;
+                        const mismatch = sqNet != null && Math.abs(sqNet - soSquare) > 1;
+                        // 集計
+                        const royaltyBase = cash + squareSales + hpb;
+                        const royalty = Math.round(royaltyBase * (Number(stM.royaltyRate) || 0) / 100);
+                        const metaTotal = (stM.metaAds || []).reduce((a, x) => a + (Number(x.amount) || 0), 0);
+                        const adjTotal = (stM.adjustments || []).reduce((a, x) => a + (Number(x.amount) || 0), 0);
+                        const billTotal = royalty + sqFees + (Number(stM.spotip) || 0) + metaTotal + adjTotal;
+                        const taxRate = Number(stM.taxRate) || 0;
+                        const tax = Math.round(billTotal * taxRate / (100 + taxRate));
+                        const refundAmount = squareSales - billTotal;
+                        const monthLabel = (() => { const [y, m] = stMonth.split('-'); return `${y}年${parseInt(m)}月`; })();
+                        return (
+                        <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
+                            <div className="max-w-[1100px] mx-auto space-y-4 md:space-y-6">
+                                {/* ヘッダー + フィルタ */}
+                                <header className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 bg-white p-3 md:p-5 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
+                                    <div className="flex items-center gap-3">
+                                        <div className="p-2 md:p-3 bg-gradient-to-br from-slate-800 to-slate-600 rounded-xl md:rounded-2xl text-white shadow-lg"><Banknote size={24} /></div>
+                                        <div>
+                                            <div className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full text-[10px] font-black uppercase tracking-widest mb-1">FC SETTLEMENT</div>
+                                            <h1 className="text-xl md:text-2xl font-black tracking-tight italic">返金明細書</h1>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <div className="relative" ref={stShopMenuRef}>
+                                            <button onClick={() => setStShopMenuOpen(!stShopMenuOpen)} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 flex items-center gap-2 min-w-[150px]">
+                                                <MapPin size={16} className="text-slate-400" /><span className="truncate">{shopName}</span><ChevronDown size={16} className="ml-auto" />
+                                            </button>
+                                            <PortalDropdown anchorRef={stShopMenuRef} isOpen={stShopMenuOpen} onClose={() => setStShopMenuOpen(false)} width={260}>
+                                                <div className="bg-white border border-slate-200 rounded-2xl shadow-xl p-3 max-h-[380px] overflow-hidden flex flex-col w-[260px]">
+                                                    <div className="relative pb-2"><Search className="absolute left-2.5 top-2 w-4 h-4 text-slate-400" /><input placeholder="店舗を検索..." className="w-full pl-8 pr-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold outline-none" value={stShopSearch} onChange={e => setStShopSearch(e.target.value)} /></div>
+                                                    <div className="overflow-y-auto space-y-1">
+                                                        {shopList.filter(s => !stShopSearch || s.name.includes(stShopSearch)).map(s => (
+                                                            <div key={s.id} onClick={() => { setStShopId(s.id); setStShopMenuOpen(false); setStShopSearch(''); }} className={`px-3 py-2 rounded-lg cursor-pointer text-sm font-bold ${String(stShopId) === String(s.id) ? 'bg-slate-800 text-white' : 'hover:bg-slate-50 text-slate-600'}`}>{s.name}</div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </PortalDropdown>
+                                        </div>
+                                        <input type="month" value={stMonth} onChange={e => setStMonth(e.target.value)} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 outline-none" />
+                                        <button onClick={fetchSettlement} disabled={stLoading} className="p-2.5 bg-slate-900 text-white rounded-xl hover:bg-slate-800 disabled:opacity-50"><RefreshCw size={18} className={stLoading ? 'animate-spin' : ''} /></button>
+                                    </div>
+                                </header>
+
+                                {stLoading && (<div className="flex items-center justify-center py-16"><Loader2 size={40} className="animate-spin text-slate-400" /></div>)}
+
+                                {!stLoading && stShopId && (
+                                    <>
+                                        {/* 照合ステータス */}
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                            <div className={`rounded-2xl border p-3 flex items-center gap-3 ${stSquare && !stSquare.error ? (mismatch ? 'bg-amber-50 border-amber-300' : 'bg-emerald-50 border-emerald-200') : 'bg-slate-50 border-slate-200'}`}>
+                                                {stSquare && stSquare.error ? <AlertCircle size={20} className="text-slate-400" /> : mismatch ? <AlertTriangle size={20} className="text-amber-500" /> : <CheckCircle size={20} className="text-emerald-500" />}
+                                                <div className="text-xs font-bold">
+                                                    {stSquare && stSquare.error ? (<span className="text-slate-500">Squareデータ未取得（{String(stSquare.error).slice(0,40)}）。SalonOneのスクエア売上で作成中。</span>)
+                                                     : mismatch ? (<span className="text-amber-700">⚠️ 不一致: SalonOneスクエア {yen(soSquare)} ≠ Square(総決済−返金) {yen(sqNet)}（差 {yen(Math.abs(sqNet - soSquare))}）</span>)
+                                                     : (<span className="text-emerald-700">✓ 一致: SalonOneスクエア {yen(soSquare)} = Square総決済 {yen(sqGross)} − 返金 {yen(sqRefunds)}</span>)}
+                                                </div>
+                                            </div>
+                                            {stSalon && stSalon.error && (<div className="rounded-2xl border bg-red-50 border-red-200 p-3 flex items-center gap-3"><AlertCircle size={20} className="text-red-400" /><span className="text-xs font-bold text-red-600">SalonOneデータ未取得（{String(stSalon.error)}）</span></div>)}
+                                        </div>
+
+                                        {/* 明細書本体 */}
+                                        <div className="bg-white rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 p-5 md:p-8">
+                                            <div className="flex flex-col sm:flex-row justify-between gap-4 border-b-2 border-slate-800 pb-4 mb-4">
+                                                <div>
+                                                    <h2 className="text-lg md:text-2xl font-black tracking-widest">請求書 兼 支払明細書</h2>
+                                                    <p className="text-sm font-bold text-slate-700 mt-2">{owner ? owner + ' 様' : ''}</p>
+                                                    <p className="text-xs text-slate-500 font-bold">（{shopName}）</p>
+                                                    <p className="text-sm font-black mt-1">{monthLabel}分</p>
+                                                </div>
+                                                <div className="text-right text-[11px] text-slate-500 font-bold leading-relaxed">
+                                                    <p className="text-slate-700 font-black text-sm">株式会社NAORUテクノロジー</p>
+                                                    <p>NAORU FC本部</p>
+                                                    <p>登録番号：T9010701040194</p>
+                                                    <p>〒140-0014 東京都品川区大井6-4-4</p>
+                                                    <p>電話：03-6822-8474</p>
+                                                </div>
+                                            </div>
+
+                                            {/* ご返金金額 */}
+                                            <div className="flex items-center justify-between bg-slate-50 border-2 border-slate-300 rounded-xl px-5 py-3 mb-5">
+                                                <span className="font-black text-slate-700">ご返金金額</span>
+                                                <span className={`text-2xl md:text-3xl font-black ${refundAmount < 0 ? 'text-rose-600' : 'text-slate-900'}`}>{yen(refundAmount)}</span>
+                                            </div>
+
+                                            {/* 売上 */}
+                                            <div className="mb-5">
+                                                <div className="bg-slate-100 px-3 py-1.5 font-black text-sm text-slate-700 rounded">売上（ロイヤリティ対象）</div>
+                                                <table className="w-full text-sm">
+                                                    <tbody>
+                                                        <tr className="border-b border-slate-100"><td className="py-2 pl-3">現金売上 <span className="text-[10px] text-slate-400">SalonOne</span></td><td className="py-2 pr-3 text-right font-bold">{yen(cash)}</td></tr>
+                                                        <tr className="border-b border-slate-100"><td className="py-2 pl-3">スクエア売上 <span className="text-[10px] text-slate-400">{sqGross != null ? 'Square API' : 'SalonOne'}</span></td><td className="py-2 pr-3 text-right font-bold">{yen(squareSales)}</td></tr>
+                                                        <tr className="border-b border-slate-100"><td className="py-2 pl-3">ホットペッパーポイント <span className="text-[10px] text-slate-400">SalonOne</span></td><td className="py-2 pr-3 text-right font-bold">{yen(hpb)}</td></tr>
+                                                        <tr className="bg-slate-50 font-black"><td className="py-2 pl-3">ロイヤリティー対象額合計（税込）</td><td className="py-2 pr-3 text-right">{yen(royaltyBase)}</td></tr>
+                                                    </tbody>
+                                                </table>
+                                            </div>
+
+                                            {/* 請求内容 */}
+                                            <div className="mb-4">
+                                                <div className="bg-slate-100 px-3 py-1.5 font-black text-sm text-slate-700 rounded flex items-center justify-between">
+                                                    <span>請求内容</span>
+                                                    <span className="text-[11px] text-slate-500 font-bold">ロイヤリティ率
+                                                        <input type="number" value={stM.royaltyRate} onChange={e => stSetM({ royaltyRate: Number(e.target.value) })} className="w-12 mx-1 px-1 py-0.5 border border-slate-300 rounded text-right" />%</span>
+                                                </div>
+                                                <table className="w-full text-sm">
+                                                    <tbody>
+                                                        <tr className="border-b border-slate-100"><td className="py-2 pl-3">FCロイヤリティ <span className="text-[10px] text-slate-400">対象額の{stM.royaltyRate}%</span></td><td className="py-2 pr-3 text-right font-bold">{yen(royalty)}</td></tr>
+                                                        <tr className="border-b border-slate-100"><td className="py-2 pl-3">スクエア手数料 <span className="text-[10px] text-slate-400">{sqGross != null ? 'Square実手数料' : '—'}</span></td><td className="py-2 pr-3 text-right font-bold">{yen(sqFees)}</td></tr>
+                                                        <tr className="border-b border-slate-100"><td className="py-2 pl-3">Spotip利用料 <span className="text-[10px] text-slate-400">AI姿勢分析</span></td><td className="py-2 pr-3 text-right"><input type="number" value={stM.spotip} onChange={e => stSetM({ spotip: Number(e.target.value) })} className="w-24 px-1 py-0.5 border border-slate-200 rounded text-right font-bold" /></td></tr>
+                                                        {(stM.metaAds || []).map((a, i) => (
+                                                            <tr key={'ma' + i} className="border-b border-slate-100">
+                                                                <td className="py-2 pl-3"><input value={a.label} onChange={e => stSetM({ metaAds: stM.metaAds.map((x, j) => j === i ? { ...x, label: e.target.value } : x) })} placeholder="広告宣伝費（例: Meta広告運用代行費）" className="w-full px-1 py-0.5 border border-slate-200 rounded" /></td>
+                                                                <td className="py-2 pr-3 text-right flex items-center justify-end gap-1"><input type="number" value={a.amount} onChange={e => stSetM({ metaAds: stM.metaAds.map((x, j) => j === i ? { ...x, amount: Number(e.target.value) } : x) })} className="w-24 px-1 py-0.5 border border-slate-200 rounded text-right font-bold" /><button onClick={() => stSetM({ metaAds: stM.metaAds.filter((_, j) => j !== i) })} className="text-slate-300 hover:text-rose-500"><X size={13} /></button></td>
+                                                            </tr>
+                                                        ))}
+                                                        {(stM.adjustments || []).map((a, i) => (
+                                                            <tr key={'adj' + i} className="border-b border-slate-100">
+                                                                <td className="py-2 pl-3"><input value={a.label} onChange={e => stSetM({ adjustments: stM.adjustments.map((x, j) => j === i ? { ...x, label: e.target.value } : x) })} placeholder="ロイヤリティ調整値引き（例: 宇良先生）" className="w-full px-1 py-0.5 border border-slate-200 rounded" /></td>
+                                                                <td className="py-2 pr-3 text-right flex items-center justify-end gap-1"><input type="number" value={a.amount} onChange={e => stSetM({ adjustments: stM.adjustments.map((x, j) => j === i ? { ...x, amount: Number(e.target.value) } : x) })} className="w-24 px-1 py-0.5 border border-slate-200 rounded text-right font-bold text-rose-600" /><button onClick={() => stSetM({ adjustments: stM.adjustments.filter((_, j) => j !== i) })} className="text-slate-300 hover:text-rose-500"><X size={13} /></button></td>
+                                                            </tr>
+                                                        ))}
+                                                        <tr className="bg-slate-50 font-black"><td className="py-2 pl-3">{taxRate}%税込請求合計</td><td className="py-2 pr-3 text-right">{yen(billTotal)}</td></tr>
+                                                        <tr className="text-slate-500"><td className="py-1 pl-3 text-xs">うち消費税額{taxRate}%</td><td className="py-1 pr-3 text-right text-xs">{yen(tax)}</td></tr>
+                                                    </tbody>
+                                                </table>
+                                                <div className="flex gap-2 mt-2">
+                                                    <button onClick={() => stSetM({ metaAds: [...(stM.metaAds || []), { label: '', amount: 0 }] })} className="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-xs font-black hover:bg-slate-200">＋ 広告宣伝費</button>
+                                                    <button onClick={() => stSetM({ adjustments: [...(stM.adjustments || []), { label: '', amount: 0 }] })} className="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-xs font-black hover:bg-slate-200">＋ 調整値引き</button>
+                                                </div>
+                                            </div>
+
+                                            <p className="text-xs text-slate-500 font-bold border-t border-slate-200 pt-3">備考：スクエア売上 {yen(squareSales)} より請求額 {yen(billTotal)} を差し引いた {yen(refundAmount)} をご返金いたします。</p>
+                                        </div>
+
+                                        <p className="text-[11px] text-slate-400 font-bold px-1">※ 現金・HPBポイントはSalonOne、スクエア売上・手数料・返金はSquare APIから取得。手動項目（Spotip・広告宣伝費・調整値引き・料率）は店舗×月ごとに保存されます。メール自動送信は次段で対応予定。</p>
+                                    </>
+                                )}
+                            </div>
+                        </div>
+                        );
+                    })()}
+
                     {/* ===== 事業計画相談タブ ===== */}
                     {currentPage === 'planning' && (
                         <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
@@ -14207,6 +14439,7 @@
                 { id: 'marketing', label: 'マーケティング', icon: <Megaphone size={20} />, mobileIcon: <Megaphone size={18} /> },
                 { id: 'square', label: 'サブスク分析', icon: <CreditCard size={20} />, mobileIcon: <CreditCard size={18} /> },
                 { id: 'salonone', label: 'SalonOne売上', icon: <Calendar size={20} />, mobileIcon: <Calendar size={18} /> },
+                { id: 'settlement', label: '返金明細書', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} /> },
                 { id: 'planning', label: '事業計画', icon: <Target size={20} />, mobileIcon: <Target size={18} /> },
                 { id: 'customers', label: '顧客管理', icon: <Users size={20} />, mobileIcon: <Users size={18} /> },
                 { id: 'finance', label: '経理・財務', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} /> }

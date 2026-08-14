@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NAORU 返金明細書 オーナーポータル</title>
+    <link rel="preconnect" href="https://cdn.tailwindcss.com">
+    <link rel="preconnect" href="https://unpkg.com">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = { theme: { extend: { colors: { brand: {
+            50:'#FFF4EE',100:'#FFE4D6',200:'#FFC4A8',300:'#FF9D70',400:'#FF6B35',
+            500:'#E53F03',600:'#C43000',700:'#9A2600',800:'#6F1C00',900:'#451200' } } } } }
+    </script>
+    <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/@babel/standalone@7.26.10/babel.min.js"></script>
+    <style> body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; } </style>
+</head>
+<body class="bg-slate-100">
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+const yen = (n) => '¥' + Math.round(Number(n) || 0).toLocaleString();
+const LS = 'settlement_owner_session_v1';
+
+// 期日スケジュール・注意書き（lib/settlement.js と同一定義）
+const SCHEDULE = [
+  { day: '2日', label: '売上確定' },
+  { day: '5日', label: '返金明細書作成' },
+  { day: '10日', label: 'オーナーチェック' },
+  { day: '15日', label: '振り込み' },
+];
+const NOTES = [
+  '6日〜10日までの間に必ず内容をご確認ください。',
+  '期日（10日）を過ぎた場合、修正対応はできません。',
+];
+const STATUS_LABEL = { draft: '下書き', published: '確認待ち', confirmed: '確認済み', revision_requested: '修正依頼中' };
+const STATUS_STYLE = {
+  published: 'bg-amber-100 text-amber-700',
+  confirmed: 'bg-emerald-100 text-emerald-700',
+  revision_requested: 'bg-rose-100 text-rose-700',
+  draft: 'bg-slate-100 text-slate-500',
+};
+
+function recentMonths(n) {
+  const arr = [], now = new Date();
+  for (let i = 0; i < n; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    arr.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+  }
+  return arr;
+}
+const monthLabel = (m) => { const [y, mo] = m.split('-'); return `${y}年${parseInt(mo)}月`; };
+
+// ── ログイン画面 ──
+function Login({ onLogin }) {
+  const [owners, setOwners] = useState([]);
+  const [owner, setOwner] = useState('');
+  const [password, setPassword] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/settlement-auth').then(r => r.json()).then(j => {
+      if (j.owners) setOwners(j.owners);
+      if (!j.configured) setErr('オーナー用パスワードが未設定です。運営にご連絡ください。');
+    }).catch(() => {});
+  }, []);
+
+  const submit = async () => {
+    setErr(''); setBusy(true);
+    try {
+      const r = await fetch('/api/settlement-auth', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'login', owner: owner || undefined, password }),
+      });
+      const j = await r.json();
+      if (j.ok) { onLogin({ owner: j.owner, token: j.token }); }
+      else setErr(j.error || 'ログインに失敗しました');
+    } catch (e) { setErr('通信に失敗しました'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-4">
+      <div className="bg-white rounded-3xl shadow-xl border border-slate-200 p-7 w-full max-w-sm space-y-5">
+        <div className="text-center space-y-1">
+          <div className="inline-block px-3 py-1 bg-brand-100 text-brand-600 rounded-full text-xs font-black tracking-widest">NAORU</div>
+          <h1 className="text-lg font-black text-slate-900">返金明細書 オーナーポータル</h1>
+          <p className="text-xs text-slate-400 font-bold">発行されたパスワードでログイン</p>
+        </div>
+        {owners.length > 0 && (
+          <div>
+            <label className="text-[11px] font-black text-slate-400">オーナー（任意）</label>
+            <select value={owner} onChange={e => setOwner(e.target.value)}
+              className="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-200 text-sm font-bold bg-white">
+              <option value="">選択しない（PASSのみで判定）</option>
+              {owners.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </div>
+        )}
+        <div>
+          <label className="text-[11px] font-black text-slate-400">パスワード</label>
+          <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && submit()}
+            className="w-full mt-1 px-3 py-2.5 rounded-xl border border-slate-200 text-sm font-bold"
+            placeholder="••••••••" />
+        </div>
+        {err && <p className="text-xs text-rose-600 font-bold">{err}</p>}
+        <button onClick={submit} disabled={busy || !password}
+          className="w-full py-2.5 rounded-xl bg-brand-500 hover:bg-brand-600 disabled:opacity-40 text-white font-black text-sm transition-colors">
+          {busy ? '確認中...' : 'ログイン'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── スケジュール表示 ──
+function ScheduleBar() {
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
+      <h3 className="text-sm font-black text-slate-800 flex items-center gap-2">
+        <span className="text-brand-500">📅</span> 毎月のスケジュール
+      </h3>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        {SCHEDULE.map((s, i) => (
+          <div key={i} className="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2 text-center">
+            <div className="text-brand-600 font-black text-base">{s.day}</div>
+            <div className="text-[11px] text-slate-500 font-bold">{s.label}</div>
+          </div>
+        ))}
+      </div>
+      <ul className="space-y-1">
+        {NOTES.map((n, i) => (
+          <li key={i} className="text-[11px] text-rose-600 font-bold flex gap-1"><span>※</span><span>{n}</span></li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// ── 明細書1件の表示（スナップショットから描画・本社と同一） ──
+function Statement({ rec, owner, token, month, onUpdated }) {
+  const s = rec.snapshot || {};
+  const [note, setNote] = useState(rec.revisionNote || '');
+  const [busy, setBusy] = useState('');
+  const [msg, setMsg] = useState('');
+
+  const act = async (action) => {
+    if (action === 'requestRevision' && !note.trim()) { setMsg('修正内容を入力してください'); return; }
+    setBusy(action); setMsg('');
+    try {
+      const r = await fetch('/api/settlement-store', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, owner, token, shopId: rec.shopId, month, note }),
+      });
+      const j = await r.json();
+      if (j.ok) { onUpdated(); }
+      else setMsg(j.error || '送信に失敗しました');
+    } catch (e) { setMsg('通信に失敗しました'); }
+    finally { setBusy(''); }
+  };
+
+  const Row = ({ label, note, value, warn, strong }) => (
+    <tr className="border-b border-slate-100">
+      <td className="py-2 pl-3">{label} {note && <span className="text-[10px] text-slate-400">{note}</span>}
+        {warn && <span className="ml-1 text-amber-500 font-black" title="Squareと不一致">⚠️</span>}</td>
+      <td className={`py-2 pr-3 text-right ${strong ? 'font-black text-slate-900' : 'font-bold text-slate-700'}`}>{yen(value)}</td>
+    </tr>
+  );
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+      <div className="flex items-center justify-between gap-2 px-4 py-3 bg-slate-50 border-b border-slate-200">
+        <div className="font-black text-slate-900">{rec.shopName || s.shopName || `店舗${rec.shopId}`}</div>
+        <span className={`px-2.5 py-1 rounded-full text-[11px] font-black ${STATUS_STYLE[rec.status] || STATUS_STYLE.draft}`}>
+          {STATUS_LABEL[rec.status] || rec.status}
+        </span>
+      </div>
+
+      <div className="p-4 space-y-4">
+        <table className="w-full text-sm">
+          <tbody>
+            <tr className="bg-slate-50"><td className="py-1.5 pl-3 text-[11px] font-black text-slate-400" colSpan="2">売上</td></tr>
+            <Row label="現金" value={s.cash} />
+            <Row label="スクエア売上" value={s.squareSales} warn={s.mismatch} />
+            <Row label="HPBポイント" value={s.hpb} />
+            <Row label="売上合計" value={s.royaltyBase} strong />
+
+            <tr className="bg-slate-50"><td className="py-1.5 pl-3 text-[11px] font-black text-slate-400" colSpan="2">FCへの請求</td></tr>
+            <Row label="ロイヤリティ" note={`${s.royaltyRate}%`} value={s.royalty} />
+            <Row label="スクエア手数料" note={s.feeRate != null ? `売上比 ${s.feeRate}%` : ''} value={s.squareFees} />
+            {s.spotip ? <Row label="Spotip" value={s.spotip} /> : null}
+            {(s.metaAds || []).map((m, i) => <Row key={'m'+i} label={m.label || 'メタ広告'} value={m.amount} />)}
+            {(s.adjustments || []).map((a, i) => <Row key={'a'+i} label={a.label || '調整'} value={a.amount} />)}
+            <Row label="請求合計" note={`内税 ${yen(s.tax)}`} value={s.billTotal} strong />
+          </tbody>
+        </table>
+
+        <div className="flex items-center justify-between px-4 py-3 rounded-xl bg-brand-50 border border-brand-100">
+          <span className="font-black text-slate-800">返金額</span>
+          <span className="font-black text-brand-600 text-lg">{yen(s.refundAmount)}</span>
+        </div>
+
+        {s.mismatch && (
+          <p className="text-[11px] text-amber-600 font-bold">
+            ⚠️ SalonOneのスクエア売上とSquare API（総決済−返金）に差があります。運営が確認中です。
+          </p>
+        )}
+
+        {rec.status === 'confirmed' ? (
+          <div className="text-center text-emerald-600 font-black text-sm py-2">✅ 確認済み（{(rec.confirmedAt || '').slice(0,10)}）</div>
+        ) : (
+          <div className="space-y-2 pt-1">
+            <textarea value={note} onChange={e => setNote(e.target.value)}
+              placeholder="修正が必要な箇所があればこちらに記入してください（例: ○○の金額が違う 等）"
+              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm h-20 resize-none" />
+            {msg && <p className="text-xs text-rose-600 font-bold">{msg}</p>}
+            <div className="flex gap-2">
+              <button onClick={() => act('confirm')} disabled={!!busy}
+                className="flex-1 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white font-black text-sm">
+                {busy === 'confirm' ? '送信中...' : '✅ 確認済みにする'}
+              </button>
+              <button onClick={() => act('requestRevision')} disabled={!!busy}
+                className="flex-1 py-2.5 rounded-xl bg-white border-2 border-rose-300 hover:bg-rose-50 disabled:opacity-40 text-rose-600 font-black text-sm">
+                {busy === 'requestRevision' ? '送信中...' : '✏️ 修正を依頼'}
+              </button>
+            </div>
+            {rec.status === 'revision_requested' && (
+              <p className="text-[11px] text-rose-600 font-bold">修正依頼を送信済みです。運営の対応をお待ちください。</p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── メイン（ログイン後） ──
+function Portal({ session, onLogout }) {
+  const months = recentMonths(6);
+  const [month, setMonth] = useState(months[0]);
+  const [records, setRecords] = useState(null);
+  const [err, setErr] = useState('');
+
+  const load = () => {
+    setRecords(null); setErr('');
+    const q = new URLSearchParams({ month, owner: session.owner });
+    fetch(`/api/settlement-store?${q.toString()}`).then(r => r.json()).then(j => {
+      if (j.records) setRecords(j.records);
+      else { setRecords([]); if (j.message) setErr(j.message); }
+    }).catch(() => { setRecords([]); setErr('取得に失敗しました'); });
+  };
+  useEffect(load, [month]);
+
+  return (
+    <div className="min-h-screen">
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
+        <div className="max-w-2xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
+          <div>
+            <div className="text-[11px] font-black text-brand-500 tracking-widest">NAORU 返金明細書</div>
+            <div className="font-black text-slate-900">{session.owner}</div>
+          </div>
+          <button onClick={onLogout} className="text-xs font-bold text-slate-400 hover:text-slate-700">ログアウト</button>
+        </div>
+      </header>
+
+      <div className="max-w-2xl mx-auto p-4 space-y-4">
+        <ScheduleBar />
+
+        <div className="flex items-center gap-2 flex-wrap">
+          {months.map(m => (
+            <button key={m} onClick={() => setMonth(m)}
+              className={`px-3 py-1.5 rounded-full text-xs font-black transition-colors ${month === m ? 'bg-brand-500 text-white' : 'bg-white border border-slate-200 text-slate-500 hover:bg-slate-50'}`}>
+              {monthLabel(m)}
+            </button>
+          ))}
+        </div>
+
+        {records === null ? (
+          <div className="text-center text-slate-400 font-bold py-12">読み込み中...</div>
+        ) : records.length === 0 ? (
+          <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
+            <p className="text-slate-500 font-bold">{monthLabel(month)}の返金明細書はまだありません。</p>
+            {err && <p className="text-xs text-slate-400 mt-2">{err}</p>}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {records.map(rec => (
+              <Statement key={rec.shopId} rec={rec} owner={session.owner} token={session.token}
+                month={month} onUpdated={load} />
+            ))}
+          </div>
+        )}
+
+        <p className="text-center text-[11px] text-slate-400 pt-4">
+          ご不明点は運営までご連絡ください。
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [session, setSession] = useState(() => { try { return JSON.parse(localStorage.getItem(LS) || 'null'); } catch { return null; } });
+
+  const login = (s) => { localStorage.setItem(LS, JSON.stringify(s)); setSession(s); };
+  const logout = () => { localStorage.removeItem(LS); setSession(null); };
+
+  if (!session) return <Login onLogin={login} />;
+  return <Portal session={session} onLogout={logout} />;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

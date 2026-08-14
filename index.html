@@ -1289,49 +1289,147 @@
             const stManualDefault = { royaltyRate: 15, taxRate: 10, spotip: 10000, metaAds: [], adjustments: [] };
             const stM = { ...stManualDefault, ...(stManual[stKey()] || {}) };
             const stSetM = (patch) => setStManual(prev => ({ ...prev, [stKey()]: { ...stManualDefault, ...(prev[stKey()] || {}), ...patch } }));
+            // オーナー共有（GAS保存）用の状態
+            const [stRecords, setStRecords] = useState([]);        // 当月の公開済みレコード（確認状況）
+            const [stPublishing, setStPublishing] = useState(false);
+            const [stBatch, setStBatch] = useState(null);          // { owner, total, done, running, msg }
+            const [stStoreMsg, setStStoreMsg] = useState('');
+            const stAuthToken = () => { try { return localStorage.getItem('naoru_auth_token') || ''; } catch { return ''; } };
 
-            const fetchSettlement = async () => {
-                if (!stShopId) return;
-                setStLoading(true); setStError(null); setStSalon(null); setStSquare(null);
-                const shop = (soShops.length ? soShops : soDemoShops).find(s => String(s.id) === String(stShopId));
-                const shopName = shop ? shop.name : '';
-                const core = shopName.replace('NAORU整体', '').replace('NAORU', '').replace(/院$/, '').trim();
+            // 1店舗分の SalonOne 決済内訳 + Square 精算を取得（単体表示・一括公開で共用）
+            const stFetchShop = async (shopId, shopName) => {
+                const core = String(shopName || '').replace('NAORU整体', '').replace('NAORU', '').replace(/院$/, '').trim();
                 const [y, m] = stMonth.split('-').map(Number);
                 const from = `${stMonth}-01`;
                 const to = `${stMonth}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
+                let salon = null, square = null;
                 try {
-                    // SalonOne 決済内訳
-                    const soRes = await fetch(`${SALONONE_API_URL}?resource=sales/summary&from=${from}&to=${to}&shop_id=${stShopId}`);
+                    const soRes = await fetch(`${SALONONE_API_URL}?resource=sales/summary&from=${from}&to=${to}&shop_id=${shopId}`);
                     const soJson = await soRes.json().catch(() => ({}));
                     if (soRes.ok && soJson.data) {
                         const s = soJson.data; const pay = {};
                         (s.by_day || []).forEach(d => (d.payment_breakdown || []).forEach(p => { pay[p.name] = (pay[p.name] || 0) + soNum(p, 'amount'); }));
                         const pick = (...keys) => keys.reduce((a, k) => a + Object.entries(pay).filter(([n]) => n.includes(k)).reduce((x, [, v]) => x + v, 0), 0);
-                        setStSalon({
+                        salon = {
                             gross: soNum(s, 'gross_sales'),
                             cash: pick('現金'),
                             square: Object.entries(pay).filter(([n]) => n.includes('スクエア')).reduce((a, [, v]) => a + v, 0),
                             hpb: pick('HPBポイント', 'ホットペッパー'),
                             payments: Object.entries(pay).map(([name, amount]) => ({ name, amount })).sort((a, b) => b.amount - a.amount),
-                        });
-                    } else {
-                        setStSalon({ error: soJson?.error?.code || `HTTP ${soRes.status}` });
-                    }
-                    // Square 精算
-                    try {
-                        const sqRes = await fetch(`/api/square/settlement?month=${stMonth}&location=${encodeURIComponent(core)}`);
-                        const sqJson = await sqRes.json().catch(() => ({}));
-                        if (sqRes.ok && sqJson.squareGrossSales !== undefined) setStSquare(sqJson);
-                        else setStSquare({ error: sqJson?.error || `HTTP ${sqRes.status}` });
-                    } catch (e) { setStSquare({ error: e.message }); }
-                } catch (err) {
-                    setStError(err.message);
-                } finally { setStLoading(false); }
+                        };
+                    } else { salon = { error: soJson?.error?.code || `HTTP ${soRes.status}` }; }
+                } catch (e) { salon = { error: e.message }; }
+                try {
+                    const sqRes = await fetch(`/api/square/settlement?month=${stMonth}&location=${encodeURIComponent(core)}`);
+                    const sqJson = await sqRes.json().catch(() => ({}));
+                    if (sqRes.ok && sqJson.squareGrossSales !== undefined) square = sqJson;
+                    else square = { error: sqJson?.error || `HTTP ${sqRes.status}` };
+                } catch (e) { square = { error: e.message }; }
+                return { salon, square };
             };
+
+            // 明細スナップショット生成（owner.html と本社の描画が完全一致するよう完成値を格納）
+            const stComputeSnapshot = (shop, salon, square, manual) => {
+                const m = { ...stManualDefault, ...(manual || {}) };
+                const cash = salon && !salon.error ? salon.cash : 0;
+                const hpb = salon && !salon.error ? salon.hpb : 0;
+                const soSquare = salon && !salon.error ? salon.square : 0;
+                const sqGross = square && !square.error ? square.squareGrossSales : null;
+                const sqFees = square && !square.error ? square.squareFees : 0;
+                const sqRefunds = square && !square.error ? square.refunds : 0;
+                const squareSales = sqGross != null ? sqGross : soSquare;
+                const sqNet = sqGross != null ? (sqGross - sqRefunds) : null;
+                const mismatch = sqNet != null && Math.abs(sqNet - soSquare) > 1;
+                const feeRate = sqGross != null && sqGross > 0 ? Math.round(sqFees / sqGross * 10000) / 100 : null;
+                const royaltyBase = cash + squareSales + hpb;
+                const royalty = Math.round(royaltyBase * (Number(m.royaltyRate) || 0) / 100);
+                const metaTotal = (m.metaAds || []).reduce((a, x) => a + (Number(x.amount) || 0), 0);
+                const adjTotal = (m.adjustments || []).reduce((a, x) => a + (Number(x.amount) || 0), 0);
+                const billTotal = royalty + sqFees + (Number(m.spotip) || 0) + metaTotal + adjTotal;
+                const taxRateN = Number(m.taxRate) || 0;
+                const tax = Math.round(billTotal * taxRateN / (100 + taxRateN));
+                const refundAmount = squareSales - billTotal;
+                return {
+                    shopName: shop.name, owner: soShopOwner(shop.name) || '',
+                    cash, hpb, soSquare, squareSales, sqGross, sqFees, sqRefunds, sqNet, mismatch, feeRate,
+                    royaltyRate: m.royaltyRate, taxRate: m.taxRate, spotip: m.spotip, metaAds: m.metaAds || [], adjustments: m.adjustments || [],
+                    royaltyBase, royalty, billTotal, tax, refundAmount, generatedAt: new Date().toISOString(),
+                };
+            };
+
+            const fetchSettlement = async () => {
+                if (!stShopId) return;
+                setStLoading(true); setStError(null); setStSalon(null); setStSquare(null);
+                const shop = (soShops.length ? soShops : soDemoShops).find(s => String(s.id) === String(stShopId));
+                const { salon, square } = await stFetchShop(stShopId, shop ? shop.name : '');
+                setStSalon(salon); setStSquare(square);
+                setStLoading(false);
+            };
+
+            // 当月の公開済みレコード（確認状況）を取得
+            const stLoadStatus = async () => {
+                try {
+                    const r = await fetch(`/api/settlement-store?month=${stMonth}`);
+                    const j = await r.json().catch(() => ({}));
+                    setStRecords(Array.isArray(j.records) ? j.records : []);
+                } catch { setStRecords([]); }
+            };
+
+            // 単一店舗の明細を公開（オーナーに共有）
+            const stPublishOne = async (shop, salon, square, manual) => {
+                const snap = stComputeSnapshot(shop, salon, square, manual);
+                const rec = { shopId: String(shop.id), shopName: shop.name, owner: snap.owner, month: stMonth, snapshot: snap };
+                const r = await fetch('/api/settlement-store', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'publish', hqToken: stAuthToken(), records: [rec] }),
+                });
+                return r.json().catch(() => ({}));
+            };
+            const stPublishCurrent = async () => {
+                const shop = (soShops.length ? soShops : soDemoShops).find(s => String(s.id) === String(stShopId));
+                if (!shop) return;
+                setStPublishing(true); setStStoreMsg('');
+                try {
+                    const j = await stPublishOne(shop, stSalon, stSquare, stManual[stKey()]);
+                    setStStoreMsg(j.ok ? '✅ このオーナーに公開しました（オーナーポータルで確認可能）' : `公開に失敗: ${j.error || '不明なエラー'}`);
+                    if (j.ok) await stLoadStatus();
+                } catch (e) { setStStoreMsg('通信に失敗しました'); }
+                finally { setStPublishing(false); }
+            };
+
+            // オーナー単位で一括生成＆公開
+            const stBatchPublishOwner = async (owner) => {
+                const branches = OWNER_BRANCHES[owner] || [];
+                const shops = (soShops.length ? soShops : soDemoShops).filter(s => branches.some(b => s.name.includes(b)));
+                if (shops.length === 0) { setStStoreMsg(`${owner} に該当する店舗が見つかりません`); return; }
+                setStBatch({ owner, total: shops.length, done: 0, running: true, msg: '' });
+                const records = [];
+                for (let i = 0; i < shops.length; i++) {
+                    const shop = shops[i];
+                    const { salon, square } = await stFetchShop(shop.id, shop.name);
+                    const snap = stComputeSnapshot(shop, salon, square, stManual[`${shop.id}_${stMonth}`]);
+                    records.push({ shopId: String(shop.id), shopName: shop.name, owner: snap.owner || owner, month: stMonth, snapshot: snap });
+                    setStBatch(b => ({ ...b, done: i + 1 }));
+                    await new Promise(res => setTimeout(res, 400)); // レート制限(60/分)への配慮
+                }
+                try {
+                    const r = await fetch('/api/settlement-store', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ action: 'publish', hqToken: stAuthToken(), records }),
+                    });
+                    const j = await r.json().catch(() => ({}));
+                    setStBatch(b => ({ ...b, running: false, msg: j.ok ? `✅ ${records.length}店舗を公開しました` : `公開失敗: ${j.error || '不明'}` }));
+                    await stLoadStatus();
+                } catch (e) { setStBatch(b => ({ ...b, running: false, msg: '通信に失敗しました' })); }
+            };
+
             useEffect(() => {
                 if (currentPage !== 'settlement' || !stShopId) return;
                 fetchSettlement();
             }, [currentPage, stShopId, stMonth]);
+            useEffect(() => {
+                if (currentPage === 'settlement') stLoadStatus();
+            }, [currentPage, stMonth]);
             // 返金明細書タブを開いたら SalonOne 店舗一覧を用意
             useEffect(() => {
                 if (currentPage === 'settlement' && soShops.length === 0) {
@@ -11358,6 +11456,14 @@
                         const tax = Math.round(billTotal * taxRate / (100 + taxRate));
                         const refundAmount = squareSales - billTotal;
                         const monthLabel = (() => { const [y, m] = stMonth.split('-'); return `${y}年${parseInt(m)}月`; })();
+                        // オーナー共有: 当月・当店の公開レコード / 期日スケジュール（owner.htmlと同一定義）
+                        const stCurRec = stRecords.find(r => String(r.shopId) === String(stShopId));
+                        const stStatusLabel = { draft: '下書き', published: '確認待ち', confirmed: '確認済み', revision_requested: '修正依頼あり' };
+                        const stStatusStyle = { published: 'bg-amber-100 text-amber-700', confirmed: 'bg-emerald-100 text-emerald-700', revision_requested: 'bg-rose-100 text-rose-700', draft: 'bg-slate-100 text-slate-500' };
+                        const ST_SCHEDULE = [{ day: '2日', label: '売上確定' }, { day: '5日', label: '返金明細書作成' }, { day: '10日', label: 'オーナーチェック' }, { day: '15日', label: '振り込み' }];
+                        const ST_NOTES = ['6日〜10日までの間に必ずオーナーは内容をご確認ください。', '期日（10日）を過ぎた場合、修正対応はできません。'];
+                        const stOwners = Object.keys(OWNER_BRANCHES);
+                        const stRecByOwner = (() => { const m = {}; stRecords.forEach(r => { (m[r.owner || '（未設定）'] = m[r.owner || '（未設定）'] || []).push(r); }); return m; })();
                         return (
                         <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
                             <div className="max-w-[1100px] mx-auto space-y-4 md:space-y-6">
@@ -11390,6 +11496,58 @@
                                         <button onClick={fetchSettlement} disabled={stLoading} className="p-2.5 bg-slate-900 text-white rounded-xl hover:bg-slate-800 disabled:opacity-50"><RefreshCw size={18} className={stLoading ? 'animate-spin' : ''} /></button>
                                     </div>
                                 </header>
+
+                                {/* 期日スケジュール + 注意書き（オーナー共有） */}
+                                <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
+                                    <div className="flex items-center gap-2"><Calendar size={16} className="text-brand-500" /><h3 className="text-sm font-black text-slate-800">毎月のスケジュール</h3></div>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                        {ST_SCHEDULE.map((s, i) => (<div key={i} className="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2 text-center"><div className="text-brand-600 font-black text-base">{s.day}</div><div className="text-[11px] text-slate-500 font-bold">{s.label}</div></div>))}
+                                    </div>
+                                    <ul className="space-y-1">{ST_NOTES.map((n, i) => (<li key={i} className="text-[11px] text-rose-600 font-bold flex gap-1"><span>※</span><span>{n}</span></li>))}</ul>
+                                </div>
+
+                                {/* オーナー別 一括生成・公開 */}
+                                <div className="bg-gradient-to-br from-slate-50 to-white rounded-2xl border border-slate-200 p-4 space-y-3">
+                                    <div className="flex items-center gap-2"><Users size={16} className="text-slate-600" /><h3 className="text-sm font-black text-slate-800">オーナー別 一括生成・公開</h3><span className="text-[11px] text-slate-400 font-bold ml-auto hidden sm:inline">{monthLabel}分をまとめて生成しオーナーポータルへ公開</span></div>
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <select value={stBatch?.owner || ''} onChange={e => setStBatch(e.target.value ? { owner: e.target.value, total: 0, done: 0, running: false, msg: '' } : null)} className="px-3 py-2 bg-white border border-slate-200 rounded-xl text-sm font-bold text-slate-700 min-w-[200px]">
+                                            <option value="">オーナーを選択...</option>
+                                            {stOwners.map(o => <option key={o} value={o}>{o}（{OWNER_BRANCHES[o].length}店舗）</option>)}
+                                        </select>
+                                        <button onClick={() => stBatch?.owner && stBatchPublishOwner(stBatch.owner)} disabled={!stBatch?.owner || stBatch?.running}
+                                            className="px-4 py-2 bg-slate-900 text-white rounded-xl text-sm font-black hover:bg-slate-800 disabled:opacity-40 flex items-center gap-2">
+                                            {stBatch?.running ? <><Loader2 size={15} className="animate-spin" />生成中 {stBatch.done}/{stBatch.total}</> : <><Send size={15} />このオーナーの全店を公開</>}
+                                        </button>
+                                    </div>
+                                    {stBatch?.msg && <p className="text-xs font-bold text-slate-600">{stBatch.msg}</p>}
+                                    <p className="text-[11px] text-slate-400 font-bold">※ 各店舗の SalonOne・Square から自動生成します。手動項目（Spotip・広告費等）を調整したい場合は、下部で店舗を選び個別に編集→公開してください（既存の確認状況は保持されます）。</p>
+                                </div>
+
+                                {/* 確認状況一覧 */}
+                                {stRecords.length > 0 && (
+                                    <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
+                                        <div className="flex items-center gap-2"><CheckCircle size={16} className="text-emerald-500" /><h3 className="text-sm font-black text-slate-800">確認状況（{monthLabel}）</h3><span className="text-[11px] text-slate-400 font-bold ml-auto">{stRecords.length}件公開中</span></div>
+                                        <div className="space-y-3">
+                                            {Object.entries(stRecByOwner).map(([owner, recs]) => (
+                                                <div key={owner} className="rounded-xl border border-slate-100 overflow-hidden">
+                                                    <div className="px-3 py-1.5 bg-slate-50 text-xs font-black text-slate-600">{owner}</div>
+                                                    <div className="divide-y divide-slate-100">
+                                                        {recs.map(r => (
+                                                            <div key={r.shopId} className="flex items-center gap-2 px-3 py-2 text-sm">
+                                                                <span className="font-bold text-slate-700 flex-1 truncate cursor-pointer hover:text-slate-900" onClick={() => setStShopId(r.shopId)}>{r.shopName || `店舗${r.shopId}`}</span>
+                                                                <span className="text-slate-500 font-bold hidden sm:inline">{yen((r.snapshot || {}).refundAmount)}</span>
+                                                                <span className={`px-2 py-0.5 rounded-full text-[11px] font-black ${stStatusStyle[r.status] || stStatusStyle.draft}`}>{stStatusLabel[r.status] || r.status}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                    {recs.filter(r => r.status === 'revision_requested' && r.revisionNote).map(r => (
+                                                        <div key={'rn' + r.shopId} className="px-3 py-2 bg-rose-50 border-t border-rose-100 text-[11px] text-rose-700 font-bold"><span className="font-black">{r.shopName}の修正依頼:</span> {r.revisionNote}</div>
+                                                    ))}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
 
                                 {stLoading && (<div className="flex items-center justify-center py-16"><Loader2 size={40} className="animate-spin text-slate-400" /></div>)}
 
@@ -11482,7 +11640,28 @@
                                             <p className="text-xs text-slate-500 font-bold border-t border-slate-200 pt-3">備考：スクエア売上 {yen(squareSales)} より請求額 {yen(billTotal)} を差し引いた {yen(refundAmount)} をご返金いたします。</p>
                                         </div>
 
-                                        <p className="text-[11px] text-slate-400 font-bold px-1">※ 現金・HPBポイントはSalonOne、スクエア売上・手数料・返金はSquare APIから取得。手動項目（Spotip・広告宣伝費・調整値引き・料率）は店舗×月ごとに保存されます。メール自動送信は次段で対応予定。</p>
+                                        {/* この店舗を公開（オーナー共有）＋ 確認状況 */}
+                                        <div className="bg-white rounded-2xl border border-slate-200 p-4 flex flex-col sm:flex-row sm:items-center gap-3">
+                                            <div className="flex-1">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-sm font-black text-slate-800">オーナー共有</span>
+                                                    {stCurRec && <span className={`px-2 py-0.5 rounded-full text-[11px] font-black ${stStatusStyle[stCurRec.status] || stStatusStyle.draft}`}>{stStatusLabel[stCurRec.status] || stCurRec.status}</span>}
+                                                </div>
+                                                <p className="text-[11px] text-slate-400 font-bold mt-0.5">
+                                                    {stCurRec ? `公開済み${stCurRec.confirmedAt ? '・確認' + stCurRec.confirmedAt.slice(0,10) : ''}。編集後に再公開すると内容が更新されます（確認状況は保持）。` : 'この明細書を公開すると、対象オーナーがポータルで確認できます。'}
+                                                </p>
+                                                {stCurRec && stCurRec.status === 'revision_requested' && stCurRec.revisionNote && (
+                                                    <p className="text-[11px] text-rose-700 font-bold mt-1">✏️ 修正依頼: {stCurRec.revisionNote}</p>
+                                                )}
+                                            </div>
+                                            <button onClick={stPublishCurrent} disabled={stPublishing || (stSalon && stSalon.error)}
+                                                className="px-4 py-2.5 bg-brand-500 text-white rounded-xl text-sm font-black hover:bg-brand-600 disabled:opacity-40 flex items-center gap-2 justify-center">
+                                                {stPublishing ? <><Loader2 size={15} className="animate-spin" />公開中...</> : <><Send size={15} />{stCurRec ? '再公開' : 'オーナーに公開'}</>}
+                                            </button>
+                                        </div>
+                                        {stStoreMsg && <p className="text-xs font-bold text-slate-600 px-1">{stStoreMsg}</p>}
+
+                                        <p className="text-[11px] text-slate-400 font-bold px-1">※ 現金・HPBポイントはSalonOne、スクエア売上・手数料・返金はSquare APIから取得。手動項目（Spotip・広告宣伝費・調整値引き・料率）は店舗×月ごとに保存されます。公開するとオーナーポータル（/owner.html）で閲覧・確認できます。</p>
                                     </>
                                 )}
                             </div>

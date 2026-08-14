@@ -1258,6 +1258,9 @@
             const [soStaffMk, setSoStaffMk] = useState([]);     // マーケ: 担当者別 新規獲得
             const [soRetention, setSoRetention] = useState(null); // マーケ: 継続顧客（summary/by_source/by_staff/by_purchases）
             const [soView, setSoView] = useState('overview');   // サブタブ: overview | staff | marketing | daily
+            const [soStaffSort, setSoStaffSort] = useState({ key: 'gross', dir: 'desc' });  // スタッフ別売上ソート
+            const [soChSort, setSoChSort] = useState({ key: 'booking', dir: 'desc' });      // 媒体別ソート
+            const [soMkSort, setSoMkSort] = useState({ key: 'booking', dir: 'desc' });      // 担当者別ソート
             const [soShop, setSoShop] = useState('all');        // 店舗フィルタ（'all' | shop_id）
             const [soStaff, setSoStaff] = useState('all');      // スタッフフィルタ（'all' | staff_id）
             const [soFrom, setSoFrom] = useState(soDefaultRange.from);
@@ -2467,6 +2470,28 @@
 
             // ===== SalonOne 分析API 連携 =====
             const soYen = (n) => '¥' + Math.round(Number(n) || 0).toLocaleString();
+            // 配列をキーで昇降ソート（数値/文字どちらも対応）
+            const soSortBy = (rows, key, dir) => [...rows].sort((a, b) => {
+                const x = a[key], y = b[key];
+                const c = (typeof x === 'string' || typeof y === 'string')
+                    ? String(x ?? '').localeCompare(String(y ?? ''), 'ja')
+                    : (Number(x) || 0) - (Number(y) || 0);
+                return dir === 'asc' ? c : -c;
+            });
+            // クリックでソート切替する見出しセル（同じ列は昇降トグル、別列は降順から）
+            const SortTh = ({ children, sKey, sort, setSort, className = '' }) => {
+                const active = sort.key === sKey;
+                return (
+                    <th className={`${className} cursor-pointer select-none hover:text-emerald-600 transition-colors`}
+                        onClick={() => setSort(active ? { key: sKey, dir: sort.dir === 'desc' ? 'asc' : 'desc' } : { key: sKey, dir: 'desc' })}
+                        title="タップで昇降順を切替">
+                        <span className={`inline-flex items-center gap-0.5 ${className.includes('text-right') ? 'flex-row-reverse' : ''}`}>
+                            {children}
+                            <span className={`text-emerald-500 text-[9px] ${active ? '' : 'opacity-20'}`}>{active ? (sort.dir === 'asc' ? '▲' : '▼') : '▼'}</span>
+                        </span>
+                    </th>
+                );
+            };
             const soNum = (v, ...keys) => {
                 for (const k of keys) {
                     if (v && v[k] != null && !isNaN(Number(v[k]))) return Number(v[k]);
@@ -10210,6 +10235,10 @@
                             const displayStaff = s ? (soStaff === 'all' ? s.byStaff : s.byStaff.filter(st => String(st.id) === String(soStaff))) : [];
                             const staffTotal = displayStaff.reduce((a, st) => a + st.gross, 0);
                             const maxDay = s && s.byDay.length ? Math.max(...s.byDay.map(d => d.gross), 1) : 1;
+                            // ソート適用（担当者別は全体行を先頭固定）
+                            const sortedStaff = soSortBy(displayStaff, soStaffSort.key, soStaffSort.dir);
+                            const sortedChannels = soSortBy(soChannels, soChSort.key, soChSort.dir);
+                            const sortedMkStaff = [...soStaffMk.filter(r => r.isTotal), ...soSortBy(soStaffMk.filter(r => !r.isTotal), soMkSort.key, soMkSort.dir)];
                             return (
                             <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
                                 <div className="max-w-[1600px] mx-auto space-y-4 md:space-y-6">
@@ -10455,20 +10484,20 @@
                                                             <thead>
                                                                 <tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200">
                                                                     <th className="pb-2 pr-2">#</th>
-                                                                    <th className="pb-2 pr-2">スタッフ</th>
-                                                                    <th className="pb-2 px-2 text-right">売上</th>
-                                                                    <th className="pb-2 px-2 text-right hidden sm:table-cell">消化売上</th>
-                                                                    <th className="pb-2 px-2 text-right hidden md:table-cell">客単価</th>
-                                                                    <th className="pb-2 px-2 text-right hidden lg:table-cell">施術数</th>
-                                                                    <th className="pb-2 px-2 text-right hidden lg:table-cell">新規</th>
-                                                                    <th className="pb-2 px-2 text-right hidden lg:table-cell" title="Google口コミ獲得数">G口コミ</th>
-                                                                    <th className="pb-2 px-2 text-right hidden lg:table-cell" title="ホットペッパー口コミ獲得数">H口コミ</th>
-                                                                    <th className="pb-2 px-2 text-right hidden md:table-cell">稼働率</th>
-                                                                    <th className="pb-2 pl-2 w-[16%]">構成比</th>
+                                                                    <SortTh sKey="name" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 pr-2">スタッフ</SortTh>
+                                                                    <SortTh sKey="gross" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">売上</SortTh>
+                                                                    <SortTh sKey="digest" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right hidden sm:table-cell">消化売上</SortTh>
+                                                                    <SortTh sKey="avgTicket" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right hidden md:table-cell">客単価</SortTh>
+                                                                    <SortTh sKey="treatments" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right hidden lg:table-cell">施術数</SortTh>
+                                                                    <SortTh sKey="newCount" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right hidden lg:table-cell">新規</SortTh>
+                                                                    <SortTh sKey="gReview" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right hidden lg:table-cell">G口コミ</SortTh>
+                                                                    <SortTh sKey="hReview" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right hidden lg:table-cell">H口コミ</SortTh>
+                                                                    <SortTh sKey="util" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right hidden md:table-cell">稼働率</SortTh>
+                                                                    <SortTh sKey="gross" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 pl-2 w-[16%]">構成比</SortTh>
                                                                 </tr>
                                                             </thead>
                                                             <tbody>
-                                                                {displayStaff.map((st, i) => {
+                                                                {sortedStaff.map((st, i) => {
                                                                     const pct = staffTotal ? Math.round(st.gross / staffTotal * 100) : 0;
                                                                     return (
                                                                         <tr key={st.id || i} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
@@ -10535,16 +10564,16 @@
                                                         <div className="overflow-x-auto">
                                                             <table className="w-full text-sm">
                                                                 <thead><tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200">
-                                                                    <th className="pb-2 pr-2">媒体</th>
-                                                                    <th className="pb-2 px-2 text-right">予約</th>
-                                                                    <th className="pb-2 px-2 text-right">来店</th>
-                                                                    <th className="pb-2 px-2 text-right">入会</th>
-                                                                    <th className="pb-2 px-2 text-right" title="入会数÷来店数（管理画面と同じ）">入会率</th>
-                                                                    <th className="pb-2 px-2 text-right hidden sm:table-cell">ｷｬﾝｾﾙ</th>
-                                                                    <th className="pb-2 pl-2 text-right">売上</th>
+                                                                    <SortTh sKey="name" sort={soChSort} setSort={setSoChSort} className="pb-2 pr-2">媒体</SortTh>
+                                                                    <SortTh sKey="booking" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">予約</SortTh>
+                                                                    <SortTh sKey="visit" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">来店</SortTh>
+                                                                    <SortTh sKey="join" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">入会</SortTh>
+                                                                    <SortTh sKey="joinRate" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">入会率</SortTh>
+                                                                    <SortTh sKey="cancel" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right hidden sm:table-cell">ｷｬﾝｾﾙ</SortTh>
+                                                                    <SortTh sKey="sales" sort={soChSort} setSort={setSoChSort} className="pb-2 pl-2 text-right">売上</SortTh>
                                                                 </tr></thead>
                                                                 <tbody>
-                                                                    {soChannels.map((c, i) => (
+                                                                    {sortedChannels.map((c, i) => (
                                                                         <tr key={i} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
                                                                             <td className="py-2 pr-2 font-bold text-slate-800 whitespace-nowrap">{c.name}</td>
                                                                             <td className="py-2 px-2 text-right font-bold text-slate-700">{c.booking}</td>
@@ -10569,16 +10598,16 @@
                                                         <div className="overflow-x-auto">
                                                             <table className="w-full text-sm">
                                                                 <thead><tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200">
-                                                                    <th className="pb-2 pr-2">担当</th>
-                                                                    <th className="pb-2 px-2 text-right">新規予約</th>
-                                                                    <th className="pb-2 px-2 text-right">来店</th>
-                                                                    <th className="pb-2 px-2 text-right hidden sm:table-cell">ｷｬﾝｾﾙ</th>
-                                                                    <th className="pb-2 px-2 text-right">購入</th>
-                                                                    <th className="pb-2 px-2 text-right" title="購入数÷新規来店数">購入率</th>
-                                                                    <th className="pb-2 pl-2 text-right">購入金額</th>
+                                                                    <SortTh sKey="name" sort={soMkSort} setSort={setSoMkSort} className="pb-2 pr-2">担当</SortTh>
+                                                                    <SortTh sKey="booking" sort={soMkSort} setSort={setSoMkSort} className="pb-2 px-2 text-right">新規予約</SortTh>
+                                                                    <SortTh sKey="visit" sort={soMkSort} setSort={setSoMkSort} className="pb-2 px-2 text-right">来店</SortTh>
+                                                                    <SortTh sKey="cancel" sort={soMkSort} setSort={setSoMkSort} className="pb-2 px-2 text-right hidden sm:table-cell">ｷｬﾝｾﾙ</SortTh>
+                                                                    <SortTh sKey="purchase" sort={soMkSort} setSort={setSoMkSort} className="pb-2 px-2 text-right">購入</SortTh>
+                                                                    <SortTh sKey="purchaseRate" sort={soMkSort} setSort={setSoMkSort} className="pb-2 px-2 text-right">購入率</SortTh>
+                                                                    <SortTh sKey="amount" sort={soMkSort} setSort={setSoMkSort} className="pb-2 pl-2 text-right">購入金額</SortTh>
                                                                 </tr></thead>
                                                                 <tbody>
-                                                                    {soStaffMk.map((st, i) => (
+                                                                    {sortedMkStaff.map((st, i) => (
                                                                         <tr key={i} className={`border-b border-slate-100 ${st.isTotal ? 'bg-emerald-50/70' : 'hover:bg-slate-50'} transition-colors`}>
                                                                             <td className={`py-2 pr-2 whitespace-nowrap ${st.isTotal ? 'font-black text-slate-900' : 'font-bold text-slate-800'}`}>{st.isTotal ? '全体' : st.name}</td>
                                                                             <td className="py-2 px-2 text-right font-bold text-slate-700">{st.booking}</td>

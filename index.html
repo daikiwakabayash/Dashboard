@@ -2719,12 +2719,18 @@
                 return `${soShopSel.length}店舗選択`;
             };
             const soShopKey = () => (soShopSel.length ? soShopSel.slice().sort().join('-') : 'all');
-            // 配列をキーで昇降ソート（数値/文字どちらも対応）
+            // 配列をキーで昇降ソート（数値優先・堅牢化）
+            // 数値列は片方が数値文字列("333900"等)でも必ず数値比較。両方が数値でない
+            // 場合のみ日本語ロケール文字列比較（スタッフ名など）。欠損は末尾側に寄せる。
             const soSortBy = (rows, key, dir) => [...rows].sort((a, b) => {
                 const x = a[key], y = b[key];
-                const c = (typeof x === 'string' || typeof y === 'string')
-                    ? String(x ?? '').localeCompare(String(y ?? ''), 'ja')
-                    : (Number(x) || 0) - (Number(y) || 0);
+                const xNum = x !== '' && x != null && !isNaN(Number(x));
+                const yNum = y !== '' && y != null && !isNaN(Number(y));
+                let c;
+                if (xNum && yNum) c = Number(x) - Number(y);
+                else if (xNum) c = 1;          // 数値ありを上位、欠損は下位へ
+                else if (yNum) c = -1;
+                else c = String(x ?? '').localeCompare(String(y ?? ''), 'ja');
                 return dir === 'asc' ? c : -c;
             });
             // クリックでソート切替する見出しセル（同じ列は昇降トグル、別列は降順から）

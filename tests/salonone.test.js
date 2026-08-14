@@ -16,7 +16,9 @@ import {
 describe('ENDPOINTS registry', () => {
   it('仕様の全エンドポイントを網羅している', () => {
     const expected = [
-      'meta', 'sales/summary', 'shops', 'staffs', 'menus', 'menu-categories',
+      'meta', 'sales/summary',
+      'marketing/by-channel', 'marketing/by-staff', 'marketing/retention',
+      'shops', 'staffs', 'menus', 'menu-categories',
       'visit-sources', 'customer-tags', 'customers', 'appointments', 'appointment-menus',
     ];
     expect(listResources().sort()).toEqual(expected.sort());

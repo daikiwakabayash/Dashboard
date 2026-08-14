@@ -2535,6 +2535,16 @@
                 // マーケティングデータもプリロード（タブ切り替え時の待ち時間を削減）
                 fetchMarketingData();
 
+                // 起動セーフティタイマー: 経営データGASが遅い/空でもアプリを固まらせない。
+                // SalonOne売上・返金明細書タブは経営データに依存しないため、
+                // 一定時間でローディングゲートを解除してダッシュボードを操作可能にする。
+                const bootSafety = setTimeout(() => {
+                    setLoading(prev => {
+                        if (prev) console.warn('⏱️ Boot safety timeout: releasing loading gate (business GAS slow/empty)');
+                        return false;
+                    });
+                }, 20000);
+
                 // Auto-refresh every 6 hours (only when tab is visible)
                 const autoRefreshInterval = setInterval(() => {
                     if (document.hidden) {
@@ -2548,6 +2558,7 @@
 
                 return () => {
                     clearInterval(autoRefreshInterval);
+                    clearTimeout(bootSafety);
                 };
             }, []);
 

@@ -1271,8 +1271,9 @@
             const [soAiLoading, setSoAiLoading] = useState(false);
             useEffect(() => { try { localStorage.setItem('salonone_plan_goals_v1', JSON.stringify(soPlanGoals)); } catch {} }, [soPlanGoals]);
             useEffect(() => { try { localStorage.setItem('salonone_actions_v1', JSON.stringify(soActions)); } catch {} }, [soActions]);
-            const [soShop, setSoShop] = useState('all');        // 店舗フィルタ（'all' | shop_id）
-            const [soStaff, setSoStaff] = useState('all');      // スタッフフィルタ（'all' | staff_id）
+            const [soShopSel, setSoShopSel] = useState([]);     // 店舗フィルタ（[]=全店舗 / shop_id配列）
+            const [soStaffSel, setSoStaffSel] = useState([]);   // スタッフフィルタ（[]=全スタッフ / staff_id配列）
+            const [soOwner, setSoOwner] = useState('');         // オーナー選択（空=なし）
             const [soFrom, setSoFrom] = useState(soDefaultRange.from);
             const [soTo, setSoTo] = useState(soDefaultRange.to);
             const [soStoreMenuOpen, setSoStoreMenuOpen] = useState(false);
@@ -2515,8 +2516,8 @@
             const soAiAnalyze = async () => {
                 setSoAiLoading(true); setSoAiResult('');
                 try {
-                    const shopLabel = soShop === 'all' ? '全店舗' : ((soShops.length ? soShops : soDemoShops).find(x => String(x.id) === String(soShop)) || {}).name || '店舗';
-                    const key = soShop + '_' + soFrom.slice(0, 7);
+                    const shopLabel = soShopLabel();
+                    const key = soShopKey() + '_' + soFrom.slice(0, 7);
                     const goal = soPlanGoals[key] || {};
                     const actual = soPlanActual(); const pi = soPlanPace();
                     const L = [];
@@ -2531,7 +2532,7 @@
                     });
                     L.push('');
                     L.push('■ アクション（施策）と検証');
-                    const acts = soActions.filter(a => a.shop === undefined || a.shop === soShop || soShop === 'all');
+                    const acts = soActions.filter(a => !a.shopKey || a.shopKey === soShopKey());
                     if (acts.length === 0) L.push('- （登録なし）');
                     acts.forEach(a => L.push(`- [${a.status}] ${a.title}（実施:${a.date || '未定'} / 狙う指標:${soMetricLabel(a.metric)} / 期待:${a.impact || '-'}）${a.result ? ' 検証結果:' + a.result : ''}`));
                     const dataContext = L.join('\n');
@@ -2552,6 +2553,89 @@
                     }
                 } catch (err) { setSoAiResult('分析に失敗しました: ' + err.message); } finally { setSoAiLoading(false); }
             };
+            // ── オーナー→店舗マッピング / 複数店舗の集計マージ ──
+            // SalonOne店舗名(例「NAORU 千葉駅院」)を OWNER_BRANCHES の短縮名と照合してオーナー判定
+            const soShopOwner = (shopName) => {
+                const core = String(shopName || '').replace('NAORU整体', '').replace('NAORU', '').replace(/院$/, '').trim();
+                if (!core) return null;
+                for (const [owner, branches] of Object.entries(OWNER_BRANCHES)) {
+                    if (branches.some(b => core === b || core.includes(b) || b.includes(core))) return owner;
+                }
+                return null;
+            };
+            // 複数店舗の sales/summary raw を合算（合計系はSUM、率は再計算）
+            const soMergeSummary = (list) => {
+                list = list.filter(Boolean);
+                if (list.length <= 1) return list[0] || null;
+                const SUM = ['gross_sales', 'digest_sales', 'consumed_sales', 'new_customer_sales', 'repeat_customer_sales', 'new_visit_count', 'repeat_visit_count', 'cancel_count', 'no_show_count', 'refund_amount', 'gross_count', 'digest_count', 'period_operating_minutes', 'period_available_minutes'];
+                const out = {}; SUM.forEach(k => out[k] = 0);
+                const dayMap = {}, staffMap = {};
+                list.forEach(d => {
+                    SUM.forEach(k => out[k] += Number(d[k]) || 0);
+                    (d.by_day || []).forEach(day => {
+                        const e = dayMap[day.date] || (dayMap[day.date] = { date: day.date, gross_sales: 0, digest_sales: 0, consumed_sales: 0, new_sales: 0, repeat_sales: 0, visit_count: 0, cancel_count: 0, new_count: 0, repeat_count: 0, operating_minutes: 0, available_minutes: 0, refund_amount: 0, _pay: {}, _media: {} });
+                        ['gross_sales', 'digest_sales', 'consumed_sales', 'new_sales', 'repeat_sales', 'visit_count', 'cancel_count', 'new_count', 'repeat_count', 'operating_minutes', 'available_minutes', 'refund_amount'].forEach(k => e[k] += Number(day[k]) || 0);
+                        (day.payment_breakdown || []).forEach(p => { e._pay[p.name] = (e._pay[p.name] || 0) + (Number(p.amount) || 0); });
+                        (day.media_breakdown || []).forEach(m => { e._media[m.name] = (e._media[m.name] || 0) + (Number(m.count) || 0); });
+                    });
+                    (d.by_staff || []).forEach(st => {
+                        const e = staffMap[st.staff_id] || (staffMap[st.staff_id] = { staff_id: st.staff_id, staff_name: st.staff_name, gross_sales: 0, digest_sales: 0, consumed_sales: 0, item_count: 0, treatment_count: 0, new_count: 0, google_review_count: 0, hotpepper_review_count: 0, operating_minutes: 0, available_minutes: 0, refund_amount: 0 });
+                        ['gross_sales', 'digest_sales', 'consumed_sales', 'item_count', 'treatment_count', 'new_count', 'google_review_count', 'hotpepper_review_count', 'operating_minutes', 'available_minutes', 'refund_amount'].forEach(k => e[k] += Number(st[k]) || 0);
+                    });
+                });
+                out.period_utilization_rate = out.period_available_minutes ? Math.round(out.period_operating_minutes / out.period_available_minutes * 1000) / 10 : 0;
+                out.by_day = Object.values(dayMap).sort((a, b) => a.date < b.date ? -1 : 1).map(e => ({ ...e, utilization_rate: e.available_minutes ? Math.round(e.operating_minutes / e.available_minutes * 1000) / 10 : 0, payment_breakdown: Object.entries(e._pay).map(([name, amount]) => ({ name, amount, is_sales: true })), media_breakdown: Object.entries(e._media).map(([name, count]) => ({ name, count })) }));
+                out.by_staff = Object.values(staffMap).map(e => ({ ...e, avg_ticket: e.item_count ? Math.round(e.gross_sales / e.item_count) : 0, utilization_rate: e.available_minutes ? Math.round(e.operating_minutes / e.available_minutes * 1000) / 10 : 0 }));
+                return out;
+            };
+            const soMergeChannels = (lists) => {
+                const map = {};
+                lists.forEach(arr => (arr || []).forEach(c => {
+                    const e = map[c.name] || (map[c.name] = { visit_source_id: c.visit_source_id, name: c.name, platform_type: c.platform_type, booking_count: 0, visit_count: 0, remaining_count: 0, cancel_count: 0, join_count: 0, sales: 0, ad_spend: 0, impressions: 0, clicks: 0 });
+                    ['booking_count', 'visit_count', 'remaining_count', 'cancel_count', 'join_count', 'sales', 'ad_spend', 'impressions', 'clicks'].forEach(x => e[x] += Number(c[x]) || 0);
+                }));
+                return Object.values(map).map(e => ({ ...e, join_rate: e.visit_count ? Math.round(e.join_count / e.visit_count * 1000) / 10 : 0, cancel_rate: e.booking_count ? Math.round(e.cancel_count / e.booking_count * 1000) / 10 : 0, cpa: 0, roas: 0 }));
+            };
+            const soMergeMkStaff = (lists) => {
+                const map = {};
+                lists.forEach(arr => (arr || []).forEach(st => {
+                    if (st.is_total) return;
+                    const e = map[st.staff_id] || (map[st.staff_id] = { staff_id: st.staff_id, staff_name: st.staff_name, new_booking_count: 0, new_visit_count: 0, remaining_count: 0, cancel_count: 0, purchase_count: 0, purchase_amount: 0, new_customer_sales_total: 0 });
+                    ['new_booking_count', 'new_visit_count', 'remaining_count', 'cancel_count', 'purchase_count', 'purchase_amount', 'new_customer_sales_total'].forEach(x => e[x] += Number(st[x]) || 0);
+                }));
+                const staff = Object.values(map).map(e => ({ ...e, purchase_unit_price: e.purchase_count ? Math.round(e.purchase_amount / e.purchase_count) : 0 }));
+                const total = { staff_id: null, staff_name: '全体', is_total: true };
+                ['new_booking_count', 'new_visit_count', 'remaining_count', 'cancel_count', 'purchase_count', 'purchase_amount', 'new_customer_sales_total'].forEach(x => total[x] = staff.reduce((a, e) => a + e[x], 0));
+                total.purchase_unit_price = total.purchase_count ? Math.round(total.purchase_amount / total.purchase_count) : 0;
+                return [total, ...staff];
+            };
+            const soMergeRetention = (list) => {
+                list = list.filter(Boolean);
+                const S = { join_count: 0, active_count: 0, churn_count: 0 }, src = {}, stf = {}, pur = {};
+                const add = (m, k, x, fields) => { const e = m[k] || (m[k] = { ...x }); fields.forEach(f => { e[f] = (e[f] || 0) + (Number(x[f]) || 0); }); return e; };
+                list.forEach(r => {
+                    const su = r.summary || {}; S.join_count += Number(su.join_count) || 0; S.active_count += Number(su.active_count) || 0; S.churn_count += Number(su.churn_count) || 0;
+                    (r.by_source || []).forEach(x => { const e = src[x.source_name] || (src[x.source_name] = { source_name: x.source_name, join_count: 0, active_count: 0, churn_count: 0 }); e.join_count += Number(x.join_count) || 0; e.active_count += Number(x.active_count) || 0; e.churn_count += Number(x.churn_count) || 0; });
+                    (r.by_staff || []).forEach(x => { const e = stf[x.staff_name] || (stf[x.staff_name] = { staff_name: x.staff_name, join_count: 0, active_count: 0, churn_count: 0 }); e.join_count += Number(x.join_count) || 0; e.active_count += Number(x.active_count) || 0; e.churn_count += Number(x.churn_count) || 0; });
+                    (r.by_purchases || []).forEach(x => { const e = pur[x.purchases] || (pur[x.purchases] = { purchases: x.purchases, label: x.label, active: 0, churned: 0 }); e.active += Number(x.active) || 0; e.churned += Number(x.churned) || 0; });
+                });
+                const rate = (a, j) => j ? Math.round(a / j * 1000) / 10 : 0;
+                return {
+                    summary: { ...S, continuation_rate: rate(S.active_count, S.join_count), churn_rate: rate(S.churn_count, S.join_count), avg_purchases: 0 },
+                    by_source: Object.values(src).map(e => ({ ...e, retention_rate: rate(e.active_count, e.join_count) })),
+                    by_staff: Object.values(stf).map(e => ({ ...e, retention_rate: rate(e.active_count, e.join_count) })),
+                    by_purchases: Object.values(pur),
+                };
+            };
+            // 選択中の店舗の表示名 / 保存キー
+            const soShopLabel = () => {
+                if (soOwner) return soOwner.replace('オーナー', '') + `（${soShopSel.length}店舗）`;
+                if (soShopSel.length === 0) return '全店舗';
+                const opts = (soShops.length ? soShops : soDemoShops);
+                if (soShopSel.length === 1) return (opts.find(x => String(x.id) === String(soShopSel[0])) || {}).name || '1店舗';
+                return `${soShopSel.length}店舗選択`;
+            };
+            const soShopKey = () => (soShopSel.length ? soShopSel.slice().sort().join('-') : 'all');
             // 配列をキーで昇降ソート（数値/文字どちらも対応）
             const soSortBy = (rows, key, dir) => [...rows].sort((a, b) => {
                 const x = a[key], y = b[key];
@@ -2737,18 +2821,31 @@
                 setSoLoading(true);
                 setSoError(null);
                 try {
-                    const params = new URLSearchParams({ resource: 'sales/summary', from: soFrom, to: soTo });
-                    if (soShop !== 'all') params.set('shop_id', soShop);
-                    const res = await fetch(`${SALONONE_API_URL}?${params.toString()}`);
-                    const json = await res.json().catch(() => ({}));
+                    const ids = soShopSel;
+                    // 1リソースを選択店舗分（[]なら全店ブランド）取得
+                    const fetchResource = async (resource, extra = {}) => {
+                        if (ids.length === 0) {
+                            const p = new URLSearchParams({ resource, from: soFrom, to: soTo, ...extra });
+                            const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`);
+                            return [{ status: r.status, json: await r.json().catch(() => ({})) }];
+                        }
+                        return Promise.all(ids.map(async id => {
+                            const p = new URLSearchParams({ resource, from: soFrom, to: soTo, shop_id: id, ...extra });
+                            const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`);
+                            return { status: r.status, json: await r.json().catch(() => ({})) };
+                        }));
+                    };
+
+                    const salesRes = await fetchResource('sales/summary');
+                    const first = salesRes[0] || {};
 
                     // キー未設定 → デモデータで UI を確認できるようにする
-                    if (res.status === 500 && json && json.setupRequired) {
+                    if (first.status === 500 && first.json && first.json.setupRequired) {
                         setSoSetupRequired(true);
                         setSoDemo(true);
                         setSoShops(soDemoShops);
                         setSoStaffs(soDemoStaffs);
-                        const demo = buildSalonOneDemo(soFrom, soTo, soShop, soStaff);
+                        const demo = buildSalonOneDemo(soFrom, soTo, 'all', 'all');
                         setSoSummary(demo);
                         // デモ用マーケ集計（実データの形を模擬）
                         setSoChannels((demo.media || []).map(m => {
@@ -2771,28 +2868,28 @@
                     }
                     setSoSetupRequired(false);
                     setSoDemo(false);
-                    if (res.ok) {
-                        // 売上サマリ成功
+                    const okSales = salesRes.filter(r => r.status === 200 && r.json && r.json.data).map(r => r.json.data);
+                    if (okSales.length > 0) {
+                        // 売上サマリ成功（複数店舗は合算）
                         setSoError(null);
-                        setSoSummary(normalizeSalonSummary(json));
+                        setSoSummary(normalizeSalonSummary({ data: soMergeSummary(okSales) }));
                     } else {
-                        // 売上サマリだけ失敗 → 部分エラー表示。マーケ等は下で取得・表示する
-                        const code = json?.error?.code || `HTTP ${res.status}`;
-                        const eid = json?.error?.error_id ? `／ID: ${json.error.error_id}` : '';
+                        // 売上サマリ失敗 → 部分エラー表示。マーケ等は下で取得・表示する
+                        const err = first.json && first.json.error;
+                        const code = (err && err.code) || `HTTP ${first.status || '?'}`;
+                        const eid = err && err.error_id ? `／ID: ${err.error_id}` : '';
                         setSoSummary(null);
                         setSoError(`売上サマリの取得に失敗しました（SalonOne側: ${code}${eid}）。マーケ分析など取得できたデータは表示しています。`);
                     }
                     setSoLastFetch(new Date());
 
-                    // マーケ集計（売上サマリの成否に関わらず取得。SalonOne計算値・管理画面と一致）
+                    // マーケ集計（売上サマリの成否に関わらず取得・複数店舗は合算）
                     (async () => {
-                        const mp = new URLSearchParams({ from: soFrom, to: soTo });
-                        if (soShop !== 'all') mp.set('shop_id', soShop);
-                        const getMk = (name) => fetch(`${SALONONE_API_URL}?resource=marketing/${name}&${mp.toString()}`).then(r => (r.ok ? r.json() : null)).catch(() => null);
-                        const [ch, st, rt] = await Promise.all([getMk('by-channel'), getMk('by-staff'), getMk('retention')]);
-                        setSoChannels(normalizeMkChannels(ch));
-                        setSoStaffMk(normalizeMkStaff(st));
-                        setSoRetention(normalizeMkRetention(rt));
+                        const [ch, st, rt] = await Promise.all([fetchResource('marketing/by-channel'), fetchResource('marketing/by-staff'), fetchResource('marketing/retention')]);
+                        const okData = arr => arr.filter(r => r.status === 200).map(r => (r.json && r.json.data) || []);
+                        setSoChannels(normalizeMkChannels({ data: soMergeChannels(okData(ch)) }));
+                        setSoStaffMk(normalizeMkStaff({ data: soMergeMkStaff(okData(st)) }));
+                        setSoRetention(normalizeMkRetention(soMergeRetention(rt.filter(r => r.status === 200).map(r => (r.json && r.json.data) || r.json))));
                     })();
 
                     // 店舗・スタッフの選択肢は初回のみ取得（売上の成否に関わらず）
@@ -2823,10 +2920,10 @@
                 if (currentPage !== 'salonone') return;
                 soInitialized.current = true;
                 fetchSalonOneData();
-            }, [currentPage, soFrom, soTo, soShop]);
+            }, [currentPage, soFrom, soTo, soShopSel]);
 
-            // 店舗を切り替えたらスタッフ選択をリセット
-            useEffect(() => { setSoStaff('all'); }, [soShop]);
+            // 店舗選択が変わったらスタッフ選択をリセット
+            useEffect(() => { setSoStaffSel([]); }, [soShopSel]);
 
             // ===== 予約メニュー分析機能（J列メニュー名ベース） =====
 
@@ -10295,9 +10392,18 @@
                         {/* ===== SalonOne 売上分析タブ ===== */}
                         {currentPage === 'salonone' && (() => {
                             const shopOptions = (soShops.length ? soShops : soDemoShops);
-                            const staffOptions = (soStaffs.length ? soStaffs : soDemoStaffs).filter(st => soShop === 'all' || String(st.shop_id) === String(soShop));
-                            const shopName = soShop === 'all' ? '全店舗' : (shopOptions.find(s => String(s.id) === String(soShop))?.name || '全店舗');
-                            const staffName = soStaff === 'all' ? '全スタッフ' : (staffOptions.find(s => String(s.id) === String(soStaff))?.name || '全スタッフ');
+                            // オーナー→SalonOne店舗ID のグループ（該当店舗があるオーナーのみ）
+                            const ownerGroups = (() => {
+                                const groups = {};
+                                shopOptions.forEach(sh => { const o = soShopOwner(sh.name); if (o) (groups[o] = groups[o] || []).push(sh); });
+                                return groups;
+                            })();
+                            const staffOptions = (soStaffs.length ? soStaffs : soDemoStaffs).filter(st => soShopSel.length === 0 || soShopSel.map(String).includes(String(st.shop_id)));
+                            const shopName = soShopLabel();
+                            const staffName = soStaffSel.length === 0 ? '全スタッフ' : (soStaffSel.length === 1 ? (staffOptions.find(s => String(s.id) === String(soStaffSel[0])) || {}).name || '1名' : `${soStaffSel.length}名`);
+                            const soToggleShop = (id) => { setSoOwner(''); setSoShopSel(sel => sel.map(String).includes(String(id)) ? sel.filter(x => String(x) !== String(id)) : [...sel, String(id)]); };
+                            const soToggleStaff = (id) => setSoStaffSel(sel => sel.map(String).includes(String(id)) ? sel.filter(x => String(x) !== String(id)) : [...sel, String(id)]);
+                            const soSelectOwner = (owner) => { const g = ownerGroups[owner] || []; setSoOwner(owner); setSoShopSel(g.map(s => String(s.id))); };
                             // 直近6ヶ月のクイック選択肢
                             const monthQuick = (() => {
                                 const arr = [], now = new Date(), pad = n => String(n).padStart(2, '0');
@@ -10314,7 +10420,7 @@
                             })();
                             const s = soSummary;
                             const totalVisits = s ? (s.newVisit + s.repeatVisit) : 0;
-                            const displayStaff = s ? (soStaff === 'all' ? s.byStaff : s.byStaff.filter(st => String(st.id) === String(soStaff))) : [];
+                            const displayStaff = s ? (soStaffSel.length === 0 ? s.byStaff : s.byStaff.filter(st => soStaffSel.map(String).includes(String(st.id)))) : [];
                             const staffTotal = displayStaff.reduce((a, st) => a + st.gross, 0);
                             const maxDay = s && s.byDay.length ? Math.max(...s.byDay.map(d => d.gross), 1) : 1;
                             // ソート適用（担当者別は全体行を先頭固定）
@@ -10323,11 +10429,22 @@
                             const sortedMkStaff = [...soStaffMk.filter(r => r.isTotal), ...soSortBy(soStaffMk.filter(r => !r.isTotal), soMkSort.key, soMkSort.dir)];
                             const sortedDaily = s ? soSortBy(s.byDay, soDailySort.key, soDailySort.dir) : [];
                             // 計画サブタブ用
-                            const planKey = soShop + '_' + soFrom.slice(0, 7);
+                            const planKey = soShopKey() + '_' + soFrom.slice(0, 7);
                             const planGoal = soPlanGoals[planKey] || {};
                             const planActual = soPlanActual();
                             const planPaceInfo = soPlanPace();
-                            const planActs = soActions.filter(a => a.shop === undefined || a.shop === soShop || soShop === 'all');
+                            const planActs = soActions.filter(a => !a.shopKey || a.shopKey === soShopKey());
+                            // 計画: 個人（スタッフ）別実績（売上＝by_staff、新規獲得＝marketing by-staff）
+                            const planStaffRows = (() => {
+                                const mkById = {}; soStaffMk.filter(r => !r.isTotal).forEach(r => { mkById[String(r.id)] = r; });
+                                let rows = (s ? s.byStaff : []).map(st => {
+                                    const mk = mkById[String(st.id)] || {};
+                                    return { id: st.id, name: st.name, gross: st.gross, newCount: st.newCount, treatments: st.treatments, util: st.util,
+                                             newBooking: mk.booking || 0, newVisit: mk.visit || 0, purchase: mk.purchase || 0, purchaseAmount: mk.amount || 0 };
+                                });
+                                if (soStaffSel.length) rows = rows.filter(r => soStaffSel.map(String).includes(String(r.id)));
+                                return rows.sort((a, b) => b.gross - a.gross);
+                            })();
                             return (
                             <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
                                 <div className="max-w-[1600px] mx-auto space-y-4 md:space-y-6">
@@ -10356,19 +10473,41 @@
                                                         <span className="truncate">{shopName}</span>
                                                         <ChevronDown size={16} className={`ml-auto transition-transform ${soStoreMenuOpen ? 'rotate-180' : ''}`} />
                                                     </button>
-                                                    <PortalDropdown anchorRef={soStoreMenuRef} isOpen={soStoreMenuOpen} onClose={() => setSoStoreMenuOpen(false)} width={250}>
-                                                        <div className="bg-white border border-slate-200 rounded-2xl shadow-xl p-3 space-y-2 max-h-[350px] overflow-hidden flex flex-col w-[250px]">
-                                                            <div className="relative px-1 pb-2">
+                                                    <PortalDropdown anchorRef={soStoreMenuRef} isOpen={soStoreMenuOpen} onClose={() => setSoStoreMenuOpen(false)} width={280}>
+                                                        <div className="bg-white border border-slate-200 rounded-2xl shadow-xl p-3 space-y-2 max-h-[440px] overflow-hidden flex flex-col w-[280px]">
+                                                            <div className="relative px-1 pb-1">
                                                                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                                                                <input type="text" placeholder="店舗を検索..." className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-emerald-500 outline-none" value={soStoreSearch} onChange={(e) => setSoStoreSearch(e.target.value)} />
+                                                                <input type="text" placeholder="店舗/オーナーを検索..." className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-emerald-500 outline-none" value={soStoreSearch} onChange={(e) => setSoStoreSearch(e.target.value)} />
                                                             </div>
-                                                            <div className="overflow-y-auto flex-1 space-y-1">
-                                                                {(!soStoreSearch || '全店舗'.includes(soStoreSearch)) && (
-                                                                    <div onClick={() => { setSoShop('all'); setSoStoreMenuOpen(false); setSoStoreSearch(''); }} className={`px-3 py-2 rounded-lg cursor-pointer transition-colors text-sm font-bold ${soShop === 'all' ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-50 text-slate-600'}`}>全店舗</div>
+                                                            <div className="flex items-center justify-between px-1">
+                                                                <button onClick={() => { setSoOwner(''); setSoShopSel([]); }} className={`px-2.5 py-1 rounded-lg text-xs font-black ${soShopSel.length === 0 ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>全店舗</button>
+                                                                {soShopSel.length > 0 && <span className="text-[11px] font-bold text-slate-400">{soShopSel.length}店舗選択中</span>}
+                                                            </div>
+                                                            <div className="overflow-y-auto flex-1 space-y-2">
+                                                                {Object.keys(ownerGroups).filter(o => !soStoreSearch || o.includes(soStoreSearch)).length > 0 && (
+                                                                    <div>
+                                                                        <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider px-1 mb-1">オーナー別</div>
+                                                                        <div className="flex flex-wrap gap-1">
+                                                                            {Object.keys(ownerGroups).filter(o => !soStoreSearch || o.includes(soStoreSearch)).map(o => (
+                                                                                <button key={o} onClick={() => soSelectOwner(o)} className={`px-2 py-1 rounded-lg text-[11px] font-bold ${soOwner === o ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>{o.replace('オーナー', '')}<span className="opacity-60 ml-0.5">{ownerGroups[o].length}</span></button>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
                                                                 )}
-                                                                {shopOptions.filter(sh => !soStoreSearch || sh.name.toLowerCase().includes(soStoreSearch.toLowerCase())).map(sh => (
-                                                                    <div key={sh.id} onClick={() => { setSoShop(sh.id); setSoStoreMenuOpen(false); setSoStoreSearch(''); }} className={`px-3 py-2 rounded-lg cursor-pointer transition-colors text-sm font-bold ${String(soShop) === String(sh.id) ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-50 text-slate-600'}`}>{sh.name}</div>
-                                                                ))}
+                                                                <div>
+                                                                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider px-1 mb-1">店舗（複数選択可）</div>
+                                                                    <div className="space-y-1">
+                                                                        {shopOptions.filter(sh => !soStoreSearch || sh.name.includes(soStoreSearch) || (soShopOwner(sh.name) || '').includes(soStoreSearch)).map(sh => {
+                                                                            const on = soShopSel.map(String).includes(String(sh.id));
+                                                                            return (
+                                                                                <div key={sh.id} onClick={() => soToggleShop(sh.id)} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors text-sm font-bold ${on ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-50 text-slate-600'}`}>
+                                                                                    <span className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 text-[10px] text-white ${on ? 'bg-emerald-600 border-emerald-600' : 'border-slate-300'}`}>{on ? '✓' : ''}</span>
+                                                                                    <span className="truncate">{sh.name}</span>
+                                                                                </div>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                </div>
                                                             </div>
                                                         </div>
                                                     </PortalDropdown>
@@ -10387,13 +10526,21 @@
                                                                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                                                                 <input type="text" placeholder="スタッフを検索..." className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-emerald-500 outline-none" value={soStaffSearch} onChange={(e) => setSoStaffSearch(e.target.value)} />
                                                             </div>
+                                                            <div className="flex items-center justify-between px-1">
+                                                                <button onClick={() => setSoStaffSel([])} className={`px-2.5 py-1 rounded-lg text-xs font-black ${soStaffSel.length === 0 ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>全スタッフ</button>
+                                                                {soStaffSel.length > 0 && <span className="text-[11px] font-bold text-slate-400">{soStaffSel.length}名選択中</span>}
+                                                            </div>
                                                             <div className="overflow-y-auto flex-1 space-y-1">
-                                                                {(!soStaffSearch || '全スタッフ'.includes(soStaffSearch)) && (
-                                                                    <div onClick={() => { setSoStaff('all'); setSoStaffMenuOpen(false); setSoStaffSearch(''); }} className={`px-3 py-2 rounded-lg cursor-pointer transition-colors text-sm font-bold ${soStaff === 'all' ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-50 text-slate-600'}`}>全スタッフ</div>
-                                                                )}
-                                                                {staffOptions.filter(st => !soStaffSearch || st.name.toLowerCase().includes(soStaffSearch.toLowerCase())).map(st => (
-                                                                    <div key={st.id} onClick={() => { setSoStaff(st.id); setSoStaffMenuOpen(false); setSoStaffSearch(''); }} className={`px-3 py-2 rounded-lg cursor-pointer transition-colors text-sm font-bold ${String(soStaff) === String(st.id) ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-50 text-slate-600'}`}>{st.name}</div>
-                                                                ))}
+                                                                {staffOptions.filter(st => !soStaffSearch || st.name.toLowerCase().includes(soStaffSearch.toLowerCase())).map(st => {
+                                                                    const on = soStaffSel.map(String).includes(String(st.id));
+                                                                    return (
+                                                                        <div key={st.id} onClick={() => soToggleStaff(st.id)} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors text-sm font-bold ${on ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-50 text-slate-600'}`}>
+                                                                            <span className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 text-[10px] text-white ${on ? 'bg-emerald-600 border-emerald-600' : 'border-slate-300'}`}>{on ? '✓' : ''}</span>
+                                                                            <span className="truncate">{st.name}</span>
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                                {staffOptions.length === 0 && <p className="text-xs text-slate-400 font-bold px-2 py-2">店舗を選ぶとスタッフが絞れます</p>}
                                                             </div>
                                                         </div>
                                                     </PortalDropdown>
@@ -10563,7 +10710,7 @@
                                                 <div className="flex items-center gap-2 mb-4">
                                                     <Users size={18} className="text-emerald-600" />
                                                     <h2 className="text-base md:text-lg font-black text-slate-900">スタッフ別売上</h2>
-                                                    {soStaff !== 'all' && (<span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-[10px] font-black">{staffName} で絞り込み中</span>)}
+                                                    {soStaffSel.length > 0 && (<span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-[10px] font-black">{staffName} で絞り込み中</span>)}
                                                     <span className="text-xs font-bold text-slate-400 ml-auto">{displayStaff.length}名</span>
                                                 </div>
                                                 {displayStaff.length === 0 ? (
@@ -10980,6 +11127,49 @@
                                                 <p className="text-[10px] text-slate-400 mt-2 font-bold">着地予想＝実績÷経過日数×期間日数（継続率は現在値）。実績はSalonOne集計（管理画面一致）。</p>
                                             </div>
 
+                                            {/* 個人別 実績 */}
+                                            <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6">
+                                                <div className="flex items-center gap-2 mb-4">
+                                                    <Users size={16} className="text-emerald-600" />
+                                                    <h3 className="text-sm md:text-base font-black text-slate-800">個人別 実績</h3>
+                                                    {soStaffSel.length > 0 && (<span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-[10px] font-black">{staffName} で絞り込み中</span>)}
+                                                    <span className="text-xs font-bold text-slate-400 ml-auto">{planStaffRows.length}名</span>
+                                                </div>
+                                                {planStaffRows.length === 0 ? (<p className="text-center text-slate-400 font-bold py-6 text-sm">スタッフ別の実績データがありません</p>) : (
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-sm whitespace-nowrap">
+                                                            <thead><tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200">
+                                                                <th className="pb-2 pr-2">#</th>
+                                                                <th className="pb-2 pr-2">スタッフ</th>
+                                                                <th className="pb-2 px-2 text-right">売上</th>
+                                                                <th className="pb-2 px-2 text-right">施術数</th>
+                                                                <th className="pb-2 px-2 text-right">新規予約</th>
+                                                                <th className="pb-2 px-2 text-right">新規来店</th>
+                                                                <th className="pb-2 px-2 text-right">購入</th>
+                                                                <th className="pb-2 px-2 text-right">購入金額</th>
+                                                                <th className="pb-2 pl-2 text-right">稼働率</th>
+                                                            </tr></thead>
+                                                            <tbody>
+                                                                {planStaffRows.map((r, i) => (
+                                                                    <tr key={r.id || i} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                                                                        <td className="py-2.5 pr-2 font-black text-slate-300">{i + 1}</td>
+                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800">{r.name}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(r.gross)}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.treatments.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.newBooking.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{r.newVisit.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-black text-emerald-600">{r.purchase.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-700">{soYen(r.purchaseAmount)}</td>
+                                                                        <td className="py-2.5 pl-2 text-right font-bold text-teal-600">{r.util ? r.util.toFixed(1) + '%' : '—'}</td>
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                        <p className="text-[10px] text-slate-400 mt-2 font-bold">売上・施術・稼働率＝sales/summary、新規予約/来店・購入＝marketing/by-staff（SalonOne集計）。</p>
+                                                    </div>
+                                                )}
+                                            </div>
+
                                             {/* アクション管理 */}
                                             <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6">
                                                 <div className="flex items-center gap-2 mb-4">
@@ -10994,7 +11184,7 @@
                                                         {SO_PLAN_METRICS.map(m => <option key={m.key} value={m.key}>{m.label}</option>)}
                                                     </select>
                                                     <input value={soActionDraft.impact} onChange={e => setSoActionDraft(d => ({ ...d, impact: e.target.value }))} placeholder="期待インパクト" className="md:col-span-2 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm font-bold outline-none focus:ring-2 focus:ring-emerald-500" />
-                                                    <button onClick={() => { if (!soActionDraft.title.trim()) return; setSoActions(a => [{ ...soActionDraft, id: Date.now(), shop: soShop }, ...a]); setSoActionDraft({ title: '', date: '', metric: 'sales', impact: '', status: '予定', result: '' }); }} className="md:col-span-2 bg-emerald-600 text-white rounded-lg px-3 py-1.5 text-sm font-black hover:bg-emerald-700">追加</button>
+                                                    <button onClick={() => { if (!soActionDraft.title.trim()) return; setSoActions(a => [{ ...soActionDraft, id: Date.now(), shopKey: soShopKey() }, ...a]); setSoActionDraft({ title: '', date: '', metric: 'sales', impact: '', status: '予定', result: '' }); }} className="md:col-span-2 bg-emerald-600 text-white rounded-lg px-3 py-1.5 text-sm font-black hover:bg-emerald-700">追加</button>
                                                 </div>
                                                 {planActs.length === 0 ? (<p className="text-center text-slate-400 font-bold py-6 text-sm">アクションを追加してPDCAを回しましょう</p>) : (
                                                     <div className="space-y-2">

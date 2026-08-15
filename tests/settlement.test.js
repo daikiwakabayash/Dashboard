@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   parseOwnerPasswords, hashOwnerToken, verifyOwnerLogin, verifyOwnerToken,
   normalizeRecord, computeSettlement, SETTLEMENT_STATUS, SETTLEMENT_SCHEDULE, SETTLEMENT_NOTES,
+  parseOwnerShops, allowedShopsFor, ownerCanAccessShop,
 } from '../lib/settlement.js';
 
 const SALT = 'test-salt';
@@ -83,6 +84,26 @@ describe('computeSettlement', () => {
     const r = computeSettlement({ cash: 'x', squareSales: undefined, hpb: null });
     expect(r.royaltyBase).toBe(0);
     expect(r.billTotal).toBe(0);
+  });
+});
+
+describe('owner shop access control', () => {
+  const map = { '野島オーナー': ['静岡', '千種'], '若林大樹オーナー': ['千葉駅'] };
+  it('parses valid JSON, ignores non-array values', () => {
+    expect(parseOwnerShops('{"a":["x","y"],"b":"nope","c":[]}')).toEqual({ a: ['x', 'y'], c: [] });
+    expect(parseOwnerShops('')).toEqual({});
+    expect(parseOwnerShops('bad')).toEqual({});
+  });
+  it('allowedShopsFor returns list or null', () => {
+    expect(allowedShopsFor(map, '野島オーナー')).toEqual(['静岡', '千種']);
+    expect(allowedShopsFor(map, '未設定オーナー')).toBeNull();
+    expect(allowedShopsFor({ x: [] }, 'x')).toBeNull();
+  });
+  it('ownerCanAccessShop matches by substring; null when undefined', () => {
+    expect(ownerCanAccessShop(map, '野島オーナー', 'NAORU 静岡院')).toBe(true);
+    expect(ownerCanAccessShop(map, '野島オーナー', 'NAORU 千葉駅院')).toBe(false);
+    expect(ownerCanAccessShop(map, '若林大樹オーナー', 'NAORU 千葉駅院')).toBe(true);
+    expect(ownerCanAccessShop(map, '未設定オーナー', 'NAORU 静岡院')).toBeNull();
   });
 });
 

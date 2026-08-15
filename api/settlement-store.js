@@ -15,7 +15,7 @@
 //   - action:'requestRevision'  オーナー: 修正依頼(note)を登録（要 owner+token）
 
 import { createHash } from 'crypto';
-import { parseOwnerPasswords, verifyOwnerToken, normalizeRecord, SETTLEMENT_STATUS } from '../lib/settlement.js';
+import { parseOwnerPasswords, verifyOwnerToken, normalizeRecord, parseOwnerShops, allowedShopsFor, SETTLEMENT_STATUS } from '../lib/settlement.js';
 
 const SALT = () => process.env.AUTH_SALT || 'naoru-settlement-2026';
 
@@ -56,8 +56,14 @@ export default async function handler(req, res) {
       const q = new URLSearchParams({ month }); if (owner) q.set('owner', owner);
       const data = await callGas(`${gasUrl}?${q.toString()}`, 'GET');
       const rows = Array.isArray(data) ? data : (data.records || []);
-      const records = rows.map(normalizeRecord).filter(Boolean)
-        .filter(r => !owner || r.owner === owner);
+      // アクセス制御: SETTLEMENT_OWNER_SHOPS があれば許可店舗のみ、無ければ owner タグ一致
+      const shopsMap = parseOwnerShops(process.env.SETTLEMENT_OWNER_SHOPS);
+      const allowed = owner ? allowedShopsFor(shopsMap, owner) : null;
+      const records = rows.map(normalizeRecord).filter(Boolean).filter(r => {
+        if (!owner) return true;
+        if (allowed) return allowed.some(p => String(r.shopName || '').includes(p));
+        return r.owner === owner;
+      });
       res.setHeader('Cache-Control', 'no-store');
       return res.status(200).json({ records, configured: true });
     } catch (err) {

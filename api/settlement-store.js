@@ -15,9 +15,13 @@
 //   - action:'requestRevision'  オーナー: 修正依頼(note)を登録（要 owner+token）
 
 import { createHash } from 'crypto';
-import { parseOwnerPasswords, verifyOwnerToken, normalizeRecord, parseOwnerShops, allowedShopsFor, SETTLEMENT_STATUS } from '../lib/settlement.js';
+import { hashOwnerToken, parseOwnerPasswords, verifyOwnerToken, normalizeRecord, parseOwnerShops, allowedShopsFor, SETTLEMENT_STATUS } from '../lib/settlement.js';
 
 const SALT = () => process.env.AUTH_SALT || 'naoru-settlement-2026';
+const ROOT = '__root__';
+const splitShops = (csv) => String(csv || '').split(',').map(s => s.trim()).filter(Boolean);
+const rootToken = () => hashOwnerToken(ROOT, process.env.DASHBOARD_PASSWORD || '', SALT());
+const isRoot = (owner, token) => owner === ROOT && !!process.env.DASHBOARD_PASSWORD && token === rootToken();
 
 function hqTokenValid(token) {
   const pw = process.env.DASHBOARD_PASSWORD;
@@ -35,6 +39,24 @@ async function callGas(url, method, payload) {
   return resp.json().catch(() => ({}));
 }
 
+// 環境変数 + GASオーナー設定をマージ（GAS優先）。トークン検証用。
+async function loadAccounts(gasUrl) {
+  const passwords = parseOwnerPasswords(process.env.SETTLEMENT_OWNER_PASSWORDS);
+  const shopsMap = parseOwnerShops(process.env.SETTLEMENT_OWNER_SHOPS);
+  if (gasUrl) {
+    try {
+      const j = await callGas(`${gasUrl}?type=owners`, 'GET');
+      for (const o of (j.owners || [])) {
+        if (!o || !o.owner) continue;
+        if (o.password != null && String(o.password) !== '') passwords[o.owner] = String(o.password);
+        const shops = splitShops(o.shops);
+        if (shops.length) shopsMap[o.owner] = shops;
+      }
+    } catch (_) { /* GAS到達不可時は環境変数のみ */ }
+  }
+  return { passwords, shopsMap };
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -47,25 +69,32 @@ export default async function handler(req, res) {
     return res.status(503).json({ ok: false, error: 'SETTLEMENT_GAS_URL が未設定です', setupRequired: true });
   }
 
-  // ── GET: 月（＋任意でオーナー）で明細レコードを取得 ──
+  // ── GET: 月＋オーナー＋トークンで明細レコードを取得（本人のみ・rootは全件） ──
   if (req.method === 'GET') {
     const month = String(req.query.month || '');
     if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month=YYYY-MM が必要です' });
     const owner = req.query.owner ? String(req.query.owner) : '';
+    const token = req.query.token ? String(req.query.token) : '';
+    const hqToken = req.query.hqToken ? String(req.query.hqToken) : '';
+    const root = isRoot(owner, token) || (hqToken && hqTokenValid(hqToken));
     try {
-      const q = new URLSearchParams({ month }); if (owner) q.set('owner', owner);
+      const { passwords, shopsMap } = await loadAccounts(gasUrl);
+      // 認可: root/本社 は全件、オーナーは本人トークン必須
+      if (!root) {
+        if (!owner) return res.status(400).json({ error: 'owner と token が必要です' });
+        if (!verifyOwnerToken(passwords, owner, token, SALT())) return res.status(401).json({ error: 'オーナー認証が必要です' });
+      }
+      const q = new URLSearchParams({ month });
       const data = await callGas(`${gasUrl}?${q.toString()}`, 'GET');
       const rows = Array.isArray(data) ? data : (data.records || []);
-      // アクセス制御: SETTLEMENT_OWNER_SHOPS があれば許可店舗のみ、無ければ owner タグ一致
-      const shopsMap = parseOwnerShops(process.env.SETTLEMENT_OWNER_SHOPS);
-      const allowed = owner ? allowedShopsFor(shopsMap, owner) : null;
+      const allowed = (!root && owner) ? allowedShopsFor(shopsMap, owner) : null;
       const records = rows.map(normalizeRecord).filter(Boolean).filter(r => {
-        if (!owner) return true;
+        if (root) return true;
         if (allowed) return allowed.some(p => String(r.shopName || '').includes(p));
         return r.owner === owner;
       });
       res.setHeader('Cache-Control', 'no-store');
-      return res.status(200).json({ records, configured: true });
+      return res.status(200).json({ records, configured: true, root: !!root });
     } catch (err) {
       return res.status(502).json({ error: 'GAS取得に失敗', message: err.message });
     }
@@ -94,11 +123,14 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, saved: payload.length, gas: out });
     }
 
-    // ── オーナー: 確認済み / 修正依頼（本人の店舗のみ） ──
+    // ── オーナー: 確認済み / 修正依頼（本人の店舗のみ・rootは全て可） ──
     if (action === 'confirm' || action === 'requestRevision') {
-      const passwords = parseOwnerPasswords(process.env.SETTLEMENT_OWNER_PASSWORDS);
-      if (!verifyOwnerToken(passwords, body.owner, body.token, SALT())) {
-        return res.status(401).json({ ok: false, error: 'オーナー認証が必要です' });
+      const root = isRoot(body.owner, body.token);
+      if (!root) {
+        const { passwords } = await loadAccounts(gasUrl);
+        if (!verifyOwnerToken(passwords, body.owner, body.token, SALT())) {
+          return res.status(401).json({ ok: false, error: 'オーナー認証が必要です' });
+        }
       }
       const shopId = String(body.shopId || '');
       const month = String(body.month || '');
@@ -107,9 +139,9 @@ export default async function handler(req, res) {
       const patch = action === 'confirm'
         ? { status: SETTLEMENT_STATUS.CONFIRMED, confirmedAt: now, revisionNote: '' }
         : { status: SETTLEMENT_STATUS.REVISION, revisionNote: String(body.note || '').slice(0, 2000), confirmedAt: '' };
-      // GAS 側は owner 一致行のみ更新（他オーナーの明細は変更不可）
+      // GAS 側は owner 一致行のみ更新（root は owner を渡さず全行対象）
       const out = await callGas(gasUrl, 'POST', {
-        action: 'update', owner: body.owner, shopId, month, updatedAt: now, ...patch,
+        action: 'update', owner: root ? '' : body.owner, shopId, month, updatedAt: now, ...patch,
       });
       return res.status(200).json({ ok: true, gas: out });
     }

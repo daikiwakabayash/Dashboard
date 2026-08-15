@@ -13,16 +13,23 @@
  *       - アクセスできるユーザー: 全員
  *  4. 発行された Web アプリ URL を Vercel の環境変数 SETTLEMENT_GAS_URL に設定
  *
- * 【列構成（1行目ヘッダー）】
+ * 【シート1「返金明細書」列構成（1行目ヘッダー）】
  *   month | shopId | shopName | owner | status | revisionNote |
  *   snapshot(JSON) | publishedAt | confirmedAt | updatedAt
- *
  *  - キーは (month, shopId) の組。同キーは upsert（上書き）
  *  - status: draft / published / confirmed / revision_requested
+ *
+ * 【シート2「オーナー設定」列構成】（自動作成。ダッシュボードのオーナー管理UIから編集）
+ *   owner | password | shops(カンマ区切り店舗名) | updatedAt
+ *  - オーナー別ログインPASSとアクセス可能店舗を保存。環境変数の再デプロイ不要
+ *  - password はサーバー間通信でのみ読み出し（ブラウザには返さない）
  */
 
 var SHEET_NAME = '返金明細書';
 var HEADERS = ['month', 'shopId', 'shopName', 'owner', 'status', 'revisionNote', 'snapshot', 'publishedAt', 'confirmedAt', 'updatedAt'];
+// オーナーアカウント（パスワード・アクセス店舗）シート
+var OWNER_SHEET = 'オーナー設定';
+var OWNER_HEADERS = ['owner', 'password', 'shops', 'updatedAt']; // shops はカンマ区切り店舗名
 
 function getSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -32,6 +39,37 @@ function getSheet_() {
     sh.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
   }
   return sh;
+}
+
+function getOwnerSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(OWNER_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(OWNER_SHEET);
+    sh.getRange(1, 1, 1, OWNER_HEADERS.length).setValues([OWNER_HEADERS]);
+  }
+  return sh;
+}
+
+function readOwners_() {
+  var sh = getOwnerSheet_();
+  var values = sh.getDataRange().getValues();
+  if (values.length < 2) return [];
+  var head = values[0], idx = {};
+  OWNER_HEADERS.forEach(function (h) { idx[h] = head.indexOf(h); });
+  var rows = [];
+  for (var r = 1; r < values.length; r++) {
+    var row = values[r];
+    var owner = idx.owner >= 0 ? String(row[idx.owner]) : '';
+    if (!owner) continue;
+    rows.push({
+      _row: r + 1, owner: owner,
+      password: idx.password >= 0 ? String(row[idx.password]) : '',
+      shops: idx.shops >= 0 ? String(row[idx.shops] || '') : '',
+      updatedAt: idx.updatedAt >= 0 ? String(row[idx.updatedAt] || '') : '',
+    });
+  }
+  return rows;
 }
 
 function readAll_(sh) {
@@ -55,8 +93,15 @@ function keyOf_(month, shopId) { return String(month) + '|' + String(shopId); }
 function doGet(e) {
   var lock = LockService.getScriptLock(); lock.waitLock(20000);
   try {
-    var sh = getSheet_();
     var p = (e && e.parameter) || {};
+    // オーナーアカウント一覧（サーバー間通信のみ・password含む）
+    if (String(p.type) === 'owners') {
+      var owners = readOwners_().map(function (o) {
+        return { owner: o.owner, password: o.password, shops: o.shops, updatedAt: o.updatedAt };
+      });
+      return json_({ owners: owners });
+    }
+    var sh = getSheet_();
     var month = String(p.month || '');
     var owner = String(p.owner || '');
     var all = readAll_(sh);
@@ -85,6 +130,27 @@ function doPost(e) {
   var lock = LockService.getScriptLock(); lock.waitLock(20000);
   try {
     var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+
+    // ── オーナーアカウントの upsert / delete（本社/root操作） ──
+    if (body.action === 'upsertOwner' || body.action === 'deleteOwner') {
+      var osh = getOwnerSheet_();
+      var owners = readOwners_();
+      var found = null;
+      owners.forEach(function (o) { if (o.owner === String(body.owner)) found = o; });
+      if (body.action === 'deleteOwner') {
+        if (found) osh.deleteRow(found._row);
+        return json_({ ok: true });
+      }
+      var now = new Date().toISOString();
+      // password 未指定なら既存を保持
+      var pw = (body.password != null && String(body.password) !== '') ? String(body.password) : (found ? found.password : '');
+      var shops = body.shops != null ? String(body.shops) : (found ? found.shops : '');
+      var vals = [String(body.owner), pw, shops, now];
+      if (found) osh.getRange(found._row, 1, 1, OWNER_HEADERS.length).setValues([vals]);
+      else osh.appendRow(vals);
+      return json_({ ok: true });
+    }
+
     var sh = getSheet_();
     var all = readAll_(sh);
     var byKey = {};

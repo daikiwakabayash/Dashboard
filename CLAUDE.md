@@ -73,6 +73,7 @@ tests/              # Vitestテスト
   - `SALONONE_API_KEY` — SalonOne 分析APIのアクセスキー（運営が「API連携」から発行・再表示不可）
   - `SALONONE_API_BASE` — SalonOne 分析APIのベースURL上書き（オプション・既定は本番）
   - `SETTLEMENT_OWNER_PASSWORDS` — 返金明細書オーナーポータルのPASS（JSON `{"オーナー名":"パスワード"}`・オーナー毎に一意）
+  - `SETTLEMENT_OWNER_SHOPS` — オーナー別アクセス権限（オプション・JSON `{"オーナー名":["店舗名の一部",...]}`）。設定時はこれが公開範囲の唯一の基準。未設定時は `OWNER_BRANCHES` にフォールバック
   - `SETTLEMENT_GAS_URL` — 返金明細書ストア用GAS WebアプリURL（`gas/settlement-gas-sample.js` を配置）
   - `AUTH_SALT` — トークン用ソルト（オプション・オーナー認証で使用）
 
@@ -89,9 +90,10 @@ SalonOne（`https://salonone.net`）の**読み取り専用**分析APIと連携�
 ## 返金明細書（FC精算）とオーナー共有
 FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売上内訳）＋ Square API（総決済/実手数料/返金）から自動生成し、オーナーに共有・確認してもらう仕組み。
 - **本社（`index.html` 返金明細書タブ）**: 店舗×月で明細書を生成・手動項目（Spotip/広告費/調整/料率）を編集。「オーナーに公開」または「オーナー別 一括公開」でスナップショットをGAS保存。確認状況（確認待ち/確認済み/修正依頼）を一覧表示
-- **オーナー（`owner.html`）**: `SETTLEMENT_OWNER_PASSWORDS` のPASSでログイン→自分の店舗の明細書のみ閲覧→「確認済み」ボタン／「修正依頼」テキスト送信
+- **オーナー（`owner.html`）**: `SETTLEMENT_OWNER_PASSWORDS` のPASSでログイン→月・店舗で検索→自分の店舗の明細書のみ閲覧→「確認済み」ボタン／「修正依頼」テキスト送信／**PDF保存・印刷**（`window.print` で各自ダウンロード保存。スプレッドシートは裏側の保存先でオーナーは触らない）
+- **アクセス権限**: `SETTLEMENT_OWNER_SHOPS` でオーナーが閲覧できる店舗を制御。GET時にサーバー側で許可店舗のみ返す（未設定なら record.owner タグ一致）。本社の公開タグ付けも同設定を優先（`stOwnerFor`）
 - **保存**: `api/settlement-store.js` 経由で `SETTLEMENT_GAS_URL`（スプレッドシート）に upsert/update。オーナーの更新は本人トークン＋owner一致行のみ許可
-- **認証**: `api/settlement-auth.js`（オーナー別PASS→トークン）。トークンは `hashOwnerToken(owner, pw, AUTH_SALT)`
+- **認証**: `api/settlement-auth.js`（オーナー別PASS→トークン＋許可店舗）。トークンは `hashOwnerToken(owner, pw, AUTH_SALT)`
 - **スナップショット方式**: 本社が算出した完成値を保存し、オーナーは再計算せず同じ値を表示（数値が完全一致）
 - **照合**: SalonOneスクエア売上 と Square(総決済−返金) が不一致なら明細に ⚠️ を表示
 - **期日/注意書き**: `lib/settlement.js` の `SETTLEMENT_SCHEDULE`/`SETTLEMENT_NOTES` が唯一の定義（2日売上確定→5日明細作成→10日オーナーチェック→15日振込、期日超過で修正不可）

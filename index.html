@@ -1285,6 +1285,7 @@
             const [stRecords, setStRecords] = useState([]);        // 当月の公開済みレコード（確認状況）
             const [stPublishing, setStPublishing] = useState(false);
             const [stStoreMsg, setStStoreMsg] = useState('');
+            const [stOwnerShops, setStOwnerShops] = useState(null); // {オーナー:[店舗名の一部]} アクセス設定（null=未取得）
             const [stSel, setStSel] = useState([]);                // 表示する店舗ID（複数選択）
             const [stData, setStData] = useState({});              // id -> { salon, square }
             const [stMultiLoad, setStMultiLoad] = useState({ running: false, done: 0, total: 0 });
@@ -1323,6 +1324,15 @@
                 return { salon, square };
             };
 
+            // 店舗→オーナー判定。SETTLEMENT_OWNER_SHOPS 設定があればそれを優先、無ければ OWNER_BRANCHES。
+            const stOwnerFor = (shopName) => {
+                if (stOwnerShops && Object.keys(stOwnerShops).length) {
+                    for (const [owner, pats] of Object.entries(stOwnerShops)) {
+                        if ((pats || []).some(p => String(shopName || '').includes(p))) return owner;
+                    }
+                }
+                return soShopOwner(shopName) || '';
+            };
             // 明細スナップショット生成（owner.html と本社の描画が完全一致するよう完成値を格納）
             const stComputeSnapshot = (shop, salon, square, manual) => {
                 const m = { ...stManualDefault, ...(manual || {}) };
@@ -1345,7 +1355,7 @@
                 const tax = Math.round(billTotal * taxRateN / (100 + taxRateN));
                 const refundAmount = squareSales - billTotal;
                 return {
-                    shopName: shop.name, owner: soShopOwner(shop.name) || '',
+                    shopName: shop.name, owner: stOwnerFor(shop.name),
                     cash, hpb, soSquare, squareSales, sqGross, sqFees, sqRefunds, sqNet, mismatch, feeRate,
                     royaltyRate: m.royaltyRate, taxRate: m.taxRate, spotip: m.spotip, metaAds: m.metaAds || [], adjustments: m.adjustments || [],
                     royaltyBase, royalty, billTotal, tax, refundAmount, generatedAt: new Date().toISOString(),
@@ -1425,6 +1435,11 @@
             useEffect(() => {
                 if (currentPage === 'settlement') stLoadStatus();
             }, [currentPage, stMonth]);
+            // オーナー別アクセス設定（SETTLEMENT_OWNER_SHOPS）を取得
+            useEffect(() => {
+                if (currentPage !== 'settlement' || stOwnerShops !== null) return;
+                fetch('/api/settlement-auth').then(r => r.json()).then(j => setStOwnerShops(j.shops || {})).catch(() => setStOwnerShops({}));
+            }, [currentPage]);
             // 選択・月が変わったら選択店舗のデータを再取得
             useEffect(() => {
                 if (currentPage !== 'settlement') return;
@@ -11435,13 +11450,16 @@
                         const stStatusStyle = { published: 'bg-amber-100 text-amber-700', confirmed: 'bg-emerald-100 text-emerald-700', revision_requested: 'bg-rose-100 text-rose-700', draft: 'bg-slate-100 text-slate-500' };
                         const ST_SCHEDULE = [{ day: '2日', label: '売上確定' }, { day: '5日', label: '返金明細書作成' }, { day: '10日', label: 'オーナーチェック' }, { day: '15日', label: '振り込み' }];
                         const ST_NOTES = ['6日〜10日までの間に必ずオーナーは内容をご確認ください。', '期日（10日）を過ぎた場合、修正対応はできません。'];
-                        const stOwners = Object.keys(OWNER_BRANCHES);
+                        // オーナー一覧・店舗判定はアクセス設定(SETTLEMENT_OWNER_SHOPS)を優先、無ければOWNER_BRANCHES
+                        const stHasCfg = stOwnerShops && Object.keys(stOwnerShops).length > 0;
+                        const stOwnerMap = stHasCfg ? stOwnerShops : OWNER_BRANCHES;
+                        const stOwners = Object.keys(stOwnerMap);
                         const stRecByOwner = (() => { const m = {}; stRecords.forEach(r => { (m[r.owner || '（未設定）'] = m[r.owner || '（未設定）'] || []).push(r); }); return m; })();
                         const selShops = stSel.map(id => shopList.find(s => String(s.id) === String(id))).filter(Boolean);
                         const stSelLabel = stSel.length === 0 ? '店舗を選択' : stSel.length === 1 ? ((shopList.find(s => String(s.id) === String(stSel[0])) || {}).name || '1店舗') : `${stSel.length}店舗選択中`;
                         const toggleShop = (id) => setStSel(prev => prev.map(String).includes(String(id)) ? prev.filter(x => String(x) !== String(id)) : [...prev, String(id)]);
                         const selectAll = () => setStSel(shopList.map(s => String(s.id)));
-                        const selectOwner = (owner) => { const br = OWNER_BRANCHES[owner] || []; setStSel(shopList.filter(s => br.some(b => s.name.includes(b))).map(s => String(s.id))); };
+                        const selectOwner = (owner) => { const br = stOwnerMap[owner] || []; setStSel(shopList.filter(s => br.some(b => s.name.includes(b))).map(s => String(s.id))); };
 
                         // ── 明細書1件（複数店舗を縦に並べて表示） ──
                         const StCard = ({ shop }) => {
@@ -11589,7 +11607,7 @@
                                                     </div>
                                                     <select onChange={e => { if (e.target.value) selectOwner(e.target.value); }} value="" className="mb-2 px-2 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-bold text-slate-700">
                                                         <option value="">オーナーで選択...</option>
-                                                        {stOwners.map(o => <option key={o} value={o}>{o}（{OWNER_BRANCHES[o].length}）</option>)}
+                                                        {stOwners.map(o => <option key={o} value={o}>{o}（{(stOwnerMap[o] || []).length}）</option>)}
                                                     </select>
                                                     <div className="relative pb-2"><Search className="absolute left-2.5 top-2 w-4 h-4 text-slate-400" /><input placeholder="店舗を検索..." className="w-full pl-8 pr-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold outline-none" value={stShopSearch} onChange={e => setStShopSearch(e.target.value)} /></div>
                                                     <div className="overflow-y-auto space-y-1">

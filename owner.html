@@ -123,7 +123,7 @@ function Login({ onLogin }) {
         body: JSON.stringify({ action: 'login', owner: owner || undefined, password }),
       });
       const j = await r.json();
-      if (j.ok) { onLogin({ owner: j.owner, token: j.token, shops: j.shops || [] }); }
+      if (j.ok) { onLogin({ owner: j.owner, token: j.token, shops: j.shops || [], root: !!j.root }); }
       else setErr(j.error || 'ログインに失敗しました');
     } catch (e) { setErr('通信に失敗しました'); }
     finally { setBusy(false); }
@@ -159,6 +159,7 @@ function Login({ onLogin }) {
           className="w-full py-2.5 rounded-xl bg-brand-500 hover:bg-brand-600 disabled:opacity-40 text-white font-black text-sm transition-colors">
           {busy ? '確認中...' : 'ログイン'}
         </button>
+        <p className="text-[10px] text-slate-400 font-bold text-center">管理者(root)はダッシュボードのパスワードで全店舗を閲覧できます</p>
       </div>
     </div>
   );
@@ -298,7 +299,7 @@ function Portal({ session, onLogout }) {
 
   const load = () => {
     setRecords(null); setErr('');
-    const q = new URLSearchParams({ month, owner: session.owner });
+    const q = new URLSearchParams({ month, owner: session.owner, token: session.token });
     fetch(`/api/settlement-store?${q.toString()}`).then(r => r.json()).then(j => {
       if (j.records) setRecords(j.records);
       else { setRecords([]); if (j.message) setErr(j.message); }
@@ -315,7 +316,7 @@ function Portal({ session, onLogout }) {
         <div className="max-w-2xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
           <div>
             <div className="text-[11px] font-black text-brand-500 tracking-widest">NAORU 返金明細書</div>
-            <div className="font-black text-slate-900">{session.owner}</div>
+            <div className="font-black text-slate-900 flex items-center gap-2">{session.root ? 'root（全店舗）' : session.owner}{session.root && <span className="px-2 py-0.5 rounded-full bg-slate-800 text-white text-[10px]">管理者</span>}</div>
           </div>
           <button onClick={onLogout} className="text-xs font-bold text-slate-400 hover:text-slate-700">ログアウト</button>
         </div>

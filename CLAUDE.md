@@ -43,8 +43,9 @@ api/
   feedback.js       # フィードバックAPI（GAS連携・取得/送信）
   health.js         # ヘルスチェック
   salonone.js       # SalonOne 分析APIプロキシ（APIキー隠蔽・GET限定・許可リスト）
-  settlement-auth.js  # 返金明細書オーナー別PASS認証（SETTLEMENT_OWNER_PASSWORDS）
-  settlement-store.js # 返金明細書ストア（GAS保存: スナップショット/確認状況/修正依頼）
+  settlement-auth.js  # 返金明細書オーナー別PASS認証（GASオーナー設定＋環境変数・root対応）
+  settlement-store.js # 返金明細書ストア（GAS保存: スナップショット/確認状況/修正依頼・トークン検証）
+  settlement-owners.js # オーナーアカウント管理（GAS「オーナー設定」の追加/変更/削除・本社/root専用）
   square/
     metrics.js      # Square サブスクデータ集計
     settlement.js   # Square 精算（返金明細書用: 総売上/実手数料/返金を店舗×月で集計）
@@ -90,10 +91,12 @@ SalonOne（`https://salonone.net`）の**読み取り専用**分析APIと連携�
 ## 返金明細書（FC精算）とオーナー共有
 FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売上内訳）＋ Square API（総決済/実手数料/返金）から自動生成し、オーナーに共有・確認してもらう仕組み。
 - **本社（`index.html` 返金明細書タブ）**: 店舗×月で明細書を生成・手動項目（Spotip/広告費/調整/料率）を編集。「オーナーに公開」または「オーナー別 一括公開」でスナップショットをGAS保存。確認状況（確認待ち/確認済み/修正依頼）を一覧表示
-- **オーナー（`owner.html`）**: `SETTLEMENT_OWNER_PASSWORDS` のPASSでログイン→月・店舗で検索→自分の店舗の明細書のみ閲覧→「確認済み」ボタン／「修正依頼」テキスト送信／**PDF保存・印刷**（`window.print` で各自ダウンロード保存。スプレッドシートは裏側の保存先でオーナーは触らない）
-- **アクセス権限**: `SETTLEMENT_OWNER_SHOPS` でオーナーが閲覧できる店舗を制御。GET時にサーバー側で許可店舗のみ返す（未設定なら record.owner タグ一致）。本社の公開タグ付けも同設定を優先（`stOwnerFor`）
-- **保存**: `api/settlement-store.js` 経由で `SETTLEMENT_GAS_URL`（スプレッドシート）に upsert/update。オーナーの更新は本人トークン＋owner一致行のみ許可
-- **認証**: `api/settlement-auth.js`（オーナー別PASS→トークン＋許可店舗）。トークンは `hashOwnerToken(owner, pw, AUTH_SALT)`
+- **オーナー（`owner.html`）**: PASSでログイン→月・店舗で検索→自分の店舗の明細書のみ閲覧→「確認済み」ボタン／「修正依頼」テキスト送信／**PDF保存・印刷**（`window.print` で各自ダウンロード保存。スプレッドシートは裏側の保存先でオーナーは触らない）
+- **オーナー管理UI（本社/root）**: 返金明細書タブの「オーナー管理」でパスワード発行・変更、アクセス店舗の設定、追加/削除を画面上で実施（`api/settlement-owners.js`→GAS「オーナー設定」シート。環境変数の再デプロイ不要）
+- **root権限**: `DASHBOARD_PASSWORD` で `owner.html` にログインすると全店舗を閲覧可能（`__root__` トークン）。本社ダッシュボードも同権限
+- **アカウントの読み込み**: `api/settlement-auth.js` が GAS「オーナー設定」＋環境変数（`SETTLEMENT_OWNER_PASSWORDS`/`SETTLEMENT_OWNER_SHOPS`）をマージ（GAS優先）
+- **アクセス権限**: オーナーが閲覧できる店舗をアカウント毎に設定。`settlement-store.js` の GET はトークン検証必須で、許可店舗のみ返す。本社の公開タグ付けも同設定を優先（`stOwnerFor`）
+- **保存**: `api/settlement-store.js` 経由で `SETTLEMENT_GAS_URL`（スプレッドシート）に upsert/update。オーナーの更新は本人トークン＋owner一致行のみ許可（rootは全て可）
 - **スナップショット方式**: 本社が算出した完成値を保存し、オーナーは再計算せず同じ値を表示（数値が完全一致）
 - **照合**: SalonOneスクエア売上 と Square(総決済−返金) が不一致なら明細に ⚠️ を表示
 - **期日/注意書き**: `lib/settlement.js` の `SETTLEMENT_SCHEDULE`/`SETTLEMENT_NOTES` が唯一の定義（2日売上確定→5日明細作成→10日オーナーチェック→15日振込、期日超過で修正不可）

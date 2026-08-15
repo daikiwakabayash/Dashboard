@@ -1445,6 +1445,37 @@
                 if (currentPage !== 'settlement' || stOwnerShops !== null) return;
                 fetch('/api/settlement-auth').then(r => r.json()).then(j => setStOwnerShops(j.shops || {})).catch(() => setStOwnerShops({}));
             }, [currentPage]);
+            // ── PDF保存/印刷（本社側でもオーナーと同じフォーマットで出力） ──
+            const stEsc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+            const stStatementHTML = (snap, month) => {
+                const y = (n) => '¥' + Math.round(Number(n) || 0).toLocaleString();
+                const ml = (() => { const [yy, mm] = String(month).split('-'); return `${yy}年${parseInt(mm)}月`; })();
+                const s = snap || {};
+                const row = (label, note, value, strong) => `<tr><td class="l">${stEsc(label)}${note ? ` <span class="n">${stEsc(note)}</span>` : ''}</td><td class="r${strong ? ' b' : ''}">${y(value)}</td></tr>`;
+                const meta = (s.metaAds || []).map(mx => row(mx.label || 'メタ広告', '', mx.amount)).join('');
+                const adj = (s.adjustments || []).map(a => row(a.label || '調整', '', a.amount)).join('');
+                return `<div class="doc"><div class="head"><div><div class="ttl">請求書 兼 支払明細書</div><div class="sub">${stEsc(s.owner)} 様</div><div class="sub2">（${stEsc(s.shopName || '')}）</div><div class="mon">${ml}分</div></div><div class="co"><div class="b">株式会社NAORUテクノロジー</div><div>NAORU FC本部</div><div>登録番号：T9010701040194</div><div>〒140-0014 東京都品川区大井6-4-4</div><div>電話：03-6822-8474</div></div></div>`
+                    + `<div class="refund"><span>ご返金金額</span><span class="amt">${y(s.refundAmount)}</span></div>`
+                    + `<div class="sec">売上（ロイヤリティ対象）</div><table>${row('現金売上', 'SalonOne', s.cash)}${row('スクエア売上', s.mismatch ? '⚠Square不一致' : 'Square', s.squareSales)}${row('ホットペッパーポイント', 'SalonOne', s.hpb)}${row('ロイヤリティー対象額合計（税込）', '', s.royaltyBase, true)}</table>`
+                    + `<div class="sec">請求内容</div><table>${row('FCロイヤリティ', `対象額の${s.royaltyRate}%`, s.royalty)}${row('スクエア手数料', s.feeRate != null ? `売上比 ${s.feeRate}%` : '', s.sqFees)}${s.spotip ? row('Spotip利用料', 'AI姿勢分析', s.spotip) : ''}${meta}${adj}${row('税込請求合計', `内税 ${y(s.tax)}`, s.billTotal, true)}</table>`
+                    + `<div class="note">備考：スクエア売上 ${y(s.squareSales)} より請求額 ${y(s.billTotal)} を差し引いた ${y(s.refundAmount)} をご返金いたします。</div></div>`;
+            };
+            const stPrintSnapshots = (list, month) => {
+                const w = window.open('', '_blank');
+                if (!w) { alert('ポップアップがブロックされました。ブラウザのポップアップを許可してください。'); return; }
+                const body = list.map(snap => stStatementHTML(snap, month)).join('<div class="pb"></div>');
+                w.document.write(`<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8"><title>返金明細書</title><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;color:#0f172a;padding:16px}.doc{max-width:720px;margin:0 auto 24px;padding:24px;border:1px solid #e2e8f0;border-radius:12px}.head{display:flex;justify-content:space-between;gap:16px;border-bottom:2px solid #1e293b;padding-bottom:12px;margin-bottom:14px}.ttl{font-size:20px;font-weight:800;letter-spacing:.15em}.sub{font-weight:700;margin-top:6px}.sub2{font-size:12px;color:#64748b;font-weight:700}.mon{font-weight:800;margin-top:2px}.co{text-align:right;font-size:11px;color:#64748b;line-height:1.6}.co .b{color:#334155;font-weight:800;font-size:13px}.refund{display:flex;justify-content:space-between;align-items:center;background:#f8fafc;border:2px solid #cbd5e1;border-radius:10px;padding:10px 18px;margin-bottom:16px}.refund span{font-weight:800}.refund .amt{font-size:24px}.sec{background:#f1f5f9;padding:6px 10px;border-radius:6px;font-weight:800;font-size:13px;margin:14px 0 4px}table{width:100%;border-collapse:collapse;font-size:13px}td{padding:7px 10px;border-bottom:1px solid #f1f5f9}.r{text-align:right;font-weight:700}.b{font-weight:800;background:#f8fafc}.n{font-size:10px;color:#94a3b8}.note{font-size:11px;color:#64748b;font-weight:700;border-top:1px solid #e2e8f0;margin-top:12px;padding-top:10px}.pb{page-break-after:always}@media print{body{padding:0}.doc{border:none;margin:0 auto}}</style></head><body>${body}<script>window.onload=function(){setTimeout(function(){window.print();},300);};<\/script></body></html>`);
+                w.document.close();
+            };
+            const stPrintShop = (shop) => {
+                const d = stData[`${stMonth}:${shop.id}`]; if (!d) return;
+                stPrintSnapshots([stComputeSnapshot(shop, d.salon, d.square, stManual[`${shop.id}_${stMonth}`])], stMonth);
+            };
+            const stPrintSelected = () => {
+                const shopList0 = (soShops.length ? soShops : soDemoShops);
+                const snaps = stSel.map(id => { const shop = shopList0.find(s => String(s.id) === String(id)); const d = stData[`${stMonth}:${id}`]; return (shop && d) ? stComputeSnapshot(shop, d.salon, d.square, stManual[`${id}_${stMonth}`]) : null; }).filter(Boolean);
+                if (snaps.length) stPrintSnapshots(snaps, stMonth);
+            };
             // オーナーアカウント一覧を取得（GAS）
             const stLoadAccounts = async () => {
                 try {
@@ -11498,12 +11529,15 @@
                         const stHasCfg = stOwnerShops && Object.keys(stOwnerShops).length > 0;
                         const stOwnerMap = stHasCfg ? stOwnerShops : OWNER_BRANCHES;
                         const stOwners = Object.keys(stOwnerMap);
+                        // オーナーが持つ「SalonOneに実在する店舗」のみを対象にする（数字も実在数）
+                        const stOwnerShopsMatch = (owner) => shopList.filter(s => (stOwnerMap[owner] || []).some(b => s.name.includes(b)));
+                        const stOwnersWithShops = stOwners.map(o => ({ o, shops: stOwnerShopsMatch(o) })).filter(x => x.shops.length > 0);
                         const stRecByOwner = (() => { const m = {}; stRecords.forEach(r => { (m[r.owner || '（未設定）'] = m[r.owner || '（未設定）'] || []).push(r); }); return m; })();
                         const selShops = stSel.map(id => shopList.find(s => String(s.id) === String(id))).filter(Boolean);
                         const stSelLabel = stSel.length === 0 ? '店舗を選択' : stSel.length === 1 ? ((shopList.find(s => String(s.id) === String(stSel[0])) || {}).name || '1店舗') : `${stSel.length}店舗選択中`;
                         const toggleShop = (id) => setStSel(prev => prev.map(String).includes(String(id)) ? prev.filter(x => String(x) !== String(id)) : [...prev, String(id)]);
                         const selectAll = () => setStSel(shopList.map(s => String(s.id)));
-                        const selectOwner = (owner) => { const br = stOwnerMap[owner] || []; setStSel(shopList.filter(s => br.some(b => s.name.includes(b))).map(s => String(s.id))); };
+                        const selectOwner = (owner) => setStSel(stOwnerShopsMatch(owner).map(s => String(s.id)));
 
                         // ── 明細書1件（複数店舗を縦に並べて表示） ──
                         const StCard = ({ shop }) => {
@@ -11617,6 +11651,7 @@
                                         <p className="text-[11px] text-slate-400 font-bold mt-0.5">{rec ? `公開済み${rec.confirmedAt ? '・確認' + rec.confirmedAt.slice(0, 10) : ''}。編集後に再公開すると内容が更新されます（確認状況は保持）。` : 'この明細書を公開すると、対象オーナーがポータルで確認できます。'}</p>
                                         {rec && rec.status === 'revision_requested' && rec.revisionNote && (<p className="text-[11px] text-rose-700 font-bold mt-1">✏️ 修正依頼: {rec.revisionNote}</p>)}
                                     </div>
+                                    <button onClick={() => stPrintShop(shop)} className="px-3 py-2.5 bg-slate-800 text-white rounded-xl text-sm font-black hover:bg-slate-700 flex items-center gap-1.5 justify-center">⬇ PDF保存/印刷</button>
                                     <button onClick={() => stPublishShop(shop)} disabled={stPublishingId === String(shop.id) || (salon && salon.error)} className="px-4 py-2.5 bg-brand-500 text-white rounded-xl text-sm font-black hover:bg-brand-600 disabled:opacity-40 flex items-center gap-2 justify-center">
                                         {stPublishingId === String(shop.id) ? <><Loader2 size={15} className="animate-spin" />公開中...</> : <><Send size={15} />{rec ? '再公開' : 'オーナーに公開'}</>}
                                     </button>
@@ -11650,8 +11685,8 @@
                                                         <button onClick={() => setStSel([])} className="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-[11px] font-black hover:bg-slate-200">解除</button>
                                                     </div>
                                                     <select onChange={e => { if (e.target.value) selectOwner(e.target.value); }} value="" className="mb-2 px-2 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-bold text-slate-700">
-                                                        <option value="">オーナーで選択...</option>
-                                                        {stOwners.map(o => <option key={o} value={o}>{o}（{(stOwnerMap[o] || []).length}）</option>)}
+                                                        <option value="">オーナーで選択...（SalonOne接続店のみ）</option>
+                                                        {stOwnersWithShops.map(({ o, shops }) => <option key={o} value={o}>{o}（{shops.length}）</option>)}
                                                     </select>
                                                     <div className="relative pb-2"><Search className="absolute left-2.5 top-2 w-4 h-4 text-slate-400" /><input placeholder="店舗を検索..." className="w-full pl-8 pr-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold outline-none" value={stShopSearch} onChange={e => setStShopSearch(e.target.value)} /></div>
                                                     <div className="overflow-y-auto space-y-1">
@@ -11738,10 +11773,14 @@
                                         <Users size={16} className="text-slate-600" />
                                         <h3 className="text-sm font-black text-slate-800">オーナーへ公開</h3>
                                         <span className="text-[11px] text-slate-400 font-bold">表示中の {selShops.length} 店舗（{monthLabel}分）</span>
-                                        <button onClick={stPublishSelected} disabled={stPublishing || stMultiLoad.running || selShops.length === 0}
-                                            className="ml-auto px-4 py-2 bg-slate-900 text-white rounded-xl text-sm font-black hover:bg-slate-800 disabled:opacity-40 flex items-center gap-2">
-                                            {stPublishing ? <><Loader2 size={15} className="animate-spin" />公開中...</> : <><Send size={15} />表示中の{selShops.length}店舗を一括公開</>}
-                                        </button>
+                                        <div className="ml-auto flex items-center gap-2">
+                                            <button onClick={stPrintSelected} disabled={selShops.length === 0}
+                                                className="px-4 py-2 bg-slate-800 text-white rounded-xl text-sm font-black hover:bg-slate-700 disabled:opacity-40 flex items-center gap-2">⬇ 全部PDF保存/印刷</button>
+                                            <button onClick={stPublishSelected} disabled={stPublishing || stMultiLoad.running || selShops.length === 0}
+                                                className="px-4 py-2 bg-slate-900 text-white rounded-xl text-sm font-black hover:bg-slate-800 disabled:opacity-40 flex items-center gap-2">
+                                                {stPublishing ? <><Loader2 size={15} className="animate-spin" />公開中...</> : <><Send size={15} />表示中の{selShops.length}店舗を一括公開</>}
+                                            </button>
+                                        </div>
                                     </div>
                                     {stStoreMsg && <p className="text-xs font-bold text-slate-600">{stStoreMsg}</p>}
                                     <p className="text-[11px] text-slate-400 font-bold">※ 上部の店舗セレクトで「全店舗」や「オーナーで選択」を選ぶと、複数店舗の明細書を一度に表示できます。個別に手動項目（Spotip・広告費等）を編集してから公開/再公開も可能です（オーナーの確認状況は保持されます）。</p>

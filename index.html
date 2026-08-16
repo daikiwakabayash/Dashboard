@@ -1281,6 +1281,20 @@
             const [stShopSearch, setStShopSearch] = useState('');
             useEffect(() => { try { localStorage.setItem('settlement_manual_v1', JSON.stringify(stManual)); } catch {} }, [stManual]);
             const stManualDefault = { royaltyRate: 15, taxRate: 10, spotip: 10000, metaAds: [], adjustments: [] };
+            // 当月の手動項目を返す。未入力なら直近の過去月（最大12ヶ月遡る）を引き継ぐ。
+            // manualObj を引数に取り、setStManual のプレビュー内でも使えるようにする。
+            const stCarriedManual = (manualObj, shopId, month) => {
+                const key = `${shopId}_${month}`;
+                if (manualObj[key]) return { ...stManualDefault, ...manualObj[key] };
+                let [y, mo] = String(month).split('-').map(Number);
+                for (let i = 0; i < 12; i++) {
+                    mo--; if (mo < 1) { mo = 12; y--; }
+                    const k = `${shopId}_${y}-${String(mo).padStart(2, '0')}`;
+                    if (manualObj[k]) return { ...stManualDefault, ...manualObj[k], _carried: true };
+                }
+                return { ...stManualDefault };
+            };
+            const stManualFor = (shopId, month) => stCarriedManual(stManual, shopId, month);
             // オーナー共有（GAS保存）用の状態
             const [stRecords, setStRecords] = useState([]);        // 当月の公開済みレコード（確認状況）
             const [stStoreMsg, setStStoreMsg] = useState('');
@@ -1395,7 +1409,7 @@
                 setStMultiLoad({ running: false, done: todo.length, total: todo.length });
                 // 取得できた店舗を自動でオーナーに共有（公開ボタン不要）
                 const recs = Object.values(acc).filter(x => x.data && !(x.data.salon && x.data.salon.error))
-                    .map(({ shop, data }) => ({ shopId: String(shop.id), shopName: shop.name, owner: stComputeSnapshot(shop, data.salon, data.square, stManual[`${shop.id}_${stMonth}`]).owner, month: stMonth, snapshot: stComputeSnapshot(shop, data.salon, data.square, stManual[`${shop.id}_${stMonth}`]) }));
+                    .map(({ shop, data }) => { const snap = stComputeSnapshot(shop, data.salon, data.square, stManualFor(shop.id, stMonth)); return { shopId: String(shop.id), shopName: shop.name, owner: snap.owner, month: stMonth, snapshot: snap }; });
                 stAutoPublish(recs);
             };
             // 自動共有（サイレント）: 取得/編集した明細をGASに保存してオーナーに見せる
@@ -1422,7 +1436,7 @@
                         const shop = shopList0.find(s => String(s.id) === String(id));
                         const d = stData[stDataKey(id)];
                         if (!shop || !d || (d.salon && d.salon.error)) return null;
-                        const snap = stComputeSnapshot(shop, d.salon, d.square, stManual[`${id}_${stMonth}`]);
+                        const snap = stComputeSnapshot(shop, d.salon, d.square, stManualFor(id, stMonth));
                         return { shopId: String(id), shopName: shop.name, owner: snap.owner, month: stMonth, snapshot: snap };
                     }).filter(Boolean);
                     if (recs.length) stAutoPublish(recs);
@@ -1458,11 +1472,11 @@
             };
             const stPrintShop = (shop) => {
                 const d = stData[`${stMonth}:${shop.id}`]; if (!d) return;
-                stPrintSnapshots([stComputeSnapshot(shop, d.salon, d.square, stManual[`${shop.id}_${stMonth}`])], stMonth);
+                stPrintSnapshots([stComputeSnapshot(shop, d.salon, d.square, stManualFor(shop.id, stMonth))], stMonth);
             };
             const stPrintSelected = () => {
                 const shopList0 = (soShops.length ? soShops : soDemoShops);
-                const snaps = stSel.map(id => { const shop = shopList0.find(s => String(s.id) === String(id)); const d = stData[`${stMonth}:${id}`]; return (shop && d) ? stComputeSnapshot(shop, d.salon, d.square, stManual[`${id}_${stMonth}`]) : null; }).filter(Boolean);
+                const snaps = stSel.map(id => { const shop = shopList0.find(s => String(s.id) === String(id)); const d = stData[`${stMonth}:${id}`]; return (shop && d) ? stComputeSnapshot(shop, d.salon, d.square, stManualFor(id, stMonth)) : null; }).filter(Boolean);
                 if (snaps.length) stPrintSnapshots(snaps, stMonth);
             };
             // オーナーアカウント一覧を取得（GAS）
@@ -11535,8 +11549,14 @@
                             const loaded = !!salon || !!square;
                             const owner = soShopOwner(shop.name);
                             const key = `${shop.id}_${stMonth}`;
-                            const m = { ...stManualDefault, ...(stManual[key] || {}) };
-                            const setM = (patch) => setStManual(prev => ({ ...prev, [key]: { ...stManualDefault, ...(prev[key] || {}), ...patch } }));
+                            const m = stManualFor(shop.id, stMonth);        // 未入力なら前月分を引き継ぐ
+                            const mCarried = !!m._carried;
+                            // 編集時は「引き継ぎ値」を土台にして当月キーへ保存（他項目を失わない）
+                            const setM = (patch) => setStManual(prev => {
+                                const base = prev[key] ? prev[key] : stCarriedManual(prev, shop.id, stMonth);
+                                const { _carried, ...clean } = { ...stManualDefault, ...base, ...patch };
+                                return { ...prev, [key]: clean };
+                            });
                             const cash = salon && !salon.error ? salon.cash : 0;
                             const hpb = salon && !salon.error ? salon.hpb : 0;
                             const soSquare = salon && !salon.error ? salon.square : 0;
@@ -11600,8 +11620,8 @@
                                         </tbody></table>
                                     </div>
                                     <div className="mb-4">
-                                        <div className="bg-slate-100 px-3 py-1.5 font-black text-sm text-slate-700 rounded flex items-center justify-between">
-                                            <span>請求内容</span>
+                                        <div className="bg-slate-100 px-3 py-1.5 font-black text-sm text-slate-700 rounded flex items-center justify-between gap-2">
+                                            <span className="flex items-center gap-2">請求内容 {mCarried && <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-[10px] font-black">前月から引き継ぎ</span>}</span>
                                             <span className="text-[11px] text-slate-500 font-bold">ロイヤリティ率<input type="number" value={m.royaltyRate} onChange={e => setM({ royaltyRate: Number(e.target.value) })} className="w-12 mx-1 px-1 py-0.5 border border-slate-300 rounded text-right" />%</span>
                                         </div>
                                         <table className="w-full text-sm"><tbody>

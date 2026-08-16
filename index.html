@@ -2960,7 +2960,7 @@
                     const sh = shopList.find(x => soShopNorm(x.name) === nn)
                         || shopList.find(x => { const xn = soShopNorm(x.name); return nn.length >= 2 && (xn.includes(nn) || nn.includes(xn)); });
                     return { order: i, name, id: sh ? sh.id : null, active: !!sh, loading: !!sh,
-                             gross: 0, newSales: 0, existSales: 0, refund: 0, newCount: 0, joinCount: 0, joinRate: 0, active_count: 0, churn: 0, churnRate: 0, gReview: 0, hReview: 0 };
+                             gross: 0, newSales: 0, existSales: 0, refund: 0, newCount: 0, joinCount: 0, joinRate: 0, active_count: 0, churn: 0, churnRate: 0, rjoin: 0, gReview: 0, hReview: 0, therapist: 0 };
                 });
                 setSoShopRows(rows);
                 const targets = rows.filter(r => r.active);
@@ -2990,7 +2990,10 @@
                             const churn = rt ? (Number(rt.summary.churn_count) || 0) : 0;
                             const rjoin = rt ? (Number(rt.summary.join_count) || 0) : 0;
                             const churnRate = rjoin ? Math.round(churn / rjoin * 1000) / 10 : 0;
-                            setSoShopRows(prev => prev.map(r => r.order === row.order ? { ...r, loading: false, gross, newSales, existSales: Math.max(0, gross - newSales), refund, newCount, joinCount, joinRate, active_count, churn, churnRate, gReview, hReview } : r));
+                            // セラピスト数＝その月に稼働した担当者数。ヘルプ/未割当等の非個人は除外し、実績(施術or売上)がある人のみ
+                            const soNonTherapist = new Set(['ヘルプ', '未割当', '(不明)', '不明']);
+                            const therapist = sum ? sum.byStaff.filter(st => !soNonTherapist.has(String(st.name || '').trim()) && ((st.treatments || 0) > 0 || (st.gross || 0) > 0)).length : 0;
+                            setSoShopRows(prev => prev.map(r => r.order === row.order ? { ...r, loading: false, gross, newSales, existSales: Math.max(0, gross - newSales), refund, newCount, joinCount, joinRate, active_count, churn, churnRate, rjoin, gReview, hReview, therapist } : r));
                         } catch (e) {
                             setSoShopRows(prev => prev.map(r => r.order === row.order ? { ...r, loading: false } : r));
                         }
@@ -11515,6 +11518,14 @@
                                             ? [...soShopRows].sort((a, b) => soShopSort.dir === 'asc' ? a.order - b.order : b.order - a.order)
                                             : soSortBy(soShopRows, soShopSort.key, soShopSort.dir);
                                         const activeCount = soShopRows.filter(r => r.active).length;
+                                        // 合計/平均（導入店のみ対象）
+                                        const tRows = soShopRows.filter(r => r.active);
+                                        const tSum = (k) => tRows.reduce((a, r) => a + (Number(r[k]) || 0), 0);
+                                        const tGross = tSum('gross'), tNewSales = tSum('newSales'), tExist = tSum('existSales'), tRefund = tSum('refund');
+                                        const tNewCount = tSum('newCount'), tJoin = tSum('joinCount'), tActive = tSum('active_count'), tChurn = tSum('churn'), tRjoin = tSum('rjoin');
+                                        const tTherapist = tSum('therapist'), tG = tSum('gReview'), tH = tSum('hReview');
+                                        const tJoinRate = tNewCount ? Math.round(tJoin / tNewCount * 1000) / 10 : 0;
+                                        const tChurnRate = tRjoin ? Math.round(tChurn / tRjoin * 1000) / 10 : 0;
                                         return (
                                             <div className="bg-white p-4 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
                                                 <div className="flex items-center gap-2 mb-4 flex-wrap">
@@ -11533,6 +11544,7 @@
                                                                 <tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-white">
                                                                     <SortTh sKey="order" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pr-2 sticky left-0 bg-white z-30">#</SortTh>
                                                                     <SortTh sKey="name" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pr-2 sticky left-9 bg-white z-30">店舗</SortTh>
+                                                                    <SortTh sKey="therapist" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">セラピスト数</SortTh>
                                                                     <SortTh sKey="gross" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">売上</SortTh>
                                                                     <SortTh sKey="newSales" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">新規売上</SortTh>
                                                                     <SortTh sKey="existSales" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">既存売上</SortTh>
@@ -11548,10 +11560,29 @@
                                                                 </tr>
                                                             </thead>
                                                             <tbody>
+                                                                {/* 合計/平均行（見出しのすぐ下・導入店のみ集計） */}
+                                                                <tr className="border-b-2 border-slate-200 bg-emerald-50/70 font-black whitespace-nowrap">
+                                                                    <td className="py-2 pr-2 text-slate-400 sticky left-0 bg-emerald-50 z-10">—</td>
+                                                                    <td className="py-2 pr-2 text-slate-900 sticky left-9 bg-emerald-50 z-10">合計（{activeCount}店舗）</td>
+                                                                    <td className="py-2 px-2 text-right text-emerald-700">{tTherapist}名</td>
+                                                                    <td className="py-2 px-2 text-right text-slate-900">{soYen(tGross)}</td>
+                                                                    <td className="py-2 px-2 text-right text-emerald-600">{soYen(tNewSales)}</td>
+                                                                    <td className="py-2 px-2 text-right text-slate-600">{soYen(tExist)}</td>
+                                                                    <td className="py-2 px-2 text-right text-rose-500">{tRefund ? '-' + soYen(tRefund) : '¥0'}</td>
+                                                                    <td className="py-2 px-2 text-right text-slate-600">{tNewCount.toLocaleString()}</td>
+                                                                    <td className="py-2 px-2 text-right text-emerald-600">{tJoin.toLocaleString()}</td>
+                                                                    <td className="py-2 px-2 text-right text-slate-600">{tNewCount ? tJoinRate.toFixed(1) + '%' : '—'}</td>
+                                                                    <td className="py-2 px-2 text-right text-slate-700">{tActive.toLocaleString()}</td>
+                                                                    <td className="py-2 px-2 text-right text-slate-600">{tChurn.toLocaleString()}</td>
+                                                                    <td className="py-2 px-2 text-right text-slate-600">{tRjoin ? tChurnRate.toFixed(1) + '%' : '—'}</td>
+                                                                    <td className="py-2 px-2 text-right text-slate-600">{tG.toLocaleString()}</td>
+                                                                    <td className="py-2 pl-2 text-right text-slate-600">{tH.toLocaleString()}</td>
+                                                                </tr>
                                                                 {sortedShopRows.map((r) => (
                                                                     <tr key={r.order} className={`border-b border-slate-100 hover:bg-slate-50 transition-colors whitespace-nowrap ${!r.active ? 'opacity-50' : ''}`}>
                                                                         <td className="py-2.5 pr-2 font-black text-slate-300 sticky left-0 bg-white z-10">{r.order + 1}</td>
                                                                         <td className="py-2.5 pr-2 font-bold text-slate-800 sticky left-9 bg-white z-10">{r.name}{!r.active && <span className="ml-1.5 px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded text-[9px] font-black align-middle">未導入</span>}{r.loading && <span className="ml-1.5 text-[10px] font-bold text-amber-500">…</span>}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-700">{r.active ? r.therapist + '名' : '—'}</td>
                                                                         <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(r.gross)}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{soYen(r.newSales)}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-slate-500">{soYen(r.existSales)}</td>
@@ -11568,7 +11599,7 @@
                                                                 ))}
                                                             </tbody>
                                                         </table>
-                                                        <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 既定は出店順（列見出しクリックで並べ替え）。売上・返金・口コミ＝SalonOne売上、新規数/入会数/入会率＝マーケ、会員数/退会数/退会率＝継続データ。SalonOne未導入の店舗は「未導入」バッジで0表示。</p>
+                                                        <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 既定は出店順（列見出しクリックで並べ替え）。1行目は合計/平均（導入店のみ・入会率と退会率は全体の加重平均）。セラピスト数＝選択月に稼働した担当者数（ヘルプ/未割当は除外・施術または売上のある人のみ）。売上・返金・口コミ＝SalonOne売上、新規数/入会数/入会率＝マーケ、会員数/退会数/退会率＝継続データ。SalonOne未導入の店舗は「未導入」バッジで0表示。</p>
                                                     </div>
                                                 )}
                                             </div>

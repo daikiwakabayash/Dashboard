@@ -744,6 +744,8 @@
         // SalonOne 分析API（読み取り専用）はサーバーサイドプロキシ経由でキーを隠蔽
         const SALONONE_API_URL = '/api/salonone';
         // 例: fetch(`${SALONONE_API_URL}?resource=sales/summary&from=2026-07-01&to=2026-07-31`)
+        // 店舗別タブの既定並び順（出店順）。SalonOne未導入の店舗も0で必ず表示する
+        const SO_SHOP_ORDER = ['大森院','千葉駅院','飯田橋院','関内院','新宿院','銀座院','西川口院','仙台院','新馬場院','四条烏丸院','千種院','太田院','浦添院','宮崎院','三鷹院','金山院','春日部院','日暮里院','福岡天神院','岐阜院','南浦和院','川越院','池袋院','福島院','伏見院','浅草院','住吉院','三宮院','勝田台院','藤が丘院','福岡姪浜院','本厚木院','仙台長町院','京都花園院','人形町院','荻窪院','恵比寿院','長崎大村院','香椎院','北海道札幌院','国分寺院','沖縄ｺｻﾞ院','鶴見院','池尻大橋院','大塚院','山形天童院','兵庫院','大山院','相模大野院','武蔵小杉院','溝の口院','沖縄大里院','名古屋八事院','大阪茨木院','中野院','錦糸町院','上大岡院','大阪京橋院','諫早院','十条院','平塚院','大宮院','目黒院','蒲田院','広島福山院','藤沢院','泉中央院','山形院','町田院','熊本院','北千住院','渋谷院','中百舌鳥院','札幌白石院','大分あけのクロス院','鹿児島院','新潟院','綱島院','上溝院','笹塚院','センター南院','天満天六院','静岡院','八王子院','上北沢院','金沢院','岡山院','博多院','新越谷院','江坂院'];
         //     fetch(`${SALONONE_API_URL}?resource=customers&limit=200&cursor=<next_cursor>`)
         //     fetch(`${SALONONE_API_URL}?diagnostic=1`)  // 疎通確認
         const fetchSalonOne = (resource, params = {}) => {
@@ -1257,7 +1259,13 @@
             const [soChannels, setSoChannels] = useState([]);   // マーケ: 媒体別 新規獲得
             const [soStaffMk, setSoStaffMk] = useState([]);     // マーケ: 担当者別 新規獲得
             const [soRetention, setSoRetention] = useState(null); // マーケ: 継続顧客（summary/by_source/by_staff/by_purchases）
-            const [soView, setSoView] = useState('overview');   // サブタブ: overview | staff | marketing | daily
+            const [soView, setSoView] = useState('overview');   // サブタブ: overview | staff | marketing | daily | plan | shops
+            // 店舗別タブ
+            const [soShopRows, setSoShopRows] = useState([]);       // 店舗別集計行
+            const [soShopLoading, setSoShopLoading] = useState(false);
+            const [soShopProgress, setSoShopProgress] = useState(null); // { done, total }
+            const [soShopSort, setSoShopSort] = useState({ key: 'order', dir: 'asc' }); // 既定=出店順
+            const soShopReqRef = useRef(0);
             const [soStaffSort, setSoStaffSort] = useState({ key: 'gross', dir: 'desc' });  // スタッフ別売上ソート
             const [soChSort, setSoChSort] = useState({ key: 'booking', dir: 'desc' });      // 媒体別ソート
             const [soMkSort, setSoMkSort] = useState({ key: 'booking', dir: 'desc' });      // 担当者別ソート
@@ -2927,6 +2935,55 @@
                     setSoFutureRepeat({ sales, count, ready: true, loading: false });
                 } catch (e) { setSoFutureRepeat({ sales, count, ready: true, loading: false }); }
             };
+            // 店舗別集計: 出店順(SO_SHOP_ORDER)で全店を並べ、SalonOne導入店(soShopsに一致)のみ実データを取得。未導入は0。
+            const soShopNorm = (n) => String(n || '').replace('NAORU整体', '').replace('NAORU', '').replace(/\s+/g, '').replace(/[院店]$/, '').trim();
+            const loadShopBreakdown = async () => {
+                const reqId = ++soShopReqRef.current;
+                setSoShopLoading(true);
+                const shopList = soShops.length ? soShops : [];
+                const rows = SO_SHOP_ORDER.map((name, i) => {
+                    const sh = shopList.find(x => soShopNorm(x.name) === soShopNorm(name));
+                    return { order: i, name, id: sh ? sh.id : null, active: !!sh, loading: !!sh,
+                             gross: 0, newSales: 0, existSales: 0, refund: 0, newCount: 0, joinCount: 0, joinRate: 0, active_count: 0, churn: 0, churnRate: 0, gReview: 0, hReview: 0 };
+                });
+                setSoShopRows(rows);
+                const targets = rows.filter(r => r.active);
+                setSoShopProgress({ done: 0, total: targets.length });
+                let done = 0, idx = 0;
+                const worker = async () => {
+                    while (idx < targets.length) {
+                        const row = targets[idx++];
+                        const q = (res) => `${SALONONE_API_URL}?${new URLSearchParams({ resource: res, from: soFrom, to: soTo, shop_id: row.id }).toString()}`;
+                        try {
+                            const [sumR, chR, rtR] = await Promise.all([
+                                fetch(q('sales/summary')).then(r => r.json()).catch(() => ({})),
+                                fetch(q('marketing/by-channel')).then(r => r.json()).catch(() => ({})),
+                                fetch(q('marketing/retention')).then(r => r.json()).catch(() => ({})),
+                            ]);
+                            if (soShopReqRef.current !== reqId) return;
+                            const sum = sumR && sumR.data ? normalizeSalonSummary({ data: sumR.data }) : null;
+                            const ch = chR && chR.data ? normalizeMkChannels({ data: chR.data }) : [];
+                            const rt = rtR && rtR.data ? normalizeMkRetention(rtR.data) : null;
+                            const gross = sum ? sum.grossSales : 0, newSales = sum ? sum.newSales : 0, refund = sum ? sum.refund : 0;
+                            const gReview = sum ? sum.byStaff.reduce((a, st) => a + (st.gReview || 0), 0) : 0;
+                            const hReview = sum ? sum.byStaff.reduce((a, st) => a + (st.hReview || 0), 0) : 0;
+                            const newCount = ch.reduce((a, c) => a + (c.visit || 0), 0);
+                            const joinCount = ch.reduce((a, c) => a + (c.join || 0), 0);
+                            const joinRate = newCount ? Math.round(joinCount / newCount * 1000) / 10 : 0;
+                            const active_count = rt ? (Number(rt.summary.active_count) || 0) : 0;
+                            const churn = rt ? (Number(rt.summary.churn_count) || 0) : 0;
+                            const rjoin = rt ? (Number(rt.summary.join_count) || 0) : 0;
+                            const churnRate = rjoin ? Math.round(churn / rjoin * 1000) / 10 : 0;
+                            setSoShopRows(prev => prev.map(r => r.order === row.order ? { ...r, loading: false, gross, newSales, existSales: Math.max(0, gross - newSales), refund, newCount, joinCount, joinRate, active_count, churn, churnRate, gReview, hReview } : r));
+                        } catch (e) {
+                            setSoShopRows(prev => prev.map(r => r.order === row.order ? { ...r, loading: false } : r));
+                        }
+                        done++; setSoShopProgress({ done, total: targets.length });
+                    }
+                };
+                await Promise.all(Array.from({ length: 4 }, worker));   // 並列度4でレート制限を抑制
+                if (soShopReqRef.current === reqId) setSoShopLoading(false);
+            };
             const soAiAnalyze = async () => {
                 setSoAiLoading(true); setSoAiResult('');
                 try {
@@ -3435,6 +3492,11 @@
                 if (currentPage === 'salonone' && soView === 'plan') soLoadFutureRepeat();
                 else if (currentPage !== 'salonone') setSoFutureRepeat({ sales: 0, count: 0, ready: false, loading: false });
             }, [currentPage, soView, soShopSel.join(','), soFrom, soTo]);
+
+            // 店舗別タブを開いたら（期間変更時も）全店を出店順で集計
+            useEffect(() => {
+                if (currentPage === 'salonone' && soView === 'shops' && soShops.length) loadShopBreakdown();
+            }, [currentPage, soView, soFrom, soTo, soShops.length]);
 
             // ===== 予約メニュー分析機能（J列メニュー名ベース） =====
 
@@ -11242,6 +11304,7 @@
                                         {[
                                             { k: 'overview', label: '概要', icon: <BarChart3 size={15} /> },
                                             { k: 'staff', label: 'スタッフ', icon: <Users size={15} /> },
+                                            { k: 'shops', label: '店舗', icon: <MapPin size={15} /> },
                                             { k: 'marketing', label: 'マーケ', icon: <Megaphone size={15} /> },
                                             { k: 'daily', label: '日報', icon: <Calendar size={15} /> },
                                             { k: 'plan', label: '計画', icon: <Target size={15} /> },
@@ -11425,6 +11488,72 @@
                                             </div>
                                         </>
                                     )}
+
+                                    {/* ===== 店舗別売上（出店順・全店） ===== */}
+                                    {soView === 'shops' && (() => {
+                                        const sortedShopRows = soShopSort.key === 'order'
+                                            ? [...soShopRows].sort((a, b) => soShopSort.dir === 'asc' ? a.order - b.order : b.order - a.order)
+                                            : soSortBy(soShopRows, soShopSort.key, soShopSort.dir);
+                                        const activeCount = soShopRows.filter(r => r.active).length;
+                                        return (
+                                            <div className="bg-white p-4 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
+                                                <div className="flex items-center gap-2 mb-4 flex-wrap">
+                                                    <MapPin size={18} className="text-emerald-600" />
+                                                    <h2 className="text-base md:text-lg font-black text-slate-900">店舗別売上</h2>
+                                                    <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-[10px] font-black">出店順</span>
+                                                    {soShopLoading && soShopProgress && (<span className="text-xs font-bold text-amber-600">集計中… {soShopProgress.done}/{soShopProgress.total}店舗</span>)}
+                                                    <span className="text-xs font-bold text-slate-400 ml-auto">全{soShopRows.length}店舗（SalonOne導入 {activeCount}）</span>
+                                                </div>
+                                                {soShopRows.length === 0 ? (
+                                                    <p className="text-center text-slate-400 font-bold py-8">店舗一覧を取得中…（SalonOne店舗の読み込み後に集計します）</p>
+                                                ) : (
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-sm whitespace-nowrap">
+                                                            <thead>
+                                                                <tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200">
+                                                                    <SortTh sKey="order" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pr-2">#</SortTh>
+                                                                    <SortTh sKey="name" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pr-2">店舗</SortTh>
+                                                                    <SortTh sKey="gross" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">売上</SortTh>
+                                                                    <SortTh sKey="newSales" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">新規売上</SortTh>
+                                                                    <SortTh sKey="existSales" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">既存売上</SortTh>
+                                                                    <SortTh sKey="refund" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">返金</SortTh>
+                                                                    <SortTh sKey="newCount" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">新規数</SortTh>
+                                                                    <SortTh sKey="joinCount" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">入会数</SortTh>
+                                                                    <SortTh sKey="joinRate" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">入会率</SortTh>
+                                                                    <SortTh sKey="active_count" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">会員数</SortTh>
+                                                                    <SortTh sKey="churn" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">退会数</SortTh>
+                                                                    <SortTh sKey="churnRate" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">退会率</SortTh>
+                                                                    <SortTh sKey="gReview" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">G口コミ</SortTh>
+                                                                    <SortTh sKey="hReview" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pl-2 text-right">H口コミ</SortTh>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                {sortedShopRows.map((r) => (
+                                                                    <tr key={r.order} className={`border-b border-slate-100 hover:bg-slate-50 transition-colors whitespace-nowrap ${!r.active ? 'opacity-50' : ''}`}>
+                                                                        <td className="py-2.5 pr-2 font-black text-slate-300">{r.order + 1}</td>
+                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800">{r.name}{!r.active && <span className="ml-1.5 px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded text-[9px] font-black align-middle">未導入</span>}{r.loading && <span className="ml-1.5 text-[10px] font-bold text-amber-500">…</span>}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(r.gross)}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{soYen(r.newSales)}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{soYen(r.existSales)}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-rose-500">{r.refund ? '-' + soYen(r.refund) : '¥0'}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.newCount.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{r.joinCount.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.newCount ? r.joinRate.toFixed(1) + '%' : '—'}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-700">{r.active_count.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.churn.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.churn ? r.churnRate.toFixed(1) + '%' : '—'}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.gReview.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.hReview.toLocaleString()}</td>
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                        <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 既定は出店順（列見出しクリックで並べ替え）。売上・返金・口コミ＝SalonOne売上、新規数/入会数/入会率＝マーケ、会員数/退会数/退会率＝継続データ。SalonOne未導入の店舗は「未導入」バッジで0表示。</p>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })()}
 
                                     {/* ===== マーケ分析（売上サマリの成否に依存せず表示） ===== */}
                                     {soView === 'marketing' && (soChannels.length > 0 || soStaffMk.length > 0 || soRetention) && (

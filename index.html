@@ -1547,6 +1547,7 @@
             const soStaffMenuRef = useRef(null);
             const soInitialized = useRef(false);
             const soReqRef = useRef(0); // フェッチ競合ガード（店舗切替時に古い応答で上書きしない）
+            const [soFutureNew, setSoFutureNew] = useState({ sales: 0, visits: 0, ready: false, loading: false }); // 未来の新規予約（受付履歴）
 
             // ソート用 State
             const [branchSortKey, setBranchSortKey] = useState('newCount');
@@ -2788,6 +2789,45 @@
                 return { total, elapsed, pace: total / elapsed };
             };
             const soPlanForecast = (m, actualVal, pace) => m.rate ? actualVal : Math.round((actualVal || 0) * pace);
+            // 未来の新規予約（受付履歴）を集計して新規売上/新規来店の着地を実額化
+            const soLoadFutureNew = async () => {
+                const shopList0 = (soShops.length ? soShops : soDemoShops);
+                const ids = soShopSel.length ? soShopSel.map(String) : shopList0.map(s => String(s.id));
+                if (!ids.length) { setSoFutureNew({ sales: 0, visits: 0, ready: true, loading: false }); return; }
+                const today = new Date(); today.setHours(0, 0, 0, 0);
+                const periodEnd = new Date(soTo + 'T23:59:59');
+                const jstDate = (utc) => { const d = new Date(String(utc).replace(' ', 'T') + 'Z'); return new Date(d.getTime() + 9 * 3600000); };
+                setSoFutureNew(f => ({ ...f, loading: true, ready: false }));
+                let sales = 0, visits = 0;
+                try {
+                    for (const id of ids) {
+                        let cursor = null, pages = 0;
+                        while (pages < 8) {
+                            const p = new URLSearchParams({ resource: 'appointments', shop_id: id, limit: '1000' });
+                            if (cursor) p.set('cursor', cursor);
+                            const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`);
+                            const j = await r.json().catch(() => ({}));
+                            const arr = j.data || [];
+                            let passedEnd = false;
+                            for (const a of arr) {
+                                if (a.cancelled_at) continue;
+                                const d = jstDate(a.start_at);
+                                if (d > periodEnd) { passedEnd = true; continue; }
+                                if (d <= today) continue;               // 到来済みは実績に含まれる
+                                if (!String(a.customer_match_status || '').includes('new')) continue; // 新規のみ
+                                const amt = Math.max(Number(a.total_price) || 0, Number(a.booked_total_price) || 0);
+                                if (amt > 0) sales += amt;
+                                visits += 1;
+                            }
+                            pages++;
+                            const meta = j.meta || {};
+                            if (!meta.has_more || passedEnd || !meta.next_cursor) break; // 昇順→期間末を超えたら終了
+                            cursor = meta.next_cursor;
+                        }
+                    }
+                    setSoFutureNew({ sales, visits, ready: true, loading: false });
+                } catch (e) { setSoFutureNew({ sales, visits, ready: true, loading: false }); }
+            };
             const soAiAnalyze = async () => {
                 setSoAiLoading(true); setSoAiResult('');
                 try {
@@ -3221,6 +3261,12 @@
 
             // 店舗選択が変わったらスタッフ選択をリセット
             useEffect(() => { setSoStaffSel([]); }, [soShopSel]);
+
+            // 計画サブタブを開いたら、未来の新規予約（受付履歴）を集計して着地に反映
+            useEffect(() => {
+                if (currentPage === 'salonone' && soView === 'plan') soLoadFutureNew();
+                else if (currentPage !== 'salonone') setSoFutureNew({ sales: 0, visits: 0, ready: false, loading: false });
+            }, [currentPage, soView, soShopSel.join(','), soFrom, soTo]);
 
             // ===== 予約メニュー分析機能（J列メニュー名ベース） =====
 
@@ -10748,6 +10794,17 @@
                             const planGoal = soPlanGoals[planKey] || {};
                             const planActual = soPlanActual();
                             const planPaceInfo = soPlanPace();
+                            // 着地予想: 新規売上/新規来店=実績+未来の新規予約(受付履歴の実額)。継続売上は現状ペース（Square定期課金連携は次段）
+                            const planFcNewSales = (planActual.newSales || 0) + (soFutureNew.sales || 0);
+                            const planFcNewVisits = (planActual.newVisits || 0) + (soFutureNew.visits || 0);
+                            const planFcRepeatSales = Math.round((planActual.repeatSales || 0) * planPaceInfo.pace);
+                            const planFcSales = planFcNewSales + planFcRepeatSales;
+                            const planForecastFor = (m, ac) => (
+                                m.key === 'sales' ? planFcSales :
+                                m.key === 'newSales' ? planFcNewSales :
+                                m.key === 'repeatSales' ? planFcRepeatSales :
+                                m.key === 'newVisits' ? planFcNewVisits :
+                                soPlanForecast(m, ac, planPaceInfo.pace));
                             const planActs = soActions.filter(a => !a.shopKey || a.shopKey === soShopKey());
                             // 計画: 個人（スタッフ）別実績（売上＝by_staff、新規獲得＝marketing by-staff）
                             const planStaffRows = (() => {
@@ -11414,7 +11471,7 @@
                                                         </tr></thead>
                                                         <tbody>
                                                             {SO_PLAN_METRICS.map(m => {
-                                                                const g = Number(planGoal[m.key]) || 0, ac = planActual[m.key] || 0, fc = soPlanForecast(m, ac, planPaceInfo.pace);
+                                                                const g = Number(planGoal[m.key]) || 0, ac = planActual[m.key] || 0, fc = planForecastFor(m, ac);
                                                                 const rate = g ? Math.round((m.rate ? ac : fc) / g * 100) : null;
                                                                 const barPct = g ? Math.min(100, Math.round(ac / g * 100)) : 0;
                                                                 const color = rate == null ? 'slate' : (rate >= 100 ? 'emerald' : (rate >= 80 ? 'amber' : 'rose'));
@@ -11437,7 +11494,9 @@
                                                         </tbody>
                                                     </table>
                                                 </div>
-                                                <p className="text-[10px] text-slate-400 mt-2 font-bold">着地予想＝実績÷経過日数×期間日数（継続率は現在値）。実績はSalonOne集計（管理画面一致）。</p>
+                                                <p className="text-[10px] text-slate-400 mt-2 font-bold">
+                                                    着地予想: 新規売上・新規来店＝実績＋受付履歴の未到来の新規予約（金額確定分）{soFutureNew.loading ? '（集計中…）' : soFutureNew.ready ? `＝未来分 +${soYen(soFutureNew.sales)}/${soFutureNew.visits}人` : ''} ／ 継続売上・入会数＝ペース（Square定期課金による継続の実額連携は次段で対応） ／ 総売上＝新規着地＋継続着地。継続率は現在値。実績はSalonOne集計（管理画面一致）。
+                                                </p>
                                             </div>
 
                                             {/* 個人別 実績 */}

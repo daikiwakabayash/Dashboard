@@ -2829,8 +2829,8 @@
                 const remainingRatio = pace.total > 0 ? Math.max(0, pace.total - pace.elapsed) / pace.total : 0;
                 const fut = futureOverride || soFutureNew;
                 const mrr = mrrOverride !== undefined ? mrrOverride : soPlanMRR();
-                // 未来の継続売上: Square定期課金を残り日数で日割り。MRR未取得時はペース法(実績×(pace-1))にフォールバック（いずれも0以上）
-                const repFuture = mrr != null ? Math.round(mrr * remainingRatio) : Math.round((actual.repeatSales || 0) * Math.max(0, pace.pace - 1));
+                // 未来の継続売上: Square定期課金(MRR>0)を残り日数で日割り。MRR未取得/未マッチ(0)時はペース法(実績×(pace-1))にフォールバック（いずれも0以上）
+                const repFuture = (mrr && mrr > 0) ? Math.round(mrr * remainingRatio) : Math.round((actual.repeatSales || 0) * Math.max(0, pace.pace - 1));
                 const newFuture = fut.sales || 0, visitFuture = fut.visits || 0;
                 let fc;
                 if (m.key === 'sales') fc = (actual.sales || 0) + newFuture + repFuture;
@@ -10964,16 +10964,27 @@
                             })();
                             const s = soSummary;
                             const totalVisits = s ? (s.newVisit + s.repeatVisit) : 0;
-                            // スタッフ→所属店舗マップ（SalonOne staffs）。選択店舗に属さないスタッフ（他店応援等でsales/summaryに混入）を除外
-                            const soStaffHomeShop = {}; (soStaffs || []).forEach(st => { if (st.id != null && st.id !== '') soStaffHomeShop[String(st.id)] = String(st.shop_id || ''); });
-                            const soStaffInSelectedShop = (id) => {
+                            // スタッフ→所属店舗マップ（SalonOne staffs）。選択店舗に属さないスタッフ（他店応援等でsales/summaryに混入）を除外。
+                            // sales/summaryのstaff_idとstaffsのidがズレる場合に備え、id と 氏名（空白除去）の両方で判定。
+                            const soSelShops = soShopSel.map(String);
+                            const soNorm = (v) => String(v || '').replace(/\s+/g, '').trim();
+                            const soStaffHomeById = {}, soStaffHomeByName = {};
+                            (soStaffs || []).forEach(st => {
+                                const home = String(st.shop_id || '');
+                                if (!home) return;
+                                if (st.id != null && st.id !== '') soStaffHomeById[String(st.id)] = home;
+                                const nm = soNorm(st.name); if (nm) (soStaffHomeByName[nm] = soStaffHomeByName[nm] || new Set()).add(home);
+                            });
+                            const soStaffInSelectedShop = (id, name) => {
                                 if (!soShopSel.length) return true;                 // 全店表示なら全員
-                                const home = soStaffHomeShop[String(id)];
-                                if (home == null || home === '') return true;       // 所属不明は除外しない（過剰除外を防ぐ）
-                                return soShopSel.map(String).includes(home);        // 所属店舗が選択店舗のときのみ表示
+                                const byId = soStaffHomeById[String(id)];
+                                if (byId) return soSelShops.includes(byId);         // id一致（最優先）
+                                const homes = soStaffHomeByName[soNorm(name)];
+                                if (homes && homes.size) return [...homes].some(h => soSelShops.includes(h)); // 氏名一致（idズレ時のフォールバック）
+                                return true;                                        // id・氏名とも所属不明のときだけ残す
                             };
                             const displayStaff = s ? s.byStaff
-                                .filter(st => soStaffInSelectedShop(st.id))
+                                .filter(st => soStaffInSelectedShop(st.id, st.name))
                                 .filter(st => soStaffSel.length === 0 || soStaffSel.map(String).includes(String(st.id))) : [];
                             const staffTotal = displayStaff.reduce((a, st) => a + st.gross, 0);
                             const maxDay = s && s.byDay.length ? Math.max(...s.byDay.map(d => d.gross), 1) : 1;
@@ -10998,7 +11009,7 @@
                             // ソート適用
                             const sortedStaff = soSortBy(staffRows, soStaffSort.key, soStaffSort.dir);
                             const sortedChannels = soSortBy(soChannels, soChSort.key, soChSort.dir);
-                            const sortedMkStaff = [...soStaffMk.filter(r => r.isTotal), ...soSortBy(soStaffMk.filter(r => !r.isTotal && soStaffInSelectedShop(r.id)), soMkSort.key, soMkSort.dir)];
+                            const sortedMkStaff = [...soStaffMk.filter(r => r.isTotal), ...soSortBy(soStaffMk.filter(r => !r.isTotal && soStaffInSelectedShop(r.id, r.name)), soMkSort.key, soMkSort.dir)];
                             const sortedDaily = s ? soSortBy(s.byDay, soDailySort.key, soDailySort.dir) : [];
                             // 計画サブタブ用
                             const planKey = soShopKey() + '_' + soFrom.slice(0, 7);
@@ -11696,7 +11707,7 @@
                                                     </table>
                                                 </div>
                                                 <p className="text-[10px] text-slate-400 mt-2 font-bold">
-                                                    着地予想＝<b>実績（本日までのSalonOne実績）＋未来分（明日〜{soTo.slice(5).replace('-', '/')}）</b>。着地は実績を絶対に下回りません。 ／ 新規来店＝実績＋残新規（マーケ集計の未来予定＝予約−来店−ｷｬﾝｾﾙ）{soFutureNew.ready ? `＝未来分 +${soFutureNew.visits}人` : ''}、新規売上＝実績＋残新規×新規客単価 ／ 継続売上＝実績＋Square定期課金 {planMRR != null ? soYen(planMRR) : '（Square読込中…）'} の残り{Math.max(0, planPaceInfo.total - planPaceInfo.elapsed)}日分（非定期は含めない） ／ 総売上＝実績＋未来新規＋未来継続。入会数＝実績＋未来の新規来店（受付履歴）×現在の入会率。継続率は現在値。実績はSalonOne集計（管理画面一致）。
+                                                    着地予想＝<b>実績（本日までのSalonOne実績）＋未来分（明日〜{soTo.slice(5).replace('-', '/')}）</b>。着地は実績を絶対に下回りません。 ／ 新規来店＝実績＋残新規（マーケ集計の未来予定＝予約−来店−ｷｬﾝｾﾙ）{soFutureNew.ready ? `＝未来分 +${soFutureNew.visits}人` : ''}、新規売上＝実績＋残新規×新規客単価 ／ 継続売上＝実績＋{(planMRR && planMRR > 0) ? `Square定期課金 ${soYen(planMRR)} の残り${Math.max(0, planPaceInfo.total - planPaceInfo.elapsed)}日分` : '残り日数ぶんのペース按分（Square定期課金が未取得/未マッチのため）'}（非定期は含めない） ／ 総売上＝実績＋未来新規＋未来継続。入会数＝実績＋未来の新規来店×現在の入会率。継続率は現在値。実績はSalonOne集計（管理画面一致）。
                                                 </p>
                                             </div>
 

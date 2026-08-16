@@ -1601,6 +1601,11 @@
             const [planBranchMenuOpen, setPlanBranchMenuOpen] = useState(false);
             const [planBranchSearch, setPlanBranchSearch] = useState('');
             const planBranchMenuRef = useRef(null);
+            // 事業計画相談: SalonOneデータ駆動（店舗選択・月次実績）
+            const [planSoShopId, setPlanSoShopId] = useState('');   // 選択中SalonOne店舗ID（''=全店）
+            const [planSoData, setPlanSoData] = useState(null);     // SalonOne月次実績 { shopId, months:[{month,summary,channels,retention}] }
+            const [planSoLoading, setPlanSoLoading] = useState(false);
+            const planSoReqRef = useRef(0);
             // 参考リンク管理
             const [planLinks, setPlanLinks] = useState(() => {
                 try {
@@ -2252,13 +2257,10 @@
                 }
             }, [currentPage]);
 
-            // 初期店舗選択: rawDataが読み込まれたら最初の店舗を選択
+            // 初期店舗選択: 事業計画相談は既定で「全店舗」（SalonOne駆動・GAS rawData非依存）
             useEffect(() => {
-                if (!planSelectedBranch && rawData.length > 0) {
-                    const branches = Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).sort();
-                    if (branches.length > 0) setPlanSelectedBranch(branches[0]);
-                }
-            }, [rawData, planSelectedBranch]);
+                if (!planSelectedBranch) setPlanSelectedBranch('全店舗');
+            }, [planSelectedBranch]);
 
             // マーケティングデータ取得
             const fetchMarketingData = async (forceRefresh = false) => {
@@ -2798,44 +2800,58 @@
                 return { total, elapsed, pace: total / elapsed };
             };
             const soPlanForecast = (m, actualVal, pace) => m.rate ? actualVal : Math.round((actualVal || 0) * pace);
-            // 未来の新規予約（受付履歴）を集計して新規売上/新規来店の着地を実額化
-            const soLoadFutureNew = async () => {
-                const shopList0 = (soShops.length ? soShops : soDemoShops);
-                const ids = soShopSel.length ? soShopSel.map(String) : shopList0.map(s => String(s.id));
-                if (!ids.length) { setSoFutureNew({ sales: 0, visits: 0, ready: true, loading: false }); return; }
-                const today = new Date(); today.setHours(0, 0, 0, 0);
-                const periodEnd = new Date(soTo + 'T23:59:59');
-                const jstDate = (utc) => { const d = new Date(String(utc).replace(' ', 'T') + 'Z'); return new Date(d.getTime() + 9 * 3600000); };
-                setSoFutureNew(f => ({ ...f, loading: true, ready: false }));
-                let sales = 0, visits = 0;
-                try {
-                    for (const id of ids) {
-                        let cursor = null, pages = 0;
-                        while (pages < 8) {
-                            const p = new URLSearchParams({ resource: 'appointments', shop_id: id, limit: '1000' });
-                            if (cursor) p.set('cursor', cursor);
-                            const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`);
-                            const j = await r.json().catch(() => ({}));
-                            const arr = j.data || [];
-                            let passedEnd = false;
-                            for (const a of arr) {
-                                if (a.cancelled_at) continue;
-                                const d = jstDate(a.start_at);
-                                if (d > periodEnd) { passedEnd = true; continue; }
-                                if (d <= today) continue;               // 到来済みは実績に含まれる
-                                if (!String(a.customer_match_status || '').includes('new')) continue; // 新規のみ
-                                const amt = Math.max(Number(a.total_price) || 0, Number(a.booked_total_price) || 0);
-                                if (amt > 0) sales += amt;
-                                visits += 1;
-                            }
-                            pages++;
-                            const meta = j.meta || {};
-                            if (!meta.has_more || passedEnd || !meta.next_cursor) break; // 昇順→期間末を超えたら終了
-                            cursor = meta.next_cursor;
-                        }
-                    }
-                    setSoFutureNew({ sales, visits, ready: true, loading: false });
-                } catch (e) { setSoFutureNew({ sales, visits, ready: true, loading: false }); }
+            // 店舗名の正規化（SalonOne店舗名 ↔ Square店舗名の照合用）
+            const soPlanCoreOf = (n) => String(n || '').replace('NAORU整体', '').replace('NAORU', '').replace(/[店院]$/, '').replace(/\s+/g, '').trim();
+            // 継続売上の未来分の原資: Square定期課金(アクティブ)の月額合計。選択店舗があれば絞り込み
+            const soPlanMRR = () => {
+                if (!sqData || !Array.isArray(sqData.subscriptions) || !Array.isArray(sqData.stores)) return null;
+                const active = sqData.subscriptions.filter(s => s.status === 'ACTIVE');
+                let locIds = null;
+                if (soShopSel.length) {
+                    const selCores = soShopSel.map(id => { const sh = (soShops.length ? soShops : soDemoShops).find(x => String(x.id) === String(id)); return sh ? soPlanCoreOf(sh.name) : ''; }).filter(Boolean);
+                    const set = new Set();
+                    sqData.stores.forEach(st => { const sc = soPlanCoreOf(st.name); if (selCores.some(c => c && (sc.includes(c) || c.includes(sc)))) (st.locationIds || [st.id]).forEach(l => set.add(l)); });
+                    locIds = set;
+                }
+                const subs = locIds ? active.filter(s => locIds.has(s.locationId)) : active;
+                return subs.reduce((a, s) => a + (Number(s.monthlyPrice) || 0), 0);
+            };
+            // 着地予想 = 実績(SalonOne 既存客の全売上・本日まで) ＋ 未来分(明日〜期間末)。着地は実績を絶対に下回らない
+            // ・新規売上/新規来店: 実績 ＋ 受付履歴の未到来の新規予約(実額)
+            // ・継続売上: 実績 ＋ Square定期課金(月額MRR)を残り日数で日割りした未請求分（非定期は含めない）
+            // ・総売上: 実績総売上 ＋ 未来新規売上 ＋ 未来継続売上
+            // ・継続率など率系: 実績値をそのまま
+            const soPlanForecastFor = (m, actualOverride, paceOverride, mrrOverride, futureOverride) => {
+                const actual = actualOverride || soPlanActual();
+                const pace = paceOverride || soPlanPace();
+                const ac = actual[m.key] || 0;
+                if (m.rate) return ac;
+                const remainingRatio = pace.total > 0 ? Math.max(0, pace.total - pace.elapsed) / pace.total : 0;
+                const fut = futureOverride || soFutureNew;
+                const mrr = mrrOverride !== undefined ? mrrOverride : soPlanMRR();
+                // 未来の継続売上: Square定期課金を残り日数で日割り。MRR未取得時はペース法(実績×(pace-1))にフォールバック（いずれも0以上）
+                const repFuture = mrr != null ? Math.round(mrr * remainingRatio) : Math.round((actual.repeatSales || 0) * Math.max(0, pace.pace - 1));
+                const newFuture = fut.sales || 0, visitFuture = fut.visits || 0;
+                let fc;
+                if (m.key === 'sales') fc = (actual.sales || 0) + newFuture + repFuture;
+                else if (m.key === 'newSales') fc = (actual.newSales || 0) + newFuture;
+                else if (m.key === 'repeatSales') fc = (actual.repeatSales || 0) + repFuture;
+                else if (m.key === 'newVisits') fc = (actual.newVisits || 0) + visitFuture;
+                // 入会数着地 = 実績入会 ＋ 未来の新規来店(受付履歴) × 現在の入会率。ペース掛け算ではなく予約ベースで実額化
+                else if (m.key === 'joins') { const er = actual.newVisits > 0 ? (actual.joins || 0) / actual.newVisits : 0; fc = (actual.joins || 0) + Math.round(visitFuture * er); }
+                else fc = Math.round(ac * pace.pace);
+                return Math.max(fc, ac); // 着地は実績を絶対に下回らない
+            };
+            // 未来の新規（＝残新規）を SalonOne マーケ集計（marketing/by-channel の remaining_count）から算出。
+            // remaining = 予約 − 来店 − キャンセル（＝まだ来ていない新規予約）で、SalonOne「残新規」と一致。
+            // 全店/各店ともに soChannels（選択店舗のマーケ集計）から算出するため店舗が変わっても正しくスコープされる。
+            // 受付履歴(appointments)の全件走査は新規判定が過大になり不正確だったため廃止。
+            const soLoadFutureNew = () => {
+                if (!soChannels || soChannels.length === 0) { setSoFutureNew({ sales: 0, visits: 0, ready: false, loading: false }); return; }
+                const remaining = soChannels.reduce((a, c) => a + (Number(c.remaining) || 0), 0); // 残新規（未来の新規来店予定）
+                const act = soPlanActual();
+                const avgTicket = act.newVisits > 0 ? (act.newSales || 0) / act.newVisits : 0;    // 現在の新規客単価
+                setSoFutureNew({ visits: remaining, sales: Math.round(remaining * avgTicket), ready: true, loading: false });
             };
             const soAiAnalyze = async () => {
                 setSoAiLoading(true); setSoAiResult('');
@@ -2843,15 +2859,16 @@
                     const shopLabel = soShopLabel();
                     const key = soShopKey() + '_' + soFrom.slice(0, 7);
                     const goal = soPlanGoals[key] || {};
-                    const actual = soPlanActual(); const pi = soPlanPace();
+                    const actual = soPlanActual(); const pi = soPlanPace(); const mrr = soPlanMRR();
                     const L = [];
                     L.push('【SalonOne 事業計画 PDCA分析】');
-                    L.push(`対象: ${shopLabel} / ${soFrom.slice(0, 7)} / 期間 ${soFrom}〜${soTo}（経過 ${pi.elapsed}/${pi.total}日）`);
+                    L.push(`対象: ${shopLabel} / ${soFrom.slice(0, 7)} / 期間 ${soFrom}〜${soTo}（経過 ${pi.elapsed}/${pi.total}日・残り ${Math.max(0, pi.total - pi.elapsed)}日）`);
+                    L.push('※ 着地予想 = 実績(本日までのSalonOne実績) ＋ 未来分(明日〜期間末)。着地は実績を必ず上回る（下回らない）');
                     L.push('');
                     L.push('■ 目標 vs 実績 vs 着地予想');
                     SO_PLAN_METRICS.forEach(m => {
-                        const g = Number(goal[m.key]) || 0, ac = actual[m.key] || 0, fc = soPlanForecast(m, ac, pi.pace);
-                        const rate = g ? Math.round(fc / g * 100) : null;
+                        const g = Number(goal[m.key]) || 0, ac = actual[m.key] || 0, fc = soPlanForecastFor(m, actual, pi, mrr);
+                        const rate = g ? Math.round((m.rate ? ac : fc) / g * 100) : null;
                         L.push(`- ${m.label}: 目標 ${g ? soFmtMetric(m, g) : '未設定'} / 実績 ${soFmtMetric(m, ac)} / 着地予想 ${soFmtMetric(m, fc)}${rate != null ? ` / 着地達成率 ${rate}%` : ''}`);
                     });
                     L.push('');
@@ -3036,8 +3053,8 @@
                         newSales: soNum(d, 'new_sales'),
                         repeatSales: soNum(d, 'repeat_sales'),
                         visits: soNum(d, 'visit_count', 'visits'),
-                        newCount: soNum(d, 'new_count'),
-                        repeatCount: soNum(d, 'repeat_count'),
+                        newCount: soNum(d, 'new_visit_count', 'new_count'),      // 新規=実来店ベース（new_visit_count優先。無ければ従来のnew_count）
+                        repeatCount: soNum(d, 'repeat_visit_count', 'repeat_count'),
                         cancel: soNum(d, 'cancel_count'),
                         util: soNum(d, 'utilization_rate'),
                     })),
@@ -3061,13 +3078,17 @@
             // マーケ 媒体別（/marketing/by-channel）を正規化。予約か売上がある行のみ、予約数降順。
             const normalizeMkChannels = (resp) => {
                 const arr = (resp && resp.data) || (Array.isArray(resp) ? resp : []);
-                return arr.map(c => ({
-                    id: c.visit_source_id, name: c.name || '未設定', platform: c.platform_type,
-                    booking: soNum(c, 'booking_count'), visit: soNum(c, 'visit_count'),
-                    remaining: soNum(c, 'remaining_count'), cancel: soNum(c, 'cancel_count'),
-                    join: soNum(c, 'join_count'), joinRate: soNum(c, 'join_rate'),
-                    sales: soNum(c, 'sales'), adSpend: soNum(c, 'ad_spend'), cpa: soNum(c, 'cpa'), roas: soNum(c, 'roas'),
-                })).filter(c => c.booking > 0 || c.sales > 0).sort((a, b) => b.booking - a.booking);
+                return arr.map(c => {
+                    const booking = soNum(c, 'booking_count'), cancel = soNum(c, 'cancel_count');
+                    return {
+                        id: c.visit_source_id, name: c.name || '未設定', platform: c.platform_type,
+                        booking, visit: soNum(c, 'visit_count'),
+                        remaining: soNum(c, 'remaining_count'), cancel,
+                        cancelRate: booking > 0 ? Math.round(cancel / booking * 1000) / 10 : 0,
+                        join: soNum(c, 'join_count'), joinRate: soNum(c, 'join_rate'),
+                        sales: soNum(c, 'sales'), adSpend: soNum(c, 'ad_spend'), cpa: soNum(c, 'cpa'), roas: soNum(c, 'roas'),
+                    };
+                }).filter(c => c.booking > 0 || c.sales > 0).sort((a, b) => b.booking - a.booking);
             };
             // マーケ 担当者別（/marketing/by-staff）。is_total を先頭、以降は新規予約降順。
             // 購入率は管理画面と同じ「購入数÷新規来店数」で算出。
@@ -3261,6 +3282,64 @@
                 }
             };
 
+            // ── 事業計画相談: SalonOne から選択店舗（''=全店）の月次実績を取得（当月＋過去5ヶ月） ──
+            const planMonthKeys = (n = 6) => {
+                const base = new Date(); const arr = [];
+                for (let i = n - 1; i >= 0; i--) { const d = new Date(base.getFullYear(), base.getMonth() - i, 1); arr.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); }
+                return arr;
+            };
+            const planMonthRange = (ym) => {
+                const [y, m] = ym.split('-').map(Number);
+                const last = new Date(y, m, 0).getDate(); const p2 = (x) => String(x).padStart(2, '0');
+                return { from: `${y}-${p2(m)}-01`, to: `${y}-${p2(m)}-${p2(last)}` };
+            };
+            const loadPlanSalonOne = async (shopId) => {
+                const reqId = ++planSoReqRef.current;
+                setPlanSoLoading(true);
+                try {
+                    const months = planMonthKeys(6);
+                    const rows = [];
+                    for (const ym of months) {
+                        const { from, to } = planMonthRange(ym);
+                        const url = (res) => { const p = new URLSearchParams({ resource: res, from, to }); if (shopId) p.set('shop_id', shopId); return `${SALONONE_API_URL}?${p.toString()}`; };
+                        const [salesR, chR, rtR] = await Promise.all([
+                            fetch(url('sales/summary')).then(r => r.json()).catch(() => ({})),
+                            fetch(url('marketing/by-channel')).then(r => r.json()).catch(() => ({})),
+                            fetch(url('marketing/retention')).then(r => r.json()).catch(() => ({})),
+                        ]);
+                        if (planSoReqRef.current !== reqId) return; // 新しい選択が来たら破棄
+                        rows.push({
+                            month: ym,
+                            summary: salesR && salesR.data ? normalizeSalonSummary({ data: salesR.data }) : null,
+                            channels: chR && chR.data ? normalizeMkChannels({ data: chR.data }) : [],
+                            retention: rtR && rtR.data ? normalizeMkRetention(rtR.data) : null,
+                        });
+                    }
+                    if (planSoReqRef.current === reqId) setPlanSoData({ shopId, months: rows });
+                } catch (e) {
+                    if (planSoReqRef.current === reqId) setPlanSoData({ shopId, months: [] });
+                } finally {
+                    if (planSoReqRef.current === reqId) setPlanSoLoading(false);
+                }
+            };
+            // 事業計画相談タブ: 店舗一覧をSalonOneから取得（未取得時のみ）
+            useEffect(() => {
+                if (currentPage !== 'planning' || soShops.length > 0) return;
+                (async () => {
+                    try {
+                        const r = await fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`);
+                        const j = await r.json().catch(() => ({}));
+                        const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.shop_id ?? ''), name: s.name || s.shop_name || `店舗${s.id}` }));
+                        if (arr.length) setSoShops(arr);
+                    } catch {}
+                })();
+            }, [currentPage]);
+            // 事業計画相談タブを開いた/店舗を変えたらSalonOne実績を取得
+            useEffect(() => {
+                if (currentPage !== 'planning') return;
+                loadPlanSalonOne(planSoShopId || '');
+            }, [currentPage, planSoShopId]);
+
             // SalonOne タブを開いた時 & フィルタ変更時に取得
             useEffect(() => {
                 if (currentPage !== 'salonone') return;
@@ -3271,11 +3350,11 @@
             // 店舗選択が変わったらスタッフ選択をリセット
             useEffect(() => { setSoStaffSel([]); }, [soShopSel]);
 
-            // 計画サブタブを開いたら、未来の新規予約（受付履歴）を集計して着地に反映
+            // 計画サブタブでマーケ集計（残新規）が更新されたら未来の新規を再計算して着地に反映
             useEffect(() => {
                 if (currentPage === 'salonone' && soView === 'plan') soLoadFutureNew();
                 else if (currentPage !== 'salonone') setSoFutureNew({ sales: 0, visits: 0, ready: false, loading: false });
-            }, [currentPage, soView, soShopSel.join(','), soFrom, soTo]);
+            }, [currentPage, soView, soShopSel.join(','), soFrom, soTo, soChannels, soSummary]);
 
             // ===== 予約メニュー分析機能（J列メニュー名ベース） =====
 
@@ -6681,6 +6760,40 @@
                             const totCh = ranked.reduce((s, r) => s + r.cur.ch, 0);
                             const totPm = ranked.reduce((s, r) => s + r.cur.pm, 0);
                             sections.push('合計: 売上¥' + totSales.toLocaleString() + ', 新規' + totNc + ', 入会率' + (totNc > 0 ? Math.round((totNe / totNc) * 100) : 0) + '%, 退会率' + (totPm > 0 ? Math.round((totCh / totPm) * 1000) / 10 : 0) + '%');
+
+                            // ── 全店舗ワースト早見表（「数字が悪い店舗」「前月対比が悪い店舗」等の質問に正確に回答するため） ──
+                            if (ranked.length >= 3) {
+                                sections.push('\n▼ ' + compareMonth + ' 全店舗ワースト早見（' + ranked.length + '店舗中／悪い順）');
+                                const worstSales = [...ranked].sort((a, b) => a.cur.sales - b.cur.sales).slice(0, 10);
+                                sections.push('【売上ワースト10】 ' + worstSales.map((r, i) => (i + 1) + '.' + r.branch + '¥' + r.cur.sales.toLocaleString()).join(' / '));
+                                const withPrev = ranked.filter(r => r.prev && r.prev.sales > 0);
+                                if (withPrev.length >= 3) {
+                                    const worstMoM = [...withPrev].sort((a, b) => ((a.cur.sales - a.prev.sales) / a.prev.sales) - ((b.cur.sales - b.prev.sales) / b.prev.sales)).slice(0, 10);
+                                    sections.push('【前月比ワースト10（下落率順）】 ' + worstMoM.map((r, i) => (i + 1) + '.' + r.branch + '(' + delta(r.cur.sales, r.prev.sales) + '%,¥' + r.cur.sales.toLocaleString() + ')').join(' / '));
+                                }
+                                const worstEr = [...ranked].filter(r => r.cur.nc >= 3).sort((a, b) => a.cur.er - b.cur.er).slice(0, 10);
+                                if (worstEr.length >= 3) sections.push('【入会率ワースト10（新規3件以上）】 ' + worstEr.map((r, i) => (i + 1) + '.' + r.branch + '(' + r.cur.er + '%,新規' + r.cur.nc + ')').join(' / '));
+                                const worstCr = [...ranked].filter(r => r.cur.pm >= 5).sort((a, b) => b.cur.cr - a.cur.cr).slice(0, 10);
+                                if (worstCr.length >= 3) sections.push('【退会率ワースト10（会員5名以上・高い順）】 ' + worstCr.map((r, i) => (i + 1) + '.' + r.branch + '(' + r.cur.cr + '%)').join(' / '));
+                            }
+
+                            // ── 全スタッフ横断ランキング（「入会率悪いスタッフ10名」等の全店横断の個人比較に回答するため） ──
+                            const staffRecs = rawData.filter(d => d.month === compareMonth && d.name).map(d => {
+                                const sales = vn(d.individualSales), nc = vn(d.newCount), ne = vn(d.newEnroll);
+                                return { label: (d.name || '不明') + '(' + d.branch + ')', sales, nc, ne, er: nc > 0 ? Math.round((ne / nc) * 100) : 0,
+                                         ch: vn(d.churnCount), prod: vn(d.productivity), gr: vn(d.gReviews), hr: vn(d.hReviews) };
+                            });
+                            if (staffRecs.length >= 5) {
+                                sections.push('\n▼ ' + compareMonth + ' 全スタッフ横断ランキング（全' + staffRecs.length + '名）');
+                                const wEr = [...staffRecs].filter(r => r.nc >= 3).sort((a, b) => a.er - b.er).slice(0, 15);
+                                if (wEr.length) sections.push('【入会率ワースト15（新規3件以上）】 ' + wEr.map((r, i) => (i + 1) + '.' + r.label + '(入会率' + r.er + '%,新規' + r.nc + ',入会' + r.ne + ')').join(' / '));
+                                const wProd = [...staffRecs].filter(r => r.prod > 0).sort((a, b) => a.prod - b.prod).slice(0, 15);
+                                if (wProd.length) sections.push('【生産性ワースト15】 ' + wProd.map((r, i) => (i + 1) + '.' + r.label + '(¥' + r.prod.toLocaleString() + ')').join(' / '));
+                                const bEr = [...staffRecs].filter(r => r.nc >= 3).sort((a, b) => b.er - a.er).slice(0, 10);
+                                if (bEr.length) sections.push('【入会率トップ10（横展開の勝ちパターン参照用）】 ' + bEr.map((r, i) => (i + 1) + '.' + r.label + '(入会率' + r.er + '%,新規' + r.nc + ')').join(' / '));
+                                const bSales = [...staffRecs].sort((a, b) => b.sales - a.sales).slice(0, 10);
+                                if (bSales.length) sections.push('【個別売上トップ10】 ' + bSales.map((r, i) => (i + 1) + '.' + r.label + '¥' + r.sales.toLocaleString()).join(' / '));
+                            }
                         }
                     }
                 }
@@ -7004,7 +7117,55 @@
             };
 
             // ── 事業計画: 店舗別実績データ計算 ──
+            // ── SalonOne実績（planSoData）から事業計画の実績オブジェクトを構築（computePlanActualsと同一shape） ──
+            const computePlanActualsSo = (branchName) => {
+                const ymLabel = (ym) => { const [y, m] = String(ym).split('-'); return `${y}年${parseInt(m)}月`; };
+                const num = (o, k) => (o && !isNaN(Number(o[k]))) ? Number(o[k]) : 0;
+                const rowMetrics = (row) => {
+                    const s = row.summary, rt = row.retention && row.retention.summary;
+                    const sales = s ? (s.grossSales || 0) : 0;
+                    const newVisit = s ? (s.newVisit || 0) : 0;
+                    const joins = num(rt, 'join_count');
+                    const enrollRate = newVisit > 0 ? Math.round((joins / newVisit) * 100) : 0;
+                    const churnRate = Math.round(num(rt, 'churn_rate') * 10) / 10;
+                    const adSpend = (row.channels || []).reduce((a, c) => a + (c.adSpend || 0), 0);
+                    const mktNew = (row.channels || []).reduce((a, c) => a + (c.visit || 0), 0);
+                    const cpa = adSpend > 0 && mktNew > 0 ? Math.round(adSpend / mktNew) : 0;
+                    return { sales, newVisit, joins, enrollRate, churnRate, adSpend, cpa,
+                             newSales: s ? (s.newSales || 0) : 0, repeatSales: s ? (s.repeatSales || 0) : 0 };
+                };
+                const withData = (planSoData.months || []).filter(r => r.summary || (r.retention && r.retention.summary));
+                const latest = withData[withData.length - 1] || null;
+                const prev = withData[withData.length - 2] || null;
+                const cur = latest ? rowMetrics(latest) : { sales: 0, newVisit: 0, joins: 0, enrollRate: 0, churnRate: 0, adSpend: 0, cpa: 0 };
+                const pv = prev ? rowMetrics(prev) : { sales: 0, newVisit: 0, joins: 0, adSpend: 0 };
+                const mediaBreakdown = ((latest && latest.channels) || []).map(c => ({
+                    media: c.name, adSpend: c.adSpend || 0, newCount: c.visit || 0, enrollCount: c.join || 0, revenue: c.sales || 0,
+                    cpa: c.cpa || 0, enrollRate: c.visit > 0 ? Math.round((c.join / c.visit) * 100) : (c.joinRate || 0), roas: c.roas || 0,
+                })).sort((a, b) => b.newCount - a.newCount);
+                const prevMediaMap = {};
+                ((prev && prev.channels) || []).forEach(c => { prevMediaMap[c.name] = { adSpend: c.adSpend || 0, newCount: c.visit || 0 }; });
+                const monthlyTrend = withData.map(r => { const m = rowMetrics(r); return { month: ymLabel(r.month), sales: m.sales, newCount: m.newVisit, adSpend: m.adSpend, enrollRate: m.enrollRate, churnRate: m.churnRate, cpa: m.cpa }; });
+                const trendStats = (() => {
+                    if (monthlyTrend.length < 3) return null;
+                    const avgSales = Math.round(monthlyTrend.reduce((s, m) => s + m.sales, 0) / monthlyTrend.length);
+                    const avgNew = Math.round(monthlyTrend.reduce((s, m) => s + m.newCount, 0) / monthlyTrend.length);
+                    const peak = monthlyTrend.reduce((mx, m) => m.sales > mx.sales ? m : mx, monthlyTrend[0]);
+                    const low = monthlyTrend.reduce((mn, m) => m.sales < mn.sales ? m : mn, monthlyTrend[0]);
+                    return { avgSales, avgNew, peakMonth: peak.month, peakSales: peak.sales, lowMonth: low.month, lowSales: low.sales };
+                })();
+                return {
+                    latestMonth: latest ? ymLabel(latest.month) : '', prevMonth: prev ? ymLabel(prev.month) : '',
+                    totalSales: cur.sales, totalNewCount: cur.newVisit, totalNewEnroll: cur.joins, enrollRate: cur.enrollRate,
+                    churnRate: cur.churnRate, cpa: cur.cpa, totalAdSpend: cur.adSpend, prevSales: pv.sales, prevNewCount: pv.newVisit,
+                    newSales: cur.newSales, repeatSales: cur.repeatSales,
+                    mediaBreakdown, prevMediaMap, branchRanking: [], monthlyTrend, similarBenchmark: null, trendStats,
+                    branchArea: '', branchName: branchName || '全店舗', source: 'salonone',
+                };
+            };
             const computePlanActuals = (branchName) => {
+                // SalonOneデータが読み込まれていればそれを優先（GAS rawDataが無い環境でも動作）
+                if (planSoData && Array.isArray(planSoData.months)) return computePlanActualsSo(branchName);
                 const vn = (n) => (n == null || isNaN(n) || !isFinite(n)) ? 0 : Math.round(n);
                 const allMonths = [...new Set(rawData.map(d => d.month).filter(Boolean))].sort();
                 const latestMonth = allMonths[allMonths.length - 1] || '';
@@ -7238,6 +7399,34 @@
                 lines.push(`入会率 ${a.enrollRate}% → ${evalEnroll}`);
                 lines.push(`退会率 ${a.churnRate}% → ${evalChurn}`);
                 lines.push(`新規数 ${a.totalNewCount}名 → ${evalNew}`);
+                // ── 過去に実施した施策とその検証結果（PDCA の C=検証／A=改善の材料） ──
+                const planActLog = (soActions || []).filter(x => {
+                    if (!x || !x.shopKey) return true; // 全店施策は常に含める
+                    const core = String(branch || '').replace(/駅?院$/, '');
+                    return core && String(x.shopKey).includes(core);
+                });
+                lines.push('', '【過去に実施した施策と検証結果（PDCAのCheck/Act材料・この店舗/全店の実行履歴）】');
+                if (planActLog.length === 0) {
+                    lines.push('- 施策ログは未登録。過去12ヶ月の指標の変化点（下の変化点分析）を「実施された施策の結果」と推定し、何が効いた/効かなかったかを仮説立てすること');
+                } else {
+                    planActLog.slice(-20).forEach(a => {
+                        lines.push(`- [${a.status || '未着手'}] ${a.title || '(無題)'}｜狙う指標: ${soMetricLabel(a.metric)}｜実施: ${a.date || '未定'}｜期待効果: ${a.impact || '-'}${a.result ? `｜検証結果: ${a.result}` : '｜検証結果: 未記入（効果測定を促すこと）'}`);
+                    });
+                }
+                // ── 月次変化点分析（過去の売上急変＝施策やイベントの痕跡。仮説検証の起点） ──
+                if (a.monthlyTrend && a.monthlyTrend.length >= 3) {
+                    const mt = a.monthlyTrend;
+                    const deltas = [];
+                    for (let i = 1; i < mt.length; i++) {
+                        const prevS = mt[i - 1].sales, curS = mt[i].sales;
+                        if (prevS > 0) deltas.push({ month: mt[i].month, pct: Math.round((curS - prevS) / prevS * 100), sales: curS, prevSales: prevS, newCount: mt[i].newCount, cpa: mt[i].cpa });
+                    }
+                    const ups = [...deltas].sort((x, y) => y.pct - x.pct).slice(0, 3).filter(d => d.pct > 0);
+                    const downs = [...deltas].sort((x, y) => x.pct - y.pct).slice(0, 3).filter(d => d.pct < 0);
+                    lines.push('', '【月次変化点分析（過去12ヶ月・売上が大きく動いた月＝仮説検証の起点）】');
+                    if (ups.length) lines.push('▲ 好転月: ' + ups.map(d => `${d.month}(前月比+${d.pct}%,¥${d.sales.toLocaleString()},新規${d.newCount}名)`).join(' / ') + ' → この月に何が効いたかを推定し横展開');
+                    if (downs.length) lines.push('▼ 悪化月: ' + downs.map(d => `${d.month}(前月比${d.pct}%,¥${d.sales.toLocaleString()},新規${d.newCount}名)`).join(' / ') + ' → 悪化要因の仮説と再発防止策');
+                }
                 // 参考リンク
                 if (planLinks.length > 0) {
                     lines.push('', '【参考リンク（回答の中で関連するものがあれば[タイトル](URL)形式のMarkdownリンクとして積極的に紹介してください）】');
@@ -7245,10 +7434,13 @@
                         lines.push('- ' + l.title + ' (' + l.category + '): ' + l.url);
                     });
                 }
-                lines.push('', '【回答フォーマット指示】');
+                lines.push('', '【回答フォーマット指示（事業計画相談＝PDCA・仮説検証・具体アクション必須）】');
                 lines.push('- Markdownで構造化して回答してください（## 見出し、**太字**、- 箇条書き、| 表 |）');
                 lines.push('- コンパクトにまとめ、冗長な説明は避けてください');
-                lines.push('- **すべての提案には必ず定量根拠を添える**: 「○○すべき」だけでなく「○○すれば月△△円増。根拠: ××（具体的なデータ）」の形式で示すこと');
+                lines.push('- **PDCAの型で答える**: ①現状評価(Plan/目標の現実性) → ②過去施策と変化点の検証(Check: 何が効いた/効かなかったか) → ③要因仮説(Why) → ④具体アクション(Do/Act)。この4段を必ず踏むこと');
+                lines.push('- **過去に実施した施策の検証結果と月次変化点を必ず引用**し、「前回○○をやった結果△△だった。だから次は□□」という因果でアクションを導くこと（データにない過去施策は捏造しない）');
+                lines.push('- **すべての提案には必ず定量根拠を添える**: 「○○すべき」だけでなく「○○すれば月△△円増。根拠: ××（具体的なデータ）／計算式」の形式で示すこと');
+                lines.push('- **アクションは「誰が・いつまでに・何を・狙う指標・期待効果・検証方法(何の数字がどうなれば成功か)」を必ず明記**し、優先度順の表で提示すること');
                 lines.push('- 同等店舗ベンチマークと業界ベンチマークの両方を引用し、自店ポジションを明確化すること');
                 lines.push('- 過去12ヶ月の達成履歴を踏まえ、目標が現実的か（過去達成率○%）を冒頭で評価すること');
                 lines.push('- 参考リンクが関連する場合は[タイトル](URL)形式で本文中に自然に挿入してください');
@@ -10772,7 +10964,17 @@
                             })();
                             const s = soSummary;
                             const totalVisits = s ? (s.newVisit + s.repeatVisit) : 0;
-                            const displayStaff = s ? (soStaffSel.length === 0 ? s.byStaff : s.byStaff.filter(st => soStaffSel.map(String).includes(String(st.id)))) : [];
+                            // スタッフ→所属店舗マップ（SalonOne staffs）。選択店舗に属さないスタッフ（他店応援等でsales/summaryに混入）を除外
+                            const soStaffHomeShop = {}; (soStaffs || []).forEach(st => { if (st.id != null && st.id !== '') soStaffHomeShop[String(st.id)] = String(st.shop_id || ''); });
+                            const soStaffInSelectedShop = (id) => {
+                                if (!soShopSel.length) return true;                 // 全店表示なら全員
+                                const home = soStaffHomeShop[String(id)];
+                                if (home == null || home === '') return true;       // 所属不明は除外しない（過剰除外を防ぐ）
+                                return soShopSel.map(String).includes(home);        // 所属店舗が選択店舗のときのみ表示
+                            };
+                            const displayStaff = s ? s.byStaff
+                                .filter(st => soStaffInSelectedShop(st.id))
+                                .filter(st => soStaffSel.length === 0 || soStaffSel.map(String).includes(String(st.id))) : [];
                             const staffTotal = displayStaff.reduce((a, st) => a + st.gross, 0);
                             const maxDay = s && s.byDay.length ? Math.max(...s.byDay.map(d => d.gross), 1) : 1;
                             // 売上(sales/summary)＋マーケ(by-staff)＋継続(retention)を個人単位でマージ
@@ -10796,50 +10998,18 @@
                             // ソート適用
                             const sortedStaff = soSortBy(staffRows, soStaffSort.key, soStaffSort.dir);
                             const sortedChannels = soSortBy(soChannels, soChSort.key, soChSort.dir);
-                            const sortedMkStaff = [...soStaffMk.filter(r => r.isTotal), ...soSortBy(soStaffMk.filter(r => !r.isTotal), soMkSort.key, soMkSort.dir)];
+                            const sortedMkStaff = [...soStaffMk.filter(r => r.isTotal), ...soSortBy(soStaffMk.filter(r => !r.isTotal && soStaffInSelectedShop(r.id)), soMkSort.key, soMkSort.dir)];
                             const sortedDaily = s ? soSortBy(s.byDay, soDailySort.key, soDailySort.dir) : [];
                             // 計画サブタブ用
                             const planKey = soShopKey() + '_' + soFrom.slice(0, 7);
                             const planGoal = soPlanGoals[planKey] || {};
                             const planActual = soPlanActual();
                             const planPaceInfo = soPlanPace();
-                            // 着地予想: 新規売上/新規来店=実績+未来の新規予約(受付履歴の実額)。継続売上=Square定期課金の月額合計(継続会員×月額)
-                            const planFcNewSales = (planActual.newSales || 0) + (soFutureNew.sales || 0);
-                            const planFcNewVisits = (planActual.newVisits || 0) + (soFutureNew.visits || 0);
-                            const planCoreOf = (n) => String(n || '').replace('NAORU整体', '').replace('NAORU', '').replace(/[店院]$/, '').replace(/\s+/g, '').trim();
-                            const planMRR = (() => {
-                                if (!sqData || !Array.isArray(sqData.subscriptions) || !Array.isArray(sqData.stores)) return null;
-                                const active = sqData.subscriptions.filter(s => s.status === 'ACTIVE');
-                                let locIds = null;
-                                if (soShopSel.length) {
-                                    const selCores = soShopSel.map(id => { const sh = (soShops.length ? soShops : soDemoShops).find(x => String(x.id) === String(id)); return sh ? planCoreOf(sh.name) : ''; }).filter(Boolean);
-                                    const set = new Set();
-                                    sqData.stores.forEach(st => { const sc = planCoreOf(st.name); if (selCores.some(c => c && (sc.includes(c) || c.includes(sc)))) (st.locationIds || [st.id]).forEach(l => set.add(l)); });
-                                    locIds = set;
-                                }
-                                const subs = locIds ? active.filter(s => locIds.has(s.locationId)) : active;
-                                return subs.reduce((a, s) => a + (Number(s.monthlyPrice) || 0), 0);
-                            })();
-                            const planFcRepeatSales = planMRR != null ? planMRR : Math.round((planActual.repeatSales || 0) * planPaceInfo.pace);
-                            const planFcSales = planFcNewSales + planFcRepeatSales;
-                            const planForecastFor = (m, ac) => (
-                                m.key === 'sales' ? planFcSales :
-                                m.key === 'newSales' ? planFcNewSales :
-                                m.key === 'repeatSales' ? planFcRepeatSales :
-                                m.key === 'newVisits' ? planFcNewVisits :
-                                soPlanForecast(m, ac, planPaceInfo.pace));
+                            // 着地予想（共有ロジック soPlanForecastFor）: 実績(本日まで) ＋ 未来分(明日〜期間末)。着地は実績を絶対に下回らない
+                            const planMRR = soPlanMRR();
+                            const planForecastFor = (m, ac) => soPlanForecastFor(m, planActual, planPaceInfo, planMRR);
                             const planActs = soActions.filter(a => !a.shopKey || a.shopKey === soShopKey());
-                            // 計画: 個人（スタッフ）別実績（売上＝by_staff、新規獲得＝marketing by-staff）
-                            const planStaffRows = (() => {
-                                const mkById = {}; soStaffMk.filter(r => !r.isTotal).forEach(r => { mkById[String(r.id)] = r; });
-                                let rows = (s ? s.byStaff : []).map(st => {
-                                    const mk = mkById[String(st.id)] || {};
-                                    return { id: st.id, name: st.name, gross: st.gross, newCount: st.newCount, treatments: st.treatments, util: st.util,
-                                             newBooking: mk.booking || 0, newVisit: mk.visit || 0, purchase: mk.purchase || 0, purchaseAmount: mk.amount || 0 };
-                                });
-                                if (soStaffSel.length) rows = rows.filter(r => soStaffSel.map(String).includes(String(r.id)));
-                                return rows.sort((a, b) => b.gross - a.gross);
-                            })();
+                            // 計画の個人別実績はスタッフタブと同一（sortedStaff）を使用
                             return (
                             <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
                                 <div className="max-w-[1600px] mx-auto space-y-4 md:space-y-6">
@@ -11200,6 +11370,10 @@
                                                                     <SortTh sKey="join" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">入会</SortTh>
                                                                     <SortTh sKey="joinRate" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">入会率</SortTh>
                                                                     <SortTh sKey="cancel" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">ｷｬﾝｾﾙ</SortTh>
+                                                                    <SortTh sKey="cancelRate" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">ｷｬﾝｾﾙ率</SortTh>
+                                                                    <SortTh sKey="adSpend" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">広告費</SortTh>
+                                                                    <SortTh sKey="cpa" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">CPA</SortTh>
+                                                                    <SortTh sKey="roas" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">ROAS</SortTh>
                                                                     <SortTh sKey="sales" sort={soChSort} setSort={setSoChSort} className="pb-2 pl-2 text-right">売上</SortTh>
                                                                 </tr></thead>
                                                                 <tbody>
@@ -11211,6 +11385,10 @@
                                                                             <td className="py-2 px-2 text-right font-black text-emerald-600">{c.join}</td>
                                                                             <td className="py-2 px-2 text-right font-bold text-slate-500">{c.joinRate ? c.joinRate.toFixed(1) + '%' : '—'}</td>
                                                                             <td className="py-2 px-2 text-right font-bold text-amber-600">{c.cancel}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-amber-600">{c.booking ? c.cancelRate.toFixed(1) + '%' : '—'}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-slate-600">{c.adSpend ? soYen(c.adSpend) : '—'}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-slate-600">{c.cpa ? soYen(c.cpa) : '—'}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-slate-600">{c.roas ? c.roas + '%' : '—'}</td>
                                                                             <td className="py-2 pl-2 text-right font-black text-slate-900">{soYen(c.sales)}</td>
                                                                         </tr>
                                                                     ))}
@@ -11218,7 +11396,7 @@
                                                             </table>
                                                         </div>
                                                     )}
-                                                    <p className="text-[10px] text-slate-400 mt-2 font-bold">※ 入会率＝入会数÷来店数（管理画面と同一定義。初回予約が先の契約が分子に入り100%超となる場合あり）</p>
+                                                    <p className="text-[10px] text-slate-400 mt-2 font-bold">※ 入会率＝入会数÷来店数（管理画面と同一定義。初回予約が先の契約が分子に入り100%超となる場合あり）。ｷｬﾝｾﾙ率＝ｷｬﾝｾﾙ÷予約。広告費・CPA・ROASはSalonOneに広告費が入力されている媒体のみ表示（未入力は「—」）。</p>
                                                 </div>
 
                                                 {/* 担当者別 新規獲得 */}
@@ -11518,7 +11696,7 @@
                                                     </table>
                                                 </div>
                                                 <p className="text-[10px] text-slate-400 mt-2 font-bold">
-                                                    着地予想: 新規売上・新規来店＝実績＋受付履歴の未到来の新規予約（金額確定分）{soFutureNew.loading ? '（集計中…）' : soFutureNew.ready ? `＝未来分 +${soYen(soFutureNew.sales)}/${soFutureNew.visits}人` : ''} ／ 継続売上＝Square定期課金の月額合計 {planMRR != null ? soYen(planMRR) : '（Square読込中…）'}（継続会員×月額） ／ 総売上＝新規着地＋継続着地。入会数はペース、継続率は現在値。実績はSalonOne集計（管理画面一致）。
+                                                    着地予想＝<b>実績（本日までのSalonOne実績）＋未来分（明日〜{soTo.slice(5).replace('-', '/')}）</b>。着地は実績を絶対に下回りません。 ／ 新規来店＝実績＋残新規（マーケ集計の未来予定＝予約−来店−ｷｬﾝｾﾙ）{soFutureNew.ready ? `＝未来分 +${soFutureNew.visits}人` : ''}、新規売上＝実績＋残新規×新規客単価 ／ 継続売上＝実績＋Square定期課金 {planMRR != null ? soYen(planMRR) : '（Square読込中…）'} の残り{Math.max(0, planPaceInfo.total - planPaceInfo.elapsed)}日分（非定期は含めない） ／ 総売上＝実績＋未来新規＋未来継続。入会数＝実績＋未来の新規来店（受付履歴）×現在の入会率。継続率は現在値。実績はSalonOne集計（管理画面一致）。
                                                 </p>
                                             </div>
 
@@ -11528,39 +11706,49 @@
                                                     <Users size={16} className="text-emerald-600" />
                                                     <h3 className="text-sm md:text-base font-black text-slate-800">個人別 実績</h3>
                                                     {soStaffSel.length > 0 && (<span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-[10px] font-black">{staffName} で絞り込み中</span>)}
-                                                    <span className="text-xs font-bold text-slate-400 ml-auto">{planStaffRows.length}名</span>
+                                                    <span className="text-xs font-bold text-slate-400 ml-auto">{sortedStaff.length}名</span>
                                                 </div>
-                                                {planStaffRows.length === 0 ? (<p className="text-center text-slate-400 font-bold py-6 text-sm">スタッフ別の実績データがありません</p>) : (
+                                                {sortedStaff.length === 0 ? (<p className="text-center text-slate-400 font-bold py-6 text-sm">スタッフ別の実績データがありません</p>) : (
                                                     <div className="overflow-x-auto">
                                                         <table className="w-full text-sm whitespace-nowrap">
                                                             <thead><tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200">
                                                                 <th className="pb-2 pr-2">#</th>
-                                                                <th className="pb-2 pr-2">スタッフ</th>
-                                                                <th className="pb-2 px-2 text-right">売上</th>
-                                                                <th className="pb-2 px-2 text-right">施術数</th>
-                                                                <th className="pb-2 px-2 text-right">新規予約</th>
-                                                                <th className="pb-2 px-2 text-right">新規来店</th>
-                                                                <th className="pb-2 px-2 text-right">購入</th>
-                                                                <th className="pb-2 px-2 text-right">購入金額</th>
-                                                                <th className="pb-2 pl-2 text-right">稼働率</th>
+                                                                <SortTh sKey="name" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 pr-2">スタッフ</SortTh>
+                                                                <SortTh sKey="gross" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">売上</SortTh>
+                                                                <SortTh sKey="newSales" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">新規売上</SortTh>
+                                                                <SortTh sKey="existSales" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">既存売上</SortTh>
+                                                                <SortTh sKey="refund" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">返金</SortTh>
+                                                                <SortTh sKey="newCount" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">新規数</SortTh>
+                                                                <SortTh sKey="joinCount" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">入会数</SortTh>
+                                                                <SortTh sKey="joinRate" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">入会率</SortTh>
+                                                                <SortTh sKey="active" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">会員数</SortTh>
+                                                                <SortTh sKey="churn" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">退会数</SortTh>
+                                                                <SortTh sKey="churnRate" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">退会率</SortTh>
+                                                                <SortTh sKey="gReview" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">G口コミ</SortTh>
+                                                                <SortTh sKey="hReview" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 pl-2 text-right">H口コミ</SortTh>
                                                             </tr></thead>
                                                             <tbody>
-                                                                {planStaffRows.map((r, i) => (
-                                                                    <tr key={r.id || i} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                                                                {sortedStaff.map((st, i) => (
+                                                                    <tr key={st.id || i} className="border-b border-slate-100 hover:bg-slate-50 transition-colors whitespace-nowrap">
                                                                         <td className="py-2.5 pr-2 font-black text-slate-300">{i + 1}</td>
-                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800">{r.name}</td>
-                                                                        <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(r.gross)}</td>
-                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.treatments.toLocaleString()}</td>
-                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.newBooking.toLocaleString()}</td>
-                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{r.newVisit.toLocaleString()}</td>
-                                                                        <td className="py-2.5 px-2 text-right font-black text-emerald-600">{r.purchase.toLocaleString()}</td>
-                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-700">{soYen(r.purchaseAmount)}</td>
-                                                                        <td className="py-2.5 pl-2 text-right font-bold text-teal-600">{r.util ? r.util.toFixed(1) + '%' : '—'}</td>
+                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800">{st.name}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(st.gross)}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{soYen(st.newSales)}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{soYen(st.existSales)}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-rose-500">{st.refund ? '-' + soYen(st.refund) : '¥0'}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.newCount.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{st.joinCount.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.newCount ? st.joinRate.toFixed(1) + '%' : '—'}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-700">{st.active.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.churn.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.joinCount ? st.churnRate.toFixed(1) + '%' : '—'}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.gReview.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.hReview.toLocaleString()}</td>
                                                                     </tr>
                                                                 ))}
                                                             </tbody>
                                                         </table>
-                                                        <p className="text-[10px] text-slate-400 mt-2 font-bold">売上・施術・稼働率＝sales/summary、新規予約/来店・購入＝marketing/by-staff（SalonOne集計）。</p>
+                                                        <p className="text-[10px] text-slate-400 mt-2 font-bold">※ スタッフタブと同一集計。売上・返金・口コミ＝SalonOne売上、新規売上/新規数＝マーケ、入会数/会員数/退会数/退会率＝継続データ。入会率＝入会数÷新規数。</p>
                                                     </div>
                                                 )}
                                             </div>
@@ -12029,11 +12217,18 @@
                                                 <input type="text" placeholder="店舗を検索..." className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-brand-400 outline-none" value={planBranchSearch} onChange={(e) => setPlanBranchSearch(e.target.value)} />
                                             </div>
                                             <div className="overflow-y-auto flex-1 space-y-1">
-                                                {Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).filter(b => !EXCLUDED_BRANCHES.has(b)).sort()
-                                                    .filter(b => !planBranchSearch || b.toLowerCase().includes(planBranchSearch.toLowerCase()))
-                                                    .map(b => (
-                                                        <div key={b} onClick={() => { setPlanSelectedBranch(b); setPlanMessages([]); setPlanBranchMenuOpen(false); setPlanBranchSearch(''); }} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${planSelectedBranch === b ? 'bg-brand-50 text-brand-600' : 'hover:bg-slate-50 text-slate-600'}`}>
-                                                            <span className="text-sm font-bold">{b}</span>
+                                                {/* 全店 */}
+                                                {(!planBranchSearch || '全店舗'.includes(planBranchSearch)) && (
+                                                    <div key="__all__" onClick={() => { setPlanSoShopId(''); setPlanSelectedBranch('全店舗'); setPlanMessages([]); setPlanBranchMenuOpen(false); setPlanBranchSearch(''); }} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${planSoShopId === '' ? 'bg-brand-50 text-brand-600' : 'hover:bg-slate-50 text-slate-600'}`}>
+                                                        <span className="text-sm font-black">全店舗（ブランド合計）</span>
+                                                    </div>
+                                                )}
+                                                {/* SalonOne店舗（rawDataが無くても選択可能）。soShops未取得時はrawDataブランチにフォールバック */}
+                                                {(soShops.length ? soShops : Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).filter(b => !EXCLUDED_BRANCHES.has(b)).sort().map((b, i) => ({ id: '', name: b })))
+                                                    .filter(sh => !planBranchSearch || String(sh.name).toLowerCase().includes(planBranchSearch.toLowerCase()))
+                                                    .map(sh => (
+                                                        <div key={sh.id || sh.name} onClick={() => { setPlanSoShopId(String(sh.id || '')); setPlanSelectedBranch(sh.name); setPlanMessages([]); setPlanBranchMenuOpen(false); setPlanBranchSearch(''); }} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${planSelectedBranch === sh.name ? 'bg-brand-50 text-brand-600' : 'hover:bg-slate-50 text-slate-600'}`}>
+                                                            <span className="text-sm font-bold">{sh.name}</span>
                                                         </div>
                                                     ))}
                                             </div>
@@ -12059,7 +12254,7 @@
                                         { label: '入会率', value: a.enrollRate + '%', sub: '目標 ' + planGoals.enrollRate + '%', up: a.enrollRate >= planGoals.enrollRate },
                                         { label: '退会率', value: a.churnRate + '%', sub: a.churnRate <= 10 ? '良好' : a.churnRate <= 15 ? '要注意' : '危険', up: a.churnRate <= 10 },
                                         { label: 'CPA', value: '¥' + a.cpa.toLocaleString(), sub: '目標 ¥' + planGoals.cpaTarget.toLocaleString(), up: a.cpa > 0 && a.cpa <= planGoals.cpaTarget },
-                                        { label: '店舗順位', value: myRank + '位', sub: '/ ' + totalBranches + '店舗中', up: myRank <= 3 },
+                                        { label: '継続売上', value: '¥' + (a.repeatSales || 0).toLocaleString(), sub: '新規売上 ¥' + (a.newSales || 0).toLocaleString(), up: (a.repeatSales || 0) >= (a.newSales || 0) },
                                     ].map((kpi, i) => (
                                         <div key={i} className="bg-white rounded-xl border border-slate-200 p-3 shadow-sm">
                                             <div className="text-xs text-slate-500 font-bold mb-1">{kpi.label}</div>
@@ -12173,8 +12368,9 @@
                                             )}
                                         </div>
 
-                                        {/* 他店舗比較 */}
+                                        {/* 店舗ランキング（GAS） or 月次推移（SalonOne） */}
                                         <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+                                            {a.branchRanking.length > 0 ? (<>
                                             <h3 className="text-sm font-black text-slate-700 mb-3 flex items-center gap-1.5">
                                                 <Award size={15} className="text-amber-500" /> 店舗ランキング
                                                 <span className="text-xs font-bold text-slate-400 ml-auto">{a.latestMonth}</span>
@@ -12201,6 +12397,29 @@
                                                 <span>店舗名</span>
                                                 <div className="flex gap-4"><span>売上</span><span>新規</span><span>入会率</span></div>
                                             </div>
+                                            </>) : (<>
+                                            <h3 className="text-sm font-black text-slate-700 mb-3 flex items-center gap-1.5">
+                                                <TrendingUp size={15} className="text-brand-500" /> 月次推移（SalonOne）
+                                                <span className="text-xs font-bold text-slate-400 ml-auto">{planSelectedBranch}</span>
+                                            </h3>
+                                            {planSoLoading ? (
+                                                <div className="text-xs text-slate-400 text-center py-4">SalonOne実績を集計中…</div>
+                                            ) : a.monthlyTrend.length === 0 ? (
+                                                <div className="text-xs text-slate-400 text-center py-4">実績データがありません</div>
+                                            ) : (
+                                                <div className="space-y-1.5">
+                                                    {a.monthlyTrend.slice(-6).map((m, i) => (
+                                                        <div key={i} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs bg-slate-50">
+                                                            <span className="w-14 font-bold text-slate-600">{m.month}</span>
+                                                            <span className="flex-1 font-black text-slate-800 text-right">¥{(m.sales / 10000).toFixed(0)}万</span>
+                                                            <span className="text-slate-500 w-12 text-right">新規{m.newCount}</span>
+                                                            <span className={`w-12 text-right font-bold ${m.enrollRate >= 40 ? 'text-emerald-600' : 'text-slate-500'}`}>入会{m.enrollRate}%</span>
+                                                            <span className={`w-12 text-right font-bold ${m.churnRate <= 10 ? 'text-emerald-600' : 'text-red-500'}`}>退会{m.churnRate}%</span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            </>)}
                                         </div>
 
                                         {/* 参考リンク管理 */}

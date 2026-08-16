@@ -2990,8 +2990,8 @@
                             const churn = rt ? (Number(rt.summary.churn_count) || 0) : 0;
                             const rjoin = rt ? (Number(rt.summary.join_count) || 0) : 0;
                             const churnRate = rjoin ? Math.round(churn / rjoin * 1000) / 10 : 0;
-                            // セラピスト数＝その月に稼働した担当者数。ヘルプ/未割当等の非個人は除外し、実績(施術or売上)がある人のみ
-                            const soNonTherapist = new Set(['ヘルプ', '未割当', '(不明)', '不明']);
+                            // セラピスト数＝その月に稼働した担当者数。ヘルプ/楽トレ/未割当等の非セラピストは除外し、実績(施術or売上)がある人のみ
+                            const soNonTherapist = new Set(['ヘルプ', '楽トレ', '未割当', '(不明)', '不明']);
                             const therapist = sum ? sum.byStaff.filter(st => !soNonTherapist.has(String(st.name || '').trim()) && ((st.treatments || 0) > 0 || (st.gross || 0) > 0)).length : 0;
                             setSoShopRows(prev => prev.map(r => r.order === row.order ? { ...r, loading: false, gross, newSales, existSales: Math.max(0, gross - newSales), refund, newCount, joinCount, joinRate, active_count, churn, churnRate, rjoin, gReview, hReview, therapist } : r));
                         } catch (e) {
@@ -7140,7 +7140,7 @@
 
                 // ── SalonOne 実データ（店舗/スタッフの人数・実績。GAS経営データが空でもこちらで回答可能に） ──
                 try {
-                    const soExcl = new Set(['ヘルプ', '未割当', '(不明)', '不明']);
+                    const soExcl = new Set(['ヘルプ', '楽トレ', '未割当', '(不明)', '不明']);
                     const soShopNameOf = (sid) => { const sh = (soShops || []).find(x => String(x.id) === String(sid)); return sh ? sh.name : ('店舗' + sid); };
                     // 店舗別の登録スタッフ（在籍ロスター）
                     if (soStaffs && soStaffs.length) {
@@ -11594,9 +11594,9 @@
                                                         <table className="w-full text-sm whitespace-nowrap">
                                                             <thead className="sticky top-0 z-20">
                                                                 <tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-white">
-                                                                    <SortTh sKey="order" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pr-2 sticky left-0 bg-white z-30">#</SortTh>
-                                                                    <SortTh sKey="name" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pr-2 sticky left-9 bg-white z-30">店舗</SortTh>
-                                                                    <SortTh sKey="therapist" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">セラピスト数</SortTh>
+                                                                    <SortTh sKey="order" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pr-2 sticky left-0 bg-white z-30 w-[34px]">#</SortTh>
+                                                                    <SortTh sKey="name" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pr-2 sticky left-[34px] bg-white z-30 w-[150px]">店舗</SortTh>
+                                                                    <SortTh sKey="therapist" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right sticky left-[184px] bg-white z-30">セラピスト数</SortTh>
                                                                     <SortTh sKey="gross" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">売上</SortTh>
                                                                     <SortTh sKey="newSales" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">新規売上</SortTh>
                                                                     <SortTh sKey="existSales" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">既存売上</SortTh>
@@ -11614,9 +11614,9 @@
                                                             <tbody>
                                                                 {/* 合計/平均行（見出しのすぐ下・導入店のみ集計） */}
                                                                 <tr className="border-b-2 border-slate-200 bg-emerald-50/70 font-black whitespace-nowrap">
-                                                                    <td className="py-2 pr-2 text-slate-400 sticky left-0 bg-emerald-50 z-10">—</td>
-                                                                    <td className="py-2 pr-2 text-slate-900 sticky left-9 bg-emerald-50 z-10">合計（{activeCount}店舗）</td>
-                                                                    <td className="py-2 px-2 text-right text-emerald-700">{tTherapist}名</td>
+                                                                    <td className="py-2 pr-2 text-slate-400 sticky left-0 bg-emerald-50 z-10 w-[34px]">—</td>
+                                                                    <td className="py-2 pr-2 text-slate-900 sticky left-[34px] bg-emerald-50 z-10 w-[150px]">合計（{activeCount}店舗）</td>
+                                                                    <td className="py-2 px-2 text-right text-emerald-700 sticky left-[184px] bg-emerald-50 z-10">{tTherapist}名</td>
                                                                     <td className="py-2 px-2 text-right text-slate-900">{soYen(tGross)}</td>
                                                                     <td className="py-2 px-2 text-right text-emerald-600">{soYen(tNewSales)}</td>
                                                                     <td className="py-2 px-2 text-right text-slate-600">{soYen(tExist)}</td>
@@ -11632,9 +11632,9 @@
                                                                 </tr>
                                                                 {sortedShopRows.map((r) => (
                                                                     <tr key={r.order} className={`border-b border-slate-100 hover:bg-slate-50 transition-colors whitespace-nowrap ${!r.active ? 'opacity-50' : ''}`}>
-                                                                        <td className="py-2.5 pr-2 font-black text-slate-300 sticky left-0 bg-white z-10">{r.order + 1}</td>
-                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800 sticky left-9 bg-white z-10">{r.name}{!r.active && <span className="ml-1.5 px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded text-[9px] font-black align-middle">未導入</span>}{r.loading && <span className="ml-1.5 text-[10px] font-bold text-amber-500">…</span>}</td>
-                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-700">{r.active ? r.therapist + '名' : '—'}</td>
+                                                                        <td className="py-2.5 pr-2 font-black text-slate-300 sticky left-0 bg-white z-10 w-[34px]">{r.order + 1}</td>
+                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800 sticky left-[34px] bg-white z-10 w-[150px] truncate">{r.name}{!r.active && <span className="ml-1.5 px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded text-[9px] font-black align-middle">未導入</span>}{r.loading && <span className="ml-1.5 text-[10px] font-bold text-amber-500">…</span>}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-700 sticky left-[184px] bg-white z-10">{r.active ? r.therapist + '名' : '—'}</td>
                                                                         <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(r.gross)}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{soYen(r.newSales)}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-slate-500">{soYen(r.existSales)}</td>

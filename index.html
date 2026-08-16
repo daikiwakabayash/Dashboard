@@ -2988,6 +2988,7 @@
                         id: String(st.staff_id ?? st.id ?? st.staffId ?? ''),
                         name: st.staff_name || st.name || st.staffName || '(不明)',
                         gross: soNum(st, 'gross_sales', 'grossSales', 'gross'),
+                        refund: soNum(st, 'refund_amount', 'refundAmount'),
                         consumed: soNum(st, 'consumed_sales', 'consumedSales', 'consumed'),
                         digest: soNum(st, 'digest_sales', 'digestSales', 'digest'),
                         avgTicket: soNum(st, 'avg_ticket', 'avgTicket'),
@@ -10703,8 +10704,26 @@
                             const displayStaff = s ? (soStaffSel.length === 0 ? s.byStaff : s.byStaff.filter(st => soStaffSel.map(String).includes(String(st.id)))) : [];
                             const staffTotal = displayStaff.reduce((a, st) => a + st.gross, 0);
                             const maxDay = s && s.byDay.length ? Math.max(...s.byDay.map(d => d.gross), 1) : 1;
-                            // ソート適用（担当者別は全体行を先頭固定）
-                            const sortedStaff = soSortBy(displayStaff, soStaffSort.key, soStaffSort.dir);
+                            // 売上(sales/summary)＋マーケ(by-staff)＋継続(retention)を個人単位でマージ
+                            const soMkById = {}; (soStaffMk || []).filter(r => !r.isTotal).forEach(r => { soMkById[String(r.id)] = r; });
+                            const soRetByName = {}; ((soRetention && soRetention.byStaff) || []).forEach(r => { soRetByName[r.staff_name] = r; });
+                            const staffRows = displayStaff.map(st => {
+                                const mk = soMkById[String(st.id)] || {};
+                                const ret = soRetByName[st.name] || {};
+                                const newSales = soNum(mk, 'sales');                 // 新規客売上（new_customer_sales_total）
+                                const existSales = Math.max(0, st.gross - newSales); // 既存売上 = 売上 − 新規売上
+                                const newCount = soNum(mk, 'visit') || st.newCount || 0; // 新規来店数（new_visit_count）
+                                const joinCount = soNum(mk, 'purchase');             // 入会数（新規客の入会 = purchase_count）
+                                const joinRate = soNum(mk, 'purchaseRate');          // 入会率（入会数÷新規数）
+                                const active = soNum(ret, 'active_count');           // 会員数（継続中）
+                                const churn = soNum(ret, 'churn_count');             // 退会数
+                                const retJoin = soNum(ret, 'join_count');
+                                const churnRate = retJoin ? Math.round(churn / retJoin * 1000) / 10 : 0; // 退会率 = 退会数÷入会数(継続)
+                                return { id: st.id, name: st.name, gross: st.gross, newSales, existSales, refund: st.refund || 0,
+                                         newCount, joinCount, joinRate, active, churn, churnRate, gReview: st.gReview, hReview: st.hReview };
+                            });
+                            // ソート適用
+                            const sortedStaff = soSortBy(staffRows, soStaffSort.key, soStaffSort.dir);
                             const sortedChannels = soSortBy(soChannels, soChSort.key, soChSort.dir);
                             const sortedMkStaff = [...soStaffMk.filter(r => r.isTotal), ...soSortBy(soStaffMk.filter(r => !r.isTotal), soMkSort.key, soMkSort.dir)];
                             const sortedDaily = s ? soSortBy(s.byDay, soDailySort.key, soDailySort.dir) : [];
@@ -11003,43 +11022,41 @@
                                                                     <th className="pb-2 pr-2">#</th>
                                                                     <SortTh sKey="name" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 pr-2">スタッフ</SortTh>
                                                                     <SortTh sKey="gross" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">売上</SortTh>
-                                                                    <SortTh sKey="digest" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">消化売上</SortTh>
-                                                                    <SortTh sKey="avgTicket" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">客単価</SortTh>
-                                                                    <SortTh sKey="treatments" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">施術数</SortTh>
-                                                                    <SortTh sKey="newCount" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">新規</SortTh>
+                                                                    <SortTh sKey="newSales" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">新規売上</SortTh>
+                                                                    <SortTh sKey="existSales" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">既存売上</SortTh>
+                                                                    <SortTh sKey="refund" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">返金</SortTh>
+                                                                    <SortTh sKey="newCount" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">新規数</SortTh>
+                                                                    <SortTh sKey="joinCount" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">入会数</SortTh>
+                                                                    <SortTh sKey="joinRate" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">入会率</SortTh>
+                                                                    <SortTh sKey="active" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">会員数</SortTh>
+                                                                    <SortTh sKey="churn" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">退会数</SortTh>
+                                                                    <SortTh sKey="churnRate" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">退会率</SortTh>
                                                                     <SortTh sKey="gReview" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">G口コミ</SortTh>
                                                                     <SortTh sKey="hReview" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">H口コミ</SortTh>
-                                                                    <SortTh sKey="util" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">稼働率</SortTh>
-                                                                    <SortTh sKey="gross" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 pl-2 w-[16%]">構成比</SortTh>
                                                                 </tr>
                                                             </thead>
                                                             <tbody>
-                                                                {sortedStaff.map((st, i) => {
-                                                                    const pct = staffTotal ? Math.round(st.gross / staffTotal * 100) : 0;
-                                                                    return (
-                                                                        <tr key={st.id || i} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
-                                                                            <td className="py-2.5 pr-2 font-black text-slate-300">{i + 1}</td>
-                                                                            <td className="py-2.5 pr-2 font-bold text-slate-800 whitespace-nowrap">{st.name}</td>
-                                                                            <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(st.gross)}</td>
-                                                                            <td className="py-2.5 px-2 text-right font-bold text-slate-500">{soYen(st.digest)}</td>
-                                                                            <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.avgTicket ? soYen(st.avgTicket) : '—'}</td>
-                                                                            <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.treatments.toLocaleString()}</td>
-                                                                            <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{st.newCount.toLocaleString()}</td>
-                                                                            <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.gReview.toLocaleString()}</td>
-                                                                            <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.hReview.toLocaleString()}</td>
-                                                                            <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.util ? st.util.toFixed(1) + '%' : '—'}</td>
-                                                                            <td className="py-2.5 pl-2">
-                                                                                <div className="flex items-center gap-2">
-                                                                                    <div className="flex-1 bg-slate-100 rounded-full h-2 overflow-hidden"><div className="bg-gradient-to-r from-emerald-500 to-teal-400 h-2 rounded-full" style={{ width: `${pct}%` }}></div></div>
-                                                                                    <span className="text-[11px] font-black text-slate-500 w-8 text-right">{pct}%</span>
-                                                                                </div>
-                                                                            </td>
-                                                                        </tr>
-                                                                    );
-                                                                })}
+                                                                {sortedStaff.map((st, i) => (
+                                                                    <tr key={st.id || i} className="border-b border-slate-100 hover:bg-slate-50 transition-colors whitespace-nowrap">
+                                                                        <td className="py-2.5 pr-2 font-black text-slate-300">{i + 1}</td>
+                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800 whitespace-nowrap">{st.name}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(st.gross)}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{soYen(st.newSales)}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{soYen(st.existSales)}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-rose-500">{st.refund ? '-' + soYen(st.refund) : '¥0'}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.newCount.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{st.joinCount.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.newCount ? st.joinRate.toFixed(1) + '%' : '—'}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-700">{st.active.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.churn.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.joinCount ? st.churnRate.toFixed(1) + '%' : '—'}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.gReview.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.hReview.toLocaleString()}</td>
+                                                                    </tr>
+                                                                ))}
                                                             </tbody>
                                                         </table>
-                                                        <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 上表はSalonOneの売上・口コミ・稼働データです。入会率・継続率などの新規獲得指標は下部「マーケ分析」を参照。</p>
+                                                        <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 売上・返金・口コミはSalonOne売上、新規売上/新規数はマーケ（新規獲得）、入会数/会員数/退会数/退会率は継続データから個人単位で集計。入会率＝入会数÷新規数、退会率＝退会数÷入会数。</p>
                                                     </div>
                                                 )}
                                             </div>

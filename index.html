@@ -2806,9 +2806,10 @@
             const soPlanPace = () => {
                 const p = n => Number(n);
                 const [fy, fm, fd] = soFrom.split('-').map(p), [ty, tm, td] = soTo.split('-').map(p);
-                const start = new Date(fy, fm - 1, fd), end = new Date(ty, tm - 1, td), today = new Date(); today.setHours(0, 0, 0, 0);
+                const start = new Date(fy, fm - 1, fd), end = new Date(ty, tm - 1, td);
+                const y = new Date(); y.setHours(0, 0, 0, 0); y.setDate(y.getDate() - 1); // 昨日（当日は未確定のため経過に含めない）
                 const total = Math.max(1, Math.round((end - start) / 86400000) + 1);
-                const cur = today < start ? start : (today > end ? end : today);
+                const cur = y < start ? start : (y > end ? end : y);
                 const elapsed = Math.min(total, Math.max(1, Math.round((cur - start) / 86400000) + 1));
                 return { total, elapsed, pace: total / elapsed };
             };
@@ -2886,14 +2887,20 @@
             };
             // 未来の新規（＝残新規）を SalonOne マーケ集計（marketing/by-channel の remaining_count）から算出。
             // remaining = 予約 − 来店 − キャンセル（＝まだ来ていない新規予約）で、SalonOne「残新規」と一致。
-            // 全店/各店ともに soChannels（選択店舗のマーケ集計）から算出するため店舗が変わっても正しくスコープされる。
-            // 受付履歴(appointments)の全件走査は新規判定が過大になり不正確だったため廃止。
-            const soLoadFutureNew = () => {
-                if (!soChannels || soChannels.length === 0) { setSoFutureNew({ sales: 0, visits: 0, ready: false, loading: false }); return; }
-                const remaining = soChannels.reduce((a, c) => a + (Number(c.remaining) || 0), 0); // 残新規（未来の新規来店予定）
-                const act = soPlanActual();
-                const avgTicket = act.newVisits > 0 ? (act.newSales || 0) / act.newVisits : 0;    // 現在の新規客単価
-                setSoFutureNew({ visits: remaining, sales: Math.round(remaining * avgTicket), ready: true, loading: false });
+            // ※実績は当日除外(確定分)だが、残新規は未来予約を含める必要があるため期間末(soTo)まででマーケを別途取得する。
+            const soLoadFutureNew = async () => {
+                const ids = soShopSel.length ? soShopSel.map(String) : [];
+                setSoFutureNew(f => ({ ...f, loading: true, ready: false }));
+                try {
+                    const q = (id) => { const p = new URLSearchParams({ resource: 'marketing/by-channel', from: soFrom, to: soTo }); if (id) p.set('shop_id', id); return `${SALONONE_API_URL}?${p.toString()}`; };
+                    const urls = ids.length ? ids.map(q) : [q(null)];
+                    const results = await Promise.all(urls.map(u => fetch(u).then(r => r.json()).catch(() => ({}))));
+                    const chans = normalizeMkChannels({ data: soMergeChannels(results.filter(r => r && r.data).map(r => r.data)) });
+                    const remaining = chans.reduce((a, c) => a + (Number(c.remaining) || 0), 0); // 残新規（未来の新規来店予定）
+                    const act = soPlanActual();
+                    const avgTicket = act.newVisits > 0 ? (act.newSales || 0) / act.newVisits : 0; // 現在の新規客単価
+                    setSoFutureNew({ visits: remaining, sales: Math.round(remaining * avgTicket), ready: true, loading: false });
+                } catch (e) { setSoFutureNew({ sales: 0, visits: 0, ready: true, loading: false }); }
             };
             // 未来の継続売上 = 受付履歴(appointments)の「既存」予約（明日〜期間末・非キャンセル）の売上合計。
             // プラン名の有無に関わらず既存客の予約金額(total_price/booked_total_price)を全て合算。
@@ -2946,8 +2953,12 @@
                 const reqId = ++soShopReqRef.current;
                 setSoShopLoading(true);
                 const shopList = soShops.length ? soShops : [];
+                const cto = soConfirmedTo();  // 確定分の締め日（当日は除外）
                 const rows = SO_SHOP_ORDER.map((name, i) => {
-                    const sh = shopList.find(x => soShopNorm(x.name) === soShopNorm(name));
+                    const nn = soShopNorm(name);
+                    // 完全一致を優先、無ければ部分一致（例: SalonOne側が「横浜関内院」等でも「関内」で拾う）
+                    const sh = shopList.find(x => soShopNorm(x.name) === nn)
+                        || shopList.find(x => { const xn = soShopNorm(x.name); return nn.length >= 2 && (xn.includes(nn) || nn.includes(xn)); });
                     return { order: i, name, id: sh ? sh.id : null, active: !!sh, loading: !!sh,
                              gross: 0, newSales: 0, existSales: 0, refund: 0, newCount: 0, joinCount: 0, joinRate: 0, active_count: 0, churn: 0, churnRate: 0, gReview: 0, hReview: 0 };
                 });
@@ -2958,7 +2969,7 @@
                 const worker = async () => {
                     while (idx < targets.length) {
                         const row = targets[idx++];
-                        const q = (res) => `${SALONONE_API_URL}?${new URLSearchParams({ resource: res, from: soFrom, to: soTo, shop_id: row.id }).toString()}`;
+                        const q = (res) => `${SALONONE_API_URL}?${new URLSearchParams({ resource: res, from: soFrom, to: cto, shop_id: row.id }).toString()}`;
                         try {
                             const [sumR, chR, rtR] = await Promise.all([
                                 fetch(q('sales/summary')).then(r => r.json()).catch(() => ({})),
@@ -3312,6 +3323,15 @@
                 };
             };
 
+            // 確定売上の締め日 = 検索当日を除く（前日まで）。集計未完了の当日を含めない。
+            const soConfirmedTo = () => {
+                const y = new Date(); y.setHours(0, 0, 0, 0); y.setDate(y.getDate() - 1); // 昨日
+                const p2 = (x) => String(x).padStart(2, '0');
+                const yStr = `${y.getFullYear()}-${p2(y.getMonth() + 1)}-${p2(y.getDate())}`;
+                let eff = soTo < yStr ? soTo : yStr;   // 選択期間末が前日以前ならそのまま
+                if (eff < soFrom) eff = soFrom;        // 期間が未来なら開始日にクランプ
+                return eff;
+            };
             const fetchSalonOneData = async (force = false) => {
                 const reqId = ++soReqRef.current;      // この取得のID
                 const stale = () => soReqRef.current !== reqId; // 途中で新しい取得が始まったら古い応答は破棄
@@ -3319,15 +3339,16 @@
                 setSoError(null);
                 try {
                     const ids = soShopSel;
+                    const cto = soConfirmedTo();       // 確定分の締め日（当日は除外）
                     // 1リソースを選択店舗分（[]なら全店ブランド）取得
                     const fetchResource = async (resource, extra = {}) => {
                         if (ids.length === 0) {
-                            const p = new URLSearchParams({ resource, from: soFrom, to: soTo, ...extra });
+                            const p = new URLSearchParams({ resource, from: soFrom, to: cto, ...extra });
                             const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`);
                             return [{ status: r.status, json: await r.json().catch(() => ({})) }];
                         }
                         return Promise.all(ids.map(async id => {
-                            const p = new URLSearchParams({ resource, from: soFrom, to: soTo, shop_id: id, ...extra });
+                            const p = new URLSearchParams({ resource, from: soFrom, to: cto, shop_id: id, ...extra });
                             const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`);
                             return { status: r.status, json: await r.json().catch(() => ({})) };
                         }));
@@ -11440,12 +11461,12 @@
                                                 {displayStaff.length === 0 ? (
                                                     <p className="text-center text-slate-400 font-bold py-8">スタッフ別データはありません</p>
                                                 ) : (
-                                                    <div className="overflow-x-auto">
+                                                    <div className="overflow-auto max-h-[70vh]">
                                                         <table className="w-full text-sm">
-                                                            <thead>
-                                                                <tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200">
-                                                                    <th className="pb-2 pr-2">#</th>
-                                                                    <SortTh sKey="name" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 pr-2">スタッフ</SortTh>
+                                                            <thead className="sticky top-0 z-20">
+                                                                <tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-white">
+                                                                    <th className="pb-2 pr-2 sticky left-0 bg-white z-30">#</th>
+                                                                    <SortTh sKey="name" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 pr-2 sticky left-9 bg-white z-30">スタッフ</SortTh>
                                                                     <SortTh sKey="gross" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">売上</SortTh>
                                                                     <SortTh sKey="newSales" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">新規売上</SortTh>
                                                                     <SortTh sKey="existSales" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">既存売上</SortTh>
@@ -11463,8 +11484,8 @@
                                                             <tbody>
                                                                 {sortedStaff.map((st, i) => (
                                                                     <tr key={st.id || i} className="border-b border-slate-100 hover:bg-slate-50 transition-colors whitespace-nowrap">
-                                                                        <td className="py-2.5 pr-2 font-black text-slate-300">{i + 1}</td>
-                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800 whitespace-nowrap">{st.name}</td>
+                                                                        <td className="py-2.5 pr-2 font-black text-slate-300 sticky left-0 bg-white z-10">{i + 1}</td>
+                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800 whitespace-nowrap sticky left-9 bg-white z-10">{st.name}</td>
                                                                         <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(st.gross)}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{soYen(st.newSales)}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-slate-500">{soYen(st.existSales)}</td>
@@ -11506,12 +11527,12 @@
                                                 {soShopRows.length === 0 ? (
                                                     <p className="text-center text-slate-400 font-bold py-8">店舗一覧を取得中…（SalonOne店舗の読み込み後に集計します）</p>
                                                 ) : (
-                                                    <div className="overflow-x-auto">
+                                                    <div className="overflow-auto max-h-[70vh]">
                                                         <table className="w-full text-sm whitespace-nowrap">
-                                                            <thead>
-                                                                <tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200">
-                                                                    <SortTh sKey="order" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pr-2">#</SortTh>
-                                                                    <SortTh sKey="name" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pr-2">店舗</SortTh>
+                                                            <thead className="sticky top-0 z-20">
+                                                                <tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-white">
+                                                                    <SortTh sKey="order" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pr-2 sticky left-0 bg-white z-30">#</SortTh>
+                                                                    <SortTh sKey="name" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pr-2 sticky left-9 bg-white z-30">店舗</SortTh>
                                                                     <SortTh sKey="gross" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">売上</SortTh>
                                                                     <SortTh sKey="newSales" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">新規売上</SortTh>
                                                                     <SortTh sKey="existSales" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">既存売上</SortTh>
@@ -11529,8 +11550,8 @@
                                                             <tbody>
                                                                 {sortedShopRows.map((r) => (
                                                                     <tr key={r.order} className={`border-b border-slate-100 hover:bg-slate-50 transition-colors whitespace-nowrap ${!r.active ? 'opacity-50' : ''}`}>
-                                                                        <td className="py-2.5 pr-2 font-black text-slate-300">{r.order + 1}</td>
-                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800">{r.name}{!r.active && <span className="ml-1.5 px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded text-[9px] font-black align-middle">未導入</span>}{r.loading && <span className="ml-1.5 text-[10px] font-bold text-amber-500">…</span>}</td>
+                                                                        <td className="py-2.5 pr-2 font-black text-slate-300 sticky left-0 bg-white z-10">{r.order + 1}</td>
+                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800 sticky left-9 bg-white z-10">{r.name}{!r.active && <span className="ml-1.5 px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded text-[9px] font-black align-middle">未導入</span>}{r.loading && <span className="ml-1.5 text-[10px] font-bold text-amber-500">…</span>}</td>
                                                                         <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(r.gross)}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{soYen(r.newSales)}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-slate-500">{soYen(r.existSales)}</td>

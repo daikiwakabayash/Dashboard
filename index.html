@@ -2837,6 +2837,8 @@
                 else if (m.key === 'newSales') fc = (actual.newSales || 0) + newFuture;
                 else if (m.key === 'repeatSales') fc = (actual.repeatSales || 0) + repFuture;
                 else if (m.key === 'newVisits') fc = (actual.newVisits || 0) + visitFuture;
+                // 入会数着地 = 実績入会 ＋ 未来の新規来店(受付履歴) × 現在の入会率。ペース掛け算ではなく予約ベースで実額化
+                else if (m.key === 'joins') { const er = actual.newVisits > 0 ? (actual.joins || 0) / actual.newVisits : 0; fc = (actual.joins || 0) + Math.round(visitFuture * er); }
                 else fc = Math.round(ac * pace.pace);
                 return Math.max(fc, ac); // 着地は実績を絶対に下回らない
             };
@@ -3079,8 +3081,8 @@
                         newSales: soNum(d, 'new_sales'),
                         repeatSales: soNum(d, 'repeat_sales'),
                         visits: soNum(d, 'visit_count', 'visits'),
-                        newCount: soNum(d, 'new_count'),
-                        repeatCount: soNum(d, 'repeat_count'),
+                        newCount: soNum(d, 'new_visit_count', 'new_count'),      // 新規=実来店ベース（new_visit_count優先。無ければ従来のnew_count）
+                        repeatCount: soNum(d, 'repeat_visit_count', 'repeat_count'),
                         cancel: soNum(d, 'cancel_count'),
                         util: soNum(d, 'utilization_rate'),
                     })),
@@ -3104,13 +3106,17 @@
             // マーケ 媒体別（/marketing/by-channel）を正規化。予約か売上がある行のみ、予約数降順。
             const normalizeMkChannels = (resp) => {
                 const arr = (resp && resp.data) || (Array.isArray(resp) ? resp : []);
-                return arr.map(c => ({
-                    id: c.visit_source_id, name: c.name || '未設定', platform: c.platform_type,
-                    booking: soNum(c, 'booking_count'), visit: soNum(c, 'visit_count'),
-                    remaining: soNum(c, 'remaining_count'), cancel: soNum(c, 'cancel_count'),
-                    join: soNum(c, 'join_count'), joinRate: soNum(c, 'join_rate'),
-                    sales: soNum(c, 'sales'), adSpend: soNum(c, 'ad_spend'), cpa: soNum(c, 'cpa'), roas: soNum(c, 'roas'),
-                })).filter(c => c.booking > 0 || c.sales > 0).sort((a, b) => b.booking - a.booking);
+                return arr.map(c => {
+                    const booking = soNum(c, 'booking_count'), cancel = soNum(c, 'cancel_count');
+                    return {
+                        id: c.visit_source_id, name: c.name || '未設定', platform: c.platform_type,
+                        booking, visit: soNum(c, 'visit_count'),
+                        remaining: soNum(c, 'remaining_count'), cancel,
+                        cancelRate: booking > 0 ? Math.round(cancel / booking * 1000) / 10 : 0,
+                        join: soNum(c, 'join_count'), joinRate: soNum(c, 'join_rate'),
+                        sales: soNum(c, 'sales'), adSpend: soNum(c, 'ad_spend'), cpa: soNum(c, 'cpa'), roas: soNum(c, 'roas'),
+                    };
+                }).filter(c => c.booking > 0 || c.sales > 0).sort((a, b) => b.booking - a.booking);
             };
             // マーケ 担当者別（/marketing/by-staff）。is_total を先頭、以降は新規予約降順。
             // 購入率は管理画面と同じ「購入数÷新規来店数」で算出。
@@ -11031,17 +11037,7 @@
                             const planMRR = soPlanMRR();
                             const planForecastFor = (m, ac) => soPlanForecastFor(m, planActual, planPaceInfo, planMRR);
                             const planActs = soActions.filter(a => !a.shopKey || a.shopKey === soShopKey());
-                            // 計画: 個人（スタッフ）別実績（売上＝by_staff、新規獲得＝marketing by-staff）
-                            const planStaffRows = (() => {
-                                const mkById = {}; soStaffMk.filter(r => !r.isTotal).forEach(r => { mkById[String(r.id)] = r; });
-                                let rows = (s ? s.byStaff : []).filter(st => soStaffInSelectedShop(st.id)).map(st => {
-                                    const mk = mkById[String(st.id)] || {};
-                                    return { id: st.id, name: st.name, gross: st.gross, newCount: st.newCount, treatments: st.treatments, util: st.util,
-                                             newBooking: mk.booking || 0, newVisit: mk.visit || 0, purchase: mk.purchase || 0, purchaseAmount: mk.amount || 0 };
-                                });
-                                if (soStaffSel.length) rows = rows.filter(r => soStaffSel.map(String).includes(String(r.id)));
-                                return rows.sort((a, b) => b.gross - a.gross);
-                            })();
+                            // 計画の個人別実績はスタッフタブと同一（sortedStaff）を使用
                             return (
                             <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
                                 <div className="max-w-[1600px] mx-auto space-y-4 md:space-y-6">
@@ -11402,6 +11398,10 @@
                                                                     <SortTh sKey="join" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">入会</SortTh>
                                                                     <SortTh sKey="joinRate" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">入会率</SortTh>
                                                                     <SortTh sKey="cancel" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">ｷｬﾝｾﾙ</SortTh>
+                                                                    <SortTh sKey="cancelRate" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">ｷｬﾝｾﾙ率</SortTh>
+                                                                    <SortTh sKey="adSpend" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">広告費</SortTh>
+                                                                    <SortTh sKey="cpa" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">CPA</SortTh>
+                                                                    <SortTh sKey="roas" sort={soChSort} setSort={setSoChSort} className="pb-2 px-2 text-right">ROAS</SortTh>
                                                                     <SortTh sKey="sales" sort={soChSort} setSort={setSoChSort} className="pb-2 pl-2 text-right">売上</SortTh>
                                                                 </tr></thead>
                                                                 <tbody>
@@ -11413,6 +11413,10 @@
                                                                             <td className="py-2 px-2 text-right font-black text-emerald-600">{c.join}</td>
                                                                             <td className="py-2 px-2 text-right font-bold text-slate-500">{c.joinRate ? c.joinRate.toFixed(1) + '%' : '—'}</td>
                                                                             <td className="py-2 px-2 text-right font-bold text-amber-600">{c.cancel}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-amber-600">{c.booking ? c.cancelRate.toFixed(1) + '%' : '—'}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-slate-600">{c.adSpend ? soYen(c.adSpend) : '—'}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-slate-600">{c.cpa ? soYen(c.cpa) : '—'}</td>
+                                                                            <td className="py-2 px-2 text-right font-bold text-slate-600">{c.roas ? c.roas + '%' : '—'}</td>
                                                                             <td className="py-2 pl-2 text-right font-black text-slate-900">{soYen(c.sales)}</td>
                                                                         </tr>
                                                                     ))}
@@ -11420,7 +11424,7 @@
                                                             </table>
                                                         </div>
                                                     )}
-                                                    <p className="text-[10px] text-slate-400 mt-2 font-bold">※ 入会率＝入会数÷来店数（管理画面と同一定義。初回予約が先の契約が分子に入り100%超となる場合あり）</p>
+                                                    <p className="text-[10px] text-slate-400 mt-2 font-bold">※ 入会率＝入会数÷来店数（管理画面と同一定義。初回予約が先の契約が分子に入り100%超となる場合あり）。ｷｬﾝｾﾙ率＝ｷｬﾝｾﾙ÷予約。広告費・CPA・ROASはSalonOneに広告費が入力されている媒体のみ表示（未入力は「—」）。</p>
                                                 </div>
 
                                                 {/* 担当者別 新規獲得 */}
@@ -11720,7 +11724,7 @@
                                                     </table>
                                                 </div>
                                                 <p className="text-[10px] text-slate-400 mt-2 font-bold">
-                                                    着地予想＝<b>実績（本日までのSalonOne実績）＋未来分（明日〜{soTo.slice(5).replace('-', '/')}）</b>。着地は実績を絶対に下回りません。 ／ 新規売上・新規来店＝実績＋受付履歴の未到来の新規予約（金額確定分）{soFutureNew.loading ? '（集計中…）' : soFutureNew.ready ? `＝未来分 +${soYen(soFutureNew.sales)}/${soFutureNew.visits}人` : ''} ／ 継続売上＝実績＋Square定期課金 {planMRR != null ? soYen(planMRR) : '（Square読込中…）'} の残り{Math.max(0, planPaceInfo.total - planPaceInfo.elapsed)}日分（非定期は含めない） ／ 総売上＝実績＋未来新規＋未来継続。入会数はペース、継続率は現在値。実績はSalonOne集計（管理画面一致）。
+                                                    着地予想＝<b>実績（本日までのSalonOne実績）＋未来分（明日〜{soTo.slice(5).replace('-', '/')}）</b>。着地は実績を絶対に下回りません。 ／ 新規売上・新規来店＝実績＋受付履歴の未到来の新規予約（金額確定分）{soFutureNew.loading ? '（集計中…）' : soFutureNew.ready ? `＝未来分 +${soYen(soFutureNew.sales)}/${soFutureNew.visits}人` : ''} ／ 継続売上＝実績＋Square定期課金 {planMRR != null ? soYen(planMRR) : '（Square読込中…）'} の残り{Math.max(0, planPaceInfo.total - planPaceInfo.elapsed)}日分（非定期は含めない） ／ 総売上＝実績＋未来新規＋未来継続。入会数＝実績＋未来の新規来店（受付履歴）×現在の入会率。継続率は現在値。実績はSalonOne集計（管理画面一致）。
                                                 </p>
                                             </div>
 
@@ -11730,39 +11734,49 @@
                                                     <Users size={16} className="text-emerald-600" />
                                                     <h3 className="text-sm md:text-base font-black text-slate-800">個人別 実績</h3>
                                                     {soStaffSel.length > 0 && (<span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-[10px] font-black">{staffName} で絞り込み中</span>)}
-                                                    <span className="text-xs font-bold text-slate-400 ml-auto">{planStaffRows.length}名</span>
+                                                    <span className="text-xs font-bold text-slate-400 ml-auto">{sortedStaff.length}名</span>
                                                 </div>
-                                                {planStaffRows.length === 0 ? (<p className="text-center text-slate-400 font-bold py-6 text-sm">スタッフ別の実績データがありません</p>) : (
+                                                {sortedStaff.length === 0 ? (<p className="text-center text-slate-400 font-bold py-6 text-sm">スタッフ別の実績データがありません</p>) : (
                                                     <div className="overflow-x-auto">
                                                         <table className="w-full text-sm whitespace-nowrap">
                                                             <thead><tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200">
                                                                 <th className="pb-2 pr-2">#</th>
-                                                                <th className="pb-2 pr-2">スタッフ</th>
-                                                                <th className="pb-2 px-2 text-right">売上</th>
-                                                                <th className="pb-2 px-2 text-right">施術数</th>
-                                                                <th className="pb-2 px-2 text-right">新規予約</th>
-                                                                <th className="pb-2 px-2 text-right">新規来店</th>
-                                                                <th className="pb-2 px-2 text-right">購入</th>
-                                                                <th className="pb-2 px-2 text-right">購入金額</th>
-                                                                <th className="pb-2 pl-2 text-right">稼働率</th>
+                                                                <SortTh sKey="name" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 pr-2">スタッフ</SortTh>
+                                                                <SortTh sKey="gross" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">売上</SortTh>
+                                                                <SortTh sKey="newSales" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">新規売上</SortTh>
+                                                                <SortTh sKey="existSales" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">既存売上</SortTh>
+                                                                <SortTh sKey="refund" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">返金</SortTh>
+                                                                <SortTh sKey="newCount" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">新規数</SortTh>
+                                                                <SortTh sKey="joinCount" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">入会数</SortTh>
+                                                                <SortTh sKey="joinRate" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">入会率</SortTh>
+                                                                <SortTh sKey="active" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">会員数</SortTh>
+                                                                <SortTh sKey="churn" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">退会数</SortTh>
+                                                                <SortTh sKey="churnRate" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">退会率</SortTh>
+                                                                <SortTh sKey="gReview" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 px-2 text-right">G口コミ</SortTh>
+                                                                <SortTh sKey="hReview" sort={soStaffSort} setSort={setSoStaffSort} className="pb-2 pl-2 text-right">H口コミ</SortTh>
                                                             </tr></thead>
                                                             <tbody>
-                                                                {planStaffRows.map((r, i) => (
-                                                                    <tr key={r.id || i} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                                                                {sortedStaff.map((st, i) => (
+                                                                    <tr key={st.id || i} className="border-b border-slate-100 hover:bg-slate-50 transition-colors whitespace-nowrap">
                                                                         <td className="py-2.5 pr-2 font-black text-slate-300">{i + 1}</td>
-                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800">{r.name}</td>
-                                                                        <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(r.gross)}</td>
-                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.treatments.toLocaleString()}</td>
-                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.newBooking.toLocaleString()}</td>
-                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{r.newVisit.toLocaleString()}</td>
-                                                                        <td className="py-2.5 px-2 text-right font-black text-emerald-600">{r.purchase.toLocaleString()}</td>
-                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-700">{soYen(r.purchaseAmount)}</td>
-                                                                        <td className="py-2.5 pl-2 text-right font-bold text-teal-600">{r.util ? r.util.toFixed(1) + '%' : '—'}</td>
+                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800">{st.name}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(st.gross)}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{soYen(st.newSales)}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{soYen(st.existSales)}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-rose-500">{st.refund ? '-' + soYen(st.refund) : '¥0'}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.newCount.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{st.joinCount.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.newCount ? st.joinRate.toFixed(1) + '%' : '—'}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-700">{st.active.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.churn.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.joinCount ? st.churnRate.toFixed(1) + '%' : '—'}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.gReview.toLocaleString()}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-slate-500">{st.hReview.toLocaleString()}</td>
                                                                     </tr>
                                                                 ))}
                                                             </tbody>
                                                         </table>
-                                                        <p className="text-[10px] text-slate-400 mt-2 font-bold">売上・施術・稼働率＝sales/summary、新規予約/来店・購入＝marketing/by-staff（SalonOne集計）。</p>
+                                                        <p className="text-[10px] text-slate-400 mt-2 font-bold">※ スタッフタブと同一集計。売上・返金・口コミ＝SalonOne売上、新規売上/新規数＝マーケ、入会数/会員数/退会数/退会率＝継続データ。入会率＝入会数÷新規数。</p>
                                                     </div>
                                                 )}
                                             </div>

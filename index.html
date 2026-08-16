@@ -1601,6 +1601,11 @@
             const [planBranchMenuOpen, setPlanBranchMenuOpen] = useState(false);
             const [planBranchSearch, setPlanBranchSearch] = useState('');
             const planBranchMenuRef = useRef(null);
+            // 事業計画相談: SalonOneデータ駆動（店舗選択・月次実績）
+            const [planSoShopId, setPlanSoShopId] = useState('');   // 選択中SalonOne店舗ID（''=全店）
+            const [planSoData, setPlanSoData] = useState(null);     // SalonOne月次実績 { shopId, months:[{month,summary,channels,retention}] }
+            const [planSoLoading, setPlanSoLoading] = useState(false);
+            const planSoReqRef = useRef(0);
             // 参考リンク管理
             const [planLinks, setPlanLinks] = useState(() => {
                 try {
@@ -2252,13 +2257,10 @@
                 }
             }, [currentPage]);
 
-            // 初期店舗選択: rawDataが読み込まれたら最初の店舗を選択
+            // 初期店舗選択: 事業計画相談は既定で「全店舗」（SalonOne駆動・GAS rawData非依存）
             useEffect(() => {
-                if (!planSelectedBranch && rawData.length > 0) {
-                    const branches = Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).sort();
-                    if (branches.length > 0) setPlanSelectedBranch(branches[0]);
-                }
-            }, [rawData, planSelectedBranch]);
+                if (!planSelectedBranch) setPlanSelectedBranch('全店舗');
+            }, [planSelectedBranch]);
 
             // マーケティングデータ取得
             const fetchMarketingData = async (forceRefresh = false) => {
@@ -3301,6 +3303,64 @@
                     setSoLoading(false);
                 }
             };
+
+            // ── 事業計画相談: SalonOne から選択店舗（''=全店）の月次実績を取得（当月＋過去5ヶ月） ──
+            const planMonthKeys = (n = 6) => {
+                const base = new Date(); const arr = [];
+                for (let i = n - 1; i >= 0; i--) { const d = new Date(base.getFullYear(), base.getMonth() - i, 1); arr.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); }
+                return arr;
+            };
+            const planMonthRange = (ym) => {
+                const [y, m] = ym.split('-').map(Number);
+                const last = new Date(y, m, 0).getDate(); const p2 = (x) => String(x).padStart(2, '0');
+                return { from: `${y}-${p2(m)}-01`, to: `${y}-${p2(m)}-${p2(last)}` };
+            };
+            const loadPlanSalonOne = async (shopId) => {
+                const reqId = ++planSoReqRef.current;
+                setPlanSoLoading(true);
+                try {
+                    const months = planMonthKeys(6);
+                    const rows = [];
+                    for (const ym of months) {
+                        const { from, to } = planMonthRange(ym);
+                        const url = (res) => { const p = new URLSearchParams({ resource: res, from, to }); if (shopId) p.set('shop_id', shopId); return `${SALONONE_API_URL}?${p.toString()}`; };
+                        const [salesR, chR, rtR] = await Promise.all([
+                            fetch(url('sales/summary')).then(r => r.json()).catch(() => ({})),
+                            fetch(url('marketing/by-channel')).then(r => r.json()).catch(() => ({})),
+                            fetch(url('marketing/retention')).then(r => r.json()).catch(() => ({})),
+                        ]);
+                        if (planSoReqRef.current !== reqId) return; // 新しい選択が来たら破棄
+                        rows.push({
+                            month: ym,
+                            summary: salesR && salesR.data ? normalizeSalonSummary({ data: salesR.data }) : null,
+                            channels: chR && chR.data ? normalizeMkChannels({ data: chR.data }) : [],
+                            retention: rtR && rtR.data ? normalizeMkRetention(rtR.data) : null,
+                        });
+                    }
+                    if (planSoReqRef.current === reqId) setPlanSoData({ shopId, months: rows });
+                } catch (e) {
+                    if (planSoReqRef.current === reqId) setPlanSoData({ shopId, months: [] });
+                } finally {
+                    if (planSoReqRef.current === reqId) setPlanSoLoading(false);
+                }
+            };
+            // 事業計画相談タブ: 店舗一覧をSalonOneから取得（未取得時のみ）
+            useEffect(() => {
+                if (currentPage !== 'planning' || soShops.length > 0) return;
+                (async () => {
+                    try {
+                        const r = await fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`);
+                        const j = await r.json().catch(() => ({}));
+                        const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.shop_id ?? ''), name: s.name || s.shop_name || `店舗${s.id}` }));
+                        if (arr.length) setSoShops(arr);
+                    } catch {}
+                })();
+            }, [currentPage]);
+            // 事業計画相談タブを開いた/店舗を変えたらSalonOne実績を取得
+            useEffect(() => {
+                if (currentPage !== 'planning') return;
+                loadPlanSalonOne(planSoShopId || '');
+            }, [currentPage, planSoShopId]);
 
             // SalonOne タブを開いた時 & フィルタ変更時に取得
             useEffect(() => {
@@ -7079,7 +7139,55 @@
             };
 
             // ── 事業計画: 店舗別実績データ計算 ──
+            // ── SalonOne実績（planSoData）から事業計画の実績オブジェクトを構築（computePlanActualsと同一shape） ──
+            const computePlanActualsSo = (branchName) => {
+                const ymLabel = (ym) => { const [y, m] = String(ym).split('-'); return `${y}年${parseInt(m)}月`; };
+                const num = (o, k) => (o && !isNaN(Number(o[k]))) ? Number(o[k]) : 0;
+                const rowMetrics = (row) => {
+                    const s = row.summary, rt = row.retention && row.retention.summary;
+                    const sales = s ? (s.grossSales || 0) : 0;
+                    const newVisit = s ? (s.newVisit || 0) : 0;
+                    const joins = num(rt, 'join_count');
+                    const enrollRate = newVisit > 0 ? Math.round((joins / newVisit) * 100) : 0;
+                    const churnRate = Math.round(num(rt, 'churn_rate') * 10) / 10;
+                    const adSpend = (row.channels || []).reduce((a, c) => a + (c.adSpend || 0), 0);
+                    const mktNew = (row.channels || []).reduce((a, c) => a + (c.visit || 0), 0);
+                    const cpa = adSpend > 0 && mktNew > 0 ? Math.round(adSpend / mktNew) : 0;
+                    return { sales, newVisit, joins, enrollRate, churnRate, adSpend, cpa,
+                             newSales: s ? (s.newSales || 0) : 0, repeatSales: s ? (s.repeatSales || 0) : 0 };
+                };
+                const withData = (planSoData.months || []).filter(r => r.summary || (r.retention && r.retention.summary));
+                const latest = withData[withData.length - 1] || null;
+                const prev = withData[withData.length - 2] || null;
+                const cur = latest ? rowMetrics(latest) : { sales: 0, newVisit: 0, joins: 0, enrollRate: 0, churnRate: 0, adSpend: 0, cpa: 0 };
+                const pv = prev ? rowMetrics(prev) : { sales: 0, newVisit: 0, joins: 0, adSpend: 0 };
+                const mediaBreakdown = ((latest && latest.channels) || []).map(c => ({
+                    media: c.name, adSpend: c.adSpend || 0, newCount: c.visit || 0, enrollCount: c.join || 0, revenue: c.sales || 0,
+                    cpa: c.cpa || 0, enrollRate: c.visit > 0 ? Math.round((c.join / c.visit) * 100) : (c.joinRate || 0), roas: c.roas || 0,
+                })).sort((a, b) => b.newCount - a.newCount);
+                const prevMediaMap = {};
+                ((prev && prev.channels) || []).forEach(c => { prevMediaMap[c.name] = { adSpend: c.adSpend || 0, newCount: c.visit || 0 }; });
+                const monthlyTrend = withData.map(r => { const m = rowMetrics(r); return { month: ymLabel(r.month), sales: m.sales, newCount: m.newVisit, adSpend: m.adSpend, enrollRate: m.enrollRate, churnRate: m.churnRate, cpa: m.cpa }; });
+                const trendStats = (() => {
+                    if (monthlyTrend.length < 3) return null;
+                    const avgSales = Math.round(monthlyTrend.reduce((s, m) => s + m.sales, 0) / monthlyTrend.length);
+                    const avgNew = Math.round(monthlyTrend.reduce((s, m) => s + m.newCount, 0) / monthlyTrend.length);
+                    const peak = monthlyTrend.reduce((mx, m) => m.sales > mx.sales ? m : mx, monthlyTrend[0]);
+                    const low = monthlyTrend.reduce((mn, m) => m.sales < mn.sales ? m : mn, monthlyTrend[0]);
+                    return { avgSales, avgNew, peakMonth: peak.month, peakSales: peak.sales, lowMonth: low.month, lowSales: low.sales };
+                })();
+                return {
+                    latestMonth: latest ? ymLabel(latest.month) : '', prevMonth: prev ? ymLabel(prev.month) : '',
+                    totalSales: cur.sales, totalNewCount: cur.newVisit, totalNewEnroll: cur.joins, enrollRate: cur.enrollRate,
+                    churnRate: cur.churnRate, cpa: cur.cpa, totalAdSpend: cur.adSpend, prevSales: pv.sales, prevNewCount: pv.newVisit,
+                    newSales: cur.newSales, repeatSales: cur.repeatSales,
+                    mediaBreakdown, prevMediaMap, branchRanking: [], monthlyTrend, similarBenchmark: null, trendStats,
+                    branchArea: '', branchName: branchName || '全店舗', source: 'salonone',
+                };
+            };
             const computePlanActuals = (branchName) => {
+                // SalonOneデータが読み込まれていればそれを優先（GAS rawDataが無い環境でも動作）
+                if (planSoData && Array.isArray(planSoData.months)) return computePlanActualsSo(branchName);
                 const vn = (n) => (n == null || isNaN(n) || !isFinite(n)) ? 0 : Math.round(n);
                 const allMonths = [...new Set(rawData.map(d => d.month).filter(Boolean))].sort();
                 const latestMonth = allMonths[allMonths.length - 1] || '';
@@ -12113,11 +12221,18 @@
                                                 <input type="text" placeholder="店舗を検索..." className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-brand-400 outline-none" value={planBranchSearch} onChange={(e) => setPlanBranchSearch(e.target.value)} />
                                             </div>
                                             <div className="overflow-y-auto flex-1 space-y-1">
-                                                {Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).filter(b => !EXCLUDED_BRANCHES.has(b)).sort()
-                                                    .filter(b => !planBranchSearch || b.toLowerCase().includes(planBranchSearch.toLowerCase()))
-                                                    .map(b => (
-                                                        <div key={b} onClick={() => { setPlanSelectedBranch(b); setPlanMessages([]); setPlanBranchMenuOpen(false); setPlanBranchSearch(''); }} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${planSelectedBranch === b ? 'bg-brand-50 text-brand-600' : 'hover:bg-slate-50 text-slate-600'}`}>
-                                                            <span className="text-sm font-bold">{b}</span>
+                                                {/* 全店 */}
+                                                {(!planBranchSearch || '全店舗'.includes(planBranchSearch)) && (
+                                                    <div key="__all__" onClick={() => { setPlanSoShopId(''); setPlanSelectedBranch('全店舗'); setPlanMessages([]); setPlanBranchMenuOpen(false); setPlanBranchSearch(''); }} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${planSoShopId === '' ? 'bg-brand-50 text-brand-600' : 'hover:bg-slate-50 text-slate-600'}`}>
+                                                        <span className="text-sm font-black">全店舗（ブランド合計）</span>
+                                                    </div>
+                                                )}
+                                                {/* SalonOne店舗（rawDataが無くても選択可能）。soShops未取得時はrawDataブランチにフォールバック */}
+                                                {(soShops.length ? soShops : Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).filter(b => !EXCLUDED_BRANCHES.has(b)).sort().map((b, i) => ({ id: '', name: b })))
+                                                    .filter(sh => !planBranchSearch || String(sh.name).toLowerCase().includes(planBranchSearch.toLowerCase()))
+                                                    .map(sh => (
+                                                        <div key={sh.id || sh.name} onClick={() => { setPlanSoShopId(String(sh.id || '')); setPlanSelectedBranch(sh.name); setPlanMessages([]); setPlanBranchMenuOpen(false); setPlanBranchSearch(''); }} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${planSelectedBranch === sh.name ? 'bg-brand-50 text-brand-600' : 'hover:bg-slate-50 text-slate-600'}`}>
+                                                            <span className="text-sm font-bold">{sh.name}</span>
                                                         </div>
                                                     ))}
                                             </div>
@@ -12143,7 +12258,7 @@
                                         { label: '入会率', value: a.enrollRate + '%', sub: '目標 ' + planGoals.enrollRate + '%', up: a.enrollRate >= planGoals.enrollRate },
                                         { label: '退会率', value: a.churnRate + '%', sub: a.churnRate <= 10 ? '良好' : a.churnRate <= 15 ? '要注意' : '危険', up: a.churnRate <= 10 },
                                         { label: 'CPA', value: '¥' + a.cpa.toLocaleString(), sub: '目標 ¥' + planGoals.cpaTarget.toLocaleString(), up: a.cpa > 0 && a.cpa <= planGoals.cpaTarget },
-                                        { label: '店舗順位', value: myRank + '位', sub: '/ ' + totalBranches + '店舗中', up: myRank <= 3 },
+                                        { label: '継続売上', value: '¥' + (a.repeatSales || 0).toLocaleString(), sub: '新規売上 ¥' + (a.newSales || 0).toLocaleString(), up: (a.repeatSales || 0) >= (a.newSales || 0) },
                                     ].map((kpi, i) => (
                                         <div key={i} className="bg-white rounded-xl border border-slate-200 p-3 shadow-sm">
                                             <div className="text-xs text-slate-500 font-bold mb-1">{kpi.label}</div>
@@ -12257,8 +12372,9 @@
                                             )}
                                         </div>
 
-                                        {/* 他店舗比較 */}
+                                        {/* 店舗ランキング（GAS） or 月次推移（SalonOne） */}
                                         <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+                                            {a.branchRanking.length > 0 ? (<>
                                             <h3 className="text-sm font-black text-slate-700 mb-3 flex items-center gap-1.5">
                                                 <Award size={15} className="text-amber-500" /> 店舗ランキング
                                                 <span className="text-xs font-bold text-slate-400 ml-auto">{a.latestMonth}</span>
@@ -12285,6 +12401,29 @@
                                                 <span>店舗名</span>
                                                 <div className="flex gap-4"><span>売上</span><span>新規</span><span>入会率</span></div>
                                             </div>
+                                            </>) : (<>
+                                            <h3 className="text-sm font-black text-slate-700 mb-3 flex items-center gap-1.5">
+                                                <TrendingUp size={15} className="text-brand-500" /> 月次推移（SalonOne）
+                                                <span className="text-xs font-bold text-slate-400 ml-auto">{planSelectedBranch}</span>
+                                            </h3>
+                                            {planSoLoading ? (
+                                                <div className="text-xs text-slate-400 text-center py-4">SalonOne実績を集計中…</div>
+                                            ) : a.monthlyTrend.length === 0 ? (
+                                                <div className="text-xs text-slate-400 text-center py-4">実績データがありません</div>
+                                            ) : (
+                                                <div className="space-y-1.5">
+                                                    {a.monthlyTrend.slice(-6).map((m, i) => (
+                                                        <div key={i} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs bg-slate-50">
+                                                            <span className="w-14 font-bold text-slate-600">{m.month}</span>
+                                                            <span className="flex-1 font-black text-slate-800 text-right">¥{(m.sales / 10000).toFixed(0)}万</span>
+                                                            <span className="text-slate-500 w-12 text-right">新規{m.newCount}</span>
+                                                            <span className={`w-12 text-right font-bold ${m.enrollRate >= 40 ? 'text-emerald-600' : 'text-slate-500'}`}>入会{m.enrollRate}%</span>
+                                                            <span className={`w-12 text-right font-bold ${m.churnRate <= 10 ? 'text-emerald-600' : 'text-red-500'}`}>退会{m.churnRate}%</span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            </>)}
                                         </div>
 
                                         {/* 参考リンク管理 */}

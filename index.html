@@ -1448,6 +1448,15 @@
                 if (!['settlement', 'salonone', 'settings'].includes(currentPage) || stOwnerShops !== null) return;
                 fetch('/api/settlement-auth').then(r => r.json()).then(j => setStOwnerShops(j.shops || {})).catch(() => setStOwnerShops({}));
             }, [currentPage]);
+            // 設定タブでもSalonOne店舗一覧を取得（管轄店舗の選択肢に実店舗を出す）
+            useEffect(() => {
+                if (currentPage === 'settings' && soShops.length === 0) {
+                    fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`).then(r => r.json()).then(j => {
+                        const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? ''), name: s.name || `店舗${s.id}` }));
+                        if (arr.length) setSoShops(arr);
+                    }).catch(() => {});
+                }
+            }, [currentPage]);
             // ── PDF保存/印刷（本社側でもオーナーと同じフォーマットで出力） ──
             const stEsc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
             const stStatementHTML = (snap, month) => {
@@ -10794,10 +10803,24 @@
                             const planGoal = soPlanGoals[planKey] || {};
                             const planActual = soPlanActual();
                             const planPaceInfo = soPlanPace();
-                            // 着地予想: 新規売上/新規来店=実績+未来の新規予約(受付履歴の実額)。継続売上は現状ペース（Square定期課金連携は次段）
+                            // 着地予想: 新規売上/新規来店=実績+未来の新規予約(受付履歴の実額)。継続売上=Square定期課金の月額合計(継続会員×月額)
                             const planFcNewSales = (planActual.newSales || 0) + (soFutureNew.sales || 0);
                             const planFcNewVisits = (planActual.newVisits || 0) + (soFutureNew.visits || 0);
-                            const planFcRepeatSales = Math.round((planActual.repeatSales || 0) * planPaceInfo.pace);
+                            const planCoreOf = (n) => String(n || '').replace('NAORU整体', '').replace('NAORU', '').replace(/[店院]$/, '').replace(/\s+/g, '').trim();
+                            const planMRR = (() => {
+                                if (!sqData || !Array.isArray(sqData.subscriptions) || !Array.isArray(sqData.stores)) return null;
+                                const active = sqData.subscriptions.filter(s => s.status === 'ACTIVE');
+                                let locIds = null;
+                                if (soShopSel.length) {
+                                    const selCores = soShopSel.map(id => { const sh = (soShops.length ? soShops : soDemoShops).find(x => String(x.id) === String(id)); return sh ? planCoreOf(sh.name) : ''; }).filter(Boolean);
+                                    const set = new Set();
+                                    sqData.stores.forEach(st => { const sc = planCoreOf(st.name); if (selCores.some(c => c && (sc.includes(c) || c.includes(sc)))) (st.locationIds || [st.id]).forEach(l => set.add(l)); });
+                                    locIds = set;
+                                }
+                                const subs = locIds ? active.filter(s => locIds.has(s.locationId)) : active;
+                                return subs.reduce((a, s) => a + (Number(s.monthlyPrice) || 0), 0);
+                            })();
+                            const planFcRepeatSales = planMRR != null ? planMRR : Math.round((planActual.repeatSales || 0) * planPaceInfo.pace);
                             const planFcSales = planFcNewSales + planFcRepeatSales;
                             const planForecastFor = (m, ac) => (
                                 m.key === 'sales' ? planFcSales :
@@ -11495,7 +11518,7 @@
                                                     </table>
                                                 </div>
                                                 <p className="text-[10px] text-slate-400 mt-2 font-bold">
-                                                    着地予想: 新規売上・新規来店＝実績＋受付履歴の未到来の新規予約（金額確定分）{soFutureNew.loading ? '（集計中…）' : soFutureNew.ready ? `＝未来分 +${soYen(soFutureNew.sales)}/${soFutureNew.visits}人` : ''} ／ 継続売上・入会数＝ペース（Square定期課金による継続の実額連携は次段で対応） ／ 総売上＝新規着地＋継続着地。継続率は現在値。実績はSalonOne集計（管理画面一致）。
+                                                    着地予想: 新規売上・新規来店＝実績＋受付履歴の未到来の新規予約（金額確定分）{soFutureNew.loading ? '（集計中…）' : soFutureNew.ready ? `＝未来分 +${soYen(soFutureNew.sales)}/${soFutureNew.visits}人` : ''} ／ 継続売上＝Square定期課金の月額合計 {planMRR != null ? soYen(planMRR) : '（Square読込中…）'}（継続会員×月額） ／ 総売上＝新規着地＋継続着地。入会数はペース、継続率は現在値。実績はSalonOne集計（管理画面一致）。
                                                 </p>
                                             </div>
 

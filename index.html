@@ -3494,6 +3494,16 @@
                     } catch {}
                 })();
             }, [currentPage]);
+            // AIチャットを開いたら 店舗一覧・スタッフ一覧（人数回答用）をSalonOneから取得（未取得時のみ）
+            useEffect(() => {
+                if (!chatOpen) return;
+                if (soShops.length === 0) {
+                    (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.shop_id ?? ''), name: s.name || s.shop_name || `店舗${s.id}` })); if (arr.length) setSoShops(arr); } catch {} })();
+                }
+                if (soStaffs.length === 0) {
+                    (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at })); if (arr.length) setSoStaffs(arr); } catch {} })();
+                }
+            }, [chatOpen]);
             // 事業計画相談タブを開いた/店舗を変えたらSalonOne実績を取得
             useEffect(() => {
                 if (currentPage !== 'planning') return;
@@ -7127,6 +7137,48 @@
                         }
                     }
                 }
+
+                // ── SalonOne 実データ（店舗/スタッフの人数・実績。GAS経営データが空でもこちらで回答可能に） ──
+                try {
+                    const soExcl = new Set(['ヘルプ', '未割当', '(不明)', '不明']);
+                    const soShopNameOf = (sid) => { const sh = (soShops || []).find(x => String(x.id) === String(sid)); return sh ? sh.name : ('店舗' + sid); };
+                    // 店舗別の登録スタッフ（在籍ロスター）
+                    if (soStaffs && soStaffs.length) {
+                        const byShop = {};
+                        soStaffs.forEach(st => { if (st.deleted) return; if (soExcl.has(String(st.name || '').trim())) return; const sid = String(st.shop_id || ''); (byShop[sid] = byShop[sid] || []).push(st.name); });
+                        const lines = Object.entries(byShop).filter(([sid]) => sid).map(([sid, names]) => `${soShopNameOf(sid)}: 在籍${names.length}名（${names.join('、')}）`);
+                        if (lines.length) { sections.push('\n■ SalonOne 店舗別スタッフ（在籍ロスター・ヘルプ/未割当除外）'); lines.slice(0, 120).forEach(l => sections.push(l)); }
+                    }
+                    // 店舗別の当月実績（店舗タブを開くと全店取得済み）
+                    const soActive = (soShopRows || []).filter(r => r && r.active && !r.loading);
+                    if (soActive.length) {
+                        sections.push('\n■ SalonOne 店舗別実績（' + soFrom.slice(0, 7) + '・全' + soActive.length + '店舗・確定分）');
+                        soActive.forEach(r => sections.push(`${r.name}: 売上¥${(r.gross || 0).toLocaleString()}, 新規売上¥${(r.newSales || 0).toLocaleString()}, 既存売上¥${(r.existSales || 0).toLocaleString()}, 新規${r.newCount || 0}, 入会${r.joinCount || 0}, 入会率${r.joinRate || 0}%, 会員${r.active_count || 0}, 退会${r.churn || 0}(${r.churnRate || 0}%), セラピスト${r.therapist || 0}名, 返金¥${(r.refund || 0).toLocaleString()}`));
+                        const wsort = (arr, k, asc) => [...arr].sort((a, b) => asc ? (a[k] - b[k]) : (b[k] - a[k]));
+                        sections.push('【売上ワースト10】 ' + wsort(soActive, 'gross', true).slice(0, 10).map(r => r.name + '¥' + (r.gross || 0).toLocaleString()).join(' / '));
+                        const erPool = soActive.filter(r => (r.newCount || 0) >= 3);
+                        if (erPool.length) sections.push('【入会率ワースト10（新規3件以上）】 ' + wsort(erPool, 'joinRate', true).slice(0, 10).map(r => r.name + '(' + r.joinRate + '%,新規' + r.newCount + ')').join(' / '));
+                        const crPool = soActive.filter(r => (r.active_count || 0) >= 5);
+                        if (crPool.length) sections.push('【退会率ワースト10（会員5名以上・高い順）】 ' + wsort(crPool, 'churnRate', false).slice(0, 10).map(r => r.name + '(' + r.churnRate + '%)').join(' / '));
+                        sections.push('【新規数トップ10】 ' + wsort(soActive, 'newCount', false).slice(0, 10).map(r => r.name + '(' + (r.newCount || 0) + '名)').join(' / '));
+                    } else if (soShops && soShops.length) {
+                        sections.push('\n■ SalonOne 店舗別実績: 未取得（ダッシュボードの「SalonOne売上」→「店舗」タブを開くと全店の実績が集計されます）');
+                    }
+                    // 選択中店舗のスタッフ別実績（現在SalonOne画面で選択中の店舗）
+                    const soSel = soSummary;
+                    if (soSel && Array.isArray(soSel.byStaff) && soSel.byStaff.length) {
+                        const mkById = {}; (soStaffMk || []).filter(r => !r.isTotal).forEach(r => { mkById[String(r.id)] = r; });
+                        const retByName = {}; ((soRetention && soRetention.byStaff) || []).forEach(r => { retByName[r.staff_name] = r; });
+                        const label = (soShopSel && soShopSel.length) ? soShopSel.map(id => soShopNameOf(id)).join('・') : '全店';
+                        sections.push('\n■ SalonOne 選択中店舗のスタッフ別実績（' + label + ' / ' + soFrom.slice(0, 7) + '）');
+                        soSel.byStaff.filter(st => !soExcl.has(String(st.name || '').trim())).slice(0, 40).forEach(st => {
+                            const mk = mkById[String(st.id)] || {}, ret = retByName[st.name] || {};
+                            const ns = soNum(mk, 'sales'), nc = soNum(mk, 'visit') || st.newCount || 0, jc = soNum(mk, 'purchase'), jr = soNum(mk, 'purchaseRate');
+                            const active = soNum(ret, 'active_count'), churn = soNum(ret, 'churn_count'), rj = soNum(ret, 'join_count');
+                            sections.push(`${st.name}: 売上¥${(st.gross || 0).toLocaleString()}, 新規売上¥${ns.toLocaleString()}, 既存売上¥${Math.max(0, (st.gross || 0) - ns).toLocaleString()}, 新規${nc}, 入会${jc}, 入会率${jr}%, 会員${active}, 退会${churn}, 施術${st.treatments || 0}, G口コミ${st.gReview || 0}, H口コミ${st.hReview || 0}`);
+                        });
+                    }
+                } catch (e) { /* SalonOne未ロード時は無視 */ }
 
                 // ── 利用可能な店舗・期間 ──
                 sections.push('\n■ 利用可能な店舗: ' + allBranches.join('、'));

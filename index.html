@@ -2858,10 +2858,8 @@
                 const ac = actual[m.key] || 0;
                 if (m.rate) return ac;
                 const fut = futureOverride || soFutureNew;
-                // 未来の継続売上: ①残り期間に課金予定のSquare定期課金(chargedThroughDate基準)を優先。
-                // ②Square未マッチ時は受付履歴の「既存」未来売上(soFutureRepeat)で代替。実績(日報)＋未来で着地。
-                const futRec = mrrOverride !== undefined ? mrrOverride : soPlanFutureRecurring();
-                const repFuture = (futRec && typeof futRec.sum === 'number' && futRec.sum > 0) ? futRec.sum : (soFutureRepeat.sales || 0);
+                // 未来の継続売上 = 受付履歴の「既存」予約の未来売上（明日〜期間末）。Squareは使わない。
+                const repFuture = soFutureRepeat.sales || 0;
                 const newFuture = fut.sales || 0, visitFuture = fut.visits || 0;
                 let fc;
                 if (m.key === 'sales') fc = (actual.sales || 0) + newFuture + repFuture;
@@ -2911,7 +2909,13 @@
                                 if (d > periodEnd) { passedEnd = true; continue; }
                                 if (d <= today) continue;                                   // 到来済みは実績(日報)で計上
                                 if (String(a.customer_match_status || '').includes('new')) continue; // 新規は除外＝既存のみ
-                                const amt = Math.max(Number(a.total_price) || 0, Number(a.booked_total_price) || 0);
+                                // 予測売上（受付履歴の金額列）。フィールド名の揺れに対応して最大値を採用
+                                const amt = Math.max(
+                                    Number(a.total_price) || 0, Number(a.booked_total_price) || 0,
+                                    Number(a.total_amount) || 0, Number(a.price) || 0,
+                                    Number(a.menu_total_price) || 0, Number(a.booked_price) || 0,
+                                    Number(a.total) || 0, Number(a.sales) || 0
+                                );
                                 if (amt > 0) { sales += amt; count++; }
                             }
                             pages++;
@@ -11789,7 +11793,7 @@
                                                     </table>
                                                 </div>
                                                 <p className="text-[10px] text-slate-400 mt-2 font-bold">
-                                                    着地予想＝<b>実績（本日までのSalonOne実績）＋未来分（明日〜{soTo.slice(5).replace('-', '/')}）</b>。着地は実績を絶対に下回りません。 ／ 新規来店＝実績＋残新規（マーケ集計の未来予定＝予約−来店−ｷｬﾝｾﾙ）{soFutureNew.ready ? `＝未来分 +${soFutureNew.visits}人` : ''}、新規売上＝実績＋残新規×新規客単価 ／ 継続売上＝実績（本日までの日報）＋{(planFutRec && planFutRec.sum > 0) ? `残り期間のSquare定期課金 ${soYen(planFutRec.sum)}（${planFutRec.count}件・chargedThroughDate基準）` : (soFutureRepeat.loading ? '受付履歴の既存未来売上（集計中…）' : `受付履歴の既存予約の未来売上 ${soYen(soFutureRepeat.sales)}（${soFutureRepeat.count}件・17日〜月末の既存客予約）`)} ／ 総売上＝実績＋未来新規＋未来継続。入会数＝実績＋未来の新規来店×現在の入会率。継続率は現在値。実績はSalonOne集計（管理画面一致）。
+                                                    着地予想＝<b>実績（本日までのSalonOne実績）＋未来分（明日〜{soTo.slice(5).replace('-', '/')}）</b>。着地は実績を絶対に下回りません。 ／ 新規来店＝実績＋残新規（マーケ集計の未来予定＝予約−来店−ｷｬﾝｾﾙ）{soFutureNew.ready ? `＝未来分 +${soFutureNew.visits}人` : ''}、新規売上＝実績＋残新規×新規客単価 ／ 継続売上＝実績（本日までの日報）＋{soFutureRepeat.loading ? '受付履歴の既存予約の未来売上（集計中…）' : `受付履歴の既存予約の未来売上 ${soYen(soFutureRepeat.sales)}（${soFutureRepeat.count}件・明日〜月末の既存客予約をすべて合算）`} ／ 総売上＝実績＋未来新規＋未来継続。入会数＝実績＋未来の新規来店×現在の入会率。継続率は現在値。実績はSalonOne集計（管理画面一致）。
                                                 </p>
                                             </div>
 

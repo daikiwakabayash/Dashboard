@@ -1557,6 +1557,7 @@
             const soInitialized = useRef(false);
             const soReqRef = useRef(0); // フェッチ競合ガード（店舗切替時に古い応答で上書きしない）
             const [soFutureNew, setSoFutureNew] = useState({ sales: 0, visits: 0, ready: false, loading: false }); // 未来の新規予約（受付履歴）
+            const [soFutureRepeat, setSoFutureRepeat] = useState({ sales: 0, count: 0, ready: false, loading: false }); // 未来の既存(継続)予約売上（受付履歴）
 
             // ソート用 State
             const [branchSortKey, setBranchSortKey] = useState('newCount');
@@ -2857,10 +2858,10 @@
                 const ac = actual[m.key] || 0;
                 if (m.rate) return ac;
                 const fut = futureOverride || soFutureNew;
-                // 未来の継続売上: 残り期間に課金される見込みのSquare定期課金（chargedThroughDate基準）。
-                // Square未マッチ（店舗特定不可）のときは水増しせず未来分0（＝着地は実績）とし、注記で明示する。
+                // 未来の継続売上: ①残り期間に課金予定のSquare定期課金(chargedThroughDate基準)を優先。
+                // ②Square未マッチ時は受付履歴の「既存」未来売上(soFutureRepeat)で代替。実績(日報)＋未来で着地。
                 const futRec = mrrOverride !== undefined ? mrrOverride : soPlanFutureRecurring();
-                const repFuture = (futRec && typeof futRec.sum === 'number') ? futRec.sum : 0;
+                const repFuture = (futRec && typeof futRec.sum === 'number' && futRec.sum > 0) ? futRec.sum : (soFutureRepeat.sales || 0);
                 const newFuture = fut.sales || 0, visitFuture = fut.visits || 0;
                 let fc;
                 if (m.key === 'sales') fc = (actual.sales || 0) + newFuture + repFuture;
@@ -2882,6 +2883,45 @@
                 const act = soPlanActual();
                 const avgTicket = act.newVisits > 0 ? (act.newSales || 0) / act.newVisits : 0;    // 現在の新規客単価
                 setSoFutureNew({ visits: remaining, sales: Math.round(remaining * avgTicket), ready: true, loading: false });
+            };
+            // 未来の継続売上 = 受付履歴(appointments)の「既存」予約（明日〜期間末・非キャンセル）の売上合計。
+            // プラン名の有無に関わらず既存客の予約金額(total_price/booked_total_price)を全て合算。
+            // 本日以前は実績(日報)で計上済みのため対象外。Square定期課金が取得できない店舗の継続着地に使用。
+            const soLoadFutureRepeat = async () => {
+                const ids = soShopSel.length ? soShopSel.map(String) : (soShops.length ? soShops : soDemoShops).map(s => String(s.id));
+                if (!ids.length) { setSoFutureRepeat({ sales: 0, count: 0, ready: true, loading: false }); return; }
+                const today = new Date(); today.setHours(0, 0, 0, 0);
+                const periodEnd = new Date(soTo + 'T23:59:59');
+                const jstDate = (utc) => { const d = new Date(String(utc).replace(' ', 'T') + 'Z'); return new Date(d.getTime() + 9 * 3600000); };
+                setSoFutureRepeat(f => ({ ...f, loading: true, ready: false }));
+                let sales = 0, count = 0;
+                try {
+                    for (const id of ids) {
+                        let cursor = null, pages = 0;
+                        while (pages < 8) {
+                            const p = new URLSearchParams({ resource: 'appointments', shop_id: id, limit: '1000' });
+                            if (cursor) p.set('cursor', cursor);
+                            const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`);
+                            const j = await r.json().catch(() => ({}));
+                            const arr = j.data || [];
+                            let passedEnd = false;
+                            for (const a of arr) {
+                                if (a.cancelled_at) continue;
+                                const d = jstDate(a.start_at);
+                                if (d > periodEnd) { passedEnd = true; continue; }
+                                if (d <= today) continue;                                   // 到来済みは実績(日報)で計上
+                                if (String(a.customer_match_status || '').includes('new')) continue; // 新規は除外＝既存のみ
+                                const amt = Math.max(Number(a.total_price) || 0, Number(a.booked_total_price) || 0);
+                                if (amt > 0) { sales += amt; count++; }
+                            }
+                            pages++;
+                            const meta = j.meta || {};
+                            if (!meta.has_more || passedEnd || !meta.next_cursor) break;     // 昇順→期間末を超えたら終了
+                            cursor = meta.next_cursor;
+                        }
+                    }
+                    setSoFutureRepeat({ sales, count, ready: true, loading: false });
+                } catch (e) { setSoFutureRepeat({ sales, count, ready: true, loading: false }); }
             };
             const soAiAnalyze = async () => {
                 setSoAiLoading(true); setSoAiResult('');
@@ -3385,6 +3425,12 @@
                 if (currentPage === 'salonone' && soView === 'plan') soLoadFutureNew();
                 else if (currentPage !== 'salonone') setSoFutureNew({ sales: 0, visits: 0, ready: false, loading: false });
             }, [currentPage, soView, soShopSel.join(','), soFrom, soTo, soChannels, soSummary]);
+
+            // 計画サブタブを開いたら 受付履歴の「既存」未来売上を集計（継続着地のSquare未マッチ時フォールバック）
+            useEffect(() => {
+                if (currentPage === 'salonone' && soView === 'plan') soLoadFutureRepeat();
+                else if (currentPage !== 'salonone') setSoFutureRepeat({ sales: 0, count: 0, ready: false, loading: false });
+            }, [currentPage, soView, soShopSel.join(','), soFrom, soTo]);
 
             // ===== 予約メニュー分析機能（J列メニュー名ベース） =====
 
@@ -11743,7 +11789,7 @@
                                                     </table>
                                                 </div>
                                                 <p className="text-[10px] text-slate-400 mt-2 font-bold">
-                                                    着地予想＝<b>実績（本日までのSalonOne実績）＋未来分（明日〜{soTo.slice(5).replace('-', '/')}）</b>。着地は実績を絶対に下回りません。 ／ 新規来店＝実績＋残新規（マーケ集計の未来予定＝予約−来店−ｷｬﾝｾﾙ）{soFutureNew.ready ? `＝未来分 +${soFutureNew.visits}人` : ''}、新規売上＝実績＋残新規×新規客単価 ／ 継続売上＝実績＋{planFutRec ? `残り期間に課金予定のSquare定期課金 ${soYen(planFutRec.sum)}（${planFutRec.count}件・chargedThroughDate基準の未請求分）` : '⚠️Square店舗が未マッチのため未来分は0（実績のみ）'}（非定期は含めない） ／ 総売上＝実績＋未来新規＋未来継続。入会数＝実績＋未来の新規来店×現在の入会率。継続率は現在値。実績はSalonOne集計（管理画面一致）。
+                                                    着地予想＝<b>実績（本日までのSalonOne実績）＋未来分（明日〜{soTo.slice(5).replace('-', '/')}）</b>。着地は実績を絶対に下回りません。 ／ 新規来店＝実績＋残新規（マーケ集計の未来予定＝予約−来店−ｷｬﾝｾﾙ）{soFutureNew.ready ? `＝未来分 +${soFutureNew.visits}人` : ''}、新規売上＝実績＋残新規×新規客単価 ／ 継続売上＝実績（本日までの日報）＋{(planFutRec && planFutRec.sum > 0) ? `残り期間のSquare定期課金 ${soYen(planFutRec.sum)}（${planFutRec.count}件・chargedThroughDate基準）` : (soFutureRepeat.loading ? '受付履歴の既存未来売上（集計中…）' : `受付履歴の既存予約の未来売上 ${soYen(soFutureRepeat.sales)}（${soFutureRepeat.count}件・17日〜月末の既存客予約）`)} ／ 総売上＝実績＋未来新規＋未来継続。入会数＝実績＋未来の新規来店×現在の入会率。継続率は現在値。実績はSalonOne集計（管理画面一致）。
                                                 </p>
                                             </div>
 

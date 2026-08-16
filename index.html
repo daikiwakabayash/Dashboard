@@ -2790,10 +2790,12 @@
             const soFmtMetric = (m, v) => m.yen ? soYen(v) : (Math.round((Number(v) || 0) * 10) / 10 + (m.unit || ''));
             const soPlanActual = () => {
                 const s = soSummary; const tot = soStaffMk.find(r => r.isTotal);
+                const gross = (s && s.grossSales) || 0;
+                const newSales = (s && s.newSales) || 0;
                 return {
-                    sales: (s && s.grossSales) || 0,
-                    newSales: (s && s.newSales) || 0,
-                    repeatSales: (s && s.repeatSales) || 0,
+                    sales: gross,                              // 総売上＝新規売上＋継続売上（下記の定義で必ず一致）
+                    newSales: newSales,
+                    repeatSales: Math.max(0, gross - newSales), // 継続売上＝総売上−新規売上（スタッフ/店舗タブの既存売上と同一定義）
                     newVisits: (tot ? tot.visit : (s ? s.newVisit : 0)) || 0,
                     // 入会数＝マーケ「購入数」(全体のpurchase_count)。SalonOne新規管理の購入数と一致（入会率＝購入数÷新規来店）。
                     // retentionのjoin_countは遡及増加で過大になるため使わない。マーケ未取得時のみ join_in_period_count にフォールバック
@@ -2866,8 +2868,11 @@
                 const ac = actual[m.key] || 0;
                 if (m.rate) return ac;
                 const fut = futureOverride || soFutureNew;
-                // 未来の継続売上 = 受付履歴の「既存」予約の未来売上（明日〜期間末）。Squareは使わない。
-                const repFuture = soFutureRepeat.sales || 0;
+                // 未来の継続売上 = 継続売上実績の日割りペース（本日までの日次平均 × 残り日数）。
+                // ※SalonOne受付履歴APIは金額を持たず(total_price:0)、日付フィルタも無いため、未来の既存予約売上の実額合算は不可。
+                //   継続（既存客）売上は日次でほぼ一定のため、実績の日割りで残り期間を予測する。
+                const repRemain = Math.max(0, pace.total - pace.elapsed);
+                const repFuture = pace.elapsed > 0 ? Math.round((actual.repeatSales || 0) * repRemain / pace.elapsed) : 0;
                 const newFuture = fut.sales || 0, visitFuture = fut.visits || 0;
                 let fc;
                 if (m.key === 'sales') fc = (actual.sales || 0) + newFuture + repFuture;
@@ -3486,12 +3491,6 @@
                 if (currentPage === 'salonone' && soView === 'plan') soLoadFutureNew();
                 else if (currentPage !== 'salonone') setSoFutureNew({ sales: 0, visits: 0, ready: false, loading: false });
             }, [currentPage, soView, soShopSel.join(','), soFrom, soTo, soChannels, soSummary]);
-
-            // 計画サブタブを開いたら 受付履歴の「既存」未来売上を集計（継続着地のSquare未マッチ時フォールバック）
-            useEffect(() => {
-                if (currentPage === 'salonone' && soView === 'plan') soLoadFutureRepeat();
-                else if (currentPage !== 'salonone') setSoFutureRepeat({ sales: 0, count: 0, ready: false, loading: false });
-            }, [currentPage, soView, soShopSel.join(','), soFrom, soTo]);
 
             // 店舗別タブを開いたら（期間変更時も）全店を出店順で集計
             useEffect(() => {
@@ -11922,7 +11921,7 @@
                                                     </table>
                                                 </div>
                                                 <p className="text-[10px] text-slate-400 mt-2 font-bold">
-                                                    着地予想＝<b>実績（本日までのSalonOne実績）＋未来分（明日〜{soTo.slice(5).replace('-', '/')}）</b>。着地は実績を絶対に下回りません。 ／ 新規来店＝実績＋残新規（マーケ集計の未来予定＝予約−来店−ｷｬﾝｾﾙ）{soFutureNew.ready ? `＝未来分 +${soFutureNew.visits}人` : ''}、新規売上＝実績＋残新規×新規客単価 ／ 継続売上＝実績（本日までの日報）＋{soFutureRepeat.loading ? '受付履歴の既存予約の未来売上（集計中…）' : `受付履歴の既存予約の未来売上 ${soYen(soFutureRepeat.sales)}（${soFutureRepeat.count}件・明日〜月末の既存客予約をすべて合算）`} ／ 総売上＝実績＋未来新規＋未来継続。入会数＝実績＋未来の新規来店×現在の入会率。継続率は現在値。実績はSalonOne集計（管理画面一致）。
+                                                    着地予想＝<b>実績（本日までのSalonOne実績）＋未来分（明日〜{soTo.slice(5).replace('-', '/')}）</b>。着地は実績を絶対に下回りません。 ／ 新規来店＝実績＋残新規（マーケ集計の未来予定＝予約−来店−ｷｬﾝｾﾙ）{soFutureNew.ready ? `＝未来分 +${soFutureNew.visits}人` : ''}、新規売上＝実績＋残新規×新規客単価 ／ <b>継続売上＝総売上−新規売上</b>（スタッフ/店舗タブの既存売上と同一定義）で、未来分は継続売上実績の日割りペース（本日までの日次平均×残り日数）。 ／ <b>総売上＝新規売上＋継続売上</b>（実績・着地とも一致）。入会数＝実績＋未来の新規来店×現在の入会率。継続率は現在値。実績はSalonOne集計（管理画面一致）。
                                                 </p>
                                             </div>
 

@@ -6722,6 +6722,40 @@
                             const totCh = ranked.reduce((s, r) => s + r.cur.ch, 0);
                             const totPm = ranked.reduce((s, r) => s + r.cur.pm, 0);
                             sections.push('合計: 売上¥' + totSales.toLocaleString() + ', 新規' + totNc + ', 入会率' + (totNc > 0 ? Math.round((totNe / totNc) * 100) : 0) + '%, 退会率' + (totPm > 0 ? Math.round((totCh / totPm) * 1000) / 10 : 0) + '%');
+
+                            // ── 全店舗ワースト早見表（「数字が悪い店舗」「前月対比が悪い店舗」等の質問に正確に回答するため） ──
+                            if (ranked.length >= 3) {
+                                sections.push('\n▼ ' + compareMonth + ' 全店舗ワースト早見（' + ranked.length + '店舗中／悪い順）');
+                                const worstSales = [...ranked].sort((a, b) => a.cur.sales - b.cur.sales).slice(0, 10);
+                                sections.push('【売上ワースト10】 ' + worstSales.map((r, i) => (i + 1) + '.' + r.branch + '¥' + r.cur.sales.toLocaleString()).join(' / '));
+                                const withPrev = ranked.filter(r => r.prev && r.prev.sales > 0);
+                                if (withPrev.length >= 3) {
+                                    const worstMoM = [...withPrev].sort((a, b) => ((a.cur.sales - a.prev.sales) / a.prev.sales) - ((b.cur.sales - b.prev.sales) / b.prev.sales)).slice(0, 10);
+                                    sections.push('【前月比ワースト10（下落率順）】 ' + worstMoM.map((r, i) => (i + 1) + '.' + r.branch + '(' + delta(r.cur.sales, r.prev.sales) + '%,¥' + r.cur.sales.toLocaleString() + ')').join(' / '));
+                                }
+                                const worstEr = [...ranked].filter(r => r.cur.nc >= 3).sort((a, b) => a.cur.er - b.cur.er).slice(0, 10);
+                                if (worstEr.length >= 3) sections.push('【入会率ワースト10（新規3件以上）】 ' + worstEr.map((r, i) => (i + 1) + '.' + r.branch + '(' + r.cur.er + '%,新規' + r.cur.nc + ')').join(' / '));
+                                const worstCr = [...ranked].filter(r => r.cur.pm >= 5).sort((a, b) => b.cur.cr - a.cur.cr).slice(0, 10);
+                                if (worstCr.length >= 3) sections.push('【退会率ワースト10（会員5名以上・高い順）】 ' + worstCr.map((r, i) => (i + 1) + '.' + r.branch + '(' + r.cur.cr + '%)').join(' / '));
+                            }
+
+                            // ── 全スタッフ横断ランキング（「入会率悪いスタッフ10名」等の全店横断の個人比較に回答するため） ──
+                            const staffRecs = rawData.filter(d => d.month === compareMonth && d.name).map(d => {
+                                const sales = vn(d.individualSales), nc = vn(d.newCount), ne = vn(d.newEnroll);
+                                return { label: (d.name || '不明') + '(' + d.branch + ')', sales, nc, ne, er: nc > 0 ? Math.round((ne / nc) * 100) : 0,
+                                         ch: vn(d.churnCount), prod: vn(d.productivity), gr: vn(d.gReviews), hr: vn(d.hReviews) };
+                            });
+                            if (staffRecs.length >= 5) {
+                                sections.push('\n▼ ' + compareMonth + ' 全スタッフ横断ランキング（全' + staffRecs.length + '名）');
+                                const wEr = [...staffRecs].filter(r => r.nc >= 3).sort((a, b) => a.er - b.er).slice(0, 15);
+                                if (wEr.length) sections.push('【入会率ワースト15（新規3件以上）】 ' + wEr.map((r, i) => (i + 1) + '.' + r.label + '(入会率' + r.er + '%,新規' + r.nc + ',入会' + r.ne + ')').join(' / '));
+                                const wProd = [...staffRecs].filter(r => r.prod > 0).sort((a, b) => a.prod - b.prod).slice(0, 15);
+                                if (wProd.length) sections.push('【生産性ワースト15】 ' + wProd.map((r, i) => (i + 1) + '.' + r.label + '(¥' + r.prod.toLocaleString() + ')').join(' / '));
+                                const bEr = [...staffRecs].filter(r => r.nc >= 3).sort((a, b) => b.er - a.er).slice(0, 10);
+                                if (bEr.length) sections.push('【入会率トップ10（横展開の勝ちパターン参照用）】 ' + bEr.map((r, i) => (i + 1) + '.' + r.label + '(入会率' + r.er + '%,新規' + r.nc + ')').join(' / '));
+                                const bSales = [...staffRecs].sort((a, b) => b.sales - a.sales).slice(0, 10);
+                                if (bSales.length) sections.push('【個別売上トップ10】 ' + bSales.map((r, i) => (i + 1) + '.' + r.label + '¥' + r.sales.toLocaleString()).join(' / '));
+                            }
                         }
                     }
                 }
@@ -7279,6 +7313,34 @@
                 lines.push(`入会率 ${a.enrollRate}% → ${evalEnroll}`);
                 lines.push(`退会率 ${a.churnRate}% → ${evalChurn}`);
                 lines.push(`新規数 ${a.totalNewCount}名 → ${evalNew}`);
+                // ── 過去に実施した施策とその検証結果（PDCA の C=検証／A=改善の材料） ──
+                const planActLog = (soActions || []).filter(x => {
+                    if (!x || !x.shopKey) return true; // 全店施策は常に含める
+                    const core = String(branch || '').replace(/駅?院$/, '');
+                    return core && String(x.shopKey).includes(core);
+                });
+                lines.push('', '【過去に実施した施策と検証結果（PDCAのCheck/Act材料・この店舗/全店の実行履歴）】');
+                if (planActLog.length === 0) {
+                    lines.push('- 施策ログは未登録。過去12ヶ月の指標の変化点（下の変化点分析）を「実施された施策の結果」と推定し、何が効いた/効かなかったかを仮説立てすること');
+                } else {
+                    planActLog.slice(-20).forEach(a => {
+                        lines.push(`- [${a.status || '未着手'}] ${a.title || '(無題)'}｜狙う指標: ${soMetricLabel(a.metric)}｜実施: ${a.date || '未定'}｜期待効果: ${a.impact || '-'}${a.result ? `｜検証結果: ${a.result}` : '｜検証結果: 未記入（効果測定を促すこと）'}`);
+                    });
+                }
+                // ── 月次変化点分析（過去の売上急変＝施策やイベントの痕跡。仮説検証の起点） ──
+                if (a.monthlyTrend && a.monthlyTrend.length >= 3) {
+                    const mt = a.monthlyTrend;
+                    const deltas = [];
+                    for (let i = 1; i < mt.length; i++) {
+                        const prevS = mt[i - 1].sales, curS = mt[i].sales;
+                        if (prevS > 0) deltas.push({ month: mt[i].month, pct: Math.round((curS - prevS) / prevS * 100), sales: curS, prevSales: prevS, newCount: mt[i].newCount, cpa: mt[i].cpa });
+                    }
+                    const ups = [...deltas].sort((x, y) => y.pct - x.pct).slice(0, 3).filter(d => d.pct > 0);
+                    const downs = [...deltas].sort((x, y) => x.pct - y.pct).slice(0, 3).filter(d => d.pct < 0);
+                    lines.push('', '【月次変化点分析（過去12ヶ月・売上が大きく動いた月＝仮説検証の起点）】');
+                    if (ups.length) lines.push('▲ 好転月: ' + ups.map(d => `${d.month}(前月比+${d.pct}%,¥${d.sales.toLocaleString()},新規${d.newCount}名)`).join(' / ') + ' → この月に何が効いたかを推定し横展開');
+                    if (downs.length) lines.push('▼ 悪化月: ' + downs.map(d => `${d.month}(前月比${d.pct}%,¥${d.sales.toLocaleString()},新規${d.newCount}名)`).join(' / ') + ' → 悪化要因の仮説と再発防止策');
+                }
                 // 参考リンク
                 if (planLinks.length > 0) {
                     lines.push('', '【参考リンク（回答の中で関連するものがあれば[タイトル](URL)形式のMarkdownリンクとして積極的に紹介してください）】');
@@ -7286,10 +7348,13 @@
                         lines.push('- ' + l.title + ' (' + l.category + '): ' + l.url);
                     });
                 }
-                lines.push('', '【回答フォーマット指示】');
+                lines.push('', '【回答フォーマット指示（事業計画相談＝PDCA・仮説検証・具体アクション必須）】');
                 lines.push('- Markdownで構造化して回答してください（## 見出し、**太字**、- 箇条書き、| 表 |）');
                 lines.push('- コンパクトにまとめ、冗長な説明は避けてください');
-                lines.push('- **すべての提案には必ず定量根拠を添える**: 「○○すべき」だけでなく「○○すれば月△△円増。根拠: ××（具体的なデータ）」の形式で示すこと');
+                lines.push('- **PDCAの型で答える**: ①現状評価(Plan/目標の現実性) → ②過去施策と変化点の検証(Check: 何が効いた/効かなかったか) → ③要因仮説(Why) → ④具体アクション(Do/Act)。この4段を必ず踏むこと');
+                lines.push('- **過去に実施した施策の検証結果と月次変化点を必ず引用**し、「前回○○をやった結果△△だった。だから次は□□」という因果でアクションを導くこと（データにない過去施策は捏造しない）');
+                lines.push('- **すべての提案には必ず定量根拠を添える**: 「○○すべき」だけでなく「○○すれば月△△円増。根拠: ××（具体的なデータ）／計算式」の形式で示すこと');
+                lines.push('- **アクションは「誰が・いつまでに・何を・狙う指標・期待効果・検証方法(何の数字がどうなれば成功か)」を必ず明記**し、優先度順の表で提示すること');
                 lines.push('- 同等店舗ベンチマークと業界ベンチマークの両方を引用し、自店ポジションを明確化すること');
                 lines.push('- 過去12ヶ月の達成履歴を踏まえ、目標が現実的か（過去達成率○%）を冒頭で評価すること');
                 lines.push('- 参考リンクが関連する場合は[タイトル](URL)形式で本文中に自然に挿入してください');

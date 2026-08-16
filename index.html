@@ -2786,8 +2786,9 @@
                     newSales: (s && s.newSales) || 0,
                     repeatSales: (s && s.repeatSales) || 0,
                     newVisits: (tot ? tot.visit : (s ? s.newVisit : 0)) || 0,
-                    // 入会数は「期間内入会」を使う。join_countは遡及増加で過大になるため join_in_period_count を優先
-                    joins: soNum(soRetention && soRetention.summary, 'join_in_period_count', 'join_in_period', 'join_count'),
+                    // 入会数＝マーケ「購入数」(全体のpurchase_count)。SalonOne新規管理の購入数と一致（入会率＝購入数÷新規来店）。
+                    // retentionのjoin_countは遡及増加で過大になるため使わない。マーケ未取得時のみ join_in_period_count にフォールバック
+                    joins: (tot && tot.purchase != null) ? tot.purchase : soNum(soRetention && soRetention.summary, 'join_in_period_count', 'join_count'),
                     retention: (soRetention && soRetention.summary && soRetention.summary.continuation_rate) || 0,
                 };
             };
@@ -3269,9 +3270,9 @@
                         try {
                             const stRes = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`);
                             const stJson = await stRes.json().catch(() => ({}));
+                            // 削除済みスタッフも所属店舗の判定に使うため保持（deletedフラグ付き）。選択肢では除外する
                             const stArr = (stJson.data || stJson || [])
-                                .filter(s => !s.deleted_at)   // 削除済みスタッフは除外
-                                .map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? '') }));
+                                .map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at }));
                             if (stArr.length) setSoStaffs(stArr);
                         } catch {}
                     }
@@ -10943,7 +10944,7 @@
                                 shopOptions.forEach(sh => { const o = soShopOwner(sh.name); if (o) (groups[o] = groups[o] || []).push(sh); });
                                 return groups;
                             })();
-                            const staffOptions = (soStaffs.length ? soStaffs : soDemoStaffs).filter(st => soShopSel.length === 0 || soShopSel.map(String).includes(String(st.shop_id)));
+                            const staffOptions = (soStaffs.length ? soStaffs : soDemoStaffs).filter(st => !st.deleted).filter(st => soShopSel.length === 0 || soShopSel.map(String).includes(String(st.shop_id)));
                             const shopName = soShopLabel();
                             const staffName = soStaffSel.length === 0 ? '全スタッフ' : (soStaffSel.length === 1 ? (staffOptions.find(s => String(s.id) === String(soStaffSel[0])) || {}).name || '1名' : `${soStaffSel.length}名`);
                             const soToggleShop = (id) => { setSoOwner(''); setSoShopSel(sel => sel.map(String).includes(String(id)) ? sel.filter(x => String(x) !== String(id)) : [...sel, String(id)]); };

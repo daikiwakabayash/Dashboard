@@ -3173,7 +3173,7 @@
                         setSoRetention(normalizeMkRetention(soMergeRetention(rt.filter(r => r.status === 200).map(r => (r.json && r.json.data) || r.json))));
                     })();
 
-                    // 店舗・スタッフの選択肢は初回のみ取得（売上の成否に関わらず）
+                    // 店舗・スタッフの選択肢はSalonOneから取得（それぞれ未取得なら取得。売上の成否に依存しない）
                     if (soShops.length === 0 || force) {
                         try {
                             const shopRes = await fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`);
@@ -3181,10 +3181,14 @@
                             const shopArr = (shopJson.data || shopJson || []).map(s => ({ id: String(s.id ?? s.shop_id ?? ''), name: s.name || s.shop_name || `店舗${s.id}` }));
                             if (shopArr.length) setSoShops(shopArr);
                         } catch {}
+                    }
+                    if (soStaffs.length === 0 || force) {
                         try {
                             const stRes = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`);
                             const stJson = await stRes.json().catch(() => ({}));
-                            const stArr = (stJson.data || stJson || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? '') }));
+                            const stArr = (stJson.data || stJson || [])
+                                .filter(s => !s.deleted_at)   // 削除済みスタッフは除外
+                                .map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? '') }));
                             if (stArr.length) setSoStaffs(stArr);
                         } catch {}
                     }

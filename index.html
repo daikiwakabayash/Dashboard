@@ -10986,7 +10986,17 @@
                             })();
                             const s = soSummary;
                             const totalVisits = s ? (s.newVisit + s.repeatVisit) : 0;
-                            const displayStaff = s ? (soStaffSel.length === 0 ? s.byStaff : s.byStaff.filter(st => soStaffSel.map(String).includes(String(st.id)))) : [];
+                            // スタッフ→所属店舗マップ（SalonOne staffs）。選択店舗に属さないスタッフ（他店応援等でsales/summaryに混入）を除外
+                            const soStaffHomeShop = {}; (soStaffs || []).forEach(st => { if (st.id != null && st.id !== '') soStaffHomeShop[String(st.id)] = String(st.shop_id || ''); });
+                            const soStaffInSelectedShop = (id) => {
+                                if (!soShopSel.length) return true;                 // 全店表示なら全員
+                                const home = soStaffHomeShop[String(id)];
+                                if (home == null || home === '') return true;       // 所属不明は除外しない（過剰除外を防ぐ）
+                                return soShopSel.map(String).includes(home);        // 所属店舗が選択店舗のときのみ表示
+                            };
+                            const displayStaff = s ? s.byStaff
+                                .filter(st => soStaffInSelectedShop(st.id))
+                                .filter(st => soStaffSel.length === 0 || soStaffSel.map(String).includes(String(st.id))) : [];
                             const staffTotal = displayStaff.reduce((a, st) => a + st.gross, 0);
                             const maxDay = s && s.byDay.length ? Math.max(...s.byDay.map(d => d.gross), 1) : 1;
                             // 売上(sales/summary)＋マーケ(by-staff)＋継続(retention)を個人単位でマージ
@@ -11010,7 +11020,7 @@
                             // ソート適用
                             const sortedStaff = soSortBy(staffRows, soStaffSort.key, soStaffSort.dir);
                             const sortedChannels = soSortBy(soChannels, soChSort.key, soChSort.dir);
-                            const sortedMkStaff = [...soStaffMk.filter(r => r.isTotal), ...soSortBy(soStaffMk.filter(r => !r.isTotal), soMkSort.key, soMkSort.dir)];
+                            const sortedMkStaff = [...soStaffMk.filter(r => r.isTotal), ...soSortBy(soStaffMk.filter(r => !r.isTotal && soStaffInSelectedShop(r.id)), soMkSort.key, soMkSort.dir)];
                             const sortedDaily = s ? soSortBy(s.byDay, soDailySort.key, soDailySort.dir) : [];
                             // 計画サブタブ用
                             const planKey = soShopKey() + '_' + soFrom.slice(0, 7);
@@ -11024,7 +11034,7 @@
                             // 計画: 個人（スタッフ）別実績（売上＝by_staff、新規獲得＝marketing by-staff）
                             const planStaffRows = (() => {
                                 const mkById = {}; soStaffMk.filter(r => !r.isTotal).forEach(r => { mkById[String(r.id)] = r; });
-                                let rows = (s ? s.byStaff : []).map(st => {
+                                let rows = (s ? s.byStaff : []).filter(st => soStaffInSelectedShop(st.id)).map(st => {
                                     const mk = mkById[String(st.id)] || {};
                                     return { id: st.id, name: st.name, gross: st.gross, newCount: st.newCount, treatments: st.treatments, util: st.util,
                                              newBooking: mk.booking || 0, newVisit: mk.visit || 0, purchase: mk.purchase || 0, purchaseAmount: mk.amount || 0 };

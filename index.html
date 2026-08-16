@@ -1443,9 +1443,9 @@
                 }, 1500);
                 return () => clearTimeout(t);
             }, [JSON.stringify(stSel.map(id => stManual[`${id}_${stMonth}`] || null))]);
-            // オーナー別アクセス設定（SETTLEMENT_OWNER_SHOPS）を取得
+            // オーナー→店舗マッピング（GAS）を取得。設定/返金明細書/SalonOne で共用
             useEffect(() => {
-                if (currentPage !== 'settlement' || stOwnerShops !== null) return;
+                if (!['settlement', 'salonone', 'settings'].includes(currentPage) || stOwnerShops !== null) return;
                 fetch('/api/settlement-auth').then(r => r.json()).then(j => setStOwnerShops(j.shops || {})).catch(() => setStOwnerShops({}));
             }, [currentPage]);
             // ── PDF保存/印刷（本社側でもオーナーと同じフォーマットで出力） ──
@@ -1516,7 +1516,7 @@
                 finally { setStAcctBusy(false); }
             };
             useEffect(() => {
-                if (currentPage === 'settlement' && stAdminOpen && stAccounts === null) stLoadAccounts();
+                if (((currentPage === 'settlement' && stAdminOpen) || currentPage === 'settings') && stAccounts === null) stLoadAccounts();
             }, [currentPage, stAdminOpen]);
             // 選択・月が変わったら選択店舗のデータを再取得
             useEffect(() => {
@@ -1546,6 +1546,7 @@
             const soStoreMenuRef = useRef(null);
             const soStaffMenuRef = useRef(null);
             const soInitialized = useRef(false);
+            const soReqRef = useRef(0); // フェッチ競合ガード（店舗切替時に古い応答で上書きしない）
 
             // ソート用 State
             const [branchSortKey, setBranchSortKey] = useState('newCount');
@@ -2830,7 +2831,14 @@
             // ── オーナー→店舗マッピング / 複数店舗の集計マージ ──
             // SalonOne店舗名(例「NAORU 千葉駅院」)を OWNER_BRANCHES の短縮名と照合してオーナー判定
             const soShopOwner = (shopName) => {
-                const core = String(shopName || '').replace('NAORU整体', '').replace('NAORU', '').replace(/院$/, '').trim();
+                const name = String(shopName || '');
+                // 設定タブ（GASオーナー設定）があれば優先
+                if (stOwnerShops && Object.keys(stOwnerShops).length) {
+                    for (const [owner, pats] of Object.entries(stOwnerShops)) {
+                        if ((pats || []).some(p => name.includes(p))) return owner;
+                    }
+                }
+                const core = name.replace('NAORU整体', '').replace('NAORU', '').replace(/院$/, '').trim();
                 if (!core) return null;
                 for (const [owner, branches] of Object.entries(OWNER_BRANCHES)) {
                     if (branches.some(b => core === b || core.includes(b) || b.includes(core))) return owner;
@@ -3099,6 +3107,8 @@
             };
 
             const fetchSalonOneData = async (force = false) => {
+                const reqId = ++soReqRef.current;      // この取得のID
+                const stale = () => soReqRef.current !== reqId; // 途中で新しい取得が始まったら古い応答は破棄
                 setSoLoading(true);
                 setSoError(null);
                 try {
@@ -3147,6 +3157,7 @@
                         setSoLastFetch(new Date());
                         return;
                     }
+                    if (stale()) return; // 店舗が切り替わっていたら古い応答を破棄
                     setSoSetupRequired(false);
                     setSoDemo(false);
                     const okSales = salesRes.filter(r => r.status === 200 && r.json && r.json.data).map(r => r.json.data);
@@ -3167,6 +3178,7 @@
                     // マーケ集計（売上サマリの成否に関わらず取得・複数店舗は合算）
                     (async () => {
                         const [ch, st, rt] = await Promise.all([fetchResource('marketing/by-channel'), fetchResource('marketing/by-staff'), fetchResource('marketing/retention')]);
+                        if (stale()) return; // 店舗が切り替わっていたら古いマーケ応答を破棄
                         const okData = arr => arr.filter(r => r.status === 200).map(r => (r.json && r.json.data) || []);
                         setSoChannels(normalizeMkChannels({ data: soMergeChannels(okData(ch)) }));
                         setSoStaffMk(normalizeMkStaff({ data: soMergeMkStaff(okData(st)) }));
@@ -11842,6 +11854,75 @@
                         );
                     })()}
 
+                    {/* ===== オーナー設定タブ ===== */}
+                    {currentPage === 'settings' && (() => {
+                        const shopList = (soShops.length ? soShops : soDemoShops);
+                        return (
+                        <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
+                            <div className="w-full space-y-4 md:space-y-6">
+                                <header className="flex items-center gap-3 bg-white p-3 md:p-5 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
+                                    <div className="p-2 md:p-3 bg-gradient-to-br from-slate-800 to-slate-600 rounded-xl md:rounded-2xl text-white shadow-lg"><Users size={24} /></div>
+                                    <div>
+                                        <div className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full text-[10px] font-black uppercase tracking-widest mb-1">SETTINGS</div>
+                                        <h1 className="text-xl md:text-2xl font-black tracking-tight italic">オーナー設定</h1>
+                                    </div>
+                                </header>
+
+                                <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 text-xs font-bold text-emerald-800 leading-relaxed">
+                                    オーナーの<span className="font-black">氏名</span>と<span className="font-black">管轄店舗</span>、ログイン用<span className="font-black">パスワード</span>を設定します。ここで割り当てた店舗は、<span className="font-black">SalonOne売上タブの「オーナー別」</span>絞り込みと、<span className="font-black">返金明細書のアクセス範囲</span>の両方に反映されます（GASに保存・再デプロイ不要）。
+                                </div>
+
+                                {/* 追加/更新フォーム */}
+                                <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-5 space-y-3">
+                                    <div className="text-sm font-black text-slate-800">オーナーを追加 / 更新</div>
+                                    <div className="flex flex-col md:flex-row gap-2">
+                                        <input value={stAcctForm.owner} onChange={e => setStAcctForm(f => ({ ...f, owner: e.target.value }))} placeholder="オーナー氏名（例: 野島オーナー）" className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold" list="settings-owner-suggest" />
+                                        <datalist id="settings-owner-suggest">{Object.keys(OWNER_BRANCHES).map(o => <option key={o} value={o} />)}</datalist>
+                                        <input value={stAcctForm.password} onChange={e => setStAcctForm(f => ({ ...f, password: e.target.value }))} placeholder="ログインPASS（変更する場合のみ入力）" className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold" />
+                                    </div>
+                                    <div>
+                                        <div className="text-[11px] font-black text-slate-400 mb-1">管轄店舗（SalonOne店舗から選択）</div>
+                                        <div className="max-h-56 overflow-y-auto border border-slate-200 rounded-lg p-2 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1 bg-white">
+                                            {shopList.map(s => {
+                                                const on = stAcctForm.shops.includes(s.name);
+                                                return (<label key={s.id} className={`flex items-center gap-1.5 px-2 py-1 rounded cursor-pointer text-xs font-bold ${on ? 'bg-brand-50 text-brand-700' : 'text-slate-600 hover:bg-slate-50'}`}>
+                                                    <input type="checkbox" checked={on} onChange={() => setStAcctForm(f => ({ ...f, shops: on ? f.shops.filter(x => x !== s.name) : [...f.shops, s.name] }))} />
+                                                    {s.name}</label>);
+                                            })}
+                                        </div>
+                                        {stAcctForm.shops.length > 0 && <div className="flex items-center gap-2 mt-1"><span className="text-[11px] text-slate-400 font-bold">{stAcctForm.shops.length}店舗選択中</span><button onClick={() => setStAcctForm(f => ({ ...f, shops: [] }))} className="text-[11px] text-slate-400 font-bold hover:text-slate-600">クリア</button></div>}
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <button onClick={() => stSaveAccount(stAcctForm.owner.trim(), stAcctForm.password, stAcctForm.shops)} disabled={stAcctBusy || !stAcctForm.owner.trim()} className="px-5 py-2 bg-brand-500 text-white rounded-lg text-sm font-black hover:bg-brand-600 disabled:opacity-40">{stAcctBusy ? '保存中...' : '保存'}</button>
+                                        {stAcctForm.owner && <button onClick={() => setStAcctForm({ owner: '', password: '', shops: [] })} className="px-3 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-black hover:bg-slate-200">新規入力</button>}
+                                        {stAcctMsg && <span className="text-xs font-bold text-slate-600">{stAcctMsg}</span>}
+                                    </div>
+                                </div>
+
+                                {/* オーナー一覧 */}
+                                <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-5">
+                                    <div className="flex items-center gap-2 mb-3"><Users size={16} className="text-slate-600" /><h3 className="text-sm font-black text-slate-800">登録済みオーナー</h3><span className="text-[11px] text-slate-400 font-bold ml-auto">{stAccounts ? stAccounts.length : 0}名</span></div>
+                                    {stAccounts === null ? (<p className="text-center text-slate-400 font-bold py-6 text-sm">読み込み中...</p>)
+                                     : stAccounts.length === 0 ? (<p className="text-center text-slate-400 font-bold py-6 text-sm">まだ登録がありません。上のフォームから追加してください。<br/><span className="text-[11px]">（SETTLEMENT_GAS_URL 未設定の場合は保存できません）</span></p>)
+                                     : (<div className="divide-y divide-slate-100">
+                                        {stAccounts.map(a => (
+                                            <div key={a.owner} className="flex items-center gap-3 py-2.5">
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="font-bold text-slate-800 flex items-center gap-2">{a.owner} {a.hasPassword ? <span className="text-[10px] text-emerald-600 font-black">●PASS設定済</span> : <span className="text-[10px] text-rose-500 font-black">●PASS未設定</span>}</div>
+                                                    <div className="text-[11px] text-slate-500 font-bold">{a.shops && a.shops.length ? `管轄: ${a.shops.join('、')}` : '（管轄店舗の指定なし＝経営指標の割当を使用）'}</div>
+                                                </div>
+                                                <button onClick={() => { setStAcctForm({ owner: a.owner, password: '', shops: a.shops || [] }); setStAcctMsg(''); window.scrollTo({ top: 0, behavior: 'smooth' }); }} className="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-xs font-black hover:bg-slate-200">編集</button>
+                                                <button onClick={() => { if (confirm(`${a.owner} を削除しますか？`)) stDeleteAccount(a.owner); }} className="px-3 py-1.5 bg-rose-50 text-rose-600 rounded-lg text-xs font-black hover:bg-rose-100">削除</button>
+                                            </div>
+                                        ))}
+                                       </div>)}
+                                    <p className="text-[11px] text-slate-400 font-bold mt-3">※ オーナーは <span className="font-black">/owner.html</span> でこのPASSでログイン→自分の管轄店舗の返金明細書を閲覧・PDF保存できます。管理者(root)は <span className="font-black">DASHBOARD_PASSWORD</span> で全店舗にアクセスできます。</p>
+                                </div>
+                            </div>
+                        </div>
+                        );
+                    })()}
+
                     {/* ===== 事業計画相談タブ ===== */}
                     {currentPage === 'planning' && (
                         <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
@@ -14812,6 +14893,7 @@
                 { id: 'salonone', label: 'SalonOne売上', icon: <Calendar size={20} />, mobileIcon: <Calendar size={18} /> },
                 { id: 'settlement', label: '返金明細書', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} /> },
                 { id: 'planning', label: '事業計画', icon: <Target size={20} />, mobileIcon: <Target size={18} /> },
+                { id: 'settings', label: 'オーナー設定', icon: <Users size={20} />, mobileIcon: <Users size={18} /> },
                 // 顧客管理・経理財務タブは非表示（必要時に下記を復帰）
                 // { id: 'customers', label: '顧客管理', icon: <Users size={20} />, mobileIcon: <Users size={18} /> },
                 // { id: 'finance', label: '経理・財務', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} /> }

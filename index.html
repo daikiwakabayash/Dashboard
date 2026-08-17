@@ -5665,6 +5665,32 @@
                 return Object.entries(map).sort((a, b) => b[1] - a[1]);
             }, [filteredData]);
 
+            // 店舗別 売上構成比をCSVダウンロード（選択期間の店舗別個別売上を出力）
+            const downloadBranchSalesCSV = useCallback(() => {
+                if (!branchSales || branchSales.length === 0) return;
+                const esc = v => {
+                    const s = String(v ?? '');
+                    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+                };
+                const lines = ['順位,店舗,売上'];
+                branchSales.forEach(([branch, sales], idx) => {
+                    lines.push([idx + 1, esc(branch), Math.round(sales || 0)].join(','));
+                });
+                const csv = '﻿' + lines.join('\r\n');
+                const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                const periodLabel = startMonth && endMonth
+                    ? (startMonth === endMonth ? startMonth : `${startMonth}_${endMonth}`)
+                    : '全期間';
+                a.href = url;
+                a.download = `店舗別売上_${periodLabel}.csv`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }, [branchSales, startMonth, endMonth]);
+
             // 福利厚生詳細計算 (Q-AA列 11項目)
             const welfareStats = useMemo(() => {
                 const items = [
@@ -8320,6 +8346,14 @@
                                 <div className="bg-white rounded-2xl md:rounded-3xl p-3 md:p-6 shadow-sm border border-slate-200">
                                     <h2 className="text-sm md:text-lg font-black mb-3 md:mb-6 flex items-center gap-2">
                                         <ChevronRight className="text-brand-400" /> 店舗別 売上構成比
+                                        {branchSales.length > 0 && (
+                                            <button
+                                                onClick={downloadBranchSalesCSV}
+                                                title={`${startMonth === endMonth ? startMonth : `${startMonth}〜${endMonth}`} の店舗別売上をCSVでダウンロード`}
+                                                className="ml-auto flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-black transition-colors shadow-sm">
+                                                <Download size={14} /> CSV
+                                            </button>
+                                        )}
                                     </h2>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-6">
                                         {branchSales.length > 0 ? branchSales.map(([branch, sales], idx) => (

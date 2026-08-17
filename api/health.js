@@ -34,3 +34,5 @@ export default function handler(req, res) {
     },
   });
 }
+
+// redeploy trigger: git再接続後の同期確認 (67cdccd)

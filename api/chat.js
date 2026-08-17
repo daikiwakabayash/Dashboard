@@ -216,8 +216,22 @@ export function validateRequest(body) {
   return { valid: true };
 }
 
+// ── Helper: 添付画像を Claude の image ブロックに変換（base64のみ・上限4枚） ──
+const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+export function normalizeImages(images) {
+  if (!Array.isArray(images)) return [];
+  return images
+    .filter(im => im && typeof im.data === 'string' && im.data && ALLOWED_IMAGE_TYPES.includes(im.mediaType))
+    .slice(0, 4)
+    .map(im => ({
+      type: 'image',
+      source: { type: 'base64', media_type: im.mediaType, data: im.data },
+    }));
+}
+
 // ── Helper: 会話履歴を Claude messages 形式に変換 ────────────────
-export function buildMessages(question, history = [], dataContext = '') {
+// images を渡すと最新ユーザーターンを [image..., text] のブロック配列にする（未指定時は文字列のまま）
+export function buildMessages(question, history = [], dataContext = '', images = []) {
   const messages = [];
 
   // 過去の会話履歴（最大10往復 = 20メッセージ）
@@ -234,7 +248,14 @@ export function buildMessages(question, history = [], dataContext = '') {
   if (dataContext && dataContext.trim()) {
     userContent = `${question}\n\n【データコンテキスト（ダッシュボードの実データ）】\n${dataContext}`;
   }
-  messages.push({ role: 'user', content: userContent });
+
+  // 添付画像があれば image ブロック＋テキストの配列で送る（画像→テキストの順）
+  const imageBlocks = normalizeImages(images);
+  if (imageBlocks.length) {
+    messages.push({ role: 'user', content: [...imageBlocks, { type: 'text', text: userContent }] });
+  } else {
+    messages.push({ role: 'user', content: userContent });
+  }
 
   return messages;
 }
@@ -280,9 +301,9 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: validation.error });
     }
 
-    const { question, history, dataContext, stream: useStream, thinking: useThinking } = body;
+    const { question, history, dataContext, images, stream: useStream, thinking: useThinking } = body;
 
-    const messages = buildMessages(question, history, dataContext);
+    const messages = buildMessages(question, history, dataContext, images);
 
     // Extended Thinking が要求された場合、思考用パラメータを構築
     // - temperature は 1 必須（thinking 有効時の制約）

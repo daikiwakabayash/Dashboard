@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { validateRequest, buildMessages, SYSTEM_PROMPT } from '../api/chat.js';
+import { validateRequest, buildMessages, normalizeImages, SYSTEM_PROMPT } from '../api/chat.js';
 
 // ── validateRequest ──────────────────────────────────────────────
 
@@ -99,6 +99,48 @@ describe('buildMessages', () => {
     const history = [{ role: 'system', content: 'test' }];
     const msgs = buildMessages('q', history);
     expect(msgs[0].role).toBe('assistant');
+  });
+
+  it('画像なしのときcontentは文字列のまま', () => {
+    const msgs = buildMessages('質問', [], '', []);
+    expect(typeof msgs[msgs.length - 1].content).toBe('string');
+  });
+
+  it('画像ありのとき最新ターンをimage+textブロック配列にする', () => {
+    const images = [{ mediaType: 'image/png', data: 'AAAA' }];
+    const msgs = buildMessages('この画像は？', [], 'ctx', images);
+    const last = msgs[msgs.length - 1];
+    expect(Array.isArray(last.content)).toBe(true);
+    expect(last.content[0]).toEqual({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } });
+    const textBlock = last.content[last.content.length - 1];
+    expect(textBlock.type).toBe('text');
+    expect(textBlock.text).toContain('この画像は？');
+    expect(textBlock.text).toContain('ctx');
+  });
+});
+
+// ── normalizeImages ──────────────────────────────────────────────
+
+describe('normalizeImages', () => {
+  it('配列でなければ空配列', () => {
+    expect(normalizeImages(undefined)).toEqual([]);
+    expect(normalizeImages(null)).toEqual([]);
+    expect(normalizeImages('x')).toEqual([]);
+  });
+
+  it('許可された画像タイプのみ image ブロックに変換する', () => {
+    const out = normalizeImages([
+      { mediaType: 'image/jpeg', data: 'abc' },
+      { mediaType: 'image/svg+xml', data: 'bad' },   // 非許可
+      { mediaType: 'image/webp', data: '' },          // dataなし
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toEqual({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'abc' } });
+  });
+
+  it('最大4枚に制限する', () => {
+    const many = Array.from({ length: 6 }, (_, i) => ({ mediaType: 'image/png', data: 'd' + i }));
+    expect(normalizeImages(many)).toHaveLength(4);
   });
 });
 

@@ -557,6 +557,7 @@
         const CircleDot = (props) => <Icon {...props}><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/></Icon>;
         const FileText = (props) => <Icon {...props}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></Icon>;
         const Upload = (props) => <Icon {...props}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></Icon>;
+        const ImageIcon = (props) => <Icon {...props}><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></Icon>;
         const Banknote = (props) => <Icon {...props}><rect width="20" height="12" x="2" y="6" rx="2"/><circle cx="12" cy="12" r="2"/><path d="M6 12h.01M18 12h.01"/></Icon>;
         const MessageCircle = (props) => <Icon {...props}><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22z"/></Icon>;
         const PieChart = (props) => <Icon {...props}><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></Icon>;
@@ -1627,8 +1628,10 @@
             const [planMessages, setPlanMessages] = useState([]);
             const [planInput, setPlanInput] = useState('');
             const [planLoading, setPlanLoading] = useState(false);
+            const [planImages, setPlanImages] = useState([]);   // 添付画像 [{ dataUrl, mediaType, data, name }]（最大4枚）
             const planChatRef = useRef(null);
             const planInputRef = useRef(null);
+            const planFileRef = useRef(null);
             const [planBranchMenuOpen, setPlanBranchMenuOpen] = useState(false);
             const [planBranchSearch, setPlanBranchSearch] = useState('');
             const planBranchMenuRef = useRef(null);
@@ -7356,6 +7359,36 @@
             };
 
             // ── 事業計画: 店舗別実績データ計算 ──
+            // ── 事業計画の目標を「SalonOne売上→計画」(soPlanGoals) から取得 ──
+            // soPlanGoals のキーは soShopKey()_YYYY-MM（単一店=shop_id / 全店=all）。
+            // 事業計画相談タブの選択(planSoShopId)と対象月から同じキーを組み立てて参照する。
+            // SalonOne計画 → 事業計画目標のマッピング: 新規=newVisits / 売上(万円)=sales/10000 / 入会率=joins÷newVisits。
+            // CPA上限はSalonOneに存在しないため事業計画タブのローカル値(planGoals.cpaTarget)を維持。
+            const labelToYm = (label) => {
+                const s = String(label || '');
+                let mo = s.match(/(\d{4})年(\d{1,2})月/);            // 「2026年8月」形式（SalonOne）
+                if (!mo) mo = s.match(/(\d{4})-(\d{1,2})/);          // 「2026-08」形式（GAS rawData）
+                return mo ? `${mo[1]}-${String(mo[2]).padStart(2, '0')}` : '';
+            };
+            const soGoalForPlanning = (latestMonthLabel) => {
+                const ym = labelToYm(latestMonthLabel) || soFrom.slice(0, 7);
+                const key = (planSoShopId ? String(planSoShopId) : 'all') + '_' + ym;
+                const g = soPlanGoals[key] || {};
+                const nv = Number(g.newVisits) || 0;
+                const jo = Number(g.joins) || 0;
+                const salesYen = Number(g.sales) || 0;
+                const fromSo = { newCustomers: nv > 0, sales: salesYen > 0, enrollRate: nv > 0 && jo > 0 };
+                return {
+                    newCustomers: nv > 0 ? nv : planGoals.newCustomers,
+                    sales: salesYen > 0 ? Math.round(salesYen / 10000) : planGoals.sales,
+                    enrollRate: (nv > 0 && jo > 0) ? Math.round((jo / nv) * 100) : planGoals.enrollRate,
+                    cpaTarget: planGoals.cpaTarget,
+                    _fromSo: fromSo,
+                    _hasAny: fromSo.newCustomers || fromSo.sales || fromSo.enrollRate,
+                    _month: ym,
+                };
+            };
+
             // ── SalonOne実績（planSoData）から事業計画の実績オブジェクトを構築（computePlanActualsと同一shape） ──
             const computePlanActualsSo = (branchName) => {
                 const ymLabel = (ym) => { const [y, m] = String(ym).split('-'); return `${y}年${parseInt(m)}月`; };
@@ -7398,6 +7431,9 @@
                     totalSales: cur.sales, totalNewCount: cur.newVisit, totalNewEnroll: cur.joins, enrollRate: cur.enrollRate,
                     churnRate: cur.churnRate, cpa: cur.cpa, totalAdSpend: cur.adSpend, prevSales: pv.sales, prevNewCount: pv.newVisit,
                     newSales: cur.newSales, repeatSales: cur.repeatSales,
+                    // 前月値（前月対比の即時表示用）
+                    prevEnrollRate: pv.enrollRate || 0, prevChurnRate: pv.churnRate || 0, prevCpa: pv.cpa || 0,
+                    prevNewSales: pv.newSales || 0, prevRepeatSales: pv.repeatSales || 0, prevNewEnroll: pv.joins || 0,
                     mediaBreakdown, prevMediaMap, branchRanking: [], monthlyTrend, similarBenchmark: null, trendStats,
                     branchArea: '', branchName: branchName || '全店舗', source: 'salonone',
                 };
@@ -7421,6 +7457,12 @@
                 const churnRate = prevMembers > 0 ? Math.round((churnCount / prevMembers) * 100) : 0;
                 const prevSales = prevData.reduce((s, d) => s + vn(d.individualSales), 0);
                 const prevNewCount = prevData.reduce((s, d) => s + vn(d.newCount), 0);
+                // 前月の派生指標（前月対比の即時表示用）
+                const prevNewEnroll = prevData.reduce((s, d) => s + vn(d.newEnroll), 0);
+                const prevEnrollRate = prevNewCount > 0 ? Math.round((prevNewEnroll / prevNewCount) * 100) : 0;
+                const prevChurnCount = prevData.reduce((s, d) => s + vn(d.churnCount), 0);
+                const prevPrevMembers = prevData.reduce((s, d) => s + vn(d.prevMembers), 0);
+                const prevChurnRate = prevPrevMembers > 0 ? Math.round((prevChurnCount / prevPrevMembers) * 100) : 0;
                 // 当該店舗のエリア
                 const branchArea = curData[0]?.area || '';
                 // マーケティング: 媒体別CPA
@@ -7430,6 +7472,9 @@
                 const totalAdSpend = curMkt.reduce((s, d) => s + (d.adSpend || 0), 0);
                 const mktNewCount = curMkt.reduce((s, d) => s + (d.newCount || 0), 0);
                 const cpa = mktNewCount > 0 ? Math.round(totalAdSpend / mktNewCount) : 0;
+                const prevAdSpend = prevMkt.reduce((s, d) => s + (d.adSpend || 0), 0);
+                const prevMktNewCount = prevMkt.reduce((s, d) => s + (d.newCount || 0), 0);
+                const prevCpa = prevMktNewCount > 0 ? Math.round(prevAdSpend / prevMktNewCount) : 0;
                 // 媒体別内訳
                 const mediaMap = {};
                 curMkt.forEach(d => {
@@ -7516,6 +7561,7 @@
                 return {
                     latestMonth, prevMonth, totalSales, totalNewCount, totalNewEnroll, enrollRate,
                     churnRate, cpa, totalAdSpend, prevSales, prevNewCount,
+                    prevEnrollRate, prevChurnRate, prevCpa, prevNewEnroll,
                     mediaBreakdown, prevMediaMap, branchRanking, monthlyTrend, similarBenchmark, trendStats,
                     branchArea, branchName: branchName || '全店舗',
                 };
@@ -7526,18 +7572,20 @@
                 const base = buildDataContext(question);
                 const branch = planSelectedBranch;
                 const a = computePlanActuals(branch);
-                const goalSalesYen = planGoals.sales * 10000;
+                const eg = soGoalForPlanning(a.latestMonth);   // SalonOne売上→計画 由来の目標
+                const goalSalesYen = eg.sales * 10000;
                 const salesGap = goalSalesYen - a.totalSales;
-                const newGap = planGoals.newCustomers - a.totalNewCount;
+                const newGap = eg.newCustomers - a.totalNewCount;
                 const lines = [
                     '■ 事業計画：' + a.branchName + ' の目標と現在の進捗',
                     '対象月: ' + (a.latestMonth || '不明'),
+                    '（目標はSalonOne売上→計画で設定された値）',
                     '',
                     '【目標】',
-                    '新規集客目標: ' + planGoals.newCustomers + '名',
-                    '売上目標: ¥' + goalSalesYen.toLocaleString() + '（' + planGoals.sales + '万円）',
-                    '入会率目標: ' + planGoals.enrollRate + '%',
-                    'CPA目標: ¥' + planGoals.cpaTarget.toLocaleString(),
+                    '新規集客目標: ' + eg.newCustomers + '名',
+                    '売上目標: ¥' + goalSalesYen.toLocaleString() + '（' + eg.sales + '万円）',
+                    '入会率目標: ' + eg.enrollRate + '%',
+                    'CPA目標: ¥' + eg.cpaTarget.toLocaleString(),
                     '',
                     '【' + a.branchName + 'の実績】',
                     '新規数: ' + a.totalNewCount + '名（前月: ' + a.prevNewCount + '名）',
@@ -7598,9 +7646,9 @@
                 const achieveStats = a.monthlyTrend.map(m => ({
                     month: m.month,
                     salesAchieved: m.sales >= goalSalesYen,
-                    newAchieved: m.newCount >= planGoals.newCustomers,
-                    enrollAchieved: m.enrollRate >= planGoals.enrollRate,
-                    cpaAchieved: m.cpa > 0 && m.cpa <= planGoals.cpaTarget,
+                    newAchieved: m.newCount >= eg.newCustomers,
+                    enrollAchieved: m.enrollRate >= eg.enrollRate,
+                    cpaAchieved: m.cpa > 0 && m.cpa <= eg.cpaTarget,
                 }));
                 const totalMonths = achieveStats.length;
                 if (totalMonths > 0) {
@@ -7609,15 +7657,15 @@
                     const enrollAchRate = Math.round((achieveStats.filter(x => x.enrollAchieved).length / totalMonths) * 100);
                     const cpaAchRate = Math.round((achieveStats.filter(x => x.cpaAchieved).length / totalMonths) * 100);
                     lines.push(`売上目標 ¥${goalSalesYen.toLocaleString()}: 過去${totalMonths}ヶ月で${achieveStats.filter(x => x.salesAchieved).length}回達成（${salesAchRate}%）`);
-                    lines.push(`新規${planGoals.newCustomers}名目標: ${achieveStats.filter(x => x.newAchieved).length}回達成（${newAchRate}%）`);
-                    lines.push(`入会率${planGoals.enrollRate}%目標: ${achieveStats.filter(x => x.enrollAchieved).length}回達成（${enrollAchRate}%）`);
-                    lines.push(`CPA¥${planGoals.cpaTarget.toLocaleString()}目標: ${achieveStats.filter(x => x.cpaAchieved).length}回達成（${cpaAchRate}%）`);
+                    lines.push(`新規${eg.newCustomers}名目標: ${achieveStats.filter(x => x.newAchieved).length}回達成（${newAchRate}%）`);
+                    lines.push(`入会率${eg.enrollRate}%目標: ${achieveStats.filter(x => x.enrollAchieved).length}回達成（${enrollAchRate}%）`);
+                    lines.push(`CPA¥${eg.cpaTarget.toLocaleString()}目標: ${achieveStats.filter(x => x.cpaAchieved).length}回達成（${cpaAchRate}%）`);
                 }
                 lines.push('', '【ギャップ分析】');
                 lines.push(salesGap > 0 ? '売上ギャップ: ¥' + salesGap.toLocaleString() + '（' + Math.round(salesGap / 10000) + '万円不足）' : '売上目標: 達成済み！');
                 lines.push(newGap > 0 ? '新規ギャップ: あと' + newGap + '名必要' : '新規目標: 達成済み！');
-                lines.push(a.enrollRate < planGoals.enrollRate ? '入会率ギャップ: あと' + (planGoals.enrollRate - a.enrollRate) + 'ポイント改善が必要' : '入会率目標: 達成済み！');
-                lines.push(a.cpa > planGoals.cpaTarget && a.cpa > 0 ? 'CPAギャップ: ¥' + (a.cpa - planGoals.cpaTarget).toLocaleString() + '削減が必要' : 'CPA目標: 達成済み！');
+                lines.push(a.enrollRate < eg.enrollRate ? '入会率ギャップ: あと' + (eg.enrollRate - a.enrollRate) + 'ポイント改善が必要' : '入会率目標: 達成済み！');
+                lines.push(a.cpa > eg.cpaTarget && a.cpa > 0 ? 'CPAギャップ: ¥' + (a.cpa - eg.cpaTarget).toLocaleString() + '削減が必要' : 'CPA目標: 達成済み！');
                 // Square サブスク・LTV指標（取得できている場合のみ）
                 if (sqMetrics) {
                     lines.push('', '【サブスク経営指標（Square 全体）】');
@@ -7686,29 +7734,49 @@
                 return lines.join('\n') + '\n\n' + base;
             };
 
+            // ── 事業計画: 画像添付（base64化。JPEG/PNG/GIF/WebP・5MB以下・最大4枚） ──
+            const PLAN_IMG_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+            const planAddImages = async (files) => {
+                const list = Array.from(files || []).filter(f => PLAN_IMG_TYPES.includes(f.type));
+                for (const f of list) {
+                    if (f.size > 5 * 1024 * 1024) { alert('画像は5MB以下にしてください: ' + (f.name || '画像')); continue; }
+                    try {
+                        const dataUrl = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f); });
+                        const m = /^data:(.+?);base64,(.*)$/.exec(String(dataUrl));
+                        if (!m) continue;
+                        setPlanImages(prev => (prev.length >= 4 ? prev : [...prev, { dataUrl, mediaType: m[1], data: m[2], name: f.name || '画像' }]));
+                    } catch (_) { /* skip */ }
+                }
+            };
+            const planRemoveImage = (idx) => setPlanImages(prev => prev.filter((_, i) => i !== idx));
+
             // ── 事業計画: AI送信 ──
             const handlePlanSubmit = async (overrideInput) => {
                 const msg = (overrideInput || planInput).trim();
-                if (!msg || planLoading) return;
+                const imgs = overrideInput ? [] : planImages;   // クイックアクション時は画像なし
+                if ((!msg && imgs.length === 0) || planLoading) return;
+                const questionText = msg || '添付した画像について、経営視点で分析してください。';
 
-                setPlanMessages(prev => [...prev, { type: 'user', content: msg }]);
+                setPlanMessages(prev => [...prev, { type: 'user', content: questionText, images: imgs.map(im => ({ dataUrl: im.dataUrl })) }]);
                 if (!overrideInput) {
                     setPlanInput('');
+                    setPlanImages([]);
                     if (planInputRef.current) planInputRef.current.style.height = '42px';
                 }
                 setPlanLoading(true);
 
                 try {
-                    const dataContext = buildPlanningContext(msg);
+                    const dataContext = buildPlanningContext(questionText);
                     const history = planMessages.map(m => ({ role: m.type === 'user' ? 'user' : 'assistant', content: m.content }));
 
                     const response = await fetch('/api/chat', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            question: '【事業計画相談: ' + (planSelectedBranch || '全店') + '】' + msg,
+                            question: '【事業計画相談: ' + (planSelectedBranch || '全店') + '】' + questionText,
                             history: history.slice(-20),
                             dataContext,
+                            images: imgs.map(im => ({ mediaType: im.mediaType, data: im.data })),
                             stream: true,
                             thinking: true
                         })
@@ -12590,27 +12658,54 @@
 
                             {(() => {
                                 const a = computePlanActuals(planSelectedBranch);
-                                const goalSalesYen = planGoals.sales * 10000;
+                                const eg = soGoalForPlanning(a.latestMonth);   // 目標は SalonOne売上→計画 由来
+                                const goalSalesYen = eg.sales * 10000;
                                 const myRank = a.branchRanking.findIndex(b => b.branch === planSelectedBranch) + 1;
                                 const totalBranches = a.branchRanking.length;
-                                const salesMoM = a.prevSales > 0 ? Math.round(((a.totalSales - a.prevSales) / a.prevSales) * 100) : 0;
-                                const newMoM = a.prevNewCount > 0 ? Math.round(((a.totalNewCount - a.prevNewCount) / a.prevNewCount) * 100) : 0;
+                                const hasPrev = !!a.prevMonth;
+                                const pctMoM = (cur, prev) => prev > 0 ? Math.round(((cur - prev) / prev) * 100) : null;
+                                const salesMoM = pctMoM(a.totalSales, a.prevSales);
+                                const newMoM = pctMoM(a.totalNewCount, a.prevNewCount);
+                                const cpaMoM = pctMoM(a.cpa, a.prevCpa);
+                                const repeatMoM = pctMoM(a.repeatSales || 0, a.prevRepeatSales || 0);
+                                const enrollDelta = hasPrev ? (a.enrollRate - (a.prevEnrollRate || 0)) : null;
+                                const churnDelta = hasPrev ? (a.churnRate - (a.prevChurnRate || 0)) : null;
+                                // 前月対比バッジ生成: pt=ポイント差(率指標) / invert=下降が良い指標(退会率・CPA)
+                                const mkDelta = (val, opt = {}) => {
+                                    if (val == null || (typeof val === 'number' && isNaN(val))) return null;
+                                    const pt = !!opt.pt, invert = !!opt.invert;
+                                    const dir = val > 0 ? 'up' : val < 0 ? 'down' : null;
+                                    const good = val === 0 ? true : (invert ? val < 0 : val > 0);
+                                    const txt = (pt ? '前月差 ' : '前月比 ') + (val >= 0 ? '+' : '') + val + (pt ? 'pt' : '%');
+                                    return { txt, dir, good };
+                                };
+                                const kpis = [
+                                    { label: '売上', value: '¥' + a.totalSales.toLocaleString(), delta: mkDelta(salesMoM), sub: '目標 ' + eg.sales + '万円' },
+                                    { label: '新規数', value: a.totalNewCount + '名', delta: mkDelta(newMoM), sub: '目標 ' + eg.newCustomers + '名' },
+                                    { label: '入会率', value: a.enrollRate + '%', delta: mkDelta(enrollDelta, { pt: true }), sub: '目標 ' + eg.enrollRate + '%' },
+                                    { label: '退会率', value: a.churnRate + '%', delta: mkDelta(churnDelta, { pt: true, invert: true }), sub: a.churnRate <= 10 ? '業界良好' : a.churnRate <= 15 ? '要注意' : '危険' },
+                                    { label: 'CPA', value: a.cpa ? '¥' + a.cpa.toLocaleString() : '—', delta: mkDelta(cpaMoM, { invert: true }), sub: '目標 ¥' + eg.cpaTarget.toLocaleString() },
+                                    { label: '継続売上', value: '¥' + (a.repeatSales || 0).toLocaleString(), delta: mkDelta(repeatMoM), sub: '新規 ¥' + (a.newSales || 0).toLocaleString() },
+                                ];
 
                                 return (<>
-                                {/* ── KPI サマリー (選択店舗) ── */}
+                                {/* ── KPI サマリー (選択店舗) — 前月対比を主指標として即時表示 ── */}
                                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
-                                    {[
-                                        { label: '売上', value: '¥' + a.totalSales.toLocaleString(), sub: '前月比 ' + (salesMoM >= 0 ? '+' : '') + salesMoM + '%', up: salesMoM >= 0 },
-                                        { label: '新規数', value: a.totalNewCount + '名', sub: '前月比 ' + (newMoM >= 0 ? '+' : '') + newMoM + '%', up: newMoM >= 0 },
-                                        { label: '入会率', value: a.enrollRate + '%', sub: '目標 ' + planGoals.enrollRate + '%', up: a.enrollRate >= planGoals.enrollRate },
-                                        { label: '退会率', value: a.churnRate + '%', sub: a.churnRate <= 10 ? '良好' : a.churnRate <= 15 ? '要注意' : '危険', up: a.churnRate <= 10 },
-                                        { label: 'CPA', value: '¥' + a.cpa.toLocaleString(), sub: '目標 ¥' + planGoals.cpaTarget.toLocaleString(), up: a.cpa > 0 && a.cpa <= planGoals.cpaTarget },
-                                        { label: '継続売上', value: '¥' + (a.repeatSales || 0).toLocaleString(), sub: '新規売上 ¥' + (a.newSales || 0).toLocaleString(), up: (a.repeatSales || 0) >= (a.newSales || 0) },
-                                    ].map((kpi, i) => (
+                                    {kpis.map((kpi, i) => (
                                         <div key={i} className="bg-white rounded-xl border border-slate-200 p-3 shadow-sm">
                                             <div className="text-xs text-slate-500 font-bold mb-1">{kpi.label}</div>
                                             <div className="text-lg font-black text-slate-800">{kpi.value}</div>
-                                            <div className={`text-xs font-bold mt-0.5 ${kpi.up ? 'text-emerald-600' : 'text-red-500'}`}>{kpi.sub}</div>
+                                            <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                                                {kpi.delta ? (
+                                                    <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[11px] font-black ${kpi.delta.good ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-500'}`}>
+                                                        {kpi.delta.dir === 'up' ? <TrendingUp size={11} /> : kpi.delta.dir === 'down' ? <TrendingDown size={11} /> : null}
+                                                        {kpi.delta.txt}
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-[11px] text-slate-300 font-bold">前月比 —</span>
+                                                )}
+                                                {kpi.sub && <span className="text-[10px] text-slate-400 font-bold">{kpi.sub}</span>}
+                                            </div>
                                         </div>
                                     ))}
                                 </div>
@@ -12619,35 +12714,51 @@
                                 <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
                                     {/* ── 左カラム: 店舗データ ── */}
                                     <div className="lg:col-span-2 space-y-4">
-                                        {/* 目標設定 */}
+                                        {/* 目標設定 — SalonOne売上→計画から取得（新規・売上・入会率）。CPA上限のみ本タブで設定 */}
                                         <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
-                                            <h3 className="text-sm font-black text-slate-700 mb-3 flex items-center gap-1.5">
-                                                <Target size={15} className="text-brand-400" /> 目標設定
-                                            </h3>
+                                            <div className="flex items-center gap-1.5 mb-1">
+                                                <Target size={15} className="text-brand-400" />
+                                                <h3 className="text-sm font-black text-slate-700">目標設定</h3>
+                                                <span className="ml-auto text-[10px] font-bold text-slate-400">{a.latestMonth || eg._month}</span>
+                                            </div>
+                                            <p className="text-[11px] text-slate-400 font-bold mb-3 leading-relaxed">
+                                                目標は<span className="text-brand-500">「SalonOne売上 › 計画」</span>で設定した値と同期（新規・売上・入会率）。CPA上限のみ本タブで設定。
+                                            </p>
                                             <div className="grid grid-cols-2 gap-2">
                                                 {[
-                                                    { key: 'newCustomers', label: '新規集客', unit: '名', icon: <UserPlus size={13} /> },
-                                                    { key: 'sales', label: '売上', unit: '万円', icon: <DollarSign size={13} /> },
-                                                    { key: 'enrollRate', label: '入会率', unit: '%', icon: <CheckCircle size={13} /> },
-                                                    { key: 'cpaTarget', label: 'CPA上限', unit: '円', icon: <Wallet size={13} /> },
-                                                ].map(g => (
-                                                    <div key={g.key} className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-2.5 py-2">
-                                                        <span className="text-slate-400">{g.icon}</span>
-                                                        <input type="number" value={planGoals[g.key]}
-                                                            onChange={e => setPlanGoals(prev => ({ ...prev, [g.key]: Number(e.target.value) || 0 }))}
-                                                            className="w-full text-sm font-black text-slate-800 bg-transparent outline-none"
-                                                        />
-                                                        <span className="text-xs text-slate-400 font-bold whitespace-nowrap">{g.unit}</span>
+                                                    { label: '新規集客', unit: '名', icon: <UserPlus size={13} />, val: eg.newCustomers, so: eg._fromSo.newCustomers },
+                                                    { label: '売上', unit: '万円', icon: <DollarSign size={13} />, val: eg.sales, so: eg._fromSo.sales },
+                                                    { label: '入会率', unit: '%', icon: <CheckCircle size={13} />, val: eg.enrollRate, so: eg._fromSo.enrollRate },
+                                                ].map((g, gi) => (
+                                                    <div key={gi} className="bg-slate-50 rounded-lg px-2.5 py-2">
+                                                        <div className="flex items-center gap-1 text-[10px] font-bold text-slate-400 mb-0.5">
+                                                            <span className="text-slate-400">{g.icon}</span>{g.label}
+                                                            <span className={`ml-auto text-[8px] font-black ${g.so ? 'text-emerald-500' : 'text-slate-300'}`}>{g.so ? 'SalonOne' : '既定'}</span>
+                                                        </div>
+                                                        <div className="text-sm font-black text-slate-800">{(Number(g.val) || 0).toLocaleString()}<span className="text-[10px] text-slate-400 font-bold ml-0.5">{g.unit}</span></div>
                                                     </div>
                                                 ))}
+                                                {/* CPA上限（本タブでローカル編集。SalonOneに広告費データが無いため） */}
+                                                <div className="bg-slate-50 rounded-lg px-2.5 py-2">
+                                                    <div className="flex items-center gap-1 text-[10px] font-bold text-slate-400 mb-0.5">
+                                                        <Wallet size={13} className="text-slate-400" />CPA上限
+                                                        <span className="ml-auto text-[8px] font-black text-slate-300">本タブ</span>
+                                                    </div>
+                                                    <div className="flex items-center">
+                                                        <input type="number" value={planGoals.cpaTarget}
+                                                            onChange={e => setPlanGoals(prev => ({ ...prev, cpaTarget: Number(e.target.value) || 0 }))}
+                                                            className="w-full text-sm font-black text-slate-800 bg-transparent outline-none" />
+                                                        <span className="text-[10px] text-slate-400 font-bold">円</span>
+                                                    </div>
+                                                </div>
                                             </div>
                                             {/* 進捗バー */}
                                             <div className="mt-3 space-y-2">
                                                 {[
-                                                    { label: '新規', cur: a.totalNewCount, tgt: planGoals.newCustomers, unit: '名' },
+                                                    { label: '新規', cur: a.totalNewCount, tgt: eg.newCustomers, unit: '名' },
                                                     { label: '売上', cur: a.totalSales, tgt: goalSalesYen, unit: '円', money: true },
-                                                    { label: '入会率', cur: a.enrollRate, tgt: planGoals.enrollRate, unit: '%' },
-                                                    { label: 'CPA', cur: a.cpa, tgt: planGoals.cpaTarget, unit: '円', money: true, inv: true },
+                                                    { label: '入会率', cur: a.enrollRate, tgt: eg.enrollRate, unit: '%' },
+                                                    { label: 'CPA', cur: a.cpa, tgt: eg.cpaTarget, unit: '円', money: true, inv: true },
                                                 ].map((p, i) => {
                                                     const pct = p.inv ? (p.cur > 0 && p.tgt > 0 ? Math.round((p.tgt / p.cur) * 100) : 0)
                                                         : (p.tgt > 0 ? Math.round((p.cur / p.tgt) * 100) : 0);
@@ -12841,8 +12952,8 @@
                                         {/* クイックアクション */}
                                         <div className="flex flex-wrap gap-1.5 mb-3">
                                             {[
-                                                planSelectedBranch + 'で新規' + planGoals.newCustomers + '名達成するための施策は？',
-                                                planSelectedBranch + 'の売上' + planGoals.sales + '万円へのアクションプランを作って',
+                                                planSelectedBranch + 'で新規' + eg.newCustomers + '名達成するための施策は？',
+                                                planSelectedBranch + 'の売上' + eg.sales + '万円へのアクションプランを作って',
                                                 planSelectedBranch + 'の媒体別CPAを分析して改善提案して',
                                                 planSelectedBranch + 'と他店舗を比較して強み・弱みを教えて',
                                                 planSelectedBranch + 'の来月の事業計画を立てて',
@@ -12885,6 +12996,13 @@
                                                     <div key={idx} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
                                                         {msg.type === 'user' ? (
                                                             <div className="max-w-[80%] rounded-2xl px-4 py-2.5 text-sm bg-brand-500 text-white font-bold">
+                                                                {Array.isArray(msg.images) && msg.images.length > 0 && (
+                                                                    <div className="flex flex-wrap gap-1.5 mb-2">
+                                                                        {msg.images.map((im, ii) => (
+                                                                            <img key={ii} src={im.dataUrl} alt="添付画像" className="w-24 h-24 object-cover rounded-lg border border-white/30" />
+                                                                        ))}
+                                                                    </div>
+                                                                )}
                                                                 <div className="break-words">{msg.content}</div>
                                                             </div>
                                                         ) : (
@@ -12903,26 +13021,50 @@
                                                 )}
                                             </div>
 
-                                            <div className="p-3 border-t border-slate-100 flex gap-2 items-end">
-                                                <textarea ref={planInputRef} value={planInput}
-                                                    onChange={e => setPlanInput(e.target.value)}
-                                                    onKeyDown={e => {
-                                                        if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                                                            e.preventDefault();
-                                                            handlePlanSubmit();
-                                                        }
-                                                    }}
-                                                    placeholder={planSelectedBranch + ' について質問... （Shift+Enterで改行）'}
-                                                    rows={1}
-                                                    className="flex-1 bg-slate-50 rounded-xl px-4 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-200 border border-slate-200 resize-none overflow-y-auto"
-                                                    style={{ minHeight: '42px', maxHeight: '160px' }}
-                                                    onInput={e => { e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'; }}
-                                                    disabled={planLoading}
-                                                />
-                                                <button onClick={() => handlePlanSubmit()} disabled={!planInput.trim() || planLoading}
-                                                    className="bg-brand-500 text-white rounded-xl px-4 py-2.5 font-bold hover:bg-brand-500 disabled:opacity-50 transition-colors">
-                                                    <Send size={16} />
-                                                </button>
+                                            <div className="p-3 border-t border-slate-100">
+                                                {/* 添付画像プレビュー */}
+                                                {planImages.length > 0 && (
+                                                    <div className="flex flex-wrap gap-2 mb-2">
+                                                        {planImages.map((im, ii) => (
+                                                            <div key={ii} className="relative group">
+                                                                <img src={im.dataUrl} alt={im.name} className="w-16 h-16 object-cover rounded-lg border border-slate-200" />
+                                                                <button onClick={() => planRemoveImage(ii)}
+                                                                    className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-slate-700 text-white flex items-center justify-center shadow hover:bg-red-500">
+                                                                    <X size={11} />
+                                                                </button>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                <div className="flex gap-2 items-end">
+                                                    <input ref={planFileRef} type="file" accept="image/*" multiple className="hidden"
+                                                        onChange={e => { planAddImages(e.target.files); e.target.value = ''; }} />
+                                                    <button onClick={() => planFileRef.current && planFileRef.current.click()} disabled={planLoading || planImages.length >= 4}
+                                                        title="画像を添付（最大4枚）"
+                                                        className="bg-slate-100 text-slate-500 rounded-xl px-3 py-2.5 font-bold hover:bg-slate-200 disabled:opacity-50 transition-colors">
+                                                        <ImageIcon size={16} />
+                                                    </button>
+                                                    <textarea ref={planInputRef} value={planInput}
+                                                        onChange={e => setPlanInput(e.target.value)}
+                                                        onPaste={e => { const imgs = Array.from(e.clipboardData?.items || []).filter(it => it.type.startsWith('image/')).map(it => it.getAsFile()).filter(Boolean); if (imgs.length) { e.preventDefault(); planAddImages(imgs); } }}
+                                                        onKeyDown={e => {
+                                                            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                                                                e.preventDefault();
+                                                                handlePlanSubmit();
+                                                            }
+                                                        }}
+                                                        placeholder={planSelectedBranch + ' について質問／画像も添付可 （Shift+Enterで改行）'}
+                                                        rows={1}
+                                                        className="flex-1 bg-slate-50 rounded-xl px-4 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-200 border border-slate-200 resize-none overflow-y-auto"
+                                                        style={{ minHeight: '42px', maxHeight: '160px' }}
+                                                        onInput={e => { e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'; }}
+                                                        disabled={planLoading}
+                                                    />
+                                                    <button onClick={() => handlePlanSubmit()} disabled={(!planInput.trim() && planImages.length === 0) || planLoading}
+                                                        className="bg-brand-500 text-white rounded-xl px-4 py-2.5 font-bold hover:bg-brand-500 disabled:opacity-50 transition-colors">
+                                                        <Send size={16} />
+                                                    </button>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>

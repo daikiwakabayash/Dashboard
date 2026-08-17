@@ -5,14 +5,18 @@
 // 保存先の優先順位:
 //   1) Vercel KV / Upstash Redis  … 環境変数 KV_REST_API_URL / KV_REST_API_TOKEN
 //      （VercelのStorageでKVを作成すると自動で入る。GAS不要・推奨）
-//   2) GAS スプレッドシート        … 環境変数 PLAN_GAS_URL または SETTLEMENT_GAS_URL
-//   どちらも未設定なら configured:false を返し、フロントは localStorage で継続。
+//   2) Supabase                    … 環境変数 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY
+//      事前にテーブル作成: create table plan_store (key text primary key, value jsonb, updated_at timestamptz default now());
+//   3) GAS スプレッドシート        … 環境変数 PLAN_GAS_URL または SETTLEMENT_GAS_URL
+//   いずれも未設定なら configured:false を返し、フロントは localStorage で継続。
 //
 // GET  /api/plan-store            → { goals:{...}, actions:[...], configured:boolean }
 // POST /api/plan-store {goals,actions} → { ok:true }
 
 const KV_URL = () => process.env.KV_REST_API_URL || '';
 const KV_TOKEN = () => process.env.KV_REST_API_TOKEN || '';
+const SB_URL = () => process.env.SUPABASE_URL || '';
+const SB_KEY = () => process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || '';
 const GAS_URL = () => process.env.PLAN_GAS_URL || process.env.SETTLEMENT_GAS_URL || '';
 const GOALS_KEY = 'naoru:plan:goals';
 const ACTIONS_KEY = 'naoru:plan:actions';
@@ -37,6 +41,25 @@ async function kvSet(key, value) {
   return true;
 }
 
+// ── Supabase (PostgREST) ──
+async function sbGet(key) {
+  const r = await fetch(`${SB_URL()}/rest/v1/plan_store?key=eq.${encodeURIComponent(key)}&select=value`, {
+    headers: { apikey: SB_KEY(), Authorization: `Bearer ${SB_KEY()}` },
+  });
+  if (!r.ok) throw new Error(`SB get ${r.status}`);
+  const arr = await r.json().catch(() => []);
+  return (Array.isArray(arr) && arr[0]) ? arr[0].value : null;
+}
+async function sbSet(key, value) {
+  const r = await fetch(`${SB_URL()}/rest/v1/plan_store`, {
+    method: 'POST',
+    headers: { apikey: SB_KEY(), Authorization: `Bearer ${SB_KEY()}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify({ key, value, updated_at: new Date().toISOString() }),
+  });
+  if (!r.ok) throw new Error(`SB set ${r.status}`);
+  return true;
+}
+
 // ── GAS フォールバック ──
 async function gasCall(url, method, payload) {
   const opt = { method, headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, redirect: 'follow' };
@@ -54,8 +77,9 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   const hasKV = !!(KV_URL() && KV_TOKEN());
+  const hasSB = !!(SB_URL() && SB_KEY());
   const gas = GAS_URL();
-  if (!hasKV && !gas) {
+  if (!hasKV && !hasSB && !gas) {
     // 保存先未設定 → フロントはlocalStorageで継続（壊さない）
     return res.status(200).json({ goals: {}, actions: [], configured: false });
   }
@@ -64,6 +88,10 @@ export default async function handler(req, res) {
     if (req.method === 'GET') {
       if (hasKV) {
         const [goals, actions] = await Promise.all([kvGet(GOALS_KEY), kvGet(ACTIONS_KEY)]);
+        return res.status(200).json({ goals: goals || {}, actions: Array.isArray(actions) ? actions : [], configured: true });
+      }
+      if (hasSB) {
+        const [goals, actions] = await Promise.all([sbGet(GOALS_KEY), sbGet(ACTIONS_KEY)]);
         return res.status(200).json({ goals: goals || {}, actions: Array.isArray(actions) ? actions : [], configured: true });
       }
       const j = await gasCall(`${gas}?type=planStore`, 'GET');
@@ -75,6 +103,10 @@ export default async function handler(req, res) {
       const actions = Array.isArray(body.actions) ? body.actions : [];
       if (hasKV) {
         await Promise.all([kvSet(GOALS_KEY, goals), kvSet(ACTIONS_KEY, actions)]);
+        return res.status(200).json({ ok: true });
+      }
+      if (hasSB) {
+        await Promise.all([sbSet(GOALS_KEY, goals), sbSet(ACTIONS_KEY, actions)]);
         return res.status(200).json({ ok: true });
       }
       const j = await gasCall(gas, 'POST', { action: 'savePlanStore', goals, actions });

@@ -46,7 +46,7 @@ api/
   settlement-auth.js  # 返金明細書オーナー別PASS認証（GASオーナー設定＋環境変数・root対応）
   settlement-store.js # 返金明細書ストア（GAS保存: スナップショット/確認状況/修正依頼・トークン検証）
   settlement-owners.js # オーナーアカウント管理（GAS「オーナー設定」の追加/変更/削除・本社/root専用）
-  plan-store.js     # SalonOne計画の目標・アクション共有ストア（GAS「計画設定」に保存・全デバイス同期。SETTLEMENT_GAS_URL再利用）
+  plan-store.js     # SalonOne計画の目標・アクション共有ストア（全デバイス同期）。保存先=Vercel KV(推奨) or GAS。KV未設定時はGAS、両方無ければlocalStorage継続
   square/
     metrics.js      # Square サブスクデータ集計
     settlement.js   # Square 精算（返金明細書用: 総売上/実手数料/返金を店舗×月で集計）
@@ -77,6 +77,7 @@ tests/              # Vitestテスト
   - `SETTLEMENT_OWNER_PASSWORDS` — 返金明細書オーナーポータルのPASS（JSON `{"オーナー名":"パスワード"}`・オーナー毎に一意）
   - `SETTLEMENT_OWNER_SHOPS` — オーナー別アクセス権限（オプション・JSON `{"オーナー名":["店舗名の一部",...]}`）。設定時はこれが公開範囲の唯一の基準。未設定時は `OWNER_BRANCHES` にフォールバック
   - `SETTLEMENT_GAS_URL` — 返金明細書ストア用GAS WebアプリURL（`gas/settlement-gas-sample.js` を配置）
+  - `KV_REST_API_URL` / `KV_REST_API_TOKEN` — 計画の目標・アクション共有ストア（`api/plan-store.js`）用のVercel KV。VercelのStorageでKVを作成すると自動注入（GAS不要・推奨）
   - `AUTH_SALT` — トークン用ソルト（オプション・オーナー認証で使用）
 
 ## SalonOne 分析API連携

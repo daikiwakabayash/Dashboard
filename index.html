@@ -2914,78 +2914,33 @@
                 else fc = Math.round(ac * pace.pace);
                 return Math.max(fc, ac); // 着地は実績を絶対に下回らない
             };
-            // ── クリエイティブ分析（媒体×メニュー）: 受付履歴(appointments)を集計 ──
-            // SalonOne APIにクリエイティブ(強制リンク)単位の集計エンドポイントが無いため、
-            // 受付履歴を「媒体(visit_source) × メニュー(menu)」で集計して内訳を出す。
-            // 母集団: 選択月に来店予定/実績のある新規客(customer_match_status=confirmed_new/link)。
-            // 予約=件数 / 実来店=status:2 / 入会=joined_this_visit / キャンセル=cancelled_at。
-            // 入会率=入会÷実来店、キャンセル率=キャンセル÷予約。売上=実来店の金額(明細total_price、無ければメニュー単価)。
-            // 広告費/CPA/ROASはSalonOneに無いため「—」。店舗フィルタ(soShopSel)対応・未選択は全店。
+            // ── クリエイティブ分析（媒体別）: marketing/by-channel を集計 ──
+            // SalonOne APIには「クリエイティブ(強制リンク)単位」の集計が無く（受付履歴の forced_link_id も
+            // ほぼ未設定）、受付履歴のメニューは"実際に予約されたサービス"でクリエイティブの設定メニューと
+            // 一致しない。そのため媒体(visit_source)単位で SalonOne公式の by-channel 集計を出す（本体と同値）。
+            // 予約/実来店/残/入会/キャンセル/売上/広告費/CPA/ROAS は by-channel の値をそのまま使用。
+            // 店舗フィルタ(soShopSel)対応・未選択はブランド全体（全店合計）。
             const loadCreative = async () => {
                 setSoCreative(c => ({ ...c, loading: true, ready: false, error: '' }));
                 try {
-                    const api = (params) => fetch(`${SALONONE_API_URL}?${new URLSearchParams(params).toString()}`).then(r => r.json()).catch(() => ({}));
-                    // マスタ(媒体名・メニュー名/単価)を取得しキャッシュ
-                    let { sources, menus } = soCreativeMastersRef.current;
-                    if (!sources || !menus) {
-                        const [vs, mn] = await Promise.all([
-                            api({ resource: 'visit-sources', limit: '1000' }),
-                            api({ resource: 'menus', limit: '1000' }),
-                        ]);
-                        sources = {}; (vs.data || []).forEach(s => { sources[s.id] = s.name; });
-                        menus = {}; (mn.data || []).forEach(m => { menus[m.menu_manage_id] = { name: m.name, price: Number(m.price) || 0 }; });
-                        soCreativeMastersRef.current = { sources, menus };
-                    }
-                    // 対象店舗(選択があればそれ、無ければ全店)
-                    const shopIds = (soShopSel.length ? soShopSel : (soShops.length ? soShops.map(s => s.id) : [])).map(String);
-                    if (!shopIds.length) { setSoCreative({ rows: [], kpi: null, loading: false, ready: true, error: '店舗が取得できませんでした' }); return; }
-                    const ym = soFrom.slice(0, 7);
-                    // 受付履歴を店舗別に取得(updated_since=月初でその月の予約/来店を含む。has_moreならページング)
-                    const fetchShop = async (id) => {
-                        const out = []; let cursor = '';
-                        for (let g = 0; g < 6; g++) {
-                            const p = { resource: 'appointments', shop_id: id, updated_since: soFrom, limit: '1000' };
-                            if (cursor) p.cursor = cursor;
-                            const j = await api(p);
-                            (j.data || []).forEach(a => out.push(a));
-                            if (j.meta && j.meta.has_more && j.meta.next_cursor) cursor = j.meta.next_cursor; else break;
-                        }
-                        return out;
-                    };
-                    const all = [];
-                    for (let i = 0; i < shopIds.length; i += 4) {
-                        const batch = await Promise.all(shopIds.slice(i, i + 4).map(fetchShop));
-                        batch.forEach(arr => all.push(...arr));
-                    }
-                    // 選択月 かつ 新規客 に絞る
-                    const appts = all.filter(a => String(a.start_at || '').slice(0, 7) === ym
-                        && (a.customer_match_status === 'confirmed_new' || a.customer_match_status === 'confirmed_link'));
-                    // 媒体×メニューで集計
-                    const groups = {};
-                    appts.forEach(a => {
-                        const media = a.visit_source_id ? (sources[a.visit_source_id] || ('媒体#' + a.visit_source_id)) : '未割当';
-                        const mObj = a.menu_manage_id ? menus[a.menu_manage_id] : null;
-                        const menu = mObj ? mObj.name : '未設定';
-                        const price = (Number(a.total_price) > 0) ? Number(a.total_price) : (mObj ? mObj.price : 0);
-                        const key = media + '｜' + menu;
-                        if (!groups[key]) groups[key] = { media, menu, booking: 0, visit: 0, join: 0, cancel: 0, sales: 0 };
-                        const g = groups[key];
-                        g.booking++;
-                        if (a.cancelled_at) g.cancel++;
-                        if (a.status === 2) { g.visit++; g.sales += price; }
-                        if (a.joined_this_visit) g.join++;
-                    });
-                    const rows = Object.values(groups).map(g => ({
-                        ...g,
-                        enrollRate: g.visit > 0 ? Math.round(g.join / g.visit * 1000) / 10 : 0,
-                        cancelRate: g.booking > 0 ? Math.round(g.cancel / g.booking * 1000) / 10 : 0,
+                    const ids = soShopSel.length ? soShopSel.map(String) : [];
+                    const q = (id) => { const p = new URLSearchParams({ resource: 'marketing/by-channel', from: soFrom, to: soTo }); if (id) p.set('shop_id', id); return `${SALONONE_API_URL}?${p.toString()}`; };
+                    const urls = ids.length ? ids.map(q) : [q(null)];   // 未選択=shop_id無し=ブランド全体
+                    const results = await Promise.all(urls.map(u => fetch(u).then(r => r.json()).catch(() => ({}))));
+                    const merged = soMergeChannels(results.filter(r => r && r.data).map(r => r.data));
+                    const rows = normalizeMkChannels({ data: merged }).map(c => ({
+                        media: c.name, booking: c.booking, visit: c.visit, remaining: c.remaining,
+                        join: c.join, cancel: c.cancel,
+                        enrollRate: c.visit > 0 ? Math.round(c.join / c.visit * 1000) / 10 : 0,
+                        cancelRate: c.cancelRate, sales: c.sales, adSpend: c.adSpend, cpa: c.cpa, roas: c.roas,
                     })).sort((a, b) => b.sales - a.sales || b.booking - a.booking);
-                    const sum = (k) => rows.reduce((s, r) => s + r[k], 0);
-                    const tB = sum('booking'), tV = sum('visit'), tJ = sum('join'), tC = sum('cancel'), tS = sum('sales');
+                    const sum = (k) => rows.reduce((s, r) => s + (Number(r[k]) || 0), 0);
+                    const tB = sum('booking'), tV = sum('visit'), tJ = sum('join'), tC = sum('cancel'), tS = sum('sales'), tAd = sum('adSpend');
                     const kpi = {
-                        creatives: rows.length, booking: tB, visit: tV, join: tJ, sales: tS,
+                        channels: rows.length, booking: tB, visit: tV, join: tJ, sales: tS, adSpend: tAd,
                         enrollRate: tV > 0 ? Math.round(tJ / tV * 1000) / 10 : 0,
                         cancelRate: tB > 0 ? Math.round(tC / tB * 1000) / 10 : 0,
+                        cpa: (tAd > 0 && tV > 0) ? Math.round(tAd / tV) : 0,
                     };
                     setSoCreative({ rows, kpi, loading: false, ready: true, error: '' });
                 } catch (e) {
@@ -12209,13 +12164,13 @@
                                             {!soCreative.loading && !soCreative.error && soCreative.kpi && (() => {
                                                 const k = soCreative.kpi;
                                                 const cards = [
-                                                    { label: 'クリエイティブ数', value: k.creatives, sub: '媒体×メニュー' },
+                                                    { label: '媒体数', value: k.channels, sub: '集客チャネル' },
                                                     { label: '予約 / 実来店', value: `${k.booking} / ${k.visit}`, sub: '新規客' },
                                                     { label: '入会数', value: k.join, sub: '実来店から' },
                                                     { label: '入会率', value: k.enrollRate + '%', sub: '入会÷実来店', color: k.enrollRate >= 30 ? 'emerald' : 'slate' },
                                                     { label: 'キャンセル率', value: k.cancelRate + '%', sub: 'キャンセル÷予約', color: k.cancelRate <= 15 ? 'emerald' : 'rose' },
-                                                    { label: '広告費 / CPA', value: '¥0 / —', sub: 'SalonOne対象外' },
-                                                    { label: '売上', value: soYen(k.sales), sub: '実来店ベース' },
+                                                    { label: '広告費 / CPA', value: (k.adSpend > 0 ? soYen(k.adSpend) : '¥0') + ' / ' + (k.cpa > 0 ? soYen(k.cpa) : '—'), sub: k.adSpend > 0 ? '広告費入力あり' : 'SalonOne未入力' },
+                                                    { label: '売上', value: soYen(k.sales), sub: '新規客売上' },
                                                 ];
                                                 return (
                                                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
@@ -12233,16 +12188,16 @@
                                                 <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
                                                     <div className="flex items-center gap-2 px-4 md:px-6 pt-4 pb-2">
                                                         <Layers size={16} className="text-emerald-600" />
-                                                        <h3 className="text-sm md:text-base font-black text-slate-800">媒体×メニュー別内訳</h3>
+                                                        <h3 className="text-sm md:text-base font-black text-slate-800">媒体別内訳</h3>
                                                         <span className="text-[11px] font-bold text-slate-400 ml-auto">{soFrom.slice(0, 7)}・売上順・{soShopLabel()}</span>
                                                     </div>
                                                     <div className="overflow-x-auto">
                                                         <table className="w-full text-sm whitespace-nowrap">
                                                             <thead><tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200">
                                                                 <th className="px-4 md:px-6 py-2">媒体</th>
-                                                                <th className="px-3 py-2">メニュー</th>
                                                                 <th className="px-3 py-2 text-right">予約</th>
                                                                 <th className="px-3 py-2 text-right">実来店</th>
+                                                                <th className="px-3 py-2 text-right">残</th>
                                                                 <th className="px-3 py-2 text-right">入会</th>
                                                                 <th className="px-3 py-2 text-right">入会率</th>
                                                                 <th className="px-3 py-2 text-right">キャンセル率</th>
@@ -12257,29 +12212,30 @@
                                                                 ) : soCreative.rows.map((r, i) => (
                                                                     <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
                                                                         <td className="px-4 md:px-6 py-2.5 font-black text-slate-800">{r.media}</td>
-                                                                        <td className="px-3 py-2.5 text-slate-600 text-xs">{r.menu}</td>
                                                                         <td className="px-3 py-2.5 text-right font-bold text-slate-700">{r.booking}</td>
                                                                         <td className="px-3 py-2.5 text-right font-bold text-slate-700">{r.visit}</td>
+                                                                        <td className="px-3 py-2.5 text-right text-slate-500">{r.remaining || 0}</td>
                                                                         <td className="px-3 py-2.5 text-right font-bold text-slate-700">{r.join}</td>
                                                                         <td className={`px-3 py-2.5 text-right font-black ${r.enrollRate >= 30 ? 'text-emerald-600' : r.enrollRate > 0 ? 'text-slate-600' : 'text-slate-300'}`}>{r.enrollRate}%</td>
                                                                         <td className={`px-3 py-2.5 text-right font-black ${r.cancelRate === 0 ? 'text-slate-300' : r.cancelRate <= 15 ? 'text-emerald-600' : 'text-rose-600'}`}>{r.cancelRate}%</td>
-                                                                        <td className="px-3 py-2.5 text-right text-slate-300">—</td>
-                                                                        <td className="px-3 py-2.5 text-right text-slate-300">—</td>
+                                                                        <td className={`px-3 py-2.5 text-right ${r.adSpend > 0 ? 'font-bold text-slate-700' : 'text-slate-300'}`}>{r.adSpend > 0 ? soYen(r.adSpend) : '—'}</td>
+                                                                        <td className={`px-3 py-2.5 text-right ${r.cpa > 0 ? 'font-bold text-slate-700' : 'text-slate-300'}`}>{r.cpa > 0 ? soYen(r.cpa) : '—'}</td>
                                                                         <td className="px-3 py-2.5 text-right font-black text-slate-900">{soYen(r.sales)}</td>
-                                                                        <td className="px-3 py-2.5 text-right text-slate-300">—</td>
+                                                                        <td className={`px-3 py-2.5 text-right ${r.roas > 0 ? 'font-bold text-slate-700' : 'text-slate-300'}`}>{r.roas > 0 ? r.roas + '%' : '—'}</td>
                                                                     </tr>
                                                                 ))}
                                                             </tbody>
                                                             {soCreative.rows.length > 0 && soCreative.kpi && (
                                                                 <tfoot><tr className="border-t-2 border-slate-200 bg-slate-50 font-black text-slate-800">
-                                                                    <td className="px-4 md:px-6 py-2.5" colSpan={2}>合計</td>
+                                                                    <td className="px-4 md:px-6 py-2.5">合計</td>
                                                                     <td className="px-3 py-2.5 text-right">{soCreative.kpi.booking}</td>
                                                                     <td className="px-3 py-2.5 text-right">{soCreative.kpi.visit}</td>
+                                                                    <td className="px-3 py-2.5 text-right"></td>
                                                                     <td className="px-3 py-2.5 text-right">{soCreative.kpi.join}</td>
                                                                     <td className="px-3 py-2.5 text-right">{soCreative.kpi.enrollRate}%</td>
                                                                     <td className="px-3 py-2.5 text-right">{soCreative.kpi.cancelRate}%</td>
-                                                                    <td className="px-3 py-2.5 text-right text-slate-300">—</td>
-                                                                    <td className="px-3 py-2.5 text-right text-slate-300">—</td>
+                                                                    <td className="px-3 py-2.5 text-right">{soCreative.kpi.adSpend > 0 ? soYen(soCreative.kpi.adSpend) : '—'}</td>
+                                                                    <td className="px-3 py-2.5 text-right">{soCreative.kpi.cpa > 0 ? soYen(soCreative.kpi.cpa) : '—'}</td>
                                                                     <td className="px-3 py-2.5 text-right">{soYen(soCreative.kpi.sales)}</td>
                                                                     <td className="px-3 py-2.5 text-right text-slate-300">—</td>
                                                                 </tr></tfoot>
@@ -12287,7 +12243,7 @@
                                                         </table>
                                                     </div>
                                                     <p className="text-[10px] text-slate-400 px-4 md:px-6 py-3 font-bold leading-relaxed border-t border-slate-100">
-                                                        ※ SalonOne受付履歴を「媒体×メニュー」で集計（新規客が母集団）。予約=件数／実来店=来店ステータス／入会=入会フラグ／キャンセル=キャンセル日時。入会率＝入会÷実来店、キャンセル率＝キャンセル÷予約。売上＝実来店の金額（明細が無い場合はメニュー単価）。広告費・CPA・ROASはSalonOneに無いため「—」。店舗フィルタ＝上部の店舗選択（未選択で全店合計）。
+                                                        ※ SalonOne公式の媒体別集計（marketing/by-channel）をそのまま表示（本体の数値と一致）。予約/実来店/残/入会/キャンセル/売上/広告費/CPA/ROASは全てAPI値。入会率＝入会÷実来店。広告費・CPA・ROASはSalonOneに広告費が入力されている媒体のみ表示（未入力は「—」）。店舗フィルタ＝上部の店舗選択（未選択で全店合計）。※クリエイティブ(強制リンク)単位はAPIに集計が無く、受付履歴の強制リンクIDもほぼ未設定のため、媒体単位で表示しています。
                                                     </p>
                                                 </div>
                                             )}

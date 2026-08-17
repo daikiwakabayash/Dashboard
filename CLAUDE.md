@@ -46,6 +46,7 @@ api/
   settlement-auth.js  # 返金明細書オーナー別PASS認証（GASオーナー設定＋環境変数・root対応）
   settlement-store.js # 返金明細書ストア（GAS保存: スナップショット/確認状況/修正依頼・トークン検証）
   settlement-owners.js # オーナーアカウント管理（GAS「オーナー設定」の追加/変更/削除・本社/root専用）
+  plan-store.js     # SalonOne計画の目標・アクション共有ストア（GAS「計画設定」に保存・全デバイス同期。SETTLEMENT_GAS_URL再利用）
   square/
     metrics.js      # Square サブスクデータ集計
     settlement.js   # Square 精算（返金明細書用: 総売上/実手数料/返金を店舗×月で集計）

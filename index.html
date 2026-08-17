@@ -1279,6 +1279,28 @@
             const [soAiLoading, setSoAiLoading] = useState(false);
             useEffect(() => { try { localStorage.setItem('salonone_plan_goals_v1', JSON.stringify(soPlanGoals)); } catch {} }, [soPlanGoals]);
             useEffect(() => { try { localStorage.setItem('salonone_actions_v1', JSON.stringify(soActions)); } catch {} }, [soActions]);
+            // ── 事業計画の目標・アクションをサーバー(GAS)と同期（全デバイス共有） ──
+            const planStoreLoaded = useRef(false);
+            useEffect(() => {
+                (async () => {
+                    try {
+                        const r = await fetch('/api/plan-store');
+                        const j = await r.json().catch(() => ({}));
+                        if (j && j.configured) {
+                            if (j.goals && Object.keys(j.goals).length) setSoPlanGoals(prev => ({ ...prev, ...j.goals })); // サーバー優先でマージ
+                            if (Array.isArray(j.actions) && j.actions.length) setSoActions(j.actions);
+                        }
+                    } catch {}
+                    finally { planStoreLoaded.current = true; }
+                })();
+            }, []);
+            useEffect(() => {
+                if (!planStoreLoaded.current) return; // 初回ロード完了までは保存しない
+                const t = setTimeout(() => {
+                    fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goals: soPlanGoals, actions: soActions }) }).catch(() => {});
+                }, 800); // 連続入力をまとめて保存
+                return () => clearTimeout(t);
+            }, [soPlanGoals, soActions]);
 
             // ===== 返金明細書（FC精算）タブ =====
             const stDefaultMonth = (() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}`; })();

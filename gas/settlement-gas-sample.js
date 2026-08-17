@@ -30,6 +30,43 @@ var HEADERS = ['month', 'shopId', 'shopName', 'owner', 'status', 'revisionNote',
 // オーナーアカウント（パスワード・アクセス店舗）シート
 var OWNER_SHEET = 'オーナー設定';
 var OWNER_HEADERS = ['owner', 'password', 'shops', 'updatedAt']; // shops はカンマ区切り店舗名
+// 事業計画(SalonOne計画)の目標・アクション 共有ストア（全デバイス同期）
+var PLAN_SHEET = '計画設定';
+var PLAN_HEADERS = ['key', 'json', 'updatedAt']; // key: 'goals' | 'actions'
+
+function getPlanSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(PLAN_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(PLAN_SHEET);
+    sh.getRange(1, 1, 1, PLAN_HEADERS.length).setValues([PLAN_HEADERS]);
+  }
+  return sh;
+}
+function readPlanStore_() {
+  var sh = getPlanSheet_();
+  var values = sh.getDataRange().getValues();
+  var out = { goals: {}, actions: [] };
+  for (var r = 1; r < values.length; r++) {
+    var key = String(values[r][0] || '');
+    var json = String(values[r][1] || '');
+    if (!key || !json) continue;
+    try { out[key] = JSON.parse(json); } catch (e) {}
+  }
+  if (!out.goals) out.goals = {};
+  if (!out.actions) out.actions = [];
+  return out;
+}
+function writePlanKey_(key, obj) {
+  var sh = getPlanSheet_();
+  var values = sh.getDataRange().getValues();
+  var now = new Date().toISOString();
+  var json = JSON.stringify(obj || (key === 'actions' ? [] : {}));
+  for (var r = 1; r < values.length; r++) {
+    if (String(values[r][0]) === key) { sh.getRange(r + 1, 1, 1, 3).setValues([[key, json, now]]); return; }
+  }
+  sh.appendRow([key, json, now]);
+}
 
 function getSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -94,6 +131,10 @@ function doGet(e) {
   var lock = LockService.getScriptLock(); lock.waitLock(20000);
   try {
     var p = (e && e.parameter) || {};
+    // 事業計画の目標・アクション（全デバイス同期）
+    if (String(p.type) === 'planStore') {
+      return json_(readPlanStore_());
+    }
     // オーナーアカウント一覧（サーバー間通信のみ・password含む）
     if (String(p.type) === 'owners') {
       var owners = readOwners_().map(function (o) {
@@ -130,6 +171,13 @@ function doPost(e) {
   var lock = LockService.getScriptLock(); lock.waitLock(20000);
   try {
     var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+
+    // ── 事業計画の目標・アクションを保存（全デバイス同期） ──
+    if (body.action === 'savePlanStore') {
+      writePlanKey_('goals', body.goals || {});
+      writePlanKey_('actions', body.actions || []);
+      return json_({ ok: true });
+    }
 
     // ── オーナーアカウントの upsert / delete（本社/root操作） ──
     if (body.action === 'upsertOwner' || body.action === 'deleteOwner') {

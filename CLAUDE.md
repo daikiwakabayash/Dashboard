@@ -39,7 +39,7 @@ owner.html          # 返金明細書 オーナーポータル（オーナー別
 api/
   auth.js           # 認証API（パスワード検証・トークン発行）
   gas-proxy.js      # GAS APIプロキシ（秘密URL隠蔽）
-  chat.js           # Claude AI チャットAPI（フィードバック動的注入対応）
+  chat.js           # Claude AI チャットAPI（フィードバック動的注入・画像添付対応）。body.images=[{mediaType,data(base64)}] を渡すと最新ターンをimage+textブロックで送信（JPEG/PNG/GIF/WebP・最大4枚）
   feedback.js       # フィードバックAPI（GAS連携・取得/送信）
   health.js         # ヘルスチェック
   salonone.js       # SalonOne 分析APIプロキシ（APIキー隠蔽・GET限定・許可リスト）

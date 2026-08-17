@@ -36,26 +36,29 @@ Vercelにpushすると自動デプロイ。
 ```
 index.html          # フロントエンド（React SPA・本社/管理者向け）
 owner.html          # 返金明細書 オーナーポータル（オーナー別PASSログイン・閲覧/確認/修正依頼）
-api/
+api/                # ⚠️ Vercel Hobbyの関数数上限(12)対策で「1エンドポイント=1ファイル」から統合ディスパッチャ方式に変更。
+                    #    実体は lib/handlers/ に分離（lib配下はServerless Functionにカウントされない）。旧URLは vercel.json の rewrites で ?fn= に振り分け（フロントは変更不要）。maxDuration は全て ≤60（Hobby上限）。
   auth.js           # 認証API（パスワード検証・トークン発行）
-  gas-proxy.js      # GAS APIプロキシ（秘密URL隠蔽）
   chat.js           # Claude AI チャットAPI（フィードバック動的注入・画像添付対応）。body.images=[{mediaType,data(base64)}] を渡すと最新ターンをimage+textブロックで送信（JPEG/PNG/GIF/WebP・最大4枚）
   feedback.js       # フィードバックAPI（GAS連携・取得/送信）
-  health.js         # ヘルスチェック
+  health.js         # ヘルスチェック（env.planStore で保存先の有効状態も返す）
   salonone.js       # SalonOne 分析APIプロキシ（APIキー隠蔽・GET限定・許可リスト）
-  settlement-auth.js  # 返金明細書オーナー別PASS認証（GASオーナー設定＋環境変数・root対応）
-  settlement-store.js # 返金明細書ストア（GAS保存: スナップショット/確認状況/修正依頼・トークン検証）
-  settlement-owners.js # オーナーアカウント管理（GAS「オーナー設定」の追加/変更/削除・本社/root専用）
-  plan-store.js     # SalonOne計画の目標・アクション共有ストア（全デバイス同期）。保存先=Vercel KV(推奨) or GAS。KV未設定時はGAS、両方無ければlocalStorage継続
-  square/
-    metrics.js      # Square サブスクデータ集計
-    settlement.js   # Square 精算（返金明細書用: 総売上/実手数料/返金を店舗×月で集計）
-    test.js         # Square API接続テスト
+  plan-store.js     # SalonOne計画の目標・アクション共有ストア（全デバイス同期）。保存先=Vercel KV(推奨) or Supabase or GAS。未設定時はlocalStorage継続
+  tasks.js          # タスク系API
+  settlement.js     # 返金明細書ディスパッチャ → /api/settlement-auth|owners|store（?fn=auth/owners/store・rewrite）
+  square.js         # Squareディスパッチャ → /api/square/metrics|settlement|test（?fn=metrics/settlement/test・rewrite）
+  finance.js        # 財務ディスパッチャ → /api/finance-chat|pdf（?fn=chat/pdf・rewrite・bodyParser 50mb）
+  gas.js            # GAS系ディスパッチャ → /api/gas-proxy|customers（?fn=proxy/customers・rewrite）
 lib/
   markdown.js       # Markdownパーサー（テスト用分離モジュール）
   plan-calc.js      # 事業計画計算ロジック（テスト用分離モジュール）
   salonone.js       # SalonOne API連携ロジック（エンドポイント許可リスト・検証・URL組立）
   settlement.js     # 返金明細書 共通ロジック（オーナー認証トークン・スナップショット・計算・期日/注意書き）
+  handlers/         # api/ ディスパッチャから呼ばれる実ハンドラ群（Serverless Functionにカウントされない）
+    settlement-auth.js / settlement-owners.js / settlement-store.js
+    square-metrics.js / square-settlement.js / square-test.js
+    finance-chat.js / finance-pdf.js
+    gas-proxy.js / customers.js
 gas/
   feedback-gas-sample.js    # フィードバック用GASサンプルスクリプト
   settlement-gas-sample.js  # 返金明細書ストア用GASサンプル（スプレッドシートupsert/update）

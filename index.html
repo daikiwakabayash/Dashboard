@@ -4635,6 +4635,55 @@
                 return list;
             }, [sqCustomerData, sqTab, sqSort]);
 
+            // ── 未来のサブスク課金予定（アクティブ会員・選択月内で本日以降に決済見込み・店舗別） ──
+            // 次回課金日の目安 = chargedThroughDate（この日まで課金済み＝次サイクル開始日）。
+            // 選択月内かつ本日より後のものを「未請求の課金予定」として店舗別に集計。
+            // 同一顧客が複数プランを持つ場合は1行に合算しメニューを結合。
+            const sqUpcomingCharges = useMemo(() => {
+                if (!sqData || !Array.isArray(sqData.subscriptions) || !sqMonth) return null;
+                const cust = sqData.customers || {};
+                const plansMap = sqData.plans || {};
+                const stores = Array.isArray(sqData.stores) ? sqData.stores : [];
+                const locToStore = {};
+                stores.forEach(st => (st.locationIds || [st.id]).forEach(l => { locToStore[l] = st.name; }));
+                const today = new Date(); today.setHours(0, 0, 0, 0);
+                const toYM = d => { if (!d) return null; const dt = new Date(d); return isNaN(dt) ? null : `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`; };
+                const active = sqData.subscriptions.filter(s => s.status === 'ACTIVE'
+                    && (!sqStoreLocationIds || sqStoreLocationIds.has(s.locationId)));
+                const groupMap = {};   // storeName → { custKey → row }
+                active.forEach(s => {
+                    if (!s.chargedThroughDate) return;
+                    const ct = new Date(String(s.chargedThroughDate).slice(0, 10) + 'T00:00:00');
+                    if (isNaN(ct)) return;
+                    if (!(toYM(ct) === sqMonth && ct > today)) return;   // 選択月内 かつ 本日より後（未請求の見込み）
+                    const amount = Number(s.monthlyPrice) || 0;
+                    const storeName = locToStore[s.locationId] || '不明店舗';
+                    const name = (cust[s.customerId] && cust[s.customerId].name) || s.customerId || '不明';
+                    const plan = (plansMap[s.planVariationId] && plansMap[s.planVariationId].name) || '(プラン不明)';
+                    const dateStr = String(s.chargedThroughDate).slice(0, 10);
+                    if (!groupMap[storeName]) groupMap[storeName] = {};
+                    const g = groupMap[storeName];
+                    const key = s.customerId || s.id;
+                    if (g[key]) {
+                        const row = g[key];
+                        row.amount += amount;
+                        if (plan && !row.plan.includes(plan)) row.plan += ' / ' + plan;
+                        if (dateStr < row.date) row.date = dateStr;
+                        row.count += 1;
+                    } else {
+                        g[key] = { name, plan, amount, date: dateStr, startDate: s.startDate || null, count: 1 };
+                    }
+                });
+                const groups = Object.entries(groupMap).map(([storeName, rowsObj]) => {
+                    const rows = Object.values(rowsObj).sort((a, b) => (a.date || '').localeCompare(b.date || '') || b.amount - a.amount);
+                    const subtotal = rows.reduce((s, r) => s + r.amount, 0);
+                    return { storeName, rows, subtotal, count: rows.length };
+                }).sort((a, b) => b.subtotal - a.subtotal);
+                const grandTotal = groups.reduce((s, g) => s + g.subtotal, 0);
+                const grandCount = groups.reduce((s, g) => s + g.count, 0);
+                return { groups, grandTotal, grandCount };
+            }, [sqData, sqStore, sqMonth, sqStoreLocationIds]);
+
             const sqHandleSort = (key) => {
                 setSqSort(prev => ({ key, dir: prev.key === key ? (prev.dir === 'asc' ? 'desc' : 'asc') : 'desc' }));
             };
@@ -11009,6 +11058,60 @@
                                                             {sqSortedList.length}件表示
                                                         </div>
                                                     )}
+                                                </div>
+                                            )}
+
+                                            {/* ①.5 今月の未請求サブスク（未来の課金予定・店舗別） */}
+                                            {sqUpcomingCharges && (
+                                                <div>
+                                                    <h2 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-2 md:mb-3 flex items-center gap-2">
+                                                        <CreditCard size={14} /> 今月の課金予定（未請求サブスク）
+                                                        <span className="ml-1 normal-case tracking-normal text-slate-300 font-bold">{sqMonth}・本日以降に決済予定のアクティブ会員</span>
+                                                    </h2>
+                                                    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                                                        <div className="flex flex-wrap items-center gap-x-6 gap-y-1 px-5 py-3 bg-blue-50/60 border-b border-blue-100">
+                                                            <div className="text-sm font-black text-slate-700">対象 <span className="text-blue-600">{sqUpcomingCharges.grandCount}名</span></div>
+                                                            <div className="text-sm font-black text-slate-700">課金予定額 合計 <span className="text-blue-600">¥{sqUpcomingCharges.grandTotal.toLocaleString()}</span></div>
+                                                            <div className="ml-auto text-[11px] font-bold text-slate-400">次回課金日はSquareのchargedThroughDate（この日まで課金済み＝次サイクル開始日）</div>
+                                                        </div>
+                                                        {sqUpcomingCharges.groups.length === 0 ? (
+                                                            <div className="px-5 py-8 text-center text-sm text-slate-400 font-bold">本日以降、{sqMonth}内に課金予定のアクティブサブスクはありません</div>
+                                                        ) : (
+                                                            <div className="divide-y divide-slate-100">
+                                                                {sqUpcomingCharges.groups.map((g, gi) => (
+                                                                    <div key={gi}>
+                                                                        <div className="flex items-center justify-between px-5 py-2.5 bg-slate-50">
+                                                                            <div className="font-black text-slate-700 text-sm flex items-center gap-2">
+                                                                                <MapPin size={13} className="text-slate-400" />{g.storeName}
+                                                                                <span className="text-xs font-bold text-slate-400">{g.count}名</span>
+                                                                            </div>
+                                                                            <div className="font-black text-slate-800 text-sm">¥{g.subtotal.toLocaleString()}</div>
+                                                                        </div>
+                                                                        <div className="overflow-x-auto">
+                                                                            <table className="w-full text-sm">
+                                                                                <thead><tr className="text-left text-[11px] font-black text-slate-400 border-b border-slate-100">
+                                                                                    <th className="px-5 py-2">氏名</th>
+                                                                                    <th className="px-4 py-2">メニュー（プラン）</th>
+                                                                                    <th className="px-4 py-2 text-center whitespace-nowrap">課金予定日</th>
+                                                                                    <th className="px-4 py-2 text-right whitespace-nowrap">金額</th>
+                                                                                </tr></thead>
+                                                                                <tbody>
+                                                                                    {g.rows.map((r, ri) => (
+                                                                                        <tr key={ri} className="border-b border-slate-50 hover:bg-slate-50">
+                                                                                            <td className="px-5 py-2.5 font-bold text-slate-800 whitespace-nowrap">{r.name}</td>
+                                                                                            <td className="px-4 py-2.5 text-slate-600 text-xs">{r.plan}{r.count > 1 ? ` （${r.count}件）` : ''}</td>
+                                                                                            <td className="px-4 py-2.5 text-center text-slate-500 text-xs whitespace-nowrap">{r.date}</td>
+                                                                                            <td className="px-4 py-2.5 text-right font-black text-slate-800 whitespace-nowrap">¥{r.amount.toLocaleString()}</td>
+                                                                                        </tr>
+                                                                                    ))}
+                                                                                </tbody>
+                                                                            </table>
+                                                                        </div>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </div>
                                                 </div>
                                             )}
 

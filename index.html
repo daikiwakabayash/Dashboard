@@ -1107,36 +1107,66 @@
         const App = () => {
             console.log('🎯 App component initializing...');
 
-            // ── 認証 ──
+            // ── 認証（アカウント制: ID(氏名)＋PASS。店舗アクセスはアカウント毎に設定・rootは全店） ──
+            const readAuthShops = () => { try { const s = localStorage.getItem('naoru_auth_shops'); return s ? JSON.parse(s) : null; } catch { return null; } };
             const [authState, setAuthState] = useState(() => {
                 try {
                     const token = localStorage.getItem('naoru_auth_token');
-                    return token ? { checking: true, authenticated: false, token } : { checking: false, authenticated: false, token: null };
-                } catch { return { checking: false, authenticated: false, token: null }; }
+                    const owner = localStorage.getItem('naoru_auth_owner') || '';
+                    const root = localStorage.getItem('naoru_auth_root') === '1';
+                    const shops = readAuthShops();
+                    return token ? { checking: true, authenticated: false, token, owner, root, shops }
+                                 : { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null };
+                } catch { return { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null }; }
             });
+            const [authId, setAuthId] = useState('');
             const [authPassword, setAuthPassword] = useState('');
             const [authError, setAuthError] = useState('');
             const [authLoading, setAuthLoading] = useState(false);
 
-            // 起動時にトークン検証
+            const persistAuth = (owner, token, root, shops) => {
+                try {
+                    localStorage.setItem('naoru_auth_token', token);
+                    localStorage.setItem('naoru_auth_owner', owner || '');
+                    localStorage.setItem('naoru_auth_root', root ? '1' : '0');
+                    localStorage.setItem('naoru_auth_shops', JSON.stringify(root ? null : (Array.isArray(shops) ? shops : [])));
+                } catch {}
+            };
+            const clearAuth = () => { ['naoru_auth_token', 'naoru_auth_owner', 'naoru_auth_root', 'naoru_auth_shops'].forEach(k => { try { localStorage.removeItem(k); } catch {} }); };
+
+            // 起動時: 保存トークンを検証（＋店舗アクセスを最新化）。未設定環境（開発）は認証スキップ。
             useEffect(() => {
                 if (!authState.token || !authState.checking) return;
-                fetch('/api/auth', {
+                fetch('/api/settlement-auth', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ action: 'verify', token: authState.token })
-                }).then(r => r.json()).then(data => {
-                    if (data.authenticated) {
-                        setAuthState({ checking: false, authenticated: true, token: authState.token });
+                    body: JSON.stringify({ action: 'verify', owner: authState.owner || '__root__', token: authState.token })
+                }).then(r => r.json()).then(async (data) => {
+                    if (data && data.ok) {
+                        let shops = authState.root ? null : authState.shops;
+                        if (!data.root) {
+                            try { const g = await fetch('/api/settlement-auth').then(r => r.json()); const list = g && g.shops && g.shops[authState.owner]; if (Array.isArray(list)) shops = list; } catch {}
+                        }
+                        persistAuth(authState.owner, authState.token, !!data.root, shops);
+                        setAuthState({ checking: false, authenticated: true, token: authState.token, owner: authState.owner, root: !!data.root, shops: data.root ? null : shops });
                     } else {
-                        localStorage.removeItem('naoru_auth_token');
-                        setAuthState({ checking: false, authenticated: false, token: null });
+                        clearAuth();
+                        setAuthState({ checking: false, authenticated: false, token: null, owner: '', root: false, shops: null });
                     }
                 }).catch(() => {
                     // ネットワークエラー時はトークンを保持してログイン状態を維持
                     console.warn('Auth verification failed (network error), keeping saved token');
-                    setAuthState({ checking: false, authenticated: true, token: authState.token });
+                    setAuthState(s => ({ ...s, checking: false, authenticated: true }));
                 });
+            }, []);
+            // 開発環境（DASHBOARD_PASSWORD・アカウント共に未設定）は認証を自動スキップ
+            useEffect(() => {
+                if (authState.token || authState.authenticated) return;
+                fetch('/api/settlement-auth').then(r => r.json()).then(j => {
+                    if (j && !j.configured && !j.rootConfigured) {
+                        setAuthState({ checking: false, authenticated: true, token: 'dev-mode', owner: '__root__', root: true, shops: null });
+                    }
+                }).catch(() => {});
             }, []);
 
             // ── スプラッシュスクリーン制御 ──
@@ -1156,15 +1186,17 @@
                 setAuthLoading(true);
                 setAuthError('');
                 try {
-                    const res = await fetch('/api/auth', {
+                    const res = await fetch('/api/settlement-auth', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ action: 'login', password: authPassword })
+                        body: JSON.stringify({ action: 'login', owner: authId.trim() || undefined, password: authPassword })
                     });
                     const data = await res.json();
-                    if (data.authenticated) {
-                        localStorage.setItem('naoru_auth_token', data.token);
-                        setAuthState({ checking: false, authenticated: true, token: data.token });
+                    if (data.ok) {
+                        const shops = data.root ? null : (Array.isArray(data.shops) ? data.shops : []);
+                        persistAuth(data.owner || '', data.token, !!data.root, shops);
+                        setAuthState({ checking: false, authenticated: true, token: data.token, owner: data.owner || '', root: !!data.root, shops });
+                        setAuthPassword(''); setAuthId('');
                     } else {
                         setAuthError(data.error || 'ログインに失敗しました');
                     }
@@ -1175,8 +1207,8 @@
             };
 
             const handleLogout = () => {
-                localStorage.removeItem('naoru_auth_token');
-                setAuthState({ checking: false, authenticated: false, token: null });
+                clearAuth();
+                setAuthState({ checking: false, authenticated: false, token: null, owner: '', root: false, shops: null });
             };
 
             // 認証チェック中・未認証の場合は後でreturn文で分岐する（Hooksの順序を保つため）
@@ -1191,6 +1223,10 @@
                 // 非表示中のページ(経営指標/ダッシュボード/マーケティング)はSalonOne売上に寄せる
                 return (p && !['dashboard', 'charts', 'marketing'].includes(p)) ? p : 'salonone';
             });
+            // 非rootが管理ページ(オーナー設定)を開いていたらSalonOne売上へ退避
+            useEffect(() => {
+                if (authState.authenticated && !authState.root && currentPage === 'settings') setCurrentPage('salonone');
+            }, [authState.authenticated, authState.root, currentPage]);
             const [rawData, setRawData] = useState(() => {
                 try {
                     const cached = localStorage.getItem(CACHE_KEY);
@@ -1284,7 +1320,14 @@
                 return { from: first, to: `${last.getFullYear()}-${pad(last.getMonth() + 1)}-${pad(last.getDate())}` };
             })();
             const [soSummary, setSoSummary] = useState(null);   // 正規化済み売上サマリ
-            const [soShops, setSoShops] = useState([]);         // 店舗一覧
+            const [soShopsRaw, setSoShops] = useState([]);      // 店舗一覧（SalonOne全件・生データ）
+            // ログイン中アカウントのアクセス店舗に絞る（root=全店。非root=許可パターンに一致する店舗のみ）
+            const soShops = useMemo(() => {
+                const arr = soShopsRaw || [];
+                if (authState.root) return arr;
+                const pats = Array.isArray(authState.shops) ? authState.shops : [];
+                return arr.filter(s => pats.some(p => String(s.name || '').includes(p)));
+            }, [soShopsRaw, authState.root, authState.shops]);
             const [soStaffs, setSoStaffs] = useState([]);       // スタッフ一覧
             const [soLoading, setSoLoading] = useState(false);
             const [soError, setSoError] = useState(null);
@@ -1438,6 +1481,12 @@
             const [stAcctForm, setStAcctForm] = useState({ owner: '', password: '', shops: [] });
             const [stAcctMsg, setStAcctMsg] = useState('');
             const [stAcctBusy, setStAcctBusy] = useState(false);
+            // 店舗一覧からまとめてアカウント作成
+            const [stBulkOpen, setStBulkOpen] = useState(false);
+            const [stBulkPass, setStBulkPass] = useState('');
+            const [stBulkSel, setStBulkSel] = useState([]);   // 対象店舗名
+            const [stBulkBusy, setStBulkBusy] = useState(false);
+            const [stBulkMsg, setStBulkMsg] = useState('');
             const [stAdminOpen, setStAdminOpen] = useState(false);
             const [stSel, setStSel] = useState([]);                // 表示する店舗ID（複数選択）
             const [stData, setStData] = useState({});              // id -> { salon, square }
@@ -1616,7 +1665,7 @@
             }, [currentPage]);
             // 設定タブでもSalonOne店舗一覧を取得（管轄店舗の選択肢に実店舗を出す）
             useEffect(() => {
-                if (currentPage === 'settings' && soShops.length === 0) {
+                if (currentPage === 'settings' && soShopsRaw.length === 0) {
                     fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`).then(r => r.json()).then(j => {
                         const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? ''), name: s.name || `店舗${s.id}` }));
                         if (arr.length) setSoShops(arr);
@@ -1691,6 +1740,28 @@
                 } catch { setStAcctMsg('通信に失敗しました'); }
                 finally { setStAcctBusy(false); }
             };
+            // 選択した各店舗ぶんのログインアカウントをまとめて作成（ID=店舗名・アクセス=その店舗・共通初期PASS）
+            const stBulkCreate = async (shopNames, password) => {
+                const names = (shopNames || []).map(String).filter(Boolean);
+                if (!names.length) { setStBulkMsg('店舗を選択してください'); return; }
+                if (!password || !password.trim()) { setStBulkMsg('初期PASSを入力してください'); return; }
+                setStBulkBusy(true); setStBulkMsg('');
+                let ok = 0, fail = 0;
+                for (const name of names) {
+                    try {
+                        const r = await fetch('/api/settlement-owners', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ hqToken: stAuthToken(), action: 'upsert', owner: name, password, shops: [name] }),
+                        });
+                        const j = await r.json().catch(() => ({}));
+                        if (j.ok) ok++; else fail++;
+                    } catch { fail++; }
+                    setStBulkMsg(`作成中… ${ok + fail}/${names.length}`);
+                }
+                await stLoadAccounts(); setStOwnerShops(null);
+                setStBulkMsg(`✅ ${ok}件作成${fail ? `／${fail}件失敗` : ''}（初期PASS: ${password}）`);
+                setStBulkBusy(false);
+            };
             useEffect(() => {
                 if (((currentPage === 'settlement' && stAdminOpen) || currentPage === 'settings') && stAccounts === null) stLoadAccounts();
             }, [currentPage, stAdminOpen]);
@@ -1701,15 +1772,15 @@
             }, [currentPage, stMonth, stSel.join(',')]);
             // 返金明細書タブを開いたら SalonOne 店舗一覧を用意し、初期選択を1店にセット
             useEffect(() => {
-                if (currentPage === 'settlement' && soShops.length === 0) {
+                if (currentPage === 'settlement' && soShopsRaw.length === 0) {
                     fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`).then(r => r.json()).then(j => {
                         const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? ''), name: s.name || `店舗${s.id}` }));
-                        if (arr.length) { setSoShops(arr); if (stSel.length === 0) setStSel([String(arr[0].id)]); }
+                        if (arr.length) { setSoShops(arr); }
                     }).catch(() => {});
                 } else if (currentPage === 'settlement' && soShops.length && stSel.length === 0) {
                     setStSel([String(soShops[0].id)]);
                 }
-            }, [currentPage]);
+            }, [currentPage, soShops.length]);
             const [soShopSel, setSoShopSel] = useState([]);     // 店舗フィルタ（[]=全店舗 / shop_id配列）
             const [soStaffSel, setSoStaffSel] = useState([]);   // スタッフフィルタ（[]=全スタッフ / staff_id配列）
             const [soOwner, setSoOwner] = useState('');         // オーナー選択（空=なし）
@@ -3601,7 +3672,7 @@
                     })();
 
                     // 店舗・スタッフの選択肢はSalonOneから取得（それぞれ未取得なら取得。売上の成否に依存しない）
-                    if (soShops.length === 0 || force) {
+                    if (soShopsRaw.length === 0 || force) {
                         try {
                             const shopRes = await fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`);
                             const shopJson = await shopRes.json().catch(() => ({}));
@@ -3669,7 +3740,7 @@
             };
             // 事業計画相談タブ: 店舗一覧をSalonOneから取得（未取得時のみ）
             useEffect(() => {
-                if (currentPage !== 'planning' || soShops.length > 0) return;
+                if (currentPage !== 'planning' || soShopsRaw.length > 0) return;
                 (async () => {
                     try {
                         const r = await fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`);
@@ -3682,7 +3753,7 @@
             // AIチャットを開いたら 店舗一覧・スタッフ一覧（人数回答用）をSalonOneから取得（未取得時のみ）
             useEffect(() => {
                 if (!chatOpen) return;
-                if (soShops.length === 0) {
+                if (soShopsRaw.length === 0) {
                     (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.shop_id ?? ''), name: s.name || s.shop_name || `店舗${s.id}` })); if (arr.length) setSoShops(arr); } catch {} })();
                 }
                 if (soStaffs.length === 0) {
@@ -8154,7 +8225,18 @@
                                 <p className="text-xs text-slate-400 mt-2">経営ダッシュボードにログイン</p>
                             </div>
                             <form onSubmit={handleLogin} className="space-y-4" autoComplete="on">
-                                <input type="hidden" name="username" autoComplete="username" value="naoru-dashboard" />
+                                <div>
+                                    <input
+                                        type="text"
+                                        name="username"
+                                        autoComplete="username"
+                                        value={authId}
+                                        onChange={e => setAuthId(e.target.value)}
+                                        placeholder="ID（氏名／管理者は空欄でOK）"
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-transparent"
+                                        disabled={authLoading}
+                                    />
+                                </div>
                                 <div>
                                     <input
                                         type="password"
@@ -8230,7 +8312,7 @@
             return (
                 <div className="min-h-screen bg-gradient-to-br from-slate-50 to-brand-50/30 flex">
                     {/* Sidebar */}
-                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} />
+                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} authRoot={authState.root} authOwner={authState.owner} />
 
                     {/* Main Content */}
                     <div className="flex-1 min-w-0 overflow-x-hidden pb-16 md:pb-0">
@@ -13131,7 +13213,39 @@
                                 </header>
 
                                 <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 text-xs font-bold text-emerald-800 leading-relaxed">
-                                    オーナーの<span className="font-black">氏名</span>と<span className="font-black">管轄店舗</span>、ログイン用<span className="font-black">パスワード</span>を設定します。ここで割り当てた店舗は、<span className="font-black">SalonOne売上タブの「オーナー別」</span>絞り込みと、<span className="font-black">返金明細書のアクセス範囲</span>の両方に反映されます（GASに保存・再デプロイ不要）。
+                                    アカウントの<span className="font-black">ID（氏名）</span>・<span className="font-black">ログインPASS</span>・<span className="font-black">アクセス店舗</span>を設定します。ここで作成したアカウントは<span className="font-black">ダッシュボード本体のログイン</span>に使え、ログイン後は<span className="font-black">許可した店舗のみ</span>表示されます（SalonOne売上・サブスク・返金明細書すべてに反映）。管理者は <span className="font-black">DASHBOARD_PASSWORD</span> で全店舗にログインできます。GASに保存・再デプロイ不要。
+                                </div>
+
+                                {/* 店舗一覧からまとめて作成（土台） */}
+                                <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-5">
+                                    <button onClick={() => { setStBulkOpen(o => !o); if (!stBulkSel.length) setStBulkSel(shopList.map(s => s.name)); }} className="w-full flex items-center justify-between text-sm font-black text-slate-800">
+                                        <span className="flex items-center gap-2"><Users size={16} className="text-brand-500" /> 店舗一覧からまとめてアカウント作成</span>
+                                        <ChevronDown size={16} className={`text-slate-400 transition-transform ${stBulkOpen ? 'rotate-180' : ''}`} />
+                                    </button>
+                                    {stBulkOpen && (
+                                        <div className="mt-3 space-y-3">
+                                            <p className="text-[11px] text-slate-500 font-bold">選択した店舗ごとに「ID＝店舗名／アクセス＝その店舗」のアカウントを一括作成します。初期PASSは共通で設定し、後から各自変更できます。</p>
+                                            <div className="flex flex-col md:flex-row gap-2 md:items-center">
+                                                <input value={stBulkPass} onChange={e => setStBulkPass(e.target.value)} placeholder="共通の初期PASS（例: naoru2026）" className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold" />
+                                                <div className="flex items-center gap-2">
+                                                    <button onClick={() => setStBulkSel(shopList.map(s => s.name))} className="px-2.5 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-[11px] font-black hover:bg-slate-200">全選択</button>
+                                                    <button onClick={() => setStBulkSel([])} className="px-2.5 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-[11px] font-black hover:bg-slate-200">全解除</button>
+                                                </div>
+                                            </div>
+                                            <div className="max-h-56 overflow-y-auto border border-slate-200 rounded-lg p-2 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1 bg-white">
+                                                {shopList.map(s => {
+                                                    const on = stBulkSel.includes(s.name);
+                                                    return (<label key={s.id} className={`flex items-center gap-1.5 px-2 py-1 rounded cursor-pointer text-xs font-bold ${on ? 'bg-brand-50 text-brand-700' : 'text-slate-600 hover:bg-slate-50'}`}>
+                                                        <input type="checkbox" checked={on} onChange={() => setStBulkSel(prev => on ? prev.filter(x => x !== s.name) : [...prev, s.name])} />
+                                                        {s.name}</label>);
+                                                })}
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <button onClick={() => stBulkCreate(stBulkSel, stBulkPass)} disabled={stBulkBusy || !stBulkSel.length || !stBulkPass.trim()} className="px-5 py-2 bg-brand-500 text-white rounded-lg text-sm font-black hover:bg-brand-600 disabled:opacity-40">{stBulkBusy ? '作成中...' : `${stBulkSel.length}店舗ぶん まとめて作成`}</button>
+                                                {stBulkMsg && <span className="text-xs font-bold text-slate-600">{stBulkMsg}</span>}
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
 
                                 {/* 追加/更新フォーム */}
@@ -13178,7 +13292,7 @@
                                             </div>
                                         ))}
                                        </div>)}
-                                    <p className="text-[11px] text-slate-400 font-bold mt-3">※ オーナーは <span className="font-black">/owner.html</span> でこのPASSでログイン→自分の管轄店舗の返金明細書を閲覧・PDF保存できます。管理者(root)は <span className="font-black">DASHBOARD_PASSWORD</span> で全店舗にアクセスできます。</p>
+                                    <p className="text-[11px] text-slate-400 font-bold mt-3">※ 各アカウントは<span className="font-black">ダッシュボードのログイン画面</span>でこのID（氏名）＋PASSでログイン→許可店舗のみ閲覧できます。返金明細書は <span className="font-black">/owner.html</span> でも同じPASSでログイン可能。管理者(root)は <span className="font-black">DASHBOARD_PASSWORD</span> で全店舗にアクセスできます。</p>
                                 </div>
                             </div>
                         </div>
@@ -16251,20 +16365,20 @@
             );
         };
 
-        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef }) => {
+        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authOwner = '' }) => {
             const menuItems = [
                 { id: 'salonone', label: 'SalonOne売上', icon: <Calendar size={20} />, mobileIcon: <Calendar size={18} /> },
                 { id: 'square', label: 'サブスク分析', icon: <CreditCard size={20} />, mobileIcon: <CreditCard size={18} /> },
                 { id: 'settlement', label: '返金明細書', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} /> },
                 { id: 'planning', label: '事業計画', icon: <Target size={20} />, mobileIcon: <Target size={18} /> },
-                { id: 'settings', label: 'オーナー設定', icon: <Users size={20} />, mobileIcon: <Users size={18} /> },
+                { id: 'settings', label: 'オーナー設定', icon: <Users size={20} />, mobileIcon: <Users size={18} />, rootOnly: true },
                 // 一旦非表示（必要時に下記を復帰）。ページ自体は残しているのでidを戻せば復活する
                 // { id: 'dashboard', label: '経営指標', icon: <Home size={20} />, mobileIcon: <Home size={18} /> },
                 // { id: 'charts', label: 'ダッシュボード', icon: <BarChart3 size={20} />, mobileIcon: <BarChart3 size={18} /> },
                 // { id: 'marketing', label: 'マーケティング', icon: <Megaphone size={20} />, mobileIcon: <Megaphone size={18} /> },
                 // { id: 'customers', label: '顧客管理', icon: <Users size={20} />, mobileIcon: <Users size={18} /> },
                 // { id: 'finance', label: '経理・財務', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} /> }
-            ];
+            ].filter(it => authRoot || !it.rootOnly);
 
             const alertCount = cpaAlerts.length;
 
@@ -16351,6 +16465,10 @@
 
                         {/* Footer */}
                         <div className="mt-auto pt-6 border-t border-slate-200 space-y-3">
+                            <div className="px-4 py-2 rounded-xl bg-slate-50 border border-slate-200">
+                                <div className="text-[10px] text-slate-400 font-black uppercase tracking-wider">ログイン中</div>
+                                <div className="text-xs font-black text-slate-700 truncate">{authRoot ? '管理者（全店舗）' : (authOwner || 'アカウント')}</div>
+                            </div>
                             <button onClick={handleLogout}
                                 className="w-full flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold text-slate-500 hover:bg-red-50 hover:text-red-600 transition-colors">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

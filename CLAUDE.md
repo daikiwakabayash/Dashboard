@@ -66,7 +66,12 @@ tests/              # Vitestテスト
 ```
 
 ## セキュリティ
-- **認証**: `DASHBOARD_PASSWORD` 環境変数でパスワード保護。未設定時は認証スキップ（開発用）
+- **認証（アカウント制）**: ダッシュボード本体のログインは **ID（氏名）＋PASS のアカウント制**。ログインは `/api/settlement-auth`（`?fn=auth`）を使い、返金明細書のオーナーアカウント（GAS「オーナー設定」＋`SETTLEMENT_OWNER_*`）と共通。ログイン後は **アカウントに割り当てた店舗のみ表示**（`soShops` を `authState.shops` パターンでフィルタ。root=全店）。root は `DASHBOARD_PASSWORD` でログイン（全店舗・`__root__` トークン）。localStorageに `naoru_auth_token`/`naoru_auth_owner`/`naoru_auth_root`/`naoru_auth_shops` を保存。`DASHBOARD_PASSWORD`・アカウント共に未設定なら認証スキップ（開発用）
+  - アカウント管理は「オーナー設定」タブ（root専用。非rootには非表示）。「店舗一覧からまとめてアカウント作成」で店舗名＝ID・アクセス＝その店舗のアカウントを共通初期PASSで一括発行（`stBulkCreate`）
+  - 認可トークン: 本社操作(hqToken)は `settlement-owners`/`settlement-store` が `settlement-auth` の rootToken も受理（メインダッシュボードのroot統一ログイン）
+  - ⚠️ 店舗絞り込みはUIレベル（SalonOneプロキシ `/api/salonone` 自体は未認証GET）。UIで見える範囲をアカウント毎に制御する用途。厳密なサーバー側データ分離が必要なら別途プロキシ認証が必要
+- **旧認証**: `api/auth.js`（`DASHBOARD_PASSWORD` 単純照合）は現在メインログインでは未使用（後方互換で残置）
+- **秘密情報**: GAS URL等はサーバーサイド(`api/gas-proxy.js`)経由。フロントにハードコードしない
 - **秘密情報**: GAS URL等はサーバーサイド(`api/gas-proxy.js`)経由。フロントにハードコードしない
 - **環境変数**: Vercelの環境変数に以下を設定
   - `DASHBOARD_PASSWORD` — ダッシュボードログインパスワード

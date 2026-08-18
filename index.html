@@ -2915,17 +2915,18 @@
             // ・継続売上: 実績 ＋ Square定期課金(月額MRR)を残り日数で日割りした未請求分（非定期は含めない）
             // ・総売上: 実績総売上 ＋ 未来新規売上 ＋ 未来継続売上
             // ・継続率など率系: 実績値をそのまま
-            const soPlanForecastFor = (m, actualOverride, paceOverride, mrrOverride, futureOverride) => {
+            const soPlanForecastFor = (m, actualOverride, paceOverride, futRecOverride, futureOverride) => {
                 const actual = actualOverride || soPlanActual();
                 const pace = paceOverride || soPlanPace();
                 const ac = actual[m.key] || 0;
                 if (m.rate) return ac;
                 const fut = futureOverride || soFutureNew;
-                // 未来の継続売上 = 継続売上実績の日割りペース（本日までの日次平均 × 残り日数）。
-                // ※SalonOne受付履歴APIは金額を持たず(total_price:0)、日付フィルタも無いため、未来の既存予約売上の実額合算は不可。
-                //   継続（既存客）売上は日次でほぼ一定のため、実績の日割りで残り期間を予測する。
+                // 未来の継続売上 = Squareの「今月の課金予定」（本日以降・未請求のアクティブサブスク合計）。
+                //   選択店舗のSquareが特定できない場合のみ、継続売上実績の日割りペースにフォールバック。
+                const futRec = futRecOverride !== undefined ? futRecOverride : soPlanFutureRecurring();
                 const repRemain = Math.max(0, pace.total - pace.elapsed);
-                const repFuture = pace.elapsed > 0 ? Math.round((actual.repeatSales || 0) * repRemain / pace.elapsed) : 0;
+                const repDayPace = pace.elapsed > 0 ? Math.round((actual.repeatSales || 0) * repRemain / pace.elapsed) : 0;
+                const repFuture = (futRec && typeof futRec.sum === 'number') ? futRec.sum : repDayPace;
                 const newFuture = fut.sales || 0, visitFuture = fut.visits || 0;
                 let fc;
                 if (m.key === 'sales') fc = (actual.sales || 0) + newFuture + repFuture;
@@ -12479,7 +12480,7 @@
                                                     </table>
                                                 </div>
                                                 <p className="text-[10px] text-slate-400 mt-2 font-bold">
-                                                    着地予想＝<b>実績（本日までのSalonOne実績）＋未来分（明日〜{soTo.slice(5).replace('-', '/')}）</b>。着地は実績を絶対に下回りません。 ／ 新規来店＝実績＋残新規（マーケ集計の未来予定＝予約−来店−ｷｬﾝｾﾙ）{soFutureNew.ready ? `＝未来分 +${soFutureNew.visits}人` : ''}、新規売上＝実績＋残新規×新規客単価 ／ <b>継続売上＝総売上−新規売上</b>（スタッフ/店舗タブの既存売上と同一定義）で、未来分は継続売上実績の日割りペース（本日までの日次平均×残り日数）。 ／ <b>総売上＝新規売上＋継続売上</b>（実績・着地とも一致）。入会数＝実績＋未来の新規来店×現在の入会率。継続率は現在値。実績はSalonOne集計（管理画面一致）。
+                                                    着地予想＝<b>実績（本日までのSalonOne実績）＋未来分（明日〜{soTo.slice(5).replace('-', '/')}）</b>。着地は実績を絶対に下回りません。 ／ 新規来店＝実績＋残新規（マーケ集計の未来予定＝予約−来店−ｷｬﾝｾﾙ）{soFutureNew.ready ? `＝未来分 +${soFutureNew.visits}人` : ''}、新規売上＝実績＋残新規×新規客単価 ／ <b>継続売上＝総売上−新規売上</b>（スタッフ/店舗タブの既存売上と同一定義）。<b>継続売上の着地＝実績＋Squareの「今月の課金予定」（本日以降・未請求のアクティブサブスク合計）</b>（Square未特定の店舗のみ日割りペースにフォールバック）。 ／ <b>総売上の着地＝予測新規＋予測継続</b>（実績・着地とも一致）。入会数＝実績＋未来の新規来店×現在の入会率。継続率は現在値。実績はSalonOne集計（管理画面一致）。
                                                 </p>
                                             </div>
 

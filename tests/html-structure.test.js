@@ -84,8 +84,13 @@ describe('index.html - 認証', () => {
   });
 
   it('トークン検証APIを呼び出す', () => {
-    expect(html).toContain('/api/auth');
+    expect(html).toContain('/api/settlement-auth');
     expect(html).toContain("action: 'verify'");
+  });
+  it('アカウント制ログイン（ID＋PASS・店舗アクセス）を持つ', () => {
+    expect(html).toContain("action: 'login'");
+    expect(html).toContain('naoru_auth_shops');
+    expect(html).toContain('naoru_auth_root');
   });
 });
 

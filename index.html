@@ -1349,6 +1349,20 @@
             const [stShopSearch, setStShopSearch] = useState('');
             useEffect(() => { try { localStorage.setItem('settlement_manual_v1', JSON.stringify(stManual)); } catch {} }, [stManual]);
             const stManualDefault = { royaltyRate: 15, taxRate: 10, spotip: 10000, metaAds: [], adjustments: [], therapists: [] };
+            // 広告宣伝費(Meta)は既定で2行。〇月はフィルターで選択中の月を反映（例: 7月の明細なら「7月」）
+            const stMonthNum = (month) => parseInt(String(month).split('-')[1], 10) || '';
+            const stDefaultMetaAds = (month) => {
+                const M = stMonthNum(month);
+                return [
+                    { label: `Meta広告運用代行費（${M}月）`, amount: 0 },
+                    { label: `Meta広告費用立替費（${M}月）`, amount: 0 },
+                ];
+            };
+            // Meta行のラベル内「（N月）」を選択中の月に更新（引き継ぎ時に当月を反映）
+            const stRefreshMetaMonth = (metaAds, month) => {
+                const M = stMonthNum(month);
+                return (metaAds || []).map(a => ({ ...a, label: String(a.label || '').replace(/（\s*\d+\s*月\s*）/g, `（${M}月）`) }));
+            };
             // セラピスト諸経費の自動判定（lib/settlement.js の computeTherapistShokei と同一ロジック）
             // 税込生産性 > 100万 → 住宅2万＋美容1万。子供1人5,000円・誕生日1万・実費(extras)は常時加算。
             const ST_SHOKEI = { threshold: 1000000, housing: 20000, beauty: 10000, childUnit: 5000, birthdayUnit: 10000 };
@@ -1364,8 +1378,8 @@
                 const extrasAmt = extras.reduce((a, x) => a + (Number(x && x.amount) || 0), 0);
                 const total = housing + beauty + childrenAmt + birthdayAmt + extrasAmt;
                 const parts = [];
-                if (housing) parts.push('住宅手当2万');
-                if (beauty) parts.push('美容手当1万');
+                if (housing) parts.push('住宅2万');
+                if (beauty) parts.push('美容1万');
                 if (childrenAmt) parts.push(`子供${childrenCount}名(¥${childrenAmt.toLocaleString()})`);
                 if (birthdayAmt) parts.push('誕生日1万');
                 extras.forEach(x => { const a = Number(x && x.amount) || 0; if (a) parts.push(`${(x && x.label) || '実費'}(¥${a.toLocaleString()})`); });
@@ -1397,14 +1411,23 @@
             // manualObj を引数に取り、setStManual のプレビュー内でも使えるようにする。
             const stCarriedManual = (manualObj, shopId, month) => {
                 const key = `${shopId}_${month}`;
-                if (manualObj[key]) return { ...stManualDefault, ...manualObj[key] };
+                // 既存(当月)。Meta行の月を当月へ更新。Meta行が無ければ既定2行を補完。
+                if (manualObj[key]) {
+                    const cur = manualObj[key];
+                    const meta = (cur.metaAds && cur.metaAds.length) ? stRefreshMetaMonth(cur.metaAds, month) : stDefaultMetaAds(month);
+                    return { ...stManualDefault, ...cur, metaAds: meta };
+                }
                 let [y, mo] = String(month).split('-').map(Number);
                 for (let i = 0; i < 12; i++) {
                     mo--; if (mo < 1) { mo = 12; y--; }
                     const k = `${shopId}_${y}-${String(mo).padStart(2, '0')}`;
-                    if (manualObj[k]) return { ...stManualDefault, ...manualObj[k], _carried: true };
+                    if (manualObj[k]) {
+                        const prev = manualObj[k];
+                        const meta = (prev.metaAds && prev.metaAds.length) ? stRefreshMetaMonth(prev.metaAds, month) : stDefaultMetaAds(month);
+                        return { ...stManualDefault, ...prev, metaAds: meta, _carried: true };
+                    }
                 }
-                return { ...stManualDefault };
+                return { ...stManualDefault, metaAds: stDefaultMetaAds(month) };
             };
             const stManualFor = (shopId, month) => stCarriedManual(stManual, shopId, month);
             // オーナー共有（GAS保存）用の状態
@@ -12914,19 +12937,10 @@
                                                             <span className="ml-auto font-black text-rose-600">諸経費 {yen(-r.total)}</span>
                                                             <button onClick={() => setM({ therapists: (m.therapists || []).filter((_, j) => j !== i) })} className="text-slate-300 hover:text-rose-500"><X size={13} /></button>
                                                         </div>
-                                                        {(t.extras || []).map((ex, k) => (
-                                                            <div key={k} className="flex items-center gap-2 mt-1.5 pl-1 text-xs">
-                                                                <input value={ex.label} onChange={e => setT({ extras: t.extras.map((x, j) => j === k ? { ...x, label: e.target.value } : x) })} placeholder="実費項目（例: 交通費・備品）" className="flex-1 px-1.5 py-1 border border-slate-200 rounded" />
-                                                                <input type="number" value={ex.amount} onChange={e => setT({ extras: t.extras.map((x, j) => j === k ? { ...x, amount: Number(e.target.value) } : x) })} className="w-24 px-1.5 py-1 border border-slate-200 rounded text-right font-bold" />
-                                                                <button onClick={() => setT({ extras: t.extras.filter((_, j) => j !== k) })} className="text-slate-300 hover:text-rose-500"><X size={12} /></button>
-                                                            </div>
-                                                        ))}
-                                                        <button onClick={() => setT({ extras: [...(t.extras || []), { label: '', amount: 0 }] })} className="mt-1.5 ml-1 px-2 py-0.5 bg-white border border-slate-200 text-slate-500 rounded text-[10px] font-black hover:bg-slate-100">＋ 実費（明細提出分）</button>
                                                     </div>
                                                     );
                                                 })}
                                             </div>
-                                            <p className="text-[10px] text-slate-400 font-bold mt-2 leading-relaxed">※ 請求書には偽装業務委託リスク回避のため名目「諸経費（氏名）」で計上し、内訳（住宅/美容/子供/誕生日/実費）は注釈で表示します。生産性は当月のSalonOne個人売上（税込）を自動取得。空欄で自動値、入力で上書き。</p>
                                         </div>
                                     </div>
                                     <p className="text-xs text-slate-500 font-bold border-t border-slate-200 pt-3">備考：スクエア売上 {yen(squareSales)} より請求額 {yen(billTotal)} を差し引いた {yen(refundAmount)} をご返金いたします。</p>

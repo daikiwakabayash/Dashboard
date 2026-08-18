@@ -4727,6 +4727,54 @@
                 return { groups, grandTotal, grandCount };
             }, [sqData, sqStore, sqMonth, sqStoreLocationIds]);
 
+            // ── 計画タブ用: 今月の課金予定（未請求サブスク）を SalonOne店舗選択でフィルタ ──
+            // sqUpcomingCharges と同じロジックだが、店舗は soPlanSquareLocs()（SalonOne店舗→Square店舗）で絞る。
+            // 対象月は計画タブの soFrom の月。「あとどれくらい決済が入るか」を計画の下に表示する用途。
+            const soPlanUpcoming = useMemo(() => {
+                if (!sqData || !Array.isArray(sqData.subscriptions)) return null;
+                const locs = soPlanSquareLocs();      // 'all' | Set | null（未マッチ）
+                if (locs == null) return null;
+                const cust = sqData.customers || {};
+                const plansMap = sqData.plans || {};
+                const stores = Array.isArray(sqData.stores) ? sqData.stores : [];
+                const locToStore = {};
+                stores.forEach(st => (st.locationIds || [st.id]).forEach(l => { locToStore[l] = st.name; }));
+                const today = new Date(); today.setHours(0, 0, 0, 0);
+                const ym = soFrom.slice(0, 7);
+                const toYM = d => { if (!d) return null; const dt = new Date(d); return isNaN(dt) ? null : `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`; };
+                const active = sqData.subscriptions.filter(s => s.status === 'ACTIVE' && (locs === 'all' || locs.has(s.locationId)));
+                const groupMap = {};
+                active.forEach(s => {
+                    if (!s.chargedThroughDate) return;
+                    const ct = new Date(String(s.chargedThroughDate).slice(0, 10) + 'T00:00:00');
+                    if (isNaN(ct)) return;
+                    if (!(toYM(ct) === ym && ct > today)) return;   // 対象月内 かつ 本日より後（未請求の見込み）
+                    const amount = Number(s.monthlyPrice) || 0;
+                    const storeName = locToStore[s.locationId] || '不明店舗';
+                    const name = (cust[s.customerId] && cust[s.customerId].name) || s.customerId || '不明';
+                    const plan = (plansMap[s.planVariationId] && plansMap[s.planVariationId].name) || '(プラン不明)';
+                    const dateStr = String(s.chargedThroughDate).slice(0, 10);
+                    if (!groupMap[storeName]) groupMap[storeName] = {};
+                    const g = groupMap[storeName];
+                    const key = s.customerId || s.id;
+                    if (g[key]) {
+                        const row = g[key];
+                        row.amount += amount;
+                        if (plan && !row.plan.includes(plan)) row.plan += ' / ' + plan;
+                        if (dateStr < row.date) row.date = dateStr;
+                        row.count += 1;
+                    } else {
+                        g[key] = { name, plan, amount, date: dateStr, count: 1 };
+                    }
+                });
+                const groups = Object.entries(groupMap).map(([storeName, rowsObj]) => {
+                    const rows = Object.values(rowsObj).sort((a, b) => (a.date || '').localeCompare(b.date || '') || b.amount - a.amount);
+                    const subtotal = rows.reduce((s, r) => s + r.amount, 0);
+                    return { storeName, rows, subtotal, count: rows.length };
+                }).sort((a, b) => b.subtotal - a.subtotal);
+                return { groups, grandTotal: groups.reduce((s, g) => s + g.subtotal, 0), grandCount: groups.reduce((s, g) => s + g.count, 0) };
+            }, [sqData, soShopSel.join(','), soFrom, soShops.length]);
+
             const sqHandleSort = (key) => {
                 setSqSort(prev => ({ key, dir: prev.key === key ? (prev.dir === 'asc' ? 'desc' : 'asc') : 'desc' }));
             };
@@ -12456,6 +12504,62 @@
                                                         <p className="text-[10px] text-slate-400 mt-2 font-bold">※ スタッフタブと同一集計。売上・返金・口コミ＝SalonOne売上、新規売上/新規数＝マーケ、入会数/会員数/退会数/退会率＝継続データ。入会率＝入会数÷新規数。</p>
                                                     </div>
                                                 )}
+                                            </div>
+
+                                            {/* 今月の課金予定（サブスク継続売上・Square）— 選択店舗の未請求分 */}
+                                            <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                                                <div className="flex items-center gap-2 px-4 md:px-6 pt-4 pb-1">
+                                                    <CreditCard size={16} className="text-blue-600" />
+                                                    <h3 className="text-sm md:text-base font-black text-slate-800">今月の課金予定（サブスク継続売上）</h3>
+                                                    <span className="text-[11px] font-bold text-slate-400 ml-auto">{soFrom.slice(0, 7)}・本日以降・{soShopLabel()}</span>
+                                                </div>
+                                                <p className="text-[11px] text-slate-400 px-4 md:px-6 pb-2 font-bold">Squareのアクティブ会員のうち、選択店舗で本日以降に決済予定の分。あとどれだけ継続売上が入るかの見込み。</p>
+                                                {!soPlanUpcoming ? (
+                                                    <div className="px-4 md:px-6 py-6 text-center text-sm text-slate-400 font-bold">
+                                                        {sqData ? 'この店舗に対応するSquare店舗が見つかりませんでした' : 'Squareデータ未取得（サブスク分析タブでSYNCすると表示されます）'}
+                                                    </div>
+                                                ) : (<>
+                                                    <div className="flex flex-wrap items-center gap-x-6 gap-y-1 px-4 md:px-6 py-3 bg-blue-50/60 border-y border-blue-100">
+                                                        <div className="text-sm font-black text-slate-700">対象 <span className="text-blue-600">{soPlanUpcoming.grandCount}名</span></div>
+                                                        <div className="text-sm font-black text-slate-700">課金予定額 合計 <span className="text-blue-600">¥{soPlanUpcoming.grandTotal.toLocaleString()}</span></div>
+                                                    </div>
+                                                    {soPlanUpcoming.groups.length === 0 ? (
+                                                        <div className="px-4 md:px-6 py-6 text-center text-sm text-slate-400 font-bold">本日以降、{soFrom.slice(0, 7)}内に課金予定のアクティブサブスクはありません</div>
+                                                    ) : (
+                                                        <div className="divide-y divide-slate-100">
+                                                            {soPlanUpcoming.groups.map((g, gi) => (
+                                                                <div key={gi}>
+                                                                    {soPlanUpcoming.groups.length > 1 && (
+                                                                        <div className="flex items-center justify-between px-4 md:px-6 py-2 bg-slate-50">
+                                                                            <div className="font-black text-slate-700 text-sm flex items-center gap-2"><MapPin size={13} className="text-slate-400" />{g.storeName}<span className="text-xs font-bold text-slate-400">{g.count}名</span></div>
+                                                                            <div className="font-black text-slate-800 text-sm">¥{g.subtotal.toLocaleString()}</div>
+                                                                        </div>
+                                                                    )}
+                                                                    <div className="overflow-x-auto">
+                                                                        <table className="w-full text-sm">
+                                                                            <thead><tr className="text-left text-[11px] font-black text-slate-400 border-b border-slate-100">
+                                                                                <th className="px-4 md:px-6 py-2">氏名</th>
+                                                                                <th className="px-3 py-2">プラン</th>
+                                                                                <th className="px-3 py-2 text-center whitespace-nowrap">課金予定日</th>
+                                                                                <th className="px-3 py-2 text-right whitespace-nowrap">金額</th>
+                                                                            </tr></thead>
+                                                                            <tbody>
+                                                                                {g.rows.map((r, ri) => (
+                                                                                    <tr key={ri} className="border-b border-slate-50 hover:bg-slate-50">
+                                                                                        <td className="px-4 md:px-6 py-2.5 font-bold text-slate-800 whitespace-nowrap">{r.name}</td>
+                                                                                        <td className="px-3 py-2.5 text-slate-600 text-xs">{r.plan}{r.count > 1 ? ` （${r.count}件）` : ''}</td>
+                                                                                        <td className="px-3 py-2.5 text-center text-slate-500 text-xs whitespace-nowrap">{r.date}</td>
+                                                                                        <td className="px-3 py-2.5 text-right font-black text-slate-800 whitespace-nowrap">¥{r.amount.toLocaleString()}</td>
+                                                                                    </tr>
+                                                                                ))}
+                                                                            </tbody>
+                                                                        </table>
+                                                                    </div>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </>)}
                                             </div>
 
                                             {/* アクション管理 */}

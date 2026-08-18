@@ -1232,6 +1232,7 @@
             const [sqStore, setSqStore] = useState('all');
             const [sqMonth, setSqMonth] = useState('');
             const [sqTab, setSqTab] = useState('active');
+            const [sqUpChgOpen, setSqUpChgOpen] = useState({});   // 課金予定: 店舗別の開閉状態（storeName→bool）
             const [sqSort, setSqSort] = useState({ key: 'paidTotal', dir: 'desc' });
             const [sqStoreSort, setSqStoreSort] = useState({ key: 'totalSales', dir: 'desc' });
             const [sqDrilldown, setSqDrilldown] = useState(null); // { month, type: 'new'|'canceled' }
@@ -11203,15 +11204,20 @@
                                                             <div className="px-5 py-8 text-center text-sm text-slate-400 font-bold">本日以降、{sqMonth}内に課金予定のアクティブサブスクはありません</div>
                                                         ) : (
                                                             <div className="divide-y divide-slate-100">
-                                                                {sqUpcomingCharges.groups.map((g, gi) => (
+                                                                {sqUpcomingCharges.groups.map((g, gi) => {
+                                                                    const isOpen = g.storeName in sqUpChgOpen ? sqUpChgOpen[g.storeName] : (sqUpcomingCharges.groups.length === 1);
+                                                                    return (
                                                                     <div key={gi}>
-                                                                        <div className="flex items-center justify-between px-5 py-2.5 bg-slate-50">
+                                                                        <button type="button" onClick={() => setSqUpChgOpen(o => ({ ...o, [g.storeName]: !isOpen }))}
+                                                                            className="w-full flex items-center justify-between px-5 py-2.5 bg-slate-50 hover:bg-slate-100 transition-colors text-left">
                                                                             <div className="font-black text-slate-700 text-sm flex items-center gap-2">
+                                                                                <ChevronDown size={15} className={`text-slate-400 transition-transform ${isOpen ? '' : '-rotate-90'}`} />
                                                                                 <MapPin size={13} className="text-slate-400" />{g.storeName}
                                                                                 <span className="text-xs font-bold text-slate-400">{g.count}名</span>
                                                                             </div>
                                                                             <div className="font-black text-slate-800 text-sm">¥{g.subtotal.toLocaleString()}</div>
-                                                                        </div>
+                                                                        </button>
+                                                                        {isOpen && (
                                                                         <div className="overflow-x-auto">
                                                                             <table className="w-full text-sm">
                                                                                 <thead><tr className="text-left text-[11px] font-black text-slate-400 border-b border-slate-100">
@@ -11232,8 +11238,10 @@
                                                                                 </tbody>
                                                                             </table>
                                                                         </div>
+                                                                        )}
                                                                     </div>
-                                                                ))}
+                                                                    );
+                                                                })}
                                                             </div>
                                                         )}
                                                     </div>
@@ -12527,14 +12535,19 @@
                                                         <div className="px-4 md:px-6 py-6 text-center text-sm text-slate-400 font-bold">本日以降、{soFrom.slice(0, 7)}内に課金予定のアクティブサブスクはありません</div>
                                                     ) : (
                                                         <div className="divide-y divide-slate-100">
-                                                            {soPlanUpcoming.groups.map((g, gi) => (
+                                                            {soPlanUpcoming.groups.map((g, gi) => {
+                                                                const isOpen = g.storeName in sqUpChgOpen ? sqUpChgOpen[g.storeName] : (soPlanUpcoming.groups.length === 1);
+                                                                return (
                                                                 <div key={gi}>
-                                                                    {soPlanUpcoming.groups.length > 1 && (
-                                                                        <div className="flex items-center justify-between px-4 md:px-6 py-2 bg-slate-50">
-                                                                            <div className="font-black text-slate-700 text-sm flex items-center gap-2"><MapPin size={13} className="text-slate-400" />{g.storeName}<span className="text-xs font-bold text-slate-400">{g.count}名</span></div>
-                                                                            <div className="font-black text-slate-800 text-sm">¥{g.subtotal.toLocaleString()}</div>
+                                                                    <button type="button" onClick={() => setSqUpChgOpen(o => ({ ...o, [g.storeName]: !isOpen }))}
+                                                                        className="w-full flex items-center justify-between px-4 md:px-6 py-2 bg-slate-50 hover:bg-slate-100 transition-colors text-left">
+                                                                        <div className="font-black text-slate-700 text-sm flex items-center gap-2">
+                                                                            <ChevronDown size={15} className={`text-slate-400 transition-transform ${isOpen ? '' : '-rotate-90'}`} />
+                                                                            <MapPin size={13} className="text-slate-400" />{g.storeName}<span className="text-xs font-bold text-slate-400">{g.count}名</span>
                                                                         </div>
-                                                                    )}
+                                                                        <div className="font-black text-slate-800 text-sm">¥{g.subtotal.toLocaleString()}</div>
+                                                                    </button>
+                                                                    {isOpen && (
                                                                     <div className="overflow-x-auto">
                                                                         <table className="w-full text-sm">
                                                                             <thead><tr className="text-left text-[11px] font-black text-slate-400 border-b border-slate-100">
@@ -12555,8 +12568,10 @@
                                                                             </tbody>
                                                                         </table>
                                                                     </div>
+                                                                    )}
                                                                 </div>
-                                                            ))}
+                                                                );
+                                                            })}
                                                         </div>
                                                     )}
                                                 </>)}

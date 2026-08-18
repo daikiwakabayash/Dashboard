@@ -2984,9 +2984,8 @@
                     const results = await Promise.all(urls.map(u => fetch(u).then(r => r.json()).catch(() => ({}))));
                     const chans = normalizeMkChannels({ data: soMergeChannels(results.filter(r => r && r.data).map(r => r.data)) });
                     const remaining = chans.reduce((a, c) => a + (Number(c.remaining) || 0), 0); // 残新規（未来の新規来店予定）
-                    const act = soPlanActual();
-                    const avgTicket = act.newVisits > 0 ? (act.newSales || 0) / act.newVisits : 0; // 現在の新規客単価
-                    setSoFutureNew({ visits: remaining, sales: Math.round(remaining * avgTicket), ready: true, loading: false });
+                    const NEW_TICKET = 2000; // 残新規の想定単価（1人あたり固定 ¥2,000）
+                    setSoFutureNew({ visits: remaining, sales: Math.round(remaining * NEW_TICKET), ready: true, loading: false });
                 } catch (e) { setSoFutureNew({ sales: 0, visits: 0, ready: true, loading: false }); }
             };
             // 未来の継続売上 = 受付履歴(appointments)の「既存」予約（明日〜期間末・非キャンセル）の売上合計。
@@ -12480,7 +12479,7 @@
                                                     </table>
                                                 </div>
                                                 <p className="text-[10px] text-slate-400 mt-2 font-bold">
-                                                    着地予想＝<b>実績（本日までのSalonOne実績）＋未来分（明日〜{soTo.slice(5).replace('-', '/')}）</b>。着地は実績を絶対に下回りません。 ／ 新規来店＝実績＋残新規（マーケ集計の未来予定＝予約−来店−ｷｬﾝｾﾙ）{soFutureNew.ready ? `＝未来分 +${soFutureNew.visits}人` : ''}、新規売上＝実績＋残新規×新規客単価 ／ <b>継続売上＝総売上−新規売上</b>（スタッフ/店舗タブの既存売上と同一定義）。<b>継続売上の着地＝実績＋Squareの「今月の課金予定」（本日以降・未請求のアクティブサブスク合計）</b>（Square未特定の店舗のみ日割りペースにフォールバック）。 ／ <b>総売上の着地＝予測新規＋予測継続</b>（実績・着地とも一致）。入会数＝実績＋未来の新規来店×現在の入会率。継続率は現在値。実績はSalonOne集計（管理画面一致）。
+                                                    着地予想＝<b>実績（本日までのSalonOne実績）＋未来分（明日〜{soTo.slice(5).replace('-', '/')}）</b>。着地は実績を絶対に下回りません。 ／ 新規来店＝実績＋残新規（マーケ集計の未来予定＝予約−来店−ｷｬﾝｾﾙ）{soFutureNew.ready ? `＝未来分 +${soFutureNew.visits}人` : ''}、新規売上＝実績＋残新規×¥2,000（1人あたり想定単価） ／ <b>継続売上＝総売上−新規売上</b>（スタッフ/店舗タブの既存売上と同一定義）。<b>継続売上の着地＝実績＋Squareの「今月の課金予定」（本日以降・未請求のアクティブサブスク合計）</b>（Square未特定の店舗のみ日割りペースにフォールバック）。 ／ <b>総売上の着地＝予測新規＋予測継続</b>（実績・着地とも一致）。入会数＝実績＋未来の新規来店×現在の入会率。継続率は現在値。実績はSalonOne集計（管理画面一致）。
                                                 </p>
                                             </div>
 

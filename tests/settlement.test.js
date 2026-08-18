@@ -3,6 +3,7 @@ import {
   parseOwnerPasswords, hashOwnerToken, verifyOwnerLogin, verifyOwnerToken,
   normalizeRecord, computeSettlement, SETTLEMENT_STATUS, SETTLEMENT_SCHEDULE, SETTLEMENT_NOTES,
   parseOwnerShops, allowedShopsFor, ownerCanAccessShop,
+  computeTherapistShokei, SHOKEI_RULES,
 } from '../lib/settlement.js';
 
 const SALT = 'test-salt';
@@ -84,6 +85,52 @@ describe('computeSettlement', () => {
     const r = computeSettlement({ cash: 'x', squareSales: undefined, hpb: null });
     expect(r.royaltyBase).toBe(0);
     expect(r.billTotal).toBe(0);
+  });
+  it('subtracts shokeiTotal (therapist 諸経費) from billTotal', () => {
+    const base = computeSettlement({ squareSales: 1000000, royaltyRate: 15, squareFees: 20000 });
+    const withShokei = computeSettlement({ squareSales: 1000000, royaltyRate: 15, squareFees: 20000, shokeiTotal: 30000 });
+    expect(withShokei.billTotal).toBe(base.billTotal - 30000);
+    expect(withShokei.refundAmount).toBe(base.refundAmount + 30000);
+  });
+});
+
+describe('computeTherapistShokei', () => {
+  it('生産性 > 100万 → 住宅2万 + 美容1万 = 3万', () => {
+    const r = computeTherapistShokei({}, 1200000);
+    expect(r.over).toBe(true);
+    expect(r.housing).toBe(20000);
+    expect(r.beauty).toBe(10000);
+    expect(r.total).toBe(30000);
+    expect(r.note).toContain('住宅手当2万');
+    expect(r.note).toContain('美容手当1万');
+  });
+  it('生産性 = ちょうど100万 → 自動計上なし（超のみ対象）', () => {
+    const r = computeTherapistShokei({}, SHOKEI_RULES.threshold);
+    expect(r.over).toBe(false);
+    expect(r.housing).toBe(0);
+    expect(r.beauty).toBe(0);
+    expect(r.total).toBe(0);
+  });
+  it('生産性 ≤ 100万 → 住宅/美容は0、子供・誕生日・実費のみ加算', () => {
+    const r = computeTherapistShokei({ children: 2, birthday: true, extras: [{ label: '交通費', amount: 3000 }] }, 800000);
+    expect(r.housing).toBe(0);
+    expect(r.beauty).toBe(0);
+    expect(r.childrenAmt).toBe(10000); // 2名 × 5,000
+    expect(r.birthdayAmt).toBe(10000);
+    expect(r.extrasAmt).toBe(3000);
+    expect(r.total).toBe(23000);
+    expect(r.note).toContain('子供2名');
+    expect(r.note).toContain('誕生日1万');
+    expect(r.note).toContain('交通費');
+  });
+  it('全部入り（生産性超 + 子供 + 誕生日 + 実費）', () => {
+    const r = computeTherapistShokei({ children: 1, birthday: true, extras: [{ label: '備品', amount: 2000 }] }, 1500000);
+    expect(r.total).toBe(20000 + 10000 + 5000 + 10000 + 2000); // 47,000
+  });
+  it('不正入力は0扱い', () => {
+    const r = computeTherapistShokei({ children: 'x', extras: 'nope' }, 'y');
+    expect(r.total).toBe(0);
+    expect(r.note).toBe('');
   });
 });
 

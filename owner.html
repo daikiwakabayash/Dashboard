@@ -62,6 +62,7 @@ function statementHTML(rec, month) {
     `<tr><td class="l">${esc(label)}${note ? ` <span class="n">${esc(note)}</span>` : ''}</td><td class="r${strong ? ' b' : ''}">${yen(value)}</td></tr>`;
   const meta = (s.metaAds || []).map(m => row(m.label || 'メタ広告', '', m.amount)).join('');
   const adj = (s.adjustments || []).map(a => row(a.label || '調整', '', a.amount)).join('');
+  const shk = (s.shokei || []).map(it => row(it.label || '諸経費', it.note ? `内訳: ${it.note}` : '', it.amount)).join('');
   return `
   <div class="doc">
     <div class="head">
@@ -74,7 +75,7 @@ function statementHTML(rec, month) {
     <div class="sec">売上（ロイヤリティ対象）</div>
     <table>${row('現金売上', 'SalonOne', s.cash)}${row('スクエア売上', s.mismatch ? '⚠Square不一致' : 'Square', s.squareSales)}${row('ホットペッパーポイント', 'SalonOne', s.hpb)}${row('ロイヤリティー対象額合計（税込）', '', s.royaltyBase, true)}</table>
     <div class="sec">請求内容</div>
-    <table>${row('FCロイヤリティ', `対象額の${s.royaltyRate}%`, s.royalty)}${row('スクエア手数料', s.feeRate != null ? `売上比 ${s.feeRate}%` : '', s.sqFees)}${s.spotip ? row('Spotip利用料', 'AI姿勢分析', s.spotip) : ''}${meta}${adj}${row('税込請求合計', `内税 ${yen(s.tax)}`, s.billTotal, true)}</table>
+    <table>${row('FCロイヤリティ', `対象額の${s.royaltyRate}%`, s.royalty)}${row('スクエア手数料', s.feeRate != null ? `売上比 ${s.feeRate}%` : '', s.sqFees)}${s.spotip ? row('Spotip利用料', 'AI姿勢分析', s.spotip) : ''}${meta}${adj}${shk}${row('税込請求合計', `内税 ${yen(s.tax)}`, s.billTotal, true)}</table>
     <div class="note">備考：スクエア売上 ${yen(s.squareSales)} より請求額 ${yen(s.billTotal)} を差し引いた ${yen(s.refundAmount)} をご返金いたします。</div>
   </div>`;
 }
@@ -246,6 +247,7 @@ function Statement({ rec, owner, token, month, onUpdated }) {
             {s.spotip ? <Row label="Spotip" value={s.spotip} /> : null}
             {(s.metaAds || []).map((m, i) => <Row key={'m'+i} label={m.label || 'メタ広告'} value={m.amount} />)}
             {(s.adjustments || []).map((a, i) => <Row key={'a'+i} label={a.label || '調整'} value={a.amount} />)}
+            {(s.shokei || []).map((it, i) => <Row key={'shk'+i} label={it.label || '諸経費'} note={it.note ? `内訳: ${it.note}` : ''} value={it.amount} />)}
             <Row label="請求合計" note={`内税 ${yen(s.tax)}`} value={s.billTotal} strong />
           </tbody>
         </table>

@@ -1348,7 +1348,51 @@
             const [stShopMenuOpen, setStShopMenuOpen] = useState(false);
             const [stShopSearch, setStShopSearch] = useState('');
             useEffect(() => { try { localStorage.setItem('settlement_manual_v1', JSON.stringify(stManual)); } catch {} }, [stManual]);
-            const stManualDefault = { royaltyRate: 15, taxRate: 10, spotip: 10000, metaAds: [], adjustments: [] };
+            const stManualDefault = { royaltyRate: 15, taxRate: 10, spotip: 10000, metaAds: [], adjustments: [], therapists: [] };
+            // セラピスト諸経費の自動判定（lib/settlement.js の computeTherapistShokei と同一ロジック）
+            // 税込生産性 > 100万 → 住宅2万＋美容1万。子供1人5,000円・誕生日1万・実費(extras)は常時加算。
+            const ST_SHOKEI = { threshold: 1000000, housing: 20000, beauty: 10000, childUnit: 5000, birthdayUnit: 10000 };
+            const stTherapistShokei = (t, productivity) => {
+                t = t || {};
+                const over = (Number(productivity) || 0) > ST_SHOKEI.threshold;
+                const housing = over ? ST_SHOKEI.housing : 0;
+                const beauty = over ? ST_SHOKEI.beauty : 0;
+                const childrenCount = Math.max(0, Math.floor(Number(t.children) || 0));
+                const childrenAmt = childrenCount * ST_SHOKEI.childUnit;
+                const birthdayAmt = t.birthday ? ST_SHOKEI.birthdayUnit : 0;
+                const extras = Array.isArray(t.extras) ? t.extras : [];
+                const extrasAmt = extras.reduce((a, x) => a + (Number(x && x.amount) || 0), 0);
+                const total = housing + beauty + childrenAmt + birthdayAmt + extrasAmt;
+                const parts = [];
+                if (housing) parts.push('住宅手当2万');
+                if (beauty) parts.push('美容手当1万');
+                if (childrenAmt) parts.push(`子供${childrenCount}名(¥${childrenAmt.toLocaleString()})`);
+                if (birthdayAmt) parts.push('誕生日1万');
+                extras.forEach(x => { const a = Number(x && x.amount) || 0; if (a) parts.push(`${(x && x.label) || '実費'}(¥${a.toLocaleString()})`); });
+                return { over, housing, beauty, childrenCount, childrenAmt, birthdayAmt, extrasAmt, total, note: parts.join('・') };
+            };
+            // 店舗の在籍セラピスト（soStaffs を shop_id で絞り、削除済み・非セラピストを除外）
+            const ST_NON_THERAPIST = new Set(['ヘルプ', '楽トレ', '未割当', '(不明)', '不明', '受付']);
+            const stTherapistRoster = (shopId) => (soStaffs || [])
+                .filter(st => String(st.shop_id || '') === String(shopId) && !st.deleted && !ST_NON_THERAPIST.has(String(st.name || '').trim()))
+                .map(st => ({ id: String(st.id), name: st.name }));
+            // salon.byStaff（当月の個人別 gross）から生産性を引く
+            const stProductivityOf = (salon, staffId, staffName) => {
+                const list = (salon && !salon.error && Array.isArray(salon.byStaff)) ? salon.byStaff : [];
+                const hit = list.find(x => String(x.id) === String(staffId)) || list.find(x => String(x.name || '').trim() === String(staffName || '').trim());
+                return hit ? (Number(hit.gross) || 0) : 0;
+            };
+            // 明細1件分の諸経費リストを構築。items=[{label,note,amount(負)}], total=正の合計
+            const stBuildShokei = (manual, salon) => {
+                const ths = (manual && Array.isArray(manual.therapists)) ? manual.therapists : [];
+                const items = []; let total = 0;
+                ths.forEach(t => {
+                    const prod = (t.productivity != null && t.productivity !== '') ? (Number(t.productivity) || 0) : stProductivityOf(salon, t.id, t.name);
+                    const r = stTherapistShokei(t, prod);
+                    if (r.total > 0) { items.push({ label: `諸経費（${t.name}）`, note: r.note, amount: -r.total }); total += r.total; }
+                });
+                return { items, total };
+            };
             // 当月の手動項目を返す。未入力なら直近の過去月（最大12ヶ月遡る）を引き継ぐ。
             // manualObj を引数に取り、setStManual のプレビュー内でも使えるようにする。
             const stCarriedManual = (manualObj, shopId, month) => {
@@ -1397,6 +1441,7 @@
                             square: Object.entries(pay).filter(([n]) => n.includes('スクエア')).reduce((a, [, v]) => a + v, 0),
                             hpb: pick('HPBポイント', 'ホットペッパー'),
                             payments: Object.entries(pay).map(([name, amount]) => ({ name, amount })).sort((a, b) => b.amount - a.amount),
+                            byStaff: (s.by_staff || []).map(st => ({ id: String(st.staff_id ?? st.id ?? ''), name: st.staff_name || st.name || '', gross: soNum(st, 'gross_sales', 'grossSales', 'gross') })),
                         };
                     } else { salon = { error: soJson?.error?.code || `HTTP ${soRes.status}` }; }
                 } catch (e) { salon = { error: e.message }; }
@@ -1435,7 +1480,8 @@
                 const royalty = Math.round(royaltyBase * (Number(m.royaltyRate) || 0) / 100);
                 const metaTotal = (m.metaAds || []).reduce((a, x) => a + (Number(x.amount) || 0), 0);
                 const adjTotal = (m.adjustments || []).reduce((a, x) => a + (Number(x.amount) || 0), 0);
-                const billTotal = royalty + sqFees + (Number(m.spotip) || 0) + metaTotal + adjTotal;
+                const shokei = stBuildShokei(m, salon);
+                const billTotal = royalty + sqFees + (Number(m.spotip) || 0) + metaTotal + adjTotal - shokei.total;
                 const taxRateN = Number(m.taxRate) || 0;
                 const tax = Math.round(billTotal * taxRateN / (100 + taxRateN));
                 const refundAmount = squareSales - billTotal;
@@ -1443,6 +1489,7 @@
                     shopName: shop.name, owner: stOwnerFor(shop.name),
                     cash, hpb, soSquare, squareSales, sqGross, sqFees, sqRefunds, sqNet, mismatch, feeRate,
                     royaltyRate: m.royaltyRate, taxRate: m.taxRate, spotip: m.spotip, metaAds: m.metaAds || [], adjustments: m.adjustments || [],
+                    shokei: shokei.items, shokeiTotal: shokei.total,
                     royaltyBase, royalty, billTotal, tax, refundAmount, generatedAt: new Date().toISOString(),
                 };
             };
@@ -1495,6 +1542,34 @@
             useEffect(() => {
                 if (currentPage === 'settlement') stLoadStatus();
             }, [currentPage, stMonth]);
+            // 返金明細書タブでは在籍スタッフ一覧（諸経費のセラピスト自動表示用）を取得
+            useEffect(() => {
+                if (currentPage !== 'settlement' || soStaffs.length > 0) return;
+                (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at })); if (arr.length) setSoStaffs(arr); } catch {} })();
+            }, [currentPage]);
+            // 選択店舗の在籍セラピストを m.therapists に反映（新規在籍を追加・氏名同期。手動入力値は保持）。
+            // 前月から引き継いだ入力（子供/誕生日/実費）は staff id で維持され、在籍者のみ表示される。
+            useEffect(() => {
+                if (currentPage !== 'settlement' || !soStaffs.length || !stSel.length) return;
+                setStManual(prev => {
+                    let changed = false; const next = { ...prev };
+                    stSel.forEach(id => {
+                        const roster = stTherapistRoster(id);
+                        if (!roster.length) return;
+                        const key = `${id}_${stMonth}`;
+                        const base = prev[key] ? prev[key] : stCarriedManual(prev, id, stMonth);
+                        const cur = Array.isArray(base.therapists) ? base.therapists : [];
+                        const byId = {}; cur.forEach(t => { byId[String(t.id)] = t; });
+                        const merged = roster.map(r => { const e = byId[String(r.id)]; return e ? { ...e, name: r.name } : { id: r.id, name: r.name, productivity: '', children: 0, birthday: false, extras: [] }; });
+                        const differs = JSON.stringify(merged) !== JSON.stringify(cur);
+                        if (differs || !prev[key]) {
+                            const { _carried, ...clean } = { ...stManualDefault, ...base, therapists: merged };
+                            next[key] = clean; changed = true;
+                        }
+                    });
+                    return changed ? next : prev;
+                });
+            }, [currentPage, stMonth, soStaffs, JSON.stringify(stSel)]);
             // 手動項目（Spotip・広告費・料率等）を編集したら、少し待って自動で再共有
             useEffect(() => {
                 if (currentPage !== 'settlement') return;
@@ -1534,10 +1609,11 @@
                 const row = (label, note, value, strong) => `<tr><td class="l">${stEsc(label)}${note ? ` <span class="n">${stEsc(note)}</span>` : ''}</td><td class="r${strong ? ' b' : ''}">${y(value)}</td></tr>`;
                 const meta = (s.metaAds || []).map(mx => row(mx.label || 'メタ広告', '', mx.amount)).join('');
                 const adj = (s.adjustments || []).map(a => row(a.label || '調整', '', a.amount)).join('');
+                const shk = (s.shokei || []).map(it => row(it.label || '諸経費', it.note ? `内訳: ${it.note}` : '', it.amount)).join('');
                 return `<div class="doc"><div class="head"><div><div class="ttl">請求書 兼 支払明細書</div><div class="sub">${stEsc(s.owner)} 様</div><div class="sub2">（${stEsc(s.shopName || '')}）</div><div class="mon">${ml}分</div></div><div class="co"><div class="b">株式会社NAORUテクノロジー</div><div>NAORU FC本部</div><div>登録番号：T9010701040194</div><div>〒140-0014 東京都品川区大井6-4-4</div><div>電話：03-6822-8474</div></div></div>`
                     + `<div class="refund"><span>ご返金金額</span><span class="amt">${y(s.refundAmount)}</span></div>`
                     + `<div class="sec">売上（ロイヤリティ対象）</div><table>${row('現金売上', 'SalonOne', s.cash)}${row('スクエア売上', s.mismatch ? '⚠Square不一致' : 'Square', s.squareSales)}${row('ホットペッパーポイント', 'SalonOne', s.hpb)}${row('ロイヤリティー対象額合計（税込）', '', s.royaltyBase, true)}</table>`
-                    + `<div class="sec">請求内容</div><table>${row('FCロイヤリティ', `対象額の${s.royaltyRate}%`, s.royalty)}${row('スクエア手数料', s.feeRate != null ? `売上比 ${s.feeRate}%` : '', s.sqFees)}${s.spotip ? row('Spotip利用料', 'AI姿勢分析', s.spotip) : ''}${meta}${adj}${row('税込請求合計', `内税 ${y(s.tax)}`, s.billTotal, true)}</table>`
+                    + `<div class="sec">請求内容</div><table>${row('FCロイヤリティ', `対象額の${s.royaltyRate}%`, s.royalty)}${row('スクエア手数料', s.feeRate != null ? `売上比 ${s.feeRate}%` : '', s.sqFees)}${s.spotip ? row('Spotip利用料', 'AI姿勢分析', s.spotip) : ''}${meta}${adj}${shk}${row('税込請求合計', `内税 ${y(s.tax)}`, s.billTotal, true)}</table>`
                     + `<div class="note">備考：スクエア売上 ${y(s.squareSales)} より請求額 ${y(s.billTotal)} を差し引いた ${y(s.refundAmount)} をご返金いたします。</div></div>`;
             };
             const stPrintSnapshots = (list, month) => {
@@ -12726,7 +12802,8 @@
                             const royalty = Math.round(royaltyBase * (Number(m.royaltyRate) || 0) / 100);
                             const metaTotal = (m.metaAds || []).reduce((a, x) => a + (Number(x.amount) || 0), 0);
                             const adjTotal = (m.adjustments || []).reduce((a, x) => a + (Number(x.amount) || 0), 0);
-                            const billTotal = royalty + sqFees + (Number(m.spotip) || 0) + metaTotal + adjTotal;
+                            const shokei = stBuildShokei(m, salon);
+                            const billTotal = royalty + sqFees + (Number(m.spotip) || 0) + metaTotal + adjTotal - shokei.total;
                             const taxRate = Number(m.taxRate) || 0;
                             const tax = Math.round(billTotal * taxRate / (100 + taxRate));
                             const refundAmount = squareSales - billTotal;
@@ -12795,12 +12872,61 @@
                                                     <td className="py-2 pr-3 text-right flex items-center justify-end gap-1"><input type="number" value={a.amount} onChange={e => setM({ adjustments: m.adjustments.map((x, j) => j === i ? { ...x, amount: Number(e.target.value) } : x) })} className="w-24 px-1 py-0.5 border border-slate-200 rounded text-right font-bold text-rose-600" /><button onClick={() => setM({ adjustments: m.adjustments.filter((_, j) => j !== i) })} className="text-slate-300 hover:text-rose-500"><X size={13} /></button></td>
                                                 </tr>
                                             ))}
+                                            {shokei.items.map((it, i) => (
+                                                <tr key={'shk' + i} className="border-b border-slate-100">
+                                                    <td className="py-2 pl-3">{it.label} {it.note && <span className="text-[10px] text-slate-400">（内訳: {it.note}）</span>}</td>
+                                                    <td className="py-2 pr-3 text-right font-bold text-rose-600">{yen(it.amount)}</td>
+                                                </tr>
+                                            ))}
                                             <tr className="bg-slate-50 font-black"><td className="py-2 pl-3">{taxRate}%税込請求合計</td><td className="py-2 pr-3 text-right">{yen(billTotal)}</td></tr>
                                             <tr className="text-slate-500"><td className="py-1 pl-3 text-xs">うち消費税額{taxRate}%</td><td className="py-1 pr-3 text-right text-xs">{yen(tax)}</td></tr>
                                         </tbody></table>
                                         <div className="flex gap-2 mt-2">
                                             <button onClick={() => setM({ metaAds: [...(m.metaAds || []), { label: '', amount: 0 }] })} className="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-xs font-black hover:bg-slate-200">＋ 広告宣伝費</button>
                                             <button onClick={() => setM({ adjustments: [...(m.adjustments || []), { label: '', amount: 0 }] })} className="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-xs font-black hover:bg-slate-200">＋ 調整値引き</button>
+                                        </div>
+                                        {/* ── セラピスト諸経費（住宅/美容手当を生産性で自動判定・請求から値引き） ── */}
+                                        <div className="mt-4 border-t border-slate-200 pt-3">
+                                            <div className="flex items-center justify-between mb-2">
+                                                <span className="font-black text-sm text-slate-700">セラピスト諸経費 <span className="text-[10px] text-slate-400 font-bold">（在籍セラピストを自動表示・請求から値引き）</span></span>
+                                                <button onClick={() => setM({ therapists: [...(m.therapists || []), { id: 'manual-' + Date.now(), name: '', productivity: '', children: 0, birthday: false, extras: [] }] })} className="px-2 py-1 bg-slate-100 text-slate-600 rounded-lg text-[11px] font-black hover:bg-slate-200">＋ セラピスト追加</button>
+                                            </div>
+                                            {(!m.therapists || !m.therapists.length) && <p className="text-[11px] text-slate-400 font-bold px-1">在籍セラピストを取得中…（店舗選択後に自動表示されます）</p>}
+                                            <div className="space-y-2">
+                                                {(m.therapists || []).map((t, i) => {
+                                                    const setT = (patch) => setM({ therapists: (m.therapists || []).map((x, j) => j === i ? { ...x, ...patch } : x) });
+                                                    const autoProd = stProductivityOf(salon, t.id, t.name);
+                                                    const prodOverridden = t.productivity != null && t.productivity !== '';
+                                                    const prod = prodOverridden ? (Number(t.productivity) || 0) : autoProd;
+                                                    const r = stTherapistShokei(t, prod);
+                                                    return (
+                                                    <div key={t.id || i} className="rounded-xl border border-slate-200 bg-slate-50/50 p-2.5">
+                                                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs">
+                                                            <input value={t.name} onChange={e => setT({ name: e.target.value })} placeholder="氏名" className="w-28 px-1.5 py-1 border border-slate-200 rounded font-bold" />
+                                                            <label className="flex items-center gap-1 text-slate-500 font-bold">生産性(税込)
+                                                                <input type="number" value={prodOverridden ? t.productivity : ''} onChange={e => setT({ productivity: e.target.value })} placeholder={String(Math.round(autoProd))} className="w-24 px-1.5 py-1 border border-slate-200 rounded text-right" />
+                                                            </label>
+                                                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-black ${r.over ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-500'}`}>{r.over ? '100万超 → 住宅2万+美容1万' : '100万以下 → 手当なし'}</span>
+                                                            <label className="flex items-center gap-1 text-slate-500 font-bold">子供
+                                                                <input type="number" min="0" value={t.children || 0} onChange={e => setT({ children: Math.max(0, Math.floor(Number(e.target.value) || 0)) })} className="w-12 px-1.5 py-1 border border-slate-200 rounded text-right" />名
+                                                            </label>
+                                                            <label className="flex items-center gap-1 text-slate-500 font-bold cursor-pointer"><input type="checkbox" checked={!!t.birthday} onChange={e => setT({ birthday: e.target.checked })} />誕生日月(1万)</label>
+                                                            <span className="ml-auto font-black text-rose-600">諸経費 {yen(-r.total)}</span>
+                                                            <button onClick={() => setM({ therapists: (m.therapists || []).filter((_, j) => j !== i) })} className="text-slate-300 hover:text-rose-500"><X size={13} /></button>
+                                                        </div>
+                                                        {(t.extras || []).map((ex, k) => (
+                                                            <div key={k} className="flex items-center gap-2 mt-1.5 pl-1 text-xs">
+                                                                <input value={ex.label} onChange={e => setT({ extras: t.extras.map((x, j) => j === k ? { ...x, label: e.target.value } : x) })} placeholder="実費項目（例: 交通費・備品）" className="flex-1 px-1.5 py-1 border border-slate-200 rounded" />
+                                                                <input type="number" value={ex.amount} onChange={e => setT({ extras: t.extras.map((x, j) => j === k ? { ...x, amount: Number(e.target.value) } : x) })} className="w-24 px-1.5 py-1 border border-slate-200 rounded text-right font-bold" />
+                                                                <button onClick={() => setT({ extras: t.extras.filter((_, j) => j !== k) })} className="text-slate-300 hover:text-rose-500"><X size={12} /></button>
+                                                            </div>
+                                                        ))}
+                                                        <button onClick={() => setT({ extras: [...(t.extras || []), { label: '', amount: 0 }] })} className="mt-1.5 ml-1 px-2 py-0.5 bg-white border border-slate-200 text-slate-500 rounded text-[10px] font-black hover:bg-slate-100">＋ 実費（明細提出分）</button>
+                                                    </div>
+                                                    );
+                                                })}
+                                            </div>
+                                            <p className="text-[10px] text-slate-400 font-bold mt-2 leading-relaxed">※ 請求書には偽装業務委託リスク回避のため名目「諸経費（氏名）」で計上し、内訳（住宅/美容/子供/誕生日/実費）は注釈で表示します。生産性は当月のSalonOne個人売上（税込）を自動取得。空欄で自動値、入力で上書き。</p>
                                         </div>
                                     </div>
                                     <p className="text-xs text-slate-500 font-bold border-t border-slate-200 pt-3">備考：スクエア売上 {yen(squareSales)} より請求額 {yen(billTotal)} を差し引いた {yen(refundAmount)} をご返金いたします。</p>

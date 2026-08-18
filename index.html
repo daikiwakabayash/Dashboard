@@ -760,7 +760,7 @@
         const UI_STATE_KEY = 'dashboard_ui_state';
         const CACHE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7日間（リロードで最新データ取得可能）
         const BATCH_SIZE = 5; // バッチあたりのアカウント数（5アカウント×5並列で75店舗を3ラウンドで完走）
-        const MAX_CONCURRENT_BATCHES = 5; // 同時バッチリクエスト数
+        const MAX_CONCURRENT_BATCHES = 8; // 同時バッチリクエスト数（多店舗の初回取得を高速化。各バッチは別Vercel関数・別Squareトークンなので競合しない）
 
         // リトライ付きfetch（タイムアウト + エクスポネンシャルバックオフ）
         const fetchWithRetry = async (url, options = {}) => {
@@ -1158,7 +1158,11 @@
             // 保存されたUI状態を取得
             const savedUIState = isAuthenticated ? getUIState() : null;
 
-            const [currentPage, setCurrentPage] = useState(savedUIState?.currentPage || 'dashboard');
+            const [currentPage, setCurrentPage] = useState(() => {
+                const p = savedUIState?.currentPage;
+                // 非表示中のページ(経営指標/ダッシュボード/マーケティング)はSalonOne売上に寄せる
+                return (p && !['dashboard', 'charts', 'marketing'].includes(p)) ? p : 'salonone';
+            });
             const [rawData, setRawData] = useState(() => {
                 try {
                     const cached = localStorage.getItem(CACHE_KEY);
@@ -16085,15 +16089,15 @@
 
         const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef }) => {
             const menuItems = [
-                { id: 'dashboard', label: '経営指標', icon: <Home size={20} />, mobileIcon: <Home size={18} /> },
-                { id: 'charts', label: 'ダッシュボード', icon: <BarChart3 size={20} />, mobileIcon: <BarChart3 size={18} /> },
-                { id: 'marketing', label: 'マーケティング', icon: <Megaphone size={20} />, mobileIcon: <Megaphone size={18} /> },
-                { id: 'square', label: 'サブスク分析', icon: <CreditCard size={20} />, mobileIcon: <CreditCard size={18} /> },
                 { id: 'salonone', label: 'SalonOne売上', icon: <Calendar size={20} />, mobileIcon: <Calendar size={18} /> },
+                { id: 'square', label: 'サブスク分析', icon: <CreditCard size={20} />, mobileIcon: <CreditCard size={18} /> },
                 { id: 'settlement', label: '返金明細書', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} /> },
                 { id: 'planning', label: '事業計画', icon: <Target size={20} />, mobileIcon: <Target size={18} /> },
                 { id: 'settings', label: 'オーナー設定', icon: <Users size={20} />, mobileIcon: <Users size={18} /> },
-                // 顧客管理・経理財務タブは非表示（必要時に下記を復帰）
+                // 一旦非表示（必要時に下記を復帰）。ページ自体は残しているのでidを戻せば復活する
+                // { id: 'dashboard', label: '経営指標', icon: <Home size={20} />, mobileIcon: <Home size={18} /> },
+                // { id: 'charts', label: 'ダッシュボード', icon: <BarChart3 size={20} />, mobileIcon: <BarChart3 size={18} /> },
+                // { id: 'marketing', label: 'マーケティング', icon: <Megaphone size={20} />, mobileIcon: <Megaphone size={18} /> },
                 // { id: 'customers', label: '顧客管理', icon: <Users size={20} />, mobileIcon: <Users size={18} /> },
                 // { id: 'finance', label: '経理・財務', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} /> }
             ];

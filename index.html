@@ -758,7 +758,35 @@
         const MARKETING_CACHE_KEY = 'marketing_data_cache';
         const SQUARE_CACHE_KEY = 'square_data_cache_v6'; // v6: locationIdデータ整合性修正
         const UI_STATE_KEY = 'dashboard_ui_state';
-        const CACHE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7日間（リロードで最新データ取得可能）
+        const CACHE_EXPIRY_MS = 24 * 60 * 60 * 1000; // 1日間はキャッシュをそのまま表示（最新化は再読み込み/SYNCで）
+        // ── IndexedDB 軽量KVキャッシュ ──
+        // Squareの全店データはlocalStorageの容量上限(~5MB)を超えて保存に失敗し、毎回再取得になっていた。
+        // IndexedDB（数百MB可）に保存してキャッシュを確実に永続化する。値はオブジェクトをそのまま格納。
+        const idbCache = (() => {
+            const DB_NAME = 'naoru_cache', STORE = 'kv';
+            let dbP = null;
+            const open = () => dbP || (dbP = new Promise((resolve, reject) => {
+                try {
+                    const req = indexedDB.open(DB_NAME, 1);
+                    req.onupgradeneeded = () => { try { req.result.createObjectStore(STORE); } catch (e) {} };
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => reject(req.error);
+                } catch (e) { reject(e); }
+            }));
+            const get = async (key) => {
+                try {
+                    const db = await open();
+                    return await new Promise((res) => { const r = db.transaction(STORE, 'readonly').objectStore(STORE).get(key); r.onsuccess = () => res(r.result || null); r.onerror = () => res(null); });
+                } catch (e) { return null; }
+            };
+            const set = async (key, val) => {
+                try {
+                    const db = await open();
+                    return await new Promise((res) => { const r = db.transaction(STORE, 'readwrite').objectStore(STORE).put(val, key); r.onsuccess = () => res(true); r.onerror = () => res(false); });
+                } catch (e) { return false; }
+            };
+            return { get, set };
+        })();
         const BATCH_SIZE = 5; // バッチあたりのアカウント数（5アカウント×5並列で75店舗を3ラウンドで完走）
         const MAX_CONCURRENT_BATCHES = 8; // 同時バッチリクエスト数（多店舗の初回取得を高速化。各バッチは別Vercel関数・別Squareトークンなので競合しない）
 
@@ -2399,24 +2427,21 @@
                     // Step 0: キャッシュを先にチェック（ネットワーク呼び出し前に即座に表示）
                     let hasStaleCache = false;
                     try {
-                        const cached = localStorage.getItem(SQUARE_CACHE_KEY);
-                        if (cached) {
-                            const parsed = JSON.parse(cached);
-                            if (parsed.timestamp && parsed.data) {
-                                const age = Date.now() - parsed.timestamp;
-                                if (age < CACHE_EXPIRY_MS && !forceRefresh) {
-                                    console.log('Using cached Square data (skip info fetch)');
-                                    setSqData(parsed.data);
-                                    setSqLastFetch(new Date(parsed.timestamp));
-                                    return;
-                                }
-                                // 期限切れでも7日以内ならstale表示して裏で更新
-                                if (age < STALE_MAX_MS) {
-                                    console.log('Showing stale Square cache, refreshing in background...');
-                                    setSqData(parsed.data);
-                                    setSqLastFetch(new Date(parsed.timestamp));
-                                    hasStaleCache = true;
-                                }
+                        const parsed = await idbCache.get(SQUARE_CACHE_KEY);
+                        if (parsed && parsed.timestamp && parsed.data) {
+                            const age = Date.now() - parsed.timestamp;
+                            if (age < CACHE_EXPIRY_MS && !forceRefresh) {
+                                console.log('Using cached Square data (skip info fetch)');
+                                setSqData(parsed.data);
+                                setSqLastFetch(new Date(parsed.timestamp));
+                                return;
+                            }
+                            // 期限切れでもstale上限内ならstale表示して裏で更新
+                            if (age < STALE_MAX_MS) {
+                                console.log('Showing stale Square cache, refreshing in background...');
+                                setSqData(parsed.data);
+                                setSqLastFetch(new Date(parsed.timestamp));
+                                hasStaleCache = true;
                             }
                         }
                     } catch (e) { /* cache miss */ }
@@ -2444,15 +2469,12 @@
                     } catch (infoErr) {
                         // info取得失敗時はキャッシュがあれば使う（オフライン対応）
                         try {
-                            const cached = localStorage.getItem(SQUARE_CACHE_KEY);
-                            if (cached) {
-                                const parsed = JSON.parse(cached);
-                                if (parsed.data) {
-                                    console.log('Info fetch failed, using cached data');
-                                    setSqData(parsed.data);
-                                    setSqLastFetch(new Date(parsed.timestamp));
-                                    return;
-                                }
+                            const parsed = await idbCache.get(SQUARE_CACHE_KEY);
+                            if (parsed && parsed.data) {
+                                console.log('Info fetch failed, using cached data');
+                                setSqData(parsed.data);
+                                setSqLastFetch(new Date(parsed.timestamp));
+                                return;
                             }
                         } catch (e) { /* cache miss */ }
                         throw infoErr;
@@ -2461,9 +2483,8 @@
                     // アカウント数変更検知: キャッシュのアカウント数と一致しなければキャッシュ無効化
                     if (hasStaleCache) {
                         try {
-                            const cached = localStorage.getItem(SQUARE_CACHE_KEY);
-                            if (cached) {
-                                const parsed = JSON.parse(cached);
+                            const parsed = await idbCache.get(SQUARE_CACHE_KEY);
+                            if (parsed) {
                                 const cachedAccounts = parsed.data && parsed.data.meta ? parsed.data.meta.totalAccounts : 0;
                                 if (cachedAccounts !== totalAccounts) {
                                     console.log(`アカウント数変更検知 (${cachedAccounts} → ${totalAccounts}): staleキャッシュを無効化`);
@@ -2653,12 +2674,9 @@
                     setSqData(result);
                     setSqLastFetch(new Date());
 
-                    // キャッシュ保存
+                    // キャッシュ保存（IndexedDB。大きいデータでも保存でき、次回以降は即時表示）
                     try {
-                        localStorage.setItem(SQUARE_CACHE_KEY, JSON.stringify({
-                            data: result,
-                            timestamp: Date.now(),
-                        }));
+                        await idbCache.set(SQUARE_CACHE_KEY, { data: result, timestamp: Date.now() });
                     } catch (e) { /* ignore cache write error */ }
                 } catch (err) {
                     console.error('Square fetch error:', err);

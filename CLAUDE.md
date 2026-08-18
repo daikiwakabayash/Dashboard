@@ -102,7 +102,8 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
 - **アカウントの読み込み**: `api/settlement-auth.js` が GAS「オーナー設定」＋環境変数（`SETTLEMENT_OWNER_PASSWORDS`/`SETTLEMENT_OWNER_SHOPS`）をマージ（GAS優先）
 - **アクセス権限**: オーナーが閲覧できる店舗をアカウント毎に設定。`settlement-store.js` の GET はトークン検証必須で、許可店舗のみ返す。本社の公開タグ付けも同設定を優先（`stOwnerFor`）
 - **保存**: `api/settlement-store.js` 経由で `SETTLEMENT_GAS_URL`（スプレッドシート）に upsert/update。オーナーの更新は本人トークン＋owner一致行のみ許可（rootは全て可）
-- **セラピスト諸経費（手当の自動判定）**: 明細の「請求内容」に、在籍セラピスト（SalonOne `staffs` を店舗で絞込）ごとの値引きを自動計上。名目は偽装業務委託リスク回避のため「諸経費（氏名）」で統一し、内訳は注釈表示。ルール＝**税込生産性>100万→住宅手当2万＋美容手当1万（自動）／100万以下→自動なし**。子供1人5,000円・誕生日月1万円・実費(明細提出)は随時入力し前月から引き継ぐ。生産性は当月のSalonOne個人売上（`sales/summary` の `by_staff` gross）を自動取得（空欄で自動・入力で上書き）。ロジックは `lib/settlement.js` の `computeTherapistShokei`／`computeSettlement(shokeiTotal)` に分離しテスト済み。手動入力は `settlement_manual_v1`（localStorage）の `therapists:[{id,name,productivity,children,birthday,extras}]` に保存
+- **広告宣伝費(Meta)の既定2行**: 「請求内容」の広告宣伝費は既定で2行（`Meta広告運用代行費（N月）`／`Meta広告費用立替費（N月）`）。`（N月）`はフィルターで選択中の月を反映し、引き継ぎ時も当月に更新（`stDefaultMetaAds`／`stRefreshMetaMonth`）
+- **セラピスト諸経費（住宅/美容の自動判定）**: 明細の「請求内容」に、在籍セラピスト（SalonOne `staffs` を店舗で絞込）ごとの値引きを自動計上。名目は偽装業務委託リスク回避のため「諸経費（氏名）」で統一し、内訳（「手当」の語は使わず `住宅2万・美容1万・子供N名・誕生日1万`）は注釈表示。ルール＝**税込生産性>100万→住宅2万＋美容1万（自動）／100万以下→自動なし**。子供1人5,000円・誕生日月1万円は随時入力し前月から引き継ぐ。生産性は当月のSalonOne個人売上（`sales/summary` の `by_staff` gross）を自動取得（空欄で自動・入力で上書き）。ロジックは `lib/settlement.js` の `computeTherapistShokei`／`computeSettlement(shokeiTotal)` に分離しテスト済み。手動入力は `settlement_manual_v1`（localStorage）の `therapists:[{id,name,productivity,children,birthday,extras}]` に保存（extrasは計算のみ・UI非表示）
 - **スナップショット方式**: 本社が算出した完成値を保存し、オーナーは再計算せず同じ値を表示（数値が完全一致）
 - **照合**: SalonOneスクエア売上 と Square(総決済−返金) が不一致なら明細に ⚠️ を表示
 - **期日/注意書き**: `lib/settlement.js` の `SETTLEMENT_SCHEDULE`/`SETTLEMENT_NOTES` が唯一の定義（2日売上確定→5日明細作成→10日オーナーチェック→15日振込、期日超過で修正不可）

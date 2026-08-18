@@ -101,8 +101,9 @@ describe('computeTherapistShokei', () => {
     expect(r.housing).toBe(20000);
     expect(r.beauty).toBe(10000);
     expect(r.total).toBe(30000);
-    expect(r.note).toContain('住宅手当2万');
-    expect(r.note).toContain('美容手当1万');
+    expect(r.note).toContain('住宅2万');
+    expect(r.note).toContain('美容1万');
+    expect(r.note).not.toContain('手当');
   });
   it('生産性 = ちょうど100万 → 自動計上なし（超のみ対象）', () => {
     const r = computeTherapistShokei({}, SHOKEI_RULES.threshold);

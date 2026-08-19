@@ -1392,6 +1392,7 @@
             const [alwForm, setAlwForm] = useState({ shopId: '', staffId: '', staffName: '', category: 'health', month: stDefaultMonth, amount: '' });
             const [alwOcr, setAlwOcr] = useState({ loading: false, msg: '' });
             const [alwMsg, setAlwMsg] = useState('');
+            const [alwLedgerOpen, setAlwLedgerOpen] = useState('');   // 月別内訳を開いているカテゴリkey
             const ALLOWANCE_CATS = [
                 { key: 'health', label: '健康手当', type: 'monthly', cap: 10000 },
                 { key: 'study', label: '勉強代手当', type: 'charge', accrual: 10000 },
@@ -1428,6 +1429,22 @@
                     return { key: cat.key, label: cat.label, used };
                 }).filter(x => x.used > 0);
             };
+            // チャージ型手当の残高（年初〜asOfMonthを時系列処理）と月別内訳
+            const stChargeLedger = (staffId, catKey, asOfMonth) => {
+                const cat = stAllowanceCat(catKey);
+                if (!cat || cat.type !== 'charge' || !staffId) return { accrued: 0, used: 0, balance: 0, rows: [] };
+                const months = stAllowanceMonthsUpTo(asOfMonth);
+                let bal = 0, accrued = 0, used = 0; const rows = [];
+                months.forEach(mo => {
+                    const over = stAllowanceOver(staffId, mo);
+                    const acc = over ? cat.accrual : 0; bal += acc; accrued += acc;
+                    const req = stAllowanceRequested(staffId, catKey, mo);
+                    const u = Math.min(req, bal); bal -= u; used += u;
+                    if (acc > 0 || u > 0) rows.push({ month: mo, accrued: acc, used: u, balanceAfter: bal });
+                });
+                return { accrued, used, balance: bal, rows };
+            };
+            const stChargeCats = () => ALLOWANCE_CATS.filter(c => c.type === 'charge');
             // 手当ストアの読み込み／保存
             const stLoadAllowance = async () => {
                 try { const r = await fetch('/api/plan-store?type=allowance'); const j = await r.json().catch(() => ({})); setStAllowance({ submissions: Array.isArray(j.submissions) ? j.submissions : [], productivity: (j.productivity && typeof j.productivity === 'object') ? j.productivity : {}, configured: j.configured !== false, loaded: true }); }
@@ -13494,6 +13511,50 @@
                                     </div>
                                     {alwMsg && <p className="text-xs font-bold text-slate-600">{alwMsg}</p>}
                                 </div>
+
+                                {/* チャージ型手当の残高（勉強手当・アクセス手当） */}
+                                {alwForm.staffId && (
+                                    <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6">
+                                        <div className="flex items-center gap-2 mb-1"><CreditCard size={16} className="text-brand-500" /><h3 className="text-sm font-black text-slate-800">チャージ残高{alwForm.staffName ? `（${alwForm.staffName}）` : ''}</h3><span className="text-[11px] text-slate-400 font-bold ml-auto">{stDefaultMonth.replace('-', '年')}月 時点</span></div>
+                                        <p className="text-[11px] text-slate-400 font-bold mb-3">生産性100万円超の月ごとに1万円チャージ→使った分を差し引いた残りが使えます（年末に残った分は失効）。</p>
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                            {stChargeCats().map(c => {
+                                                const led = stChargeLedger(alwForm.staffId, c.key, stDefaultMonth);
+                                                const open = alwLedgerOpen === c.key;
+                                                return (
+                                                <div key={c.key} className="rounded-xl border border-slate-200 overflow-hidden">
+                                                    <div className="p-3 bg-slate-50">
+                                                        <div className="flex items-center justify-between">
+                                                            <span className="font-black text-slate-700 text-sm">{c.label}</span>
+                                                            <span className="text-xl font-black text-emerald-600">¥{led.balance.toLocaleString()}<span className="text-[10px] text-slate-400 ml-1">残</span></span>
+                                                        </div>
+                                                        <div className="flex gap-4 mt-1 text-[11px] font-bold text-slate-500">
+                                                            <span>チャージ計 ¥{led.accrued.toLocaleString()}</span>
+                                                            <span>使用済 ¥{led.used.toLocaleString()}</span>
+                                                        </div>
+                                                        <button onClick={() => setAlwLedgerOpen(open ? '' : c.key)} className="mt-1.5 text-[11px] font-black text-brand-600 flex items-center gap-1">{open ? '内訳を閉じる' : '月別の内訳を見る'} <ChevronDown size={12} className={open ? 'rotate-180' : ''} /></button>
+                                                    </div>
+                                                    {open && (
+                                                        <div className="p-2 border-t border-slate-100">
+                                                            {led.rows.length === 0 ? <p className="text-[11px] text-slate-400 font-bold px-1 py-2">まだ増減がありません。</p>
+                                                             : (<table className="w-full text-[11px]"><tbody>
+                                                                {led.rows.map(r => (
+                                                                    <tr key={r.month} className="border-b border-slate-50">
+                                                                        <td className="py-1 pl-1 font-bold text-slate-500">{r.month.replace('-', '/')}</td>
+                                                                        <td className="py-1 text-right font-bold text-emerald-600">{r.accrued ? `+¥${r.accrued.toLocaleString()}` : ''}</td>
+                                                                        <td className="py-1 text-right font-bold text-rose-500">{r.used ? `−¥${r.used.toLocaleString()}` : ''}</td>
+                                                                        <td className="py-1 pr-1 text-right font-black text-slate-700">残 ¥{r.balanceAfter.toLocaleString()}</td>
+                                                                    </tr>
+                                                                ))}
+                                                               </tbody></table>)}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                )}
 
                                 {/* 提出履歴 */}
                                 <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6">

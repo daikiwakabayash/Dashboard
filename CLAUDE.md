@@ -43,7 +43,7 @@ api/                # ⚠️ Vercel Hobbyの関数数上限(12)対策で「1エ�
   feedback.js       # フィードバックAPI（GAS連携・取得/送信）
   health.js         # ヘルスチェック（env.planStore で保存先の有効状態も返す）
   salonone.js       # SalonOne 分析APIプロキシ（APIキー隠蔽・GET限定・許可リスト）
-  plan-store.js     # SalonOne計画の目標・アクション共有ストア（全デバイス同期）。保存先=Vercel KV(推奨) or Supabase or GAS。未設定時はlocalStorage継続
+  plan-store.js     # SalonOne計画の目標・アクション共有ストア（全デバイス同期）。保存先=Vercel KV(推奨) or Supabase or GAS。未設定時はlocalStorage継続。?type=allowance で手当（領収書）の提出・個人別生産性も同ストアに保存（submit/delete/recordProductivity）
   tasks.js          # タスク系API
   settlement.js     # 返金明細書ディスパッチャ → /api/settlement-auth|owners|store（?fn=auth/owners/store・rewrite）
   square.js         # Squareディスパッチャ → /api/square/metrics|settlement|test（?fn=metrics/settlement/test・rewrite）
@@ -53,6 +53,7 @@ lib/
   markdown.js       # Markdownパーサー（テスト用分離モジュール）
   plan-calc.js      # 事業計画計算ロジック（テスト用分離モジュール）
   salonone.js       # SalonOne API連携ロジック（エンドポイント許可リスト・検証・URL組立）
+  allowances.js     # 手当（領収書）計算ロジック（毎月上限型/通算チャージ型・年末失効）。tests/allowances.test.js
   settlement.js     # 返金明細書 共通ロジック（オーナー認証トークン・スナップショット・計算・期日/注意書き）
   handlers/         # api/ ディスパッチャから呼ばれる実ハンドラ群（Serverless Functionにカウントされない）
     settlement-auth.js / settlement-owners.js / settlement-store.js
@@ -108,6 +109,7 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
 - **アクセス権限**: オーナーが閲覧できる店舗をアカウント毎に設定。`settlement-store.js` の GET はトークン検証必須で、許可店舗のみ返す。本社の公開タグ付けも同設定を優先（`stOwnerFor`）
 - **保存**: `api/settlement-store.js` 経由で `SETTLEMENT_GAS_URL`（スプレッドシート）に upsert/update。オーナーの更新は本人トークン＋owner一致行のみ許可（rootは全て可）
 - **広告宣伝費(Meta)の既定2行**: 「請求内容」の広告宣伝費は既定で2行（`Meta広告運用代行費（N月）`／`Meta広告費用立替費（N月）`）。`（N月）`はフィルターで選択中の月を反映し、引き継ぎ時も当月に更新（`stDefaultMetaAds`／`stRefreshMetaMonth`）
+- **手当・領収書（勉強代/健康/アクセス手当）**: 専用タブ「手当・領収書」でスタッフが領収書写真をアップ→**Claude Visionで金額を自動抽出**（画像は保存せず金額のみ）。カテゴリはスタッフが選択。提出は共有ストア（`/api/plan-store?type=allowance`・KV/Supabase/GAS）に保存。**毎月2日23:59（翌月2日締切）までに提出された分**が対象月の返金明細書に「諸経費（氏名）＋注釈（健康手当 等）」で自動計上（税込生産性>100万が条件）。2タイプ＝**毎月上限型**（健康手当・上限1万）／**通算チャージ型**（勉強代/アクセス・生産性>100万の月ごとに1万チャージ、年内プールから使用、残高超はNG、年末失効）。生産性は返金明細書表示時に個人別grossをストアへ記録（`recordProductivity`）。ロジックは `lib/allowances.js`（`computeMonthlyCap`/`computeChargeLedger`/`computeAllowanceForMonth`）に分離しテスト済み
 - **セラピスト諸経費（住宅/美容の自動判定）**: 明細の「請求内容」に、在籍セラピスト（SalonOne `staffs` を店舗で絞込）ごとの値引きを自動計上。名目は偽装業務委託リスク回避のため「諸経費（氏名）」で統一し、内訳（「手当」の語は使わず `住宅2万・美容1万・子供N名・誕生日1万`）は注釈表示。ルール＝**税込生産性>100万→住宅2万＋美容1万（自動）／100万以下→自動なし**。子供1人5,000円・誕生日月1万円は随時入力し前月から引き継ぐ。生産性は当月のSalonOne個人売上（`sales/summary` の `by_staff` gross）を自動取得（空欄で自動・入力で上書き）。ロジックは `lib/settlement.js` の `computeTherapistShokei`／`computeSettlement(shokeiTotal)` に分離しテスト済み。手動入力は `settlement_manual_v1`（localStorage）の `therapists:[{id,name,productivity,children,birthday,extras}]` に保存（extrasは計算のみ・UI非表示）
 - **スナップショット方式**: 本社が算出した完成値を保存し、オーナーは再計算せず同じ値を表示（数値が完全一致）
 - **照合**: SalonOneスクエア売上 と Square(総決済−返金) が不一致なら明細に ⚠️ を表示

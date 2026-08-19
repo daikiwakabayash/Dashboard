@@ -20,6 +20,7 @@ const SB_KEY = () => process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABA
 const GAS_URL = () => process.env.PLAN_GAS_URL || process.env.SETTLEMENT_GAS_URL || '';
 const GOALS_KEY = 'naoru:plan:goals';
 const ACTIONS_KEY = 'naoru:plan:actions';
+const ALLOWANCE_KEY = 'naoru:allowance:v1'; // { submissions:[...], productivity:{staffId:{'YYYY-MM':gross}} }
 
 // ── Vercel KV (Upstash REST) ──
 async function kvGet(key) {
@@ -69,6 +70,19 @@ async function gasCall(url, method, payload) {
   return resp.json().catch(() => ({}));
 }
 
+// ── 汎用 blob get/set（有効なバックエンドへ振り分け。手当ストア等で使用） ──
+async function blobGet(key, hasKV, hasSB, gas) {
+  if (hasKV) return await kvGet(key);
+  if (hasSB) return await sbGet(key);
+  const j = await gasCall(`${gas}?type=kv&key=${encodeURIComponent(key)}`, 'GET');
+  return (j && j.value != null) ? j.value : null;
+}
+async function blobSet(key, value, hasKV, hasSB, gas) {
+  if (hasKV) return await kvSet(key, value);
+  if (hasSB) return await sbSet(key, value);
+  return await gasCall(gas, 'POST', { action: 'saveKv', key, value });
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -79,6 +93,44 @@ export default async function handler(req, res) {
   const hasKV = !!(KV_URL() && KV_TOKEN());
   const hasSB = !!(SB_URL() && SB_KEY());
   const gas = GAS_URL();
+
+  // ── 手当（領収書）ストア: ?type=allowance / body.type==='allowance' ──
+  const isAllowance = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'allowance';
+  if (isAllowance) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ submissions: [], productivity: {}, configured: false });
+    try {
+      const cur = (await blobGet(ALLOWANCE_KEY, hasKV, hasSB, gas)) || {};
+      const submissions = Array.isArray(cur.submissions) ? cur.submissions : [];
+      const productivity = (cur.productivity && typeof cur.productivity === 'object') ? cur.productivity : {};
+      if (req.method === 'GET') {
+        return res.status(200).json({ submissions, productivity, configured: true });
+      }
+      const body = req.body || {};
+      const action = body.action;
+      if (action === 'submit' && body.submission && body.submission.id) {
+        const s = body.submission;
+        const next = submissions.filter(x => x && x.id !== s.id);
+        next.push(s);
+        await blobSet(ALLOWANCE_KEY, { submissions: next, productivity }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, id: s.id });
+      }
+      if (action === 'delete' && body.id) {
+        const next = submissions.filter(x => x && x.id !== body.id);
+        await blobSet(ALLOWANCE_KEY, { submissions: next, productivity }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      if (action === 'recordProductivity' && body.staffId && body.month) {
+        const p = { ...productivity };
+        p[String(body.staffId)] = { ...(p[String(body.staffId)] || {}), [String(body.month)]: Number(body.gross) || 0 };
+        await blobSet(ALLOWANCE_KEY, { submissions, productivity: p }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid allowance action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
   if (!hasKV && !hasSB && !gas) {
     // 保存先未設定 → フロントはlocalStorageで継続（壊さない）
     return res.status(200).json({ goals: {}, actions: [], configured: false });

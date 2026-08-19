@@ -1387,6 +1387,100 @@
             const stDefaultMonth = (() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}`; })();
             const [stMonth, setStMonth] = useState(stDefaultMonth);
             const [stManual, setStManual] = useState(() => { try { return JSON.parse(localStorage.getItem('settlement_manual_v1') || '{}'); } catch { return {}; } });
+            // ── 手当（領収書）: 共有ストア（/api/plan-store?type=allowance）。lib/allowances.js と同一ロジック ──
+            const [stAllowance, setStAllowance] = useState({ submissions: [], productivity: {}, configured: true, loaded: false });
+            const [alwForm, setAlwForm] = useState({ shopId: '', staffId: '', staffName: '', category: 'health', month: stDefaultMonth, amount: '' });
+            const [alwOcr, setAlwOcr] = useState({ loading: false, msg: '' });
+            const [alwMsg, setAlwMsg] = useState('');
+            const ALLOWANCE_CATS = [
+                { key: 'health', label: '健康手当', type: 'monthly', cap: 10000 },
+                { key: 'study', label: '勉強代手当', type: 'charge', accrual: 10000 },
+                { key: 'access', label: 'アクセス手当', type: 'charge', accrual: 10000 },
+            ];
+            const ALLOWANCE_THRESHOLD = 1000000;
+            const stAllowanceCat = (key) => ALLOWANCE_CATS.find(c => c.key === key) || null;
+            // 対象月Mの提出締切 = 翌月2日 23:59:59 JST（= 14:59:59 UTC）
+            const stAllowanceDeadline = (month) => { const [y, m] = String(month).split('-').map(Number); return new Date(Date.UTC(y, m, 2, 14, 59, 59)); };
+            const stAllowanceMonthsUpTo = (targetMonth) => { const [y, m] = String(targetMonth).split('-').map(Number); const arr = []; for (let i = 1; i <= m; i++) arr.push(`${y}-${String(i).padStart(2, '0')}`); return arr; };
+            // staff+category+month の提出合計（締切内のみ）
+            const stAllowanceRequested = (staffId, catKey, mo) => (stAllowance.submissions || [])
+                .filter(s => String(s.staffId) === String(staffId) && s.category === catKey && s.month === mo && s.submittedAt && new Date(s.submittedAt) <= stAllowanceDeadline(mo))
+                .reduce((a, s) => a + (Number(s.amount) || 0), 0);
+            // staff の month 生産性 over 判定（ストア productivity。当月はライブ salon gross 優先）
+            const stAllowanceOver = (staffId, mo, liveGross) => {
+                const stored = ((stAllowance.productivity || {})[String(staffId)] || {})[mo];
+                const g = (liveGross != null && liveGross > 0) ? liveGross : (Number(stored) || 0);
+                return g > ALLOWANCE_THRESHOLD;
+            };
+            // staff の対象月Mに計上する手当（カテゴリ別 used）。charge型は年初〜Mを時系列処理
+            const stAllowanceUsedFor = (staffId, targetMonth, liveGross) => {
+                const months = stAllowanceMonthsUpTo(targetMonth);
+                return ALLOWANCE_CATS.map(cat => {
+                    const hist = months.map(mo => ({ mo, over: stAllowanceOver(staffId, mo, mo === targetMonth ? liveGross : null), req: stAllowanceRequested(staffId, cat.key, mo) }));
+                    let used = 0;
+                    if (cat.type === 'monthly') {
+                        const cur = hist.find(h => h.mo === targetMonth) || { over: false, req: 0 };
+                        used = cur.over ? Math.min(cur.req, cat.cap) : 0;
+                    } else {
+                        let bal = 0;
+                        for (const h of hist) { bal += h.over ? cat.accrual : 0; const u = Math.min(h.req, bal); bal -= u; if (h.mo === targetMonth) used = u; }
+                    }
+                    return { key: cat.key, label: cat.label, used };
+                }).filter(x => x.used > 0);
+            };
+            // 手当ストアの読み込み／保存
+            const stLoadAllowance = async () => {
+                try { const r = await fetch('/api/plan-store?type=allowance'); const j = await r.json().catch(() => ({})); setStAllowance({ submissions: Array.isArray(j.submissions) ? j.submissions : [], productivity: (j.productivity && typeof j.productivity === 'object') ? j.productivity : {}, configured: j.configured !== false, loaded: true }); }
+                catch { setStAllowance(a => ({ ...a, loaded: true })); }
+            };
+            const stSubmitAllowance = async (submission) => {
+                const r = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'allowance', action: 'submit', submission }) });
+                const j = await r.json().catch(() => ({})); await stLoadAllowance(); return j;
+            };
+            const stDeleteAllowance = async (id) => {
+                await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'allowance', action: 'delete', id }) });
+                await stLoadAllowance();
+            };
+            const stRecordProductivity = async (staffId, month, gross) => {
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'allowance', action: 'recordProductivity', staffId: String(staffId), month, gross: Number(gross) || 0 }) }); } catch {}
+            };
+            // 領収書写真 → Claude Vision で金額を自動抽出（画像は保存せず金額のみ）
+            const alwReadReceipt = async (file) => {
+                if (!file) return;
+                setAlwOcr({ loading: true, msg: '領収書を読み取り中…' });
+                try {
+                    const mediaType = file.type || 'image/jpeg';
+                    const dataUrl = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(file); });
+                    const base64 = String(dataUrl).split(',')[1] || '';
+                    const r = await fetch('/api/chat', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            question: 'この領収書の「合計金額（税込）」を半角数字のみで答えてください。円記号・カンマ・文字は付けず、数字だけを1つ返してください。読み取れない場合は0とだけ返してください。',
+                            images: [{ mediaType, data: base64 }], stream: false, thinking: false,
+                        }),
+                    });
+                    const j = await r.json().catch(() => ({}));
+                    const text = String(j.text || j.content || j.message || '').replace(/[,\s円¥]/g, '');
+                    const m = text.match(/\d{2,7}/);
+                    const amt = m ? Number(m[0]) : 0;
+                    if (amt > 0) { setAlwForm(f => ({ ...f, amount: String(amt) })); setAlwOcr({ loading: false, msg: `読み取り: ¥${amt.toLocaleString()}（必要なら修正してください）` }); }
+                    else setAlwOcr({ loading: false, msg: '金額を読み取れませんでした。手入力してください。' });
+                } catch (e) { setAlwOcr({ loading: false, msg: '読み取りに失敗しました。手入力してください。' }); }
+            };
+            const alwSubmit = async () => {
+                const amt = Math.max(0, Math.floor(Number(alwForm.amount) || 0));
+                if (!alwForm.staffId || !alwForm.staffName) { setAlwMsg('氏名を選択してください'); return; }
+                if (!amt) { setAlwMsg('金額を入力してください'); return; }
+                setAlwMsg('送信中…');
+                const submission = {
+                    id: `alw-${alwForm.staffId}-${alwForm.category}-${Date.now()}`,
+                    staffId: String(alwForm.staffId), staffName: alwForm.staffName, shopId: String(alwForm.shopId || ''),
+                    category: alwForm.category, month: alwForm.month, amount: amt, submittedAt: new Date().toISOString(),
+                };
+                const j = await stSubmitAllowance(submission);
+                if (j && j.ok) { setAlwMsg('✅ 提出しました'); setAlwForm(f => ({ ...f, amount: '' })); setAlwOcr({ loading: false, msg: '' }); }
+                else setAlwMsg(`失敗: ${(j && j.error) || (j && j.configured === false ? '保存先が未設定です（KV/Supabase/GAS）' : '不明')}`);
+            };
             const stShopMenuRef = useRef(null);
             const [stShopMenuOpen, setStShopMenuOpen] = useState(false);
             const [stShopSearch, setStShopSearch] = useState('');
@@ -1440,6 +1534,7 @@
                 return hit ? (Number(hit.gross) || 0) : 0;
             };
             // 明細1件分の諸経費リストを構築。items=[{label,note,amount(負)}], total=正の合計
+            // 住宅/美容（生産性自動）＋ 手当（領収書・締切内）を合算して計上する。
             const stBuildShokei = (manual, salon) => {
                 const ths = (manual && Array.isArray(manual.therapists)) ? manual.therapists : [];
                 const items = []; let total = 0;
@@ -1447,6 +1542,8 @@
                     const prod = (t.productivity != null && t.productivity !== '') ? (Number(t.productivity) || 0) : stProductivityOf(salon, t.id, t.name);
                     const r = stTherapistShokei(t, prod);
                     if (r.total > 0) { items.push({ label: `諸経費（${t.name}）`, note: r.note, amount: -r.total }); total += r.total; }
+                    // 手当（領収書）: 締切内に提出された分をカテゴリ別に計上
+                    stAllowanceUsedFor(t.id, stMonth, prod).forEach(a => { items.push({ label: `諸経費（${t.name}）`, note: a.label, amount: -a.used }); total += a.used; });
                 });
                 return { items, total };
             };
@@ -1598,6 +1695,11 @@
                 const recs = Object.values(acc).filter(x => x.data && !(x.data.salon && x.data.salon.error))
                     .map(({ shop, data }) => { const snap = stComputeSnapshot(shop, data.salon, data.square, stManualFor(shop.id, stMonth)); return { shopId: String(shop.id), shopName: shop.name, owner: snap.owner, month: stMonth, snapshot: snap }; });
                 stAutoPublish(recs);
+                // 手当のチャージ判定用に、当月の個人別生産性（税込gross）を共有ストアへ記録
+                Object.values(acc).forEach(({ data }) => {
+                    const bs = (data && data.salon && !data.salon.error && Array.isArray(data.salon.byStaff)) ? data.salon.byStaff : [];
+                    bs.forEach(st => { if (st.id && (Number(st.gross) || 0) > 0) stRecordProductivity(st.id, stMonth, st.gross); });
+                });
             };
             // 自動共有（サイレント）: 取得/編集した明細をGASに保存してオーナーに見せる
             const stAutoPublish = async (records) => {
@@ -1612,11 +1714,12 @@
                 } catch (e) { /* サイレント */ }
             };
             useEffect(() => {
-                if (currentPage === 'settlement') stLoadStatus();
+                if (currentPage === 'settlement') { stLoadStatus(); stLoadAllowance(); }
+                if (currentPage === 'allowance') stLoadAllowance();
             }, [currentPage, stMonth]);
-            // 返金明細書タブでは在籍スタッフ一覧（諸経費のセラピスト自動表示用）を取得
+            // 返金明細書・手当タブでは在籍スタッフ一覧（諸経費/手当のセラピスト表示用）を取得
             useEffect(() => {
-                if (currentPage !== 'settlement' || soStaffs.length > 0) return;
+                if (!['settlement', 'allowance'].includes(currentPage) || soStaffs.length > 0) return;
                 (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at })); if (arr.length) setSoStaffs(arr); } catch {} })();
             }, [currentPage]);
             // 選択店舗の在籍セラピストを m.therapists に反映（新規在籍を追加・氏名同期。手動入力値は保持）。
@@ -1770,9 +1873,9 @@
                 if (currentPage !== 'settlement') return;
                 stLoadSelected(stSel);
             }, [currentPage, stMonth, stSel.join(',')]);
-            // 返金明細書タブを開いたら SalonOne 店舗一覧を用意し、初期選択を1店にセット
+            // 返金明細書・手当タブを開いたら SalonOne 店舗一覧を用意し、初期選択を1店にセット
             useEffect(() => {
-                if (currentPage === 'settlement' && soShopsRaw.length === 0) {
+                if (['settlement', 'allowance'].includes(currentPage) && soShopsRaw.length === 0) {
                     fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`).then(r => r.json()).then(j => {
                         const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? ''), name: s.name || `店舗${s.id}` }));
                         if (arr.length) { setSoShops(arr); }
@@ -13299,6 +13402,123 @@
                         );
                     })()}
 
+                    {/* ===== 手当・領収書タブ ===== */}
+                    {currentPage === 'allowance' && (() => {
+                        const shopList = (soShops.length ? soShops : soDemoShops);
+                        const roster = alwForm.shopId ? stTherapistRoster(alwForm.shopId) : [];
+                        const cat = stAllowanceCat(alwForm.category);
+                        // 選択スタッフ・カテゴリの年内チャージ残高（charge型のみ）
+                        const chargeInfo = (() => {
+                            if (!alwForm.staffId || !cat || cat.type !== 'charge') return null;
+                            const months = stAllowanceMonthsUpTo(alwForm.month);
+                            let bal = 0, accrued = 0, used = 0;
+                            months.forEach(mo => { const over = stAllowanceOver(alwForm.staffId, mo); if (over) { bal += cat.accrual; accrued += cat.accrual; } const u = Math.min(stAllowanceRequested(alwForm.staffId, cat.key, mo), bal); bal -= u; used += u; });
+                            return { accrued, used, balance: bal };
+                        })();
+                        const mySubs = (stAllowance.submissions || [])
+                            .filter(s => (!alwForm.staffId || String(s.staffId) === String(alwForm.staffId)))
+                            .sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt)));
+                        const monthOpts = (() => { const arr = []; const n = new Date(); for (let i = 0; i < 12; i++) { const d = new Date(n.getFullYear(), n.getMonth() - i, 1); arr.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); } return arr; })();
+                        return (
+                        <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
+                            <div className="max-w-3xl mx-auto space-y-5">
+                                <header className="bg-white p-4 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
+                                    <div className="flex items-center gap-3">
+                                        <div className="p-2 md:p-3 bg-gradient-to-br from-emerald-600 to-teal-500 rounded-xl md:rounded-2xl text-white shadow-lg"><FileText size={24} /></div>
+                                        <div>
+                                            <div className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-[10px] font-black uppercase tracking-widest mb-1">Allowance</div>
+                                            <h1 className="text-xl md:text-2xl font-black tracking-tight italic">手当・領収書の提出</h1>
+                                        </div>
+                                    </div>
+                                    <p className="text-xs text-slate-500 font-bold mt-3 leading-relaxed">領収書の写真をアップロードすると金額を自動で読み取ります。カテゴリと氏名を選んで提出してください。<b>毎月2日23:59まで</b>に提出された分が、その月の返金明細書に自動計上されます（税込生産性100万円超が対象）。</p>
+                                </header>
+
+                                {stAllowance.configured === false && (
+                                    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs font-bold text-amber-800">⚠️ 保存先（KV/Supabase/GAS）が未設定のため提出を保存できません。管理者に共有ストアの設定をご依頼ください。</div>
+                                )}
+
+                                {/* 提出フォーム */}
+                                <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6 space-y-4">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        <div>
+                                            <label className="text-[11px] font-black text-slate-400">店舗</label>
+                                            <select value={alwForm.shopId} onChange={e => setAlwForm(f => ({ ...f, shopId: e.target.value, staffId: '', staffName: '' }))} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white">
+                                                <option value="">店舗を選択</option>
+                                                {shopList.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="text-[11px] font-black text-slate-400">氏名</label>
+                                            <select value={alwForm.staffId} onChange={e => { const st = roster.find(x => String(x.id) === e.target.value); setAlwForm(f => ({ ...f, staffId: e.target.value, staffName: st ? st.name : '' })); }} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white" disabled={!alwForm.shopId}>
+                                                <option value="">{alwForm.shopId ? '氏名を選択' : '先に店舗を選択'}</option>
+                                                {roster.map(st => <option key={st.id} value={st.id}>{st.name}</option>)}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="text-[11px] font-black text-slate-400">カテゴリ</label>
+                                            <select value={alwForm.category} onChange={e => setAlwForm(f => ({ ...f, category: e.target.value }))} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white">
+                                                {ALLOWANCE_CATS.map(c => <option key={c.key} value={c.key}>{c.label}{c.type === 'monthly' ? '（毎月上限1万）' : '（通算チャージ）'}</option>)}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="text-[11px] font-black text-slate-400">対象月</label>
+                                            <select value={alwForm.month} onChange={e => setAlwForm(f => ({ ...f, month: e.target.value }))} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white">
+                                                {monthOpts.map(mo => <option key={mo} value={mo}>{mo.replace('-', '年') + '月'}</option>)}
+                                            </select>
+                                        </div>
+                                    </div>
+
+                                    {chargeInfo && (
+                                        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-bold text-slate-600 flex flex-wrap gap-x-4 gap-y-1">
+                                            <span>年内チャージ枠: <b className="text-slate-800">¥{chargeInfo.accrued.toLocaleString()}</b></span>
+                                            <span>使用済: ¥{chargeInfo.used.toLocaleString()}</span>
+                                            <span>残高: <b className="text-emerald-600">¥{chargeInfo.balance.toLocaleString()}</b>（超過分は計上されません）</span>
+                                        </div>
+                                    )}
+
+                                    <div>
+                                        <label className="text-[11px] font-black text-slate-400">領収書の写真</label>
+                                        <label className="mt-1 flex items-center justify-center gap-2 px-4 py-3 border-2 border-dashed border-slate-300 rounded-xl text-sm font-black text-slate-500 hover:bg-slate-50 cursor-pointer">
+                                            <Upload size={16} /> {alwOcr.loading ? '読み取り中…' : '写真を撮影 / 選択して金額を自動読み取り'}
+                                            <input type="file" accept="image/*" capture="environment" className="hidden" disabled={alwOcr.loading} onChange={e => { const f = e.target.files && e.target.files[0]; if (f) alwReadReceipt(f); e.target.value = ''; }} />
+                                        </label>
+                                        {alwOcr.msg && <p className="text-[11px] font-bold text-slate-500 mt-1.5">{alwOcr.msg}</p>}
+                                    </div>
+
+                                    <div className="flex items-end gap-3">
+                                        <div className="flex-1">
+                                            <label className="text-[11px] font-black text-slate-400">金額（税込）</label>
+                                            <div className="flex items-center gap-1 mt-1"><span className="font-black text-slate-500">¥</span><input type="number" value={alwForm.amount} onChange={e => setAlwForm(f => ({ ...f, amount: e.target.value }))} placeholder="0" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-black text-right" /></div>
+                                        </div>
+                                        <button onClick={alwSubmit} disabled={!alwForm.staffId || !Number(alwForm.amount)} className="px-6 py-2.5 bg-brand-500 text-white rounded-xl text-sm font-black hover:bg-brand-600 disabled:opacity-40">提出</button>
+                                    </div>
+                                    {alwMsg && <p className="text-xs font-bold text-slate-600">{alwMsg}</p>}
+                                </div>
+
+                                {/* 提出履歴 */}
+                                <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6">
+                                    <div className="flex items-center gap-2 mb-3"><FileText size={16} className="text-slate-500" /><h3 className="text-sm font-black text-slate-800">提出履歴{alwForm.staffName ? `（${alwForm.staffName}）` : ''}</h3></div>
+                                    {!stAllowance.loaded ? <p className="text-center text-slate-400 font-bold py-6 text-sm">読み込み中...</p>
+                                     : mySubs.length === 0 ? <p className="text-center text-slate-400 font-bold py-6 text-sm">まだ提出がありません。</p>
+                                     : (<div className="divide-y divide-slate-100">
+                                        {mySubs.slice(0, 40).map(s => {
+                                            const c = stAllowanceCat(s.category); const inTime = s.submittedAt && new Date(s.submittedAt) <= stAllowanceDeadline(s.month);
+                                            return (<div key={s.id} className="flex items-center gap-3 py-2.5 text-sm">
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="font-bold text-slate-800">{s.staffName} <span className="text-[11px] text-slate-400">{c ? c.label : s.category}</span></div>
+                                                    <div className="text-[11px] text-slate-500 font-bold">{s.month.replace('-', '年')}月 分 ・ 提出 {String(s.submittedAt).slice(0, 10)} {inTime ? <span className="text-emerald-600">✓締切内</span> : <span className="text-rose-500">✗締切超過</span>}</div>
+                                                </div>
+                                                <div className="font-black text-slate-800">¥{(Number(s.amount) || 0).toLocaleString()}</div>
+                                                <button onClick={() => { if (confirm('この提出を削除しますか？')) stDeleteAllowance(s.id); }} className="text-slate-300 hover:text-rose-500"><X size={14} /></button>
+                                            </div>);
+                                        })}
+                                       </div>)}
+                                </div>
+                            </div>
+                        </div>
+                        );
+                    })()}
+
                     {/* ===== 事業計画相談タブ ===== */}
                     {currentPage === 'planning' && (
                         <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
@@ -16370,6 +16590,7 @@
                 { id: 'salonone', label: 'SalonOne売上', icon: <Calendar size={20} />, mobileIcon: <Calendar size={18} /> },
                 { id: 'square', label: 'サブスク分析', icon: <CreditCard size={20} />, mobileIcon: <CreditCard size={18} /> },
                 { id: 'settlement', label: '返金明細書', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} /> },
+                { id: 'allowance', label: '手当・領収書', icon: <FileText size={20} />, mobileIcon: <FileText size={18} /> },
                 { id: 'planning', label: '事業計画', icon: <Target size={20} />, mobileIcon: <Target size={18} /> },
                 { id: 'settings', label: 'オーナー設定', icon: <Users size={20} />, mobileIcon: <Users size={18} />, rootOnly: true },
                 // 一旦非表示（必要時に下記を復帰）。ページ自体は残しているのでidを戻せば復活する

@@ -1115,24 +1115,30 @@
                     const owner = localStorage.getItem('naoru_auth_owner') || '';
                     const root = localStorage.getItem('naoru_auth_root') === '1';
                     const shops = readAuthShops();
-                    return token ? { checking: true, authenticated: false, token, owner, root, shops }
-                                 : { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null };
-                } catch { return { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null }; }
+                    const role = localStorage.getItem('naoru_auth_role') || (root ? 'root' : 'owner');
+                    const staffId = localStorage.getItem('naoru_auth_staffid') || '';
+                    const staffName = localStorage.getItem('naoru_auth_staffname') || '';
+                    return token ? { checking: true, authenticated: false, token, owner, root, shops, role, staffId, staffName }
+                                 : { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '' };
+                } catch { return { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '' }; }
             });
             const [authId, setAuthId] = useState('');
             const [authPassword, setAuthPassword] = useState('');
             const [authError, setAuthError] = useState('');
             const [authLoading, setAuthLoading] = useState(false);
 
-            const persistAuth = (owner, token, root, shops) => {
+            const persistAuth = (owner, token, root, shops, role, staffId, staffName) => {
                 try {
                     localStorage.setItem('naoru_auth_token', token);
                     localStorage.setItem('naoru_auth_owner', owner || '');
                     localStorage.setItem('naoru_auth_root', root ? '1' : '0');
                     localStorage.setItem('naoru_auth_shops', JSON.stringify(root ? null : (Array.isArray(shops) ? shops : [])));
+                    localStorage.setItem('naoru_auth_role', role || (root ? 'root' : 'owner'));
+                    localStorage.setItem('naoru_auth_staffid', staffId || '');
+                    localStorage.setItem('naoru_auth_staffname', staffName || '');
                 } catch {}
             };
-            const clearAuth = () => { ['naoru_auth_token', 'naoru_auth_owner', 'naoru_auth_root', 'naoru_auth_shops'].forEach(k => { try { localStorage.removeItem(k); } catch {} }); };
+            const clearAuth = () => { ['naoru_auth_token', 'naoru_auth_owner', 'naoru_auth_root', 'naoru_auth_shops', 'naoru_auth_role', 'naoru_auth_staffid', 'naoru_auth_staffname'].forEach(k => { try { localStorage.removeItem(k); } catch {} }); };
 
             // 起動時: 保存トークンを検証（＋店舗アクセスを最新化）。未設定環境（開発）は認証スキップ。
             useEffect(() => {
@@ -1144,14 +1150,19 @@
                 }).then(r => r.json()).then(async (data) => {
                     if (data && data.ok) {
                         let shops = authState.root ? null : authState.shops;
+                        let role = authState.role, staffId = authState.staffId, staffName = authState.staffName;
                         if (!data.root) {
-                            try { const g = await fetch('/api/settlement-auth').then(r => r.json()); const list = g && g.shops && g.shops[authState.owner]; if (Array.isArray(list)) shops = list; } catch {}
-                        }
-                        persistAuth(authState.owner, authState.token, !!data.root, shops);
-                        setAuthState({ checking: false, authenticated: true, token: authState.token, owner: authState.owner, root: !!data.root, shops: data.root ? null : shops });
+                            try {
+                                const g = await fetch('/api/settlement-auth').then(r => r.json());
+                                const list = g && g.shops && g.shops[authState.owner]; if (Array.isArray(list)) shops = list;
+                                const meta = g && g.meta && g.meta[authState.owner]; if (meta) { role = meta.role || role || 'owner'; staffId = meta.staffId || ''; staffName = meta.staffName || ''; }
+                            } catch {}
+                        } else { role = 'root'; staffId = ''; staffName = ''; }
+                        persistAuth(authState.owner, authState.token, !!data.root, shops, role, staffId, staffName);
+                        setAuthState({ checking: false, authenticated: true, token: authState.token, owner: authState.owner, root: !!data.root, shops: data.root ? null : shops, role, staffId, staffName });
                     } else {
                         clearAuth();
-                        setAuthState({ checking: false, authenticated: false, token: null, owner: '', root: false, shops: null });
+                        setAuthState({ checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '' });
                     }
                 }).catch(() => {
                     // ネットワークエラー時はトークンを保持してログイン状態を維持
@@ -1164,7 +1175,7 @@
                 if (authState.token || authState.authenticated) return;
                 fetch('/api/settlement-auth').then(r => r.json()).then(j => {
                     if (j && !j.configured && !j.rootConfigured) {
-                        setAuthState({ checking: false, authenticated: true, token: 'dev-mode', owner: '__root__', root: true, shops: null });
+                        setAuthState({ checking: false, authenticated: true, token: 'dev-mode', owner: '__root__', root: true, shops: null, role: 'root', staffId: '', staffName: '' });
                     }
                 }).catch(() => {});
             }, []);
@@ -1194,8 +1205,9 @@
                     const data = await res.json();
                     if (data.ok) {
                         const shops = data.root ? null : (Array.isArray(data.shops) ? data.shops : []);
-                        persistAuth(data.owner || '', data.token, !!data.root, shops);
-                        setAuthState({ checking: false, authenticated: true, token: data.token, owner: data.owner || '', root: !!data.root, shops });
+                        const role = data.role || (data.root ? 'root' : 'owner');
+                        persistAuth(data.owner || '', data.token, !!data.root, shops, role, data.staffId || '', data.staffName || '');
+                        setAuthState({ checking: false, authenticated: true, token: data.token, owner: data.owner || '', root: !!data.root, shops, role, staffId: data.staffId || '', staffName: data.staffName || '' });
                         setAuthPassword(''); setAuthId('');
                     } else {
                         setAuthError(data.error || 'ログインに失敗しました');
@@ -1208,8 +1220,13 @@
 
             const handleLogout = () => {
                 clearAuth();
-                setAuthState({ checking: false, authenticated: false, token: null, owner: '', root: false, shops: null });
+                setAuthState({ checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '' });
             };
+            // ロール判定ヘルパー
+            const authRole = authState.root ? 'root' : (authState.role || 'owner');
+            const isStaff = authRole === 'staff';
+            const isOwnerRole = authRole === 'owner';
+            const canSeeSettlement = authState.root || isOwnerRole; // 返金明細書はroot/ownerのみ
 
             // 認証チェック中・未認証の場合は後でreturn文で分岐する（Hooksの順序を保つため）
             const isAuthChecking = authState.checking;
@@ -1223,10 +1240,12 @@
                 // 非表示中のページ(経営指標/ダッシュボード/マーケティング)はSalonOne売上に寄せる
                 return (p && !['dashboard', 'charts', 'marketing'].includes(p)) ? p : 'salonone';
             });
-            // 非rootが管理ページ(オーナー設定)を開いていたらSalonOne売上へ退避
+            // 権限外のページを開いていたらSalonOne売上へ退避（オーナー設定=root専用／返金明細書=staff不可）
             useEffect(() => {
-                if (authState.authenticated && !authState.root && currentPage === 'settings') setCurrentPage('salonone');
-            }, [authState.authenticated, authState.root, currentPage]);
+                if (!authState.authenticated) return;
+                if (!authState.root && currentPage === 'settings') setCurrentPage('salonone');
+                if (authRole === 'staff' && currentPage === 'settlement') setCurrentPage('salonone');
+            }, [authState.authenticated, authState.root, authRole, currentPage]);
             const [rawData, setRawData] = useState(() => {
                 try {
                     const cached = localStorage.getItem(CACHE_KEY);
@@ -1592,7 +1611,7 @@
             const [stStoreMsg, setStStoreMsg] = useState('');
             const [stOwnerShops, setStOwnerShops] = useState(null); // {オーナー:[店舗名の一部]} アクセス設定（null=未取得）
             const [stAccounts, setStAccounts] = useState(null);    // オーナーアカウント一覧 [{owner, shops, hasPassword, updatedAt}]
-            const [stAcctForm, setStAcctForm] = useState({ owner: '', password: '', shops: [] });
+            const [stAcctForm, setStAcctForm] = useState({ owner: '', password: '', shops: [], role: 'owner', staffId: '', staffName: '' });
             const [stAcctMsg, setStAcctMsg] = useState('');
             const [stAcctBusy, setStAcctBusy] = useState(false);
             // 店舗一覧からまとめてアカウント作成
@@ -1736,7 +1755,7 @@
             }, [currentPage, stMonth]);
             // 返金明細書・手当タブでは在籍スタッフ一覧（諸経費/手当のセラピスト表示用）を取得
             useEffect(() => {
-                if (!['settlement', 'allowance'].includes(currentPage) || soStaffs.length > 0) return;
+                if (!['settlement', 'allowance', 'settings'].includes(currentPage) || soStaffs.length > 0) return;
                 (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at })); if (arr.length) setSoStaffs(arr); } catch {} })();
             }, [currentPage]);
             // 選択店舗の在籍セラピストを m.therapists に反映（新規在籍を追加・氏名同期。手動入力値は保持）。
@@ -1833,17 +1852,21 @@
                     else { setStAccounts([]); setStAcctMsg(j.error || '取得に失敗しました'); }
                 } catch { setStAccounts([]); setStAcctMsg('通信に失敗しました'); }
             };
-            const stSaveAccount = async (owner, password, shops) => {
-                if (!owner) { setStAcctMsg('オーナー名を入力してください'); return; }
+            const stSaveAccount = async (owner, password, shops, role, staffId, staffName) => {
+                if (!owner) { setStAcctMsg('氏名（ID）を入力してください'); return; }
                 setStAcctBusy(true); setStAcctMsg('');
                 try {
+                    const payload = { hqToken: stAuthToken(), action: 'upsert', owner, password, shops };
+                    if (role != null) payload.role = role;
+                    if (staffId != null) payload.staffId = staffId;
+                    if (staffName != null) payload.staffName = staffName;
                     const r = await fetch('/api/settlement-owners', {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ hqToken: stAuthToken(), action: 'upsert', owner, password, shops }),
+                        body: JSON.stringify(payload),
                     });
                     const j = await r.json().catch(() => ({}));
                     setStAcctMsg(j.ok ? `✅ ${owner} を保存しました` : `失敗: ${j.error || '不明'}`);
-                    if (j.ok) { setStAcctForm({ owner: '', password: '', shops: [] }); await stLoadAccounts(); setStOwnerShops(null); }
+                    if (j.ok) { setStAcctForm({ owner: '', password: '', shops: [], role: 'owner', staffId: '', staffName: '' }); await stLoadAccounts(); setStOwnerShops(null); }
                 } catch { setStAcctMsg('通信に失敗しました'); }
                 finally { setStAcctBusy(false); }
             };
@@ -1967,6 +1990,18 @@
             const [planSoData, setPlanSoData] = useState(null);     // SalonOne月次実績 { shopId, months:[{month,summary,channels,retention}] }
             const [planSoLoading, setPlanSoLoading] = useState(false);
             const planSoReqRef = useRef(0);
+            // staffが事業計画を開いたら自分の店舗の計画を自動表示
+            useEffect(() => {
+                if (currentPage === 'planning' && isStaff && !planSoShopId && soShops.length) {
+                    const s = soShops[0]; setPlanSoShopId(String(s.id)); setPlanSelectedBranch(s.name);
+                }
+            }, [currentPage, isStaff, soShops.length]);
+            // staffが手当タブを開いたら店舗名・氏名を自動入力（打たなくてよい）
+            useEffect(() => {
+                if (currentPage === 'allowance' && isStaff && authState.staffId && soShops.length) {
+                    setAlwForm(f => f.staffId ? f : { ...f, shopId: String(soShops[0].id), staffId: String(authState.staffId), staffName: authState.staffName || '' });
+                }
+            }, [currentPage, isStaff, authState.staffId, soShops.length]);
             // 参考リンク管理
             const [planLinks, setPlanLinks] = useState(() => {
                 try {
@@ -8432,7 +8467,7 @@
             return (
                 <div className="min-h-screen bg-gradient-to-br from-slate-50 to-brand-50/30 flex">
                     {/* Sidebar */}
-                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} authRoot={authState.root} authOwner={authState.owner} />
+                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} authRoot={authState.root} authOwner={authState.owner} authRole={authRole} />
 
                     {/* Main Content */}
                     <div className="flex-1 min-w-0 overflow-x-hidden pb-16 md:pb-0">
@@ -13276,7 +13311,7 @@
                                                             <div className="font-bold text-slate-800">{a.owner} {a.hasPassword ? <span className="text-[10px] text-emerald-600">●PASS設定済</span> : <span className="text-[10px] text-rose-500">●PASS未設定</span>}</div>
                                                             <div className="text-[11px] text-slate-400 font-bold truncate">{a.shops && a.shops.length ? a.shops.join('、') : '（店舗指定なし＝オーナー割当）'}</div>
                                                         </div>
-                                                        <button onClick={() => { setStAcctForm({ owner: a.owner, password: '', shops: a.shops || [] }); setStAcctMsg(''); }} className="px-2.5 py-1 bg-slate-100 text-slate-600 rounded-lg text-[11px] font-black hover:bg-slate-200">編集</button>
+                                                        <button onClick={() => { setStAcctForm({ owner: a.owner, password: '', shops: a.shops || [], role: a.role || 'owner', staffId: a.staffId || '', staffName: a.staffName || '' }); setStAcctMsg(''); }} className="px-2.5 py-1 bg-slate-100 text-slate-600 rounded-lg text-[11px] font-black hover:bg-slate-200">編集</button>
                                                         <button onClick={() => { if (confirm(`${a.owner} を削除しますか？`)) stDeleteAccount(a.owner); }} className="px-2.5 py-1 bg-rose-50 text-rose-600 rounded-lg text-[11px] font-black hover:bg-rose-100">削除</button>
                                                     </div>
                                                 ))}
@@ -13369,15 +13404,25 @@
                                 </div>
 
                                 {/* 追加/更新フォーム */}
+                                {(() => {
+                                    const acctRoster = (() => { const seen = new Set(); const out = []; stAcctForm.shops.forEach(nm => { const shop = shopList.find(s => s.name === nm); if (shop) stTherapistRoster(shop.id).forEach(st => { const k = String(st.id); if (!seen.has(k)) { seen.add(k); out.push(st); } }); }); return out; })();
+                                    return (
                                 <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-5 space-y-3">
-                                    <div className="text-sm font-black text-slate-800">オーナーを追加 / 更新</div>
+                                    <div className="text-sm font-black text-slate-800">アカウントを追加 / 更新</div>
+                                    {/* ロール選択 */}
+                                    <div className="flex gap-2">
+                                        {[{ v: 'owner', l: 'オーナー' }, { v: 'staff', l: 'セラピスト/マネージャー' }].map(r => (
+                                            <button key={r.v} onClick={() => setStAcctForm(f => ({ ...f, role: r.v }))} className={`px-3 py-1.5 rounded-lg text-xs font-black border ${stAcctForm.role === r.v ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}>{r.l}</button>
+                                        ))}
+                                        <span className="text-[11px] text-slate-400 font-bold self-center ml-1">{stAcctForm.role === 'staff' ? '返金明細書は非表示・手当は本人名で自動入力' : '返金明細書を閲覧可'}</span>
+                                    </div>
                                     <div className="flex flex-col md:flex-row gap-2">
-                                        <input value={stAcctForm.owner} onChange={e => setStAcctForm(f => ({ ...f, owner: e.target.value }))} placeholder="オーナー氏名（例: 野島オーナー）" className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold" list="settings-owner-suggest" />
+                                        <input value={stAcctForm.owner} onChange={e => setStAcctForm(f => ({ ...f, owner: e.target.value }))} placeholder={stAcctForm.role === 'staff' ? '氏名（ログインID・スタッフ選択で自動入力）' : 'オーナー氏名（例: 野島オーナー）'} className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold" list="settings-owner-suggest" />
                                         <datalist id="settings-owner-suggest">{Object.keys(OWNER_BRANCHES).map(o => <option key={o} value={o} />)}</datalist>
                                         <input value={stAcctForm.password} onChange={e => setStAcctForm(f => ({ ...f, password: e.target.value }))} placeholder="ログインPASS（変更する場合のみ入力）" className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold" />
                                     </div>
                                     <div>
-                                        <div className="text-[11px] font-black text-slate-400 mb-1">管轄店舗（SalonOne店舗から選択）</div>
+                                        <div className="text-[11px] font-black text-slate-400 mb-1">{stAcctForm.role === 'staff' ? '所属/管轄店舗（複数可＝マネージャー）' : '管轄店舗（SalonOne店舗から選択）'}</div>
                                         <div className="max-h-56 overflow-y-auto border border-slate-200 rounded-lg p-2 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1 bg-white">
                                             {shopList.map(s => {
                                                 const on = stAcctForm.shops.includes(s.name);
@@ -13388,12 +13433,23 @@
                                         </div>
                                         {stAcctForm.shops.length > 0 && <div className="flex items-center gap-2 mt-1"><span className="text-[11px] text-slate-400 font-bold">{stAcctForm.shops.length}店舗選択中</span><button onClick={() => setStAcctForm(f => ({ ...f, shops: [] }))} className="text-[11px] text-slate-400 font-bold hover:text-slate-600">クリア</button></div>}
                                     </div>
+                                    {stAcctForm.role === 'staff' && (
+                                        <div>
+                                            <div className="text-[11px] font-black text-slate-400 mb-1">本人（SalonOne配属スタッフ）※手当の自動反映に使用</div>
+                                            <select value={stAcctForm.staffId} onChange={e => { const st = acctRoster.find(x => String(x.id) === e.target.value); setStAcctForm(f => ({ ...f, staffId: e.target.value, staffName: st ? st.name : '', owner: (st && (!f.owner || f.owner === f.staffName)) ? st.name : f.owner })); }} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white" disabled={!stAcctForm.shops.length}>
+                                                <option value="">{stAcctForm.shops.length ? 'スタッフを選択（氏名がIDに自動入力）' : '先に店舗を選択'}</option>
+                                                {acctRoster.map(st => <option key={st.id} value={st.id}>{st.name}</option>)}
+                                            </select>
+                                        </div>
+                                    )}
                                     <div className="flex items-center gap-2">
-                                        <button onClick={() => stSaveAccount(stAcctForm.owner.trim(), stAcctForm.password, stAcctForm.shops)} disabled={stAcctBusy || !stAcctForm.owner.trim()} className="px-5 py-2 bg-brand-500 text-white rounded-lg text-sm font-black hover:bg-brand-600 disabled:opacity-40">{stAcctBusy ? '保存中...' : '保存'}</button>
-                                        {stAcctForm.owner && <button onClick={() => setStAcctForm({ owner: '', password: '', shops: [] })} className="px-3 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-black hover:bg-slate-200">新規入力</button>}
+                                        <button onClick={() => stSaveAccount(stAcctForm.owner.trim(), stAcctForm.password, stAcctForm.shops, stAcctForm.role, stAcctForm.staffId, stAcctForm.staffName)} disabled={stAcctBusy || !stAcctForm.owner.trim()} className="px-5 py-2 bg-brand-500 text-white rounded-lg text-sm font-black hover:bg-brand-600 disabled:opacity-40">{stAcctBusy ? '保存中...' : '保存'}</button>
+                                        {stAcctForm.owner && <button onClick={() => setStAcctForm({ owner: '', password: '', shops: [], role: 'owner', staffId: '', staffName: '' })} className="px-3 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-black hover:bg-slate-200">新規入力</button>}
                                         {stAcctMsg && <span className="text-xs font-bold text-slate-600">{stAcctMsg}</span>}
                                     </div>
                                 </div>
+                                    );
+                                })()}
 
                                 {/* オーナー一覧 */}
                                 <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-5">
@@ -13404,10 +13460,10 @@
                                         {stAccounts.map(a => (
                                             <div key={a.owner} className="flex items-center gap-3 py-2.5">
                                                 <div className="flex-1 min-w-0">
-                                                    <div className="font-bold text-slate-800 flex items-center gap-2">{a.owner} {a.hasPassword ? <span className="text-[10px] text-emerald-600 font-black">●PASS設定済</span> : <span className="text-[10px] text-rose-500 font-black">●PASS未設定</span>}</div>
-                                                    <div className="text-[11px] text-slate-500 font-bold">{a.shops && a.shops.length ? `管轄: ${a.shops.join('、')}` : '（管轄店舗の指定なし＝経営指標の割当を使用）'}</div>
+                                                    <div className="font-bold text-slate-800 flex items-center gap-2">{a.owner} <span className={`text-[10px] font-black px-1.5 py-0.5 rounded ${a.role === 'staff' ? 'bg-sky-100 text-sky-700' : 'bg-amber-100 text-amber-700'}`}>{a.role === 'staff' ? 'セラピスト' : 'オーナー'}</span>{a.hasPassword ? <span className="text-[10px] text-emerald-600 font-black">●PASS設定済</span> : <span className="text-[10px] text-rose-500 font-black">●PASS未設定</span>}</div>
+                                                    <div className="text-[11px] text-slate-500 font-bold">{a.shops && a.shops.length ? `店舗: ${a.shops.join('、')}` : '（店舗の指定なし）'}{a.role === 'staff' && a.staffName ? ` ・ 本人: ${a.staffName}` : ''}</div>
                                                 </div>
-                                                <button onClick={() => { setStAcctForm({ owner: a.owner, password: '', shops: a.shops || [] }); setStAcctMsg(''); window.scrollTo({ top: 0, behavior: 'smooth' }); }} className="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-xs font-black hover:bg-slate-200">編集</button>
+                                                <button onClick={() => { setStAcctForm({ owner: a.owner, password: '', shops: a.shops || [], role: a.role || 'owner', staffId: a.staffId || '', staffName: a.staffName || '' }); setStAcctMsg(''); window.scrollTo({ top: 0, behavior: 'smooth' }); }} className="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-xs font-black hover:bg-slate-200">編集</button>
                                                 <button onClick={() => { if (confirm(`${a.owner} を削除しますか？`)) stDeleteAccount(a.owner); }} className="px-3 py-1.5 bg-rose-50 text-rose-600 rounded-lg text-xs font-black hover:bg-rose-100">削除</button>
                                             </div>
                                         ))}
@@ -16646,11 +16702,11 @@
             );
         };
 
-        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authOwner = '' }) => {
+        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authOwner = '', authRole = 'root' }) => {
             const menuItems = [
                 { id: 'salonone', label: 'SalonOne売上', icon: <Calendar size={20} />, mobileIcon: <Calendar size={18} /> },
                 { id: 'square', label: 'サブスク分析', icon: <CreditCard size={20} />, mobileIcon: <CreditCard size={18} /> },
-                { id: 'settlement', label: '返金明細書', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} /> },
+                { id: 'settlement', label: '返金明細書', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} />, hideForStaff: true },
                 { id: 'allowance', label: '手当・領収書', icon: <FileText size={20} />, mobileIcon: <FileText size={18} /> },
                 { id: 'planning', label: '事業計画', icon: <Target size={20} />, mobileIcon: <Target size={18} /> },
                 { id: 'settings', label: 'オーナー設定', icon: <Users size={20} />, mobileIcon: <Users size={18} />, rootOnly: true },
@@ -16660,7 +16716,7 @@
                 // { id: 'marketing', label: 'マーケティング', icon: <Megaphone size={20} />, mobileIcon: <Megaphone size={18} /> },
                 // { id: 'customers', label: '顧客管理', icon: <Users size={20} />, mobileIcon: <Users size={18} /> },
                 // { id: 'finance', label: '経理・財務', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} /> }
-            ].filter(it => authRoot || !it.rootOnly);
+            ].filter(it => (authRoot || !it.rootOnly) && !(it.hideForStaff && authRole === 'staff'));
 
             const alertCount = cpaAlerts.length;
 

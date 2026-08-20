@@ -1139,6 +1139,9 @@
                 } catch {}
             };
             const clearAuth = () => { ['naoru_auth_token', 'naoru_auth_owner', 'naoru_auth_root', 'naoru_auth_shops', 'naoru_auth_role', 'naoru_auth_staffid', 'naoru_auth_staffname'].forEach(k => { try { localStorage.removeItem(k); } catch {} }); };
+            // アカウント拡張情報（role/staffId/staffName）はKV(plan-store)に保持（GAS列に依存しない）
+            const loadAcctMeta = async () => { try { const r = await fetch('/api/plan-store?type=accountmeta'); const j = await r.json().catch(() => ({})); return (j && j.meta && typeof j.meta === 'object') ? j.meta : {}; } catch { return {}; } };
+            const saveAcctMeta = async (owner, role, staffId, staffName) => { try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'accountmeta', action: 'set', owner, role, staffId, staffName }) }); } catch {} };
 
             // 起動時: 保存トークンを検証（＋店舗アクセスを最新化）。未設定環境（開発）は認証スキップ。
             useEffect(() => {
@@ -1156,6 +1159,8 @@
                                 const g = await fetch('/api/settlement-auth').then(r => r.json());
                                 const list = g && g.shops && g.shops[authState.owner]; if (Array.isArray(list)) shops = list;
                                 const meta = g && g.meta && g.meta[authState.owner]; if (meta) { role = meta.role || role || 'owner'; staffId = meta.staffId || ''; staffName = meta.staffName || ''; }
+                                // KV拡張情報（GAS列に依存しない）を優先適用
+                                const km = (await loadAcctMeta())[authState.owner]; if (km) { role = km.role || role; staffId = km.staffId || staffId; staffName = km.staffName || staffName; }
                             } catch {}
                         } else { role = 'root'; staffId = ''; staffName = ''; }
                         persistAuth(authState.owner, authState.token, !!data.root, shops, role, staffId, staffName);
@@ -1205,9 +1210,10 @@
                     const data = await res.json();
                     if (data.ok) {
                         const shops = data.root ? null : (Array.isArray(data.shops) ? data.shops : []);
-                        const role = data.role || (data.root ? 'root' : 'owner');
-                        persistAuth(data.owner || '', data.token, !!data.root, shops, role, data.staffId || '', data.staffName || '');
-                        setAuthState({ checking: false, authenticated: true, token: data.token, owner: data.owner || '', root: !!data.root, shops, role, staffId: data.staffId || '', staffName: data.staffName || '' });
+                        let role = data.role || (data.root ? 'root' : 'owner'), staffId = data.staffId || '', staffName = data.staffName || '';
+                        if (!data.root) { const meta = await loadAcctMeta(); const m = meta[data.owner]; if (m) { role = m.role || role; staffId = m.staffId || staffId; staffName = m.staffName || staffName; } }
+                        persistAuth(data.owner || '', data.token, !!data.root, shops, role, staffId, staffName);
+                        setAuthState({ checking: false, authenticated: true, token: data.token, owner: data.owner || '', root: !!data.root, shops, role, staffId, staffName });
                         setAuthPassword(''); setAuthId('');
                     } else {
                         setAuthError(data.error || 'ログインに失敗しました');
@@ -1850,7 +1856,12 @@
                 try {
                     const r = await fetch(`/api/settlement-owners?hqToken=${encodeURIComponent(stAuthToken())}`);
                     const j = await r.json().catch(() => ({}));
-                    if (j.ok) setStAccounts(j.owners || []);
+                    if (j.ok) {
+                        // KVのrole/staffId/staffNameを優先マージ（GAS列に依存せず表示）
+                        const km = await loadAcctMeta();
+                        const merged = (j.owners || []).map(o => { const m = km[o.owner]; return m ? { ...o, role: m.role || o.role, staffId: m.staffId || o.staffId, staffName: m.staffName || o.staffName } : o; });
+                        setStAccounts(merged);
+                    }
                     else { setStAccounts([]); setStAcctMsg(j.error || '取得に失敗しました'); }
                 } catch { setStAccounts([]); setStAcctMsg('通信に失敗しました'); }
             };
@@ -1867,6 +1878,8 @@
                         body: JSON.stringify(payload),
                     });
                     const j = await r.json().catch(() => ({}));
+                    // role/staffId は KV(plan-store) にも保存（GAS列の再デプロイに依存せず反映）
+                    if (role != null || staffId != null || staffName != null) await saveAcctMeta(owner, role || 'owner', staffId || '', staffName || '');
                     setStAcctMsg(j.ok ? `✅ ${owner} を保存しました` : `失敗: ${j.error || '不明'}`);
                     if (j.ok) { setStAcctForm({ owner: '', password: '', shops: [], role: 'owner', staffId: '', staffName: '' }); await stLoadAccounts(); setStOwnerShops(null); }
                 } catch { setStAcctMsg('通信に失敗しました'); }
@@ -11863,7 +11876,9 @@
                                 shopOptions.forEach(sh => { const o = soShopOwner(sh.name); if (o) (groups[o] = groups[o] || []).push(sh); });
                                 return groups;
                             })();
-                            const staffOptions = (soStaffs.length ? soStaffs : soDemoStaffs).filter(st => !st.deleted).filter(st => soShopSel.length === 0 || soShopSel.map(String).includes(String(st.shop_id)));
+                            // セラピスト本人ログイン時は本人のみ表示（staffId紐付け）
+                            const authStaffOnly = (isStaff && authState.staffId) ? String(authState.staffId) : null;
+                            const staffOptions = (soStaffs.length ? soStaffs : soDemoStaffs).filter(st => !st.deleted).filter(st => soShopSel.length === 0 || soShopSel.map(String).includes(String(st.shop_id))).filter(st => !authStaffOnly || String(st.id) === authStaffOnly);
                             const shopName = soShopLabel();
                             const staffName = soStaffSel.length === 0 ? '全スタッフ' : (soStaffSel.length === 1 ? (staffOptions.find(s => String(s.id) === String(soStaffSel[0])) || {}).name || '1名' : `${soStaffSel.length}名`);
                             const soToggleShop = (id) => { setSoOwner(''); setSoShopSel(sel => sel.map(String).includes(String(id)) ? sel.filter(x => String(x) !== String(id)) : [...sel, String(id)]); };
@@ -11910,6 +11925,7 @@
                                 const seen = new Set();
                                 return s.byStaff
                                     .filter(st => soStaffInSelectedShop(st.id, st.name))
+                                    .filter(st => !authStaffOnly || String(st.id) === authStaffOnly)
                                     .filter(st => soStaffSel.length === 0 || soStaffSel.map(String).includes(String(st.id)))
                                     .filter(st => { const k = soNorm(st.name) || String(st.id); if (seen.has(k)) return false; seen.add(k); return true; });
                             })();
@@ -11936,7 +11952,7 @@
                             // ソート適用
                             const sortedStaff = soSortBy(staffRows, soStaffSort.key, soStaffSort.dir);
                             const sortedChannels = soSortBy(soChannels, soChSort.key, soChSort.dir);
-                            const sortedMkStaff = [...soStaffMk.filter(r => r.isTotal), ...soSortBy(soStaffMk.filter(r => !r.isTotal && soStaffInSelectedShop(r.id, r.name)), soMkSort.key, soMkSort.dir)];
+                            const sortedMkStaff = [...soStaffMk.filter(r => r.isTotal), ...soSortBy(soStaffMk.filter(r => !r.isTotal && soStaffInSelectedShop(r.id, r.name) && (!authStaffOnly || String(r.id) === authStaffOnly)), soMkSort.key, soMkSort.dir)];
                             const sortedDaily = s ? soSortBy(s.byDay, soDailySort.key, soDailySort.dir) : [];
                             // 計画サブタブ用
                             const planKey = soShopKey() + '_' + soFrom.slice(0, 7);
@@ -11980,23 +11996,13 @@
                                                         <div className="bg-white border border-slate-200 rounded-2xl shadow-xl p-3 space-y-2 max-h-[440px] overflow-hidden flex flex-col w-[280px]">
                                                             <div className="relative px-1 pb-1">
                                                                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                                                                <input type="text" placeholder="店舗/オーナーを検索..." className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-emerald-500 outline-none" value={soStoreSearch} onChange={(e) => setSoStoreSearch(e.target.value)} />
+                                                                <input type="text" placeholder="店舗を検索..." className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-emerald-500 outline-none" value={soStoreSearch} onChange={(e) => setSoStoreSearch(e.target.value)} />
                                                             </div>
                                                             <div className="flex items-center justify-between px-1">
                                                                 <button onClick={() => { setSoOwner(''); setSoShopSel([]); }} className={`px-2.5 py-1 rounded-lg text-xs font-black ${soShopSel.length === 0 ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>全店舗</button>
                                                                 {soShopSel.length > 0 && <span className="text-[11px] font-bold text-slate-400">{soShopSel.length}店舗選択中</span>}
                                                             </div>
                                                             <div className="overflow-y-auto flex-1 space-y-2">
-                                                                {Object.keys(ownerGroups).filter(o => !soStoreSearch || o.includes(soStoreSearch)).length > 0 && (
-                                                                    <div>
-                                                                        <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider px-1 mb-1">オーナー別</div>
-                                                                        <div className="flex flex-wrap gap-1">
-                                                                            {Object.keys(ownerGroups).filter(o => !soStoreSearch || o.includes(soStoreSearch)).map(o => (
-                                                                                <button key={o} onClick={() => soSelectOwner(o)} className={`px-2 py-1 rounded-lg text-[11px] font-bold ${soOwner === o ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>{o.replace('オーナー', '')}<span className="opacity-60 ml-0.5">{ownerGroups[o].length}</span></button>
-                                                                            ))}
-                                                                        </div>
-                                                                    </div>
-                                                                )}
                                                                 <div>
                                                                     <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider px-1 mb-1">店舗（複数選択可）</div>
                                                                     <div className="space-y-1">

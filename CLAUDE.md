@@ -67,8 +67,11 @@ tests/              # Vitestテスト
 ```
 
 ## セキュリティ
-- **認証（アカウント制）**: ダッシュボード本体のログインは **ID（氏名）＋PASS のアカウント制**。ログインは `/api/settlement-auth`（`?fn=auth`）を使い、返金明細書のオーナーアカウント（GAS「オーナー設定」＋`SETTLEMENT_OWNER_*`）と共通。ログイン後は **アカウントに割り当てた店舗のみ表示**（`soShops` を `authState.shops` パターンでフィルタ。root=全店）。root は `DASHBOARD_PASSWORD` でログイン（全店舗・`__root__` トークン）。localStorageに `naoru_auth_token`/`naoru_auth_owner`/`naoru_auth_root`/`naoru_auth_shops` を保存。`DASHBOARD_PASSWORD`・アカウント共に未設定なら認証スキップ（開発用）
-  - アカウント管理は「オーナー設定」タブ（root専用。非rootには非表示）。「店舗一覧からまとめてアカウント作成」で店舗名＝ID・アクセス＝その店舗のアカウントを共通初期PASSで一括発行（`stBulkCreate`）
+- **認証（アカウント制・ロール別）**: ダッシュボード本体のログインは **ID（氏名）＋PASS のアカウント制**。ログインは `/api/settlement-auth`（`?fn=auth`）を使い、返金明細書のオーナーアカウント（GAS「オーナー設定」＋`SETTLEMENT_OWNER_*`）と共通。ログイン後は **アカウントに割り当てた店舗のみ表示**（`soShops` を `authState.shops` パターンでフィルタ。root=全店）。root は `DASHBOARD_PASSWORD` でログイン（全店舗・`__root__` トークン）。localStorageに `naoru_auth_token`/`naoru_auth_owner`/`naoru_auth_root`/`naoru_auth_shops`/`naoru_auth_role`/`naoru_auth_staffid`/`naoru_auth_staffname` を保存。`DASHBOARD_PASSWORD`・アカウント共に未設定なら認証スキップ（開発用）
+  - **3ロール**: `root`（管理者・全店・オーナー設定可）／`owner`（オーナー・管轄店舗・返金明細書可）／`staff`（セラピスト/マネージャー・所属/管轄店舗・返金明細書は非表示）。マネージャー/複数管轄はアクセス店舗リストの複数指定で表現
+  - **タブのロール連動**: 返金明細書=root/ownerのみ（staffは非表示・退避）／オーナー設定=rootのみ／手当タブはstaffなら本人の店舗・氏名を自動入力（`staffId`でSalonOne配属スタッフに紐付け→返金明細書に自動反映）／事業計画はstaffなら所属店舗の計画を自動表示
+  - アカウント管理は「オーナー設定」タブ（root専用）。ロール選択＋（staffは）SalonOneロスターから本人を選び `staffId`/`staffName` を紐付け。「店舗一覧からまとめてアカウント作成」で一括発行（`stBulkCreate`）
+  - 拡張情報 `role`/`staffId`/`staffName` は GAS「オーナー設定」シートに列追加（`OWNER_HEADERS` に末尾追加・旧4列シートは初回アクセスで自動移行）。**GASスクリプト(`gas/settlement-gas-sample.js`)の再デプロイが必要**
   - 認可トークン: 本社操作(hqToken)は `settlement-owners`/`settlement-store` が `settlement-auth` の rootToken も受理（メインダッシュボードのroot統一ログイン）
   - ⚠️ 店舗絞り込みはUIレベル（SalonOneプロキシ `/api/salonone` 自体は未認証GET）。UIで見える範囲をアカウント毎に制御する用途。厳密なサーバー側データ分離が必要なら別途プロキシ認証が必要
 - **旧認証**: `api/auth.js`（`DASHBOARD_PASSWORD` 単純照合）は現在メインログインでは未使用（後方互換で残置）

@@ -20,7 +20,8 @@
  *  - status: draft / published / confirmed / revision_requested
  *
  * 【シート2「オーナー設定」列構成】（自動作成。ダッシュボードのオーナー管理UIから編集）
- *   owner | password | shops(カンマ区切り店舗名) | updatedAt
+ *   owner | password | shops(カンマ区切り店舗名) | updatedAt | role | staffId | staffName
+ *   （role/staffId/staffName は自動で追記。既存4列シートも初回アクセス時に移行）
  *  - オーナー別ログインPASSとアクセス可能店舗を保存。環境変数の再デプロイ不要
  *  - password はサーバー間通信でのみ読み出し（ブラウザには返さない）
  */
@@ -29,7 +30,9 @@ var SHEET_NAME = '返金明細書';
 var HEADERS = ['month', 'shopId', 'shopName', 'owner', 'status', 'revisionNote', 'snapshot', 'publishedAt', 'confirmedAt', 'updatedAt'];
 // オーナーアカウント（パスワード・アクセス店舗）シート
 var OWNER_SHEET = 'オーナー設定';
-var OWNER_HEADERS = ['owner', 'password', 'shops', 'updatedAt']; // shops はカンマ区切り店舗名
+// shops はカンマ区切り店舗名。role/staffId/staffName は後方互換のため末尾に追加。
+//  role='owner'|'staff'（未設定はダッシュボード側で owner 既定）／staffId・staffName は staff の SalonOne 配属スタッフ紐付け。
+var OWNER_HEADERS = ['owner', 'password', 'shops', 'updatedAt', 'role', 'staffId', 'staffName'];
 // 事業計画(SalonOne計画)の目標・アクション 共有ストア（全デバイス同期）
 var PLAN_SHEET = '計画設定';
 var PLAN_HEADERS = ['key', 'json', 'updatedAt']; // key: 'goals' | 'actions'
@@ -84,6 +87,13 @@ function getOwnerSheet_() {
   if (!sh) {
     sh = ss.insertSheet(OWNER_SHEET);
     sh.getRange(1, 1, 1, OWNER_HEADERS.length).setValues([OWNER_HEADERS]);
+  } else {
+    // 旧シート（owner|password|shops|updatedAt の4列）へ role/staffId/staffName 列を追記して移行。
+    // 先頭4列の名称は不変のため、ヘッダ行を上書きしても既存データは壊れない。
+    var head = sh.getRange(1, 1, 1, OWNER_HEADERS.length).getValues()[0];
+    var needs = false;
+    for (var i = 0; i < OWNER_HEADERS.length; i++) { if (String(head[i] || '') !== OWNER_HEADERS[i]) { needs = true; break; } }
+    if (needs) sh.getRange(1, 1, 1, OWNER_HEADERS.length).setValues([OWNER_HEADERS]);
   }
   return sh;
 }
@@ -104,6 +114,9 @@ function readOwners_() {
       password: idx.password >= 0 ? String(row[idx.password]) : '',
       shops: idx.shops >= 0 ? String(row[idx.shops] || '') : '',
       updatedAt: idx.updatedAt >= 0 ? String(row[idx.updatedAt] || '') : '',
+      role: idx.role >= 0 ? String(row[idx.role] || '') : '',
+      staffId: idx.staffId >= 0 ? String(row[idx.staffId] || '') : '',
+      staffName: idx.staffName >= 0 ? String(row[idx.staffName] || '') : '',
     });
   }
   return rows;
@@ -138,7 +151,7 @@ function doGet(e) {
     // オーナーアカウント一覧（サーバー間通信のみ・password含む）
     if (String(p.type) === 'owners') {
       var owners = readOwners_().map(function (o) {
-        return { owner: o.owner, password: o.password, shops: o.shops, updatedAt: o.updatedAt };
+        return { owner: o.owner, password: o.password, shops: o.shops, updatedAt: o.updatedAt, role: o.role, staffId: o.staffId, staffName: o.staffName };
       });
       return json_({ owners: owners });
     }
@@ -193,7 +206,11 @@ function doPost(e) {
       // password 未指定なら既存を保持
       var pw = (body.password != null && String(body.password) !== '') ? String(body.password) : (found ? found.password : '');
       var shops = body.shops != null ? String(body.shops) : (found ? found.shops : '');
-      var vals = [String(body.owner), pw, shops, now];
+      var role = body.role != null ? String(body.role) : (found ? found.role : '');
+      var staffId = body.staffId != null ? String(body.staffId) : (found ? found.staffId : '');
+      var staffName = body.staffName != null ? String(body.staffName) : (found ? found.staffName : '');
+      var meta = { owner: String(body.owner), password: pw, shops: shops, updatedAt: now, role: role, staffId: staffId, staffName: staffName };
+      var vals = OWNER_HEADERS.map(function (h) { return meta[h] != null ? meta[h] : ''; });
       if (found) osh.getRange(found._row, 1, 1, OWNER_HEADERS.length).setValues([vals]);
       else osh.appendRow(vals);
       return json_({ ok: true });

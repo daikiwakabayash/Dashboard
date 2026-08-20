@@ -1347,6 +1347,8 @@
                 const pats = Array.isArray(authState.shops) ? authState.shops : [];
                 return arr.filter(s => pats.some(p => String(s.name || '').includes(p)));
             }, [soShopsRaw, authState.root, authState.shops]);
+            // SalonOne /shops レスポンスを店舗配列に変換（削除済み店舗は除外）
+            const soShopsFromResp = (j) => (j && (j.data || j) || []).filter(s => !s.deleted_at).map(s => ({ id: String(s.id ?? s.shop_id ?? ''), name: s.name || s.shop_name || `店舗${s.id}` }));
             const [soStaffs, setSoStaffs] = useState([]);       // スタッフ一覧
             const [soLoading, setSoLoading] = useState(false);
             const [soError, setSoError] = useState(null);
@@ -1806,7 +1808,7 @@
             useEffect(() => {
                 if (currentPage === 'settings' && soShopsRaw.length === 0) {
                     fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`).then(r => r.json()).then(j => {
-                        const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? ''), name: s.name || `店舗${s.id}` }));
+                        const arr = soShopsFromResp(j);
                         if (arr.length) setSoShops(arr);
                     }).catch(() => {});
                 }
@@ -1917,7 +1919,7 @@
             useEffect(() => {
                 if (['settlement', 'allowance'].includes(currentPage) && soShopsRaw.length === 0) {
                     fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`).then(r => r.json()).then(j => {
-                        const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? ''), name: s.name || `店舗${s.id}` }));
+                        const arr = soShopsFromResp(j);
                         if (arr.length) { setSoShops(arr); }
                     }).catch(() => {});
                 } else if (currentPage === 'settlement' && soShops.length && stSel.length === 0) {
@@ -1996,12 +1998,19 @@
                     const s = soShops[0]; setPlanSoShopId(String(s.id)); setPlanSelectedBranch(s.name);
                 }
             }, [currentPage, isStaff, soShops.length]);
-            // staffが手当タブを開いたら店舗名・氏名を自動入力（打たなくてよい）
+            // 手当タブ: ログイン中アカウントの店舗・氏名を自動入力（打たなくてよい）
+            //  staffId 紐付けがあればそれを、無ければ所属店舗の先頭スタッフを既定にする
             useEffect(() => {
-                if (currentPage === 'allowance' && isStaff && authState.staffId && soShops.length) {
-                    setAlwForm(f => f.staffId ? f : { ...f, shopId: String(soShops[0].id), staffId: String(authState.staffId), staffName: authState.staffName || '' });
-                }
-            }, [currentPage, isStaff, authState.staffId, soShops.length]);
+                if (currentPage !== 'allowance' || authState.root || !soShops.length) return;
+                setAlwForm(f => {
+                    if (f.staffId) return f; // 既に選択済みは尊重
+                    const shopId = String(soShops[0].id);
+                    if (authState.staffId) return { ...f, shopId, staffId: String(authState.staffId), staffName: authState.staffName || '' };
+                    const roster = stTherapistRoster(shopId);
+                    const first = roster[0];
+                    return first ? { ...f, shopId, staffId: String(first.id), staffName: first.name } : { ...f, shopId };
+                });
+            }, [currentPage, authState.root, authState.staffId, soShops.length, soStaffs.length]);
             // 参考リンク管理
             const [planLinks, setPlanLinks] = useState(() => {
                 try {
@@ -2745,6 +2754,8 @@
             // Square データ取得（75店舗対応: バッチ取得 + プログレッシブ表示 + stale-while-revalidate）
             const fetchSquareData = async (forceRefresh = false) => {
                 console.log('Fetching Square data...');
+                // キャッシュはアクセス店舗スコープごとに分離（root=全店、非root=許可店舗のみ）
+                const sqCacheKey = authState.root ? SQUARE_CACHE_KEY : `${SQUARE_CACHE_KEY}:${Array.isArray(authState.shops) ? authState.shops.join('|') : ''}`;
                 try {
                     setSqError(null);
                     setSqFailedDetails(null);
@@ -2752,7 +2763,7 @@
                     // Step 0: キャッシュを先にチェック（ネットワーク呼び出し前に即座に表示）
                     let hasStaleCache = false;
                     try {
-                        const parsed = await idbCache.get(SQUARE_CACHE_KEY);
+                        const parsed = await idbCache.get(sqCacheKey);
                         if (parsed && parsed.timestamp && parsed.data) {
                             const age = Date.now() - parsed.timestamp;
                             if (age < CACHE_EXPIRY_MS && !forceRefresh) {
@@ -2794,7 +2805,7 @@
                     } catch (infoErr) {
                         // info取得失敗時はキャッシュがあれば使う（オフライン対応）
                         try {
-                            const parsed = await idbCache.get(SQUARE_CACHE_KEY);
+                            const parsed = await idbCache.get(sqCacheKey);
                             if (parsed && parsed.data) {
                                 console.log('Info fetch failed, using cached data');
                                 setSqData(parsed.data);
@@ -2808,7 +2819,7 @@
                     // アカウント数変更検知: キャッシュのアカウント数と一致しなければキャッシュ無効化
                     if (hasStaleCache) {
                         try {
-                            const parsed = await idbCache.get(SQUARE_CACHE_KEY);
+                            const parsed = await idbCache.get(sqCacheKey);
                             if (parsed) {
                                 const cachedAccounts = parsed.data && parsed.data.meta ? parsed.data.meta.totalAccounts : 0;
                                 if (cachedAccounts !== totalAccounts) {
@@ -2822,7 +2833,16 @@
                     setSqLoading(true);
                     setSqLoadingProgress({ total: 0, completed: 0, failed: 0 });
 
-                    const accounts = infoData.accounts;
+                    // 非rootはアクセス店舗のSquareアカウントのみ取得（全91件を取りに行かない）
+                    // 各アカウントは元のindexを保持しているため、絞り込んでもサーバー側の対応は崩れない
+                    let accounts = infoData.accounts;
+                    if (!authState.root && Array.isArray(authState.shops) && authState.shops.length) {
+                        const cores = authState.shops.map(n => String(n).replace(/^NAORU整体\s*/, '').replace(/^NAORU\s*/, '').trim()).filter(Boolean);
+                        if (cores.length) {
+                            const scoped = accounts.filter(a => { const nm = String(a.name || ''); return cores.some(c => nm.includes(c) || c.includes(nm)); });
+                            if (scoped.length) { accounts = scoped; totalAccounts = scoped.length; }
+                        }
+                    }
                     let completedBatches = 0;
                     let failedCount = 0;
 
@@ -3001,7 +3021,7 @@
 
                     // キャッシュ保存（IndexedDB。大きいデータでも保存でき、次回以降は即時表示）
                     try {
-                        await idbCache.set(SQUARE_CACHE_KEY, { data: result, timestamp: Date.now() });
+                        await idbCache.set(sqCacheKey, { data: result, timestamp: Date.now() });
                     } catch (e) { /* ignore cache write error */ }
                 } catch (err) {
                     console.error('Square fetch error:', err);
@@ -3831,7 +3851,7 @@
                         try {
                             const shopRes = await fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`);
                             const shopJson = await shopRes.json().catch(() => ({}));
-                            const shopArr = (shopJson.data || shopJson || []).map(s => ({ id: String(s.id ?? s.shop_id ?? ''), name: s.name || s.shop_name || `店舗${s.id}` }));
+                            const shopArr = soShopsFromResp(shopJson);
                             if (shopArr.length) setSoShops(shopArr);
                         } catch {}
                     }
@@ -3900,7 +3920,7 @@
                     try {
                         const r = await fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`);
                         const j = await r.json().catch(() => ({}));
-                        const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.shop_id ?? ''), name: s.name || s.shop_name || `店舗${s.id}` }));
+                        const arr = soShopsFromResp(j);
                         if (arr.length) setSoShops(arr);
                     } catch {}
                 })();
@@ -3909,7 +3929,7 @@
             useEffect(() => {
                 if (!chatOpen) return;
                 if (soShopsRaw.length === 0) {
-                    (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.shop_id ?? ''), name: s.name || s.shop_name || `店舗${s.id}` })); if (arr.length) setSoShops(arr); } catch {} })();
+                    (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`); const j = await r.json().catch(() => ({})); const arr = soShopsFromResp(j); if (arr.length) setSoShops(arr); } catch {} })();
                 }
                 if (soStaffs.length === 0) {
                     (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at })); if (arr.length) setSoStaffs(arr); } catch {} })();

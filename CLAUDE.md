@@ -71,7 +71,8 @@ tests/              # Vitestテスト
   - **3ロール**: `root`（管理者・全店・オーナー設定可）／`owner`（オーナー・管轄店舗・返金明細書可）／`staff`（セラピスト/マネージャー・所属/管轄店舗・返金明細書は非表示）。マネージャー/複数管轄はアクセス店舗リストの複数指定で表現
   - **タブのロール連動**: 返金明細書=root/ownerのみ（staffは非表示・退避）／オーナー設定=rootのみ／手当タブはstaffなら本人の店舗・氏名を自動入力（`staffId`でSalonOne配属スタッフに紐付け→返金明細書に自動反映）／事業計画はstaffなら所属店舗の計画を自動表示
   - アカウント管理は「オーナー設定」タブ（root専用）。ロール選択＋（staffは）SalonOneロスターから本人を選び `staffId`/`staffName` を紐付け。「店舗一覧からまとめてアカウント作成」で一括発行（`stBulkCreate`）
-  - 拡張情報 `role`/`staffId`/`staffName` は GAS「オーナー設定」シートに列追加（`OWNER_HEADERS` に末尾追加・旧4列シートは初回アクセスで自動移行）。**GASスクリプト(`gas/settlement-gas-sample.js`)の再デプロイが必要**
+  - 拡張情報 `role`/`staffId`/`staffName` は **KV(plan-store `?type=accountmeta`)を優先**（GAS列に依存せず即反映）。GAS「オーナー設定」シートにも列追加済み（`OWNER_HEADERS` 末尾・旧4列は自動移行）だが、GAS再デプロイ前でもKVで動作。フロントは保存時にKVへ書き、ログイン/検証時にKVを読んで `authState.role/staffId/staffName` に反映
+  - セラピスト本人ログイン時: SalonOne売上のスタッフ絞り込み・一覧は本人（`staffId`）のみ表示。手当フォームは本人の店舗・氏名を自動入力。店舗フィルタの「オーナー別」グループは廃止
   - 認可トークン: 本社操作(hqToken)は `settlement-owners`/`settlement-store` が `settlement-auth` の rootToken も受理（メインダッシュボードのroot統一ログイン）
   - ⚠️ 店舗絞り込みはUIレベル（SalonOneプロキシ `/api/salonone` 自体は未認証GET）。UIで見える範囲をアカウント毎に制御する用途。厳密なサーバー側データ分離が必要なら別途プロキシ認証が必要
 - **旧認証**: `api/auth.js`（`DASHBOARD_PASSWORD` 単純照合）は現在メインログインでは未使用（後方互換で残置）

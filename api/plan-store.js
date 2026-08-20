@@ -21,6 +21,7 @@ const GAS_URL = () => process.env.PLAN_GAS_URL || process.env.SETTLEMENT_GAS_URL
 const GOALS_KEY = 'naoru:plan:goals';
 const ACTIONS_KEY = 'naoru:plan:actions';
 const ALLOWANCE_KEY = 'naoru:allowance:v1'; // { submissions:[...], productivity:{staffId:{'YYYY-MM':gross}} }
+const ACCTMETA_KEY = 'naoru:accountmeta:v1'; // { owner: { role, staffId, staffName } }
 
 // ── Vercel KV (Upstash REST) ──
 async function kvGet(key) {
@@ -126,6 +127,33 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
       return res.status(400).json({ ok: false, error: 'invalid allowance action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── アカウント拡張情報（role/staffId/staffName）ストア: ?type=accountmeta ──
+  // GAS「オーナー設定」の列に依存せず、KV/Supabase/GASのblobで role/staff を保持する。
+  const isAcctMeta = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'accountmeta';
+  if (isAcctMeta) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ meta: {}, configured: false });
+    try {
+      const cur = (await blobGet(ACCTMETA_KEY, hasKV, hasSB, gas)) || {};
+      const meta = (cur && typeof cur === 'object') ? cur : {};
+      if (req.method === 'GET') return res.status(200).json({ meta, configured: true });
+      const body = req.body || {};
+      if (body.action === 'set' && body.owner) {
+        const next = { ...meta };
+        next[String(body.owner)] = { role: String(body.role || 'owner'), staffId: String(body.staffId || ''), staffName: String(body.staffName || '') };
+        await blobSet(ACCTMETA_KEY, next, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      if (body.action === 'delete' && body.owner) {
+        const next = { ...meta }; delete next[String(body.owner)];
+        await blobSet(ACCTMETA_KEY, next, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid accountmeta action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
     }

@@ -11327,6 +11327,24 @@
                                         </div>
                                     )}
 
+                                    {/* 取得カバレッジ（全店舗が反映されているかの確認用） */}
+                                    {sqData && sqData.meta && (
+                                        <div className="bg-white border border-slate-200 rounded-2xl px-4 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs font-bold text-slate-500">
+                                            <span className="flex items-center gap-1.5"><MapPin size={14} className="text-slate-400" />取得店舗 <b className="text-slate-800">{sqData.meta.totalStores || 0}</b> / 全{sqData.meta.totalAccounts || 0}アカウント</span>
+                                            <span>サブスク <b className="text-slate-800">{((sqData.subscriptions || []).length).toLocaleString()}</b>件</span>
+                                            {sqData.meta.failedAccounts && sqData.meta.failedAccounts.length > 0
+                                                ? <span className="text-amber-600 font-black">⚠️ 取得失敗 {sqData.meta.failedAccounts.length}店舗（下記・数値は過少の可能性）</span>
+                                                : <span className="text-emerald-600 font-black">✓ 全アカウント取得成功</span>}
+                                            {sqData.meta.diagnostics && (() => {
+                                                const part = sqData.meta.diagnostics.filter(d => {
+                                                    const t = (v) => v && (String(v).includes('タイムアウト') || String(v).includes('部分結果') || String(v).includes('timeout'));
+                                                    return t(d.subscriptionsApi) || t(d.invoicesApi) || t(d.paymentsApi);
+                                                });
+                                                return part.length > 0 ? <span className="text-amber-600 font-black">⚠️ 部分取得あり {part.length}店舗（サブスク/インボイスAPIがタイムアウト→会員数が過少になります）</span> : null;
+                                            })()}
+                                        </div>
+                                    )}
+
                                     {/* Failed Accounts Warning */}
                                     {sqData && sqData.meta && sqData.meta.failedAccounts && sqData.meta.failedAccounts.length > 0 && (
                                         <div className="bg-amber-50 border-2 border-amber-200 rounded-2xl p-4 flex items-start gap-3">

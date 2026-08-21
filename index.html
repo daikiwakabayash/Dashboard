@@ -4304,23 +4304,26 @@
                     return result;
                 };
                 const countUniqueMembers = (subsList) => getUniqueCustomerIds(subsList).size;
-                let memberCount, prevMemberCount;
-                memberCount = countUniqueMembers(activeRef);
-                prevMemberCount = countUniqueMembers(activePrev);
-                // フォールバック: サブスクデータがない場合はPAIDインボイスベース
-                if (memberCount === 0) {
-                    const memberInvRef = allInvoices.filter(inv =>
-                        inv.subscriptionId && inv.status === 'PAID'
-                        && toYM(inv.createdAt) === sqMonth
-                        && (sqStore === 'all' || (sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId)))
-                    );
-                    const memberInvPrev = allInvoices.filter(inv =>
-                        inv.subscriptionId && inv.status === 'PAID'
-                        && toYM(inv.createdAt) === prevYM
-                        && (sqStore === 'all' || (sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId)))
-                    );
-                    memberCount = new Set(memberInvRef.map(inv => inv.customerId || inv.subscriptionId)).size;
-                    prevMemberCount = new Set(memberInvPrev.map(inv => inv.customerId || inv.subscriptionId)).size;
+                // 会員数＝「当月または前月にサブスク決済(PAID invoice)した顧客」の実数。
+                // インボイスは大規模店でも完走するため、サブスクのページ取得が部分的でも正確に数えられる
+                // （realSubIds＝取得済みサブスクIDに依存させない）。決済ベースなので金額(MRR)とも整合。
+                const payersInMonths = (yms, locSet) => {
+                    const set = new Set();
+                    for (const inv of allInvoices) {
+                        if (!inv.subscriptionId || inv.status !== 'PAID' || !inv.customerId) continue;
+                        if (!yms.includes(toYM(inv.createdAt))) continue;
+                        if (locSet && !locSet.has(inv.locationId)) continue;
+                        set.add(inv.customerId);
+                    }
+                    return set;
+                };
+                const memberLocSet = (sqStore === 'all') ? null : sqStoreLocationIds;
+                let memberCount = payersInMonths([sqMonth, prevYM], memberLocSet).size;
+                let prevMemberCount = payersInMonths([prevYM, getPrevYM(prevYM)], memberLocSet).size;
+                // 決済インボイスが皆無（サブスクAPIのみ取得できた稀なケース）はサブスクステータスで代替
+                if (memberCount === 0 && activeRef.length > 0) {
+                    memberCount = countUniqueMembers(activeRef);
+                    prevMemberCount = countUniqueMembers(activePrev);
                 }
 
                 // MRR = 選択月のサブスク決済の合計（PAID invoices with subscriptionId）
@@ -4431,27 +4434,14 @@
                     const storeLocIds = store.locationIds || [store.id];
                     const ss = storeLocIds.flatMap(lid => subsByLoc[lid] || []);
                     const storeHasSubs = ss.length > 0;
-                    let smc, smrr, sn;
-                    if (storeHasSubs) {
-                        // 通常パス: サブスクステータスベースで会員数を計算（金額0を除外）
-                        const sa = ss.filter(s => isActiveAt(s, refEnd) && hasPaymentActivity(s));
-                        smc = new Set(sa.map(s => s.customerId)).size;
-                        // 店舗ごとのMRR: 事前グループ化済みインボイスから集計
-                        smrr = 0;
-                        for (const s of ss) {
-                            const subInvs = monthPaidInvBySub[s.id];
-                            if (subInvs) {
-                                for (const inv of subInvs) smrr += inv.amount;
-                            }
-                        }
-                        sn = ss.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s) && !isPlanChange(s));
-                    } else {
-                        // フォールバック: ロケーション別グループから取得（全locationIdsを集約）
-                        const storeInvsRef = storeLocIds.flatMap(lid => monthPaidInvByLoc[lid] || []);
-                        smc = new Set(storeInvsRef.map(inv => inv.customerId || inv.subscriptionId)).size;
-                        smrr = storeInvsRef.reduce((sum, inv) => sum + inv.amount, 0);
-                        sn = [];
-                    }
+                    // 会員数・MRRはインボイス基準（当月/前月にサブスク決済した顧客）で算出。
+                    // 大規模店でサブスクのページ取得が部分的でも正確・完全に出る。
+                    const storeLocSet = new Set(storeLocIds);
+                    const storeInvsMonth = storeLocIds.flatMap(lid => monthPaidInvByLoc[lid] || []);
+                    const smc = payersInMonths([sqMonth, prevYM], storeLocSet).size;
+                    const smrr = storeInvsMonth.reduce((sum, inv) => sum + inv.amount, 0);
+                    // 新規入会はサブスク開始日が必要なため取得済みサブスクから（best-effort）
+                    const sn = storeHasSubs ? ss.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s) && !isPlanChange(s)) : [];
                     // 店舗別解約率（アクティブ会員ベース: この店舗の前月アクティブ会員のうち、全店舗横断で当月非アクティブ = 解約）
                     const storePrevActive = ss.filter(s => isActiveAt(s, prevEnd) && hasPaymentActivity(s, prevYM));
                     const storePrevIds = new Set(storePrevActive.map(s => s.customerId));

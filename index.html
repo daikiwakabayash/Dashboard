@@ -11335,9 +11335,15 @@
                                         <div className="bg-white border border-slate-200 rounded-2xl px-4 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs font-bold text-slate-500">
                                             <span className="flex items-center gap-1.5"><MapPin size={14} className="text-slate-400" />取得店舗 <b className="text-slate-800">{sqData.meta.totalStores || 0}</b> / 全{sqData.meta.totalAccounts || 0}アカウント</span>
                                             <span>サブスク <b className="text-slate-800">{((sqData.subscriptions || []).length).toLocaleString()}</b>件</span>
-                                            {sqData.meta.failedAccounts && sqData.meta.failedAccounts.length > 0
-                                                ? <span className="text-amber-600 font-black">⚠️ 取得失敗 {sqData.meta.failedAccounts.length}店舗（下記・数値は過少の可能性）</span>
-                                                : <span className="text-emerald-600 font-black">✓ 全アカウント取得成功</span>}
+                                            {/* 店舗数がアカウント数に比べて少ない＝一部店舗のデータが未取得（数値が過少になる） */}
+                                            {(() => {
+                                                const stores = sqData.meta.totalStores || 0, accts = sqData.meta.totalAccounts || 0;
+                                                const failed = (sqData.meta.failedAccounts || []).length;
+                                                const missing = Math.max(0, accts - 1 - stores); // 銀座など重複1件ぶんは許容
+                                                if (failed > 0) return <span className="text-rose-600 font-black">⚠️ 取得失敗 {failed}店舗（数値は過少・SYNCで再取得してください）</span>;
+                                                if (missing > 0) return <span className="text-rose-600 font-black">⚠️ {missing}店舗分が未取得（{stores}/{accts}）。数値は過少です。SYNCで再取得してください</span>;
+                                                return <span className="text-emerald-600 font-black">✓ 全店舗取得済み</span>;
+                                            })()}
                                             {sqData.meta.diagnostics && (() => {
                                                 const part = sqData.meta.diagnostics.filter(d => {
                                                     const t = (v) => v && (String(v).includes('タイムアウト') || String(v).includes('部分結果') || String(v).includes('timeout'));

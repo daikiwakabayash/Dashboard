@@ -11335,11 +11335,15 @@
                                                 return <span className="text-emerald-600 font-black">✓ 全店舗取得済み</span>;
                                             })()}
                                             {sqData.meta.diagnostics && (() => {
-                                                const part = sqData.meta.diagnostics.filter(d => {
-                                                    const t = (v) => v && (String(v).includes('タイムアウト') || String(v).includes('部分結果') || String(v).includes('timeout'));
-                                                    return t(d.subscriptionsApi) || t(d.invoicesApi) || t(d.paymentsApi);
-                                                });
-                                                return part.length > 0 ? <span className="text-amber-600 font-black">⚠️ 部分取得あり {part.length}店舗（サブスク/インボイスAPIがタイムアウト→会員数が過少になります）</span> : null;
+                                                const t = (v) => v && (String(v).includes('タイムアウト') || String(v).includes('部分結果') || String(v).includes('timeout'));
+                                                // インボイス/決済がタイムアウト＝会員数・金額に影響（重大）
+                                                const invPart = sqData.meta.diagnostics.filter(d => t(d.invoicesApi) || t(d.paymentsApi));
+                                                // サブスクのみタイムアウト（インボイスは完走）＝会員数・金額は決済ベースで正確。明細/解約内訳のみ影響
+                                                const subsOnly = sqData.meta.diagnostics.filter(d => t(d.subscriptionsApi) && !t(d.invoicesApi) && !t(d.paymentsApi));
+                                                return (<>
+                                                    {invPart.length > 0 && <span className="text-rose-600 font-black">⚠️ 決済データ不完全 {invPart.length}店舗（会員数・金額が過少）</span>}
+                                                    {subsOnly.length > 0 && <span className="text-slate-400 font-bold">ℹ️ 明細一部のみ {subsOnly.length}店舗（会員数・金額は決済ベースで正確／会員リスト・解約内訳のみ影響）</span>}
+                                                </>);
                                             })()}
                                         </div>
                                     )}

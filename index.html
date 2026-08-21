@@ -3003,6 +3003,34 @@
                         Array.from({ length: Math.min(MAX_CONCURRENT_BATCHES, batches.length) }, () => runBatch())
                     );
 
+                    // Step 3.5: 未取得店（storeが返らなかったアカウント）を自動リトライ（最大3巡・低並列）
+                    // 重い店舗が60秒内に落ちた回のみ発生。手動SYNCなしで90店舗に収束させる。
+                    const coreOf = (n) => String(n || '').replace(/^NAORU整体\s*/, '').replace(/^NAORU\s*/, '').replace(/院$/, '').replace(/\s+/g, '').trim();
+                    for (let round = 0; round < 3; round++) {
+                        const gotCores = merged.stores.map(s => coreOf(s.name)).filter(Boolean);
+                        const missing = accounts.filter(a => {
+                            const c = coreOf(a.name);
+                            if (!c) return false;
+                            return !gotCores.some(g => g === c || g.includes(c) || c.includes(g));
+                        });
+                        if (!missing.length) break;
+                        console.log(`Square 自動リトライ ${round + 1}/3: 未取得 ${missing.length}店舗を再取得`);
+                        let mi = 0;
+                        const retryWorker = async () => {
+                            while (mi < missing.length) {
+                                const acc = missing[mi++];
+                                try { const data = await fetchSingleAccount(acc); if (data) mergeData(data); } catch (e) { /* 次巡へ */ }
+                                setSqLoadingProgress({ total: totalAccounts, completed: merged.stores.length, failed: failedCount, batches: totalBatches, batchesDone: totalBatches, retrying: missing.length - mi });
+                            }
+                        };
+                        await Promise.all(Array.from({ length: Math.min(2, missing.length) }, () => retryWorker()));
+                        if (merged.stores.length > 0) setSqData(prev => ({
+                            success: true, stores: [...merged.stores], subscriptions: [...merged.subscriptions], customers: { ...merged.customers },
+                            invoices: [...merged.invoices], payments: [...merged.payments], refunds: [...merged.refunds], plans: { ...merged.plans },
+                            meta: { ...((prev && prev.meta) || {}), totalStores: merged.stores.length, totalAccounts, totalSubscriptions: merged.subscriptions.length, totalInvoices: merged.invoices.length, totalPayments: merged.payments.length, totalRefunds: merged.refunds.length, diagnostics: merged.diagnostics.length ? [...merged.diagnostics] : undefined, failedAccounts: failedAccounts.length ? [...failedAccounts] : undefined, generatedAt: new Date().toISOString() },
+                        }));
+                    }
+
                     // Step 4: 最終結果
                     const result = {
                         success: true,

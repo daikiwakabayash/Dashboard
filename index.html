@@ -4607,9 +4607,6 @@
                 }
                 const monthlyTrends = [];
                 // 月別推移（12ヶ月）- ルックアップマップで高速化（O(n×12) → O(n+12)）
-                // 月別推移の高速化: 前回イテレーションのアクティブ会員セットをキャッシュして再利用
-                // イテレーションi の ymActiveIds = イテレーションi-1 の ymPrevActiveIds
-                let cachedFilteredActiveIds = null;
                 const isAllStores = sqStore === 'all';
                 for (let i = 11; i >= 0; i--) {
                     const td = new Date(refY, refM - 1 - i, 1);
@@ -4621,11 +4618,10 @@
                         ? ymSubInvs.filter(inv => storeSubIds.has(inv.subscriptionId))
                         : ymSubInvs;
                     let ymMemberCount, ymNewCount, ymPlanChangeCount, ymCanceledCount;
-                    // 会員数: サブスクステータスベース（月末時点のアクティブ顧客数）
-                    // 過去月の会員推移が欠落しないよう、決済実績チェックは全期間ベース（paidSubIds）
-                    const ymActive = filtered.filter(s => isActiveAt(s, eom) && (paidSubIds.has(s.id) || s.monthlyPrice > 0));
-                    const ymActiveIds = new Set(ymActive.map(s => s.customerId));
-                    ymMemberCount = ymActiveIds.size;
+                    // 会員数: 決済ベース（KPIカード/店舗別サマリーと同一定義・payersInMonths）。
+                    // 完了月=単月／進行中の今月=当月+前月。サブスク一覧の取得完全性に依存せず正確で、
+                    // カード・店舗別サマリー・月別推移の3箇所が同じ数字で揃う。
+                    ymMemberCount = payersInMonths(memberWindow(ym), memberLocSet).size;
                     // 新規: 開始月マップから取得（プラン変更は除外）
                     const ymAllStartSubs = (subsByStartYM[ym] || []).filter(s => paidSubIds.has(s.id) || s.monthlyPrice > 0);
                     const ymNewSubs = ymAllStartSubs.filter(s => !isPlanChange(s));
@@ -4633,18 +4629,6 @@
                     // プラン変更: 同月開始だが初回入会ではないサブスク
                     const ymPlanChangeSubs = ymAllStartSubs.filter(s => isPlanChange(s));
                     ymPlanChangeCount = new Set(ymPlanChangeSubs.map(s => s.customerId)).size;
-                    // 解約（アクティブ会員ベース）: 前月のアクティブ会員のうち、当月に全店舗横断でアクティブでなくなった会員
-                    // 前月アクティブ: 前回イテレーションでキャッシュ済みなら再利用
-                    const ymPrevActiveIds = cachedFilteredActiveIds || (() => {
-                        const prevEom = new Date(td.getFullYear(), td.getMonth(), 0);
-                        const ymPrevActive = filtered.filter(s => isActiveAt(s, prevEom) && (paidSubIds.has(s.id) || s.monthlyPrice > 0));
-                        return new Set(ymPrevActive.map(s => s.customerId));
-                    })();
-                    // 全店舗横断アクティブ: 全店舗モードならymActiveIdsをそのまま使用
-                    const ymGlobalActiveIds = isAllStores ? ymActiveIds : (() => {
-                        const ymGlobalActive = subs.filter(s => isActiveAt(s, eom) && (paidSubIds.has(s.id) || s.monthlyPrice > 0));
-                        return new Set(ymGlobalActive.map(s => s.customerId));
-                    })();
                     // 解約数: モーダル「解約・一時停止者一覧」と一致させるため、当月にCANCELED/DEACTIVATED/PAUSEDになった
                     // サブスクを「name + monthlyPrice」でマージしてカウント（sqDrilldownList と同じロジック）
                     const ymCanceledSubs = filtered.filter(s =>
@@ -4657,8 +4641,6 @@
                         ymCanceledKeys.add(`${name}|${s.monthlyPrice}`);
                     }
                     ymCanceledCount = ymCanceledKeys.size;
-                    // 今回のアクティブセットを次回イテレーションの前月データとしてキャッシュ
-                    cachedFilteredActiveIds = ymActiveIds;
                     // フォールバック: サブスクデータがない場合はPAIDインボイスベース
                     if (ymMemberCount === 0) {
                         const ymAllPaidInvs = paidInvsByYM[ym] || [];

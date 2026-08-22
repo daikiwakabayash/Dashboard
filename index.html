@@ -4361,26 +4361,22 @@
                     prevMemberCount = countUniqueMembers(activePrev);
                 }
 
-                // MRR = 選択月のサブスク決済の合計（PAID invoices with subscriptionId）
-                // フォールバック時はインボイスのlocationIdで直接フィルタ（realSubIdsチェック不要）
+                // MRR = 選択月のサブスク決済(PAIDインボイス)合計。
+                // ⚠️ 会員数(分母)がインボイス基準=全件なのに、MRR(分子)を realSubIds（取得できた
+                //    サブスクのみ）で絞ると、サブスク一覧が部分取得の店舗ぶんMRRだけ過少になり、
+                //    ARPUが不当に低く出る（店舗別ARPU>1万なのに総ARPUが7千台になる不整合）。
+                //    → 会員数・店舗別MRR(smrr)と同じくインボイス基準（ロケーションで絞る／realSubIds不使用）に統一。
                 const subInvsMonth = allInvoices.filter(inv =>
                     inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth
-                    && (useInvoiceFallback ? (sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId)) : realSubIds.has(inv.subscriptionId))
+                    && (!memberLocSet || memberLocSet.has(inv.locationId))
                 );
-                const storeSubIds = (sqStore === 'all' || useInvoiceFallback) ? null : new Set(filtered.map(s => s.id));
-                const filteredSubInvs = storeSubIds
-                    ? subInvsMonth.filter(inv => storeSubIds.has(inv.subscriptionId))
-                    : subInvsMonth;
-                const mrr = filteredSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
+                const mrr = subInvsMonth.reduce((sum, inv) => sum + inv.amount, 0);
 
                 const prevSubInvs = allInvoices.filter(inv =>
                     inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === prevYM
-                    && (useInvoiceFallback ? (sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId)) : realSubIds.has(inv.subscriptionId))
+                    && (!memberLocSet || memberLocSet.has(inv.locationId))
                 );
-                const filteredPrevSubInvs = storeSubIds
-                    ? prevSubInvs.filter(inv => storeSubIds.has(inv.subscriptionId))
-                    : prevSubInvs;
-                const prevMrr = filteredPrevSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
+                const prevMrr = prevSubInvs.reduce((sum, inv) => sum + inv.amount, 0);
                 const mrrChange = prevMrr > 0 ? Math.round((mrr - prevMrr) / prevMrr * 10000) / 100 : 0;
 
                 // 返品額 = Refunds API 返金の合計
@@ -4507,7 +4503,7 @@
                     // customerIdベースの重複排除 + 名前ベースの重複排除（異なるcustomerIdで同一人物のケース対応）
                     const dedupKey = `${s.customerId}|${s.monthlyPrice}`;
                     const nameDedupKey = `${name}|${pn}|${s.monthlyPrice}`;
-                    const subInvForThis = filteredSubInvs.filter(inv => inv.subscriptionId === s.id);
+                    const subInvForThis = subInvsMonth.filter(inv => inv.subscriptionId === s.id);
                     const subMrr = subInvForThis.reduce((sum, inv) => sum + inv.amount, 0);
                     if (!byPlan[pn]) byPlan[pn] = { count: 0, mrr: 0 };
                     if (byPlanSeen[dedupKey] || byPlanSeen[nameDedupKey]) {
@@ -4600,10 +4596,9 @@
                     if (!iym) continue;
                     if (!paidInvsByYM[iym]) paidInvsByYM[iym] = [];
                     paidInvsByYM[iym].push(inv);
-                    if (useInvoiceFallback ? (sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId)) : realSubIds.has(inv.subscriptionId)) {
-                        if (!paidSubInvsByYM[iym]) paidSubInvsByYM[iym] = [];
-                        paidSubInvsByYM[iym].push(inv);
-                    }
+                    // MRRは会員数と同じインボイス基準（realSubIdsで絞らない）。店舗絞りは後段でロケーション判定。
+                    if (!paidSubInvsByYM[iym]) paidSubInvsByYM[iym] = [];
+                    paidSubInvsByYM[iym].push(inv);
                 }
                 const monthlyTrends = [];
                 // 月別推移（12ヶ月）- ルックアップマップで高速化（O(n×12) → O(n+12)）
@@ -4614,8 +4609,8 @@
                     const eom = new Date(td.getFullYear(), td.getMonth()+1, 0);
                     // MRR = その月のPAIDサブスクインボイス合計（プリコンピュート済みマップから取得）
                     const ymSubInvs = paidSubInvsByYM[ym] || [];
-                    const ymFilteredSubInvs = storeSubIds
-                        ? ymSubInvs.filter(inv => storeSubIds.has(inv.subscriptionId))
+                    const ymFilteredSubInvs = memberLocSet
+                        ? ymSubInvs.filter(inv => memberLocSet.has(inv.locationId))
                         : ymSubInvs;
                     let ymMemberCount, ymNewCount, ymPlanChangeCount, ymCanceledCount;
                     // 会員数: 決済ベース（KPIカード/店舗別サマリーと同一定義・payersInMonths）。

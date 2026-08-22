@@ -4802,6 +4802,20 @@
                 const seenInv = {};
                 const prevYM = (() => { const [y, m] = sqMonth.split('-').map(Number); const pd = new Date(y, m - 2, 1); return `${pd.getFullYear()}-${String(pd.getMonth()+1).padStart(2,'0')}`; })();
 
+                // アクティブ判定はKPIカードと同一の「決済ベース」に統一する。
+                // 集計ウィンドウ: 完了月=単月／進行中の今月=当月+前月（memberWindowと同じ）。
+                // activePayerIds ＝ そのウィンドウにサブスク決済(PAIDインボイス)がある顧客（＝カードの会員数集合）。
+                const nowYM = `${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`;
+                const winMonths = (sqMonth === nowYM) ? [sqMonth, prevYM] : [sqMonth];
+                const activeLocSet = (sqStore === 'all') ? null : sqStoreLocationIds;
+                const activePayerIds = new Set();
+                for (const inv of allInvoices) {
+                    if (!inv.subscriptionId || inv.status !== 'PAID' || !inv.customerId) continue;
+                    if (!winMonths.includes(toYM(inv.createdAt))) continue;
+                    if (activeLocSet && !activeLocSet.has(inv.locationId)) continue;
+                    activePayerIds.add(inv.customerId);
+                }
+
                 if (useInvFallback) {
                     // フォールバック: インボイスから顧客リストを構築
                     const storeInvs = allInvoices.filter(inv => inv.subscriptionId && sqStoreLocationIds && sqStoreLocationIds.has(inv.locationId));
@@ -4831,8 +4845,8 @@
                             canceledDate: null,
                             monthlyPrice: latestPaidAmount,
                         };
-                        // 当月にPAID決済がある → アクティブ
-                        if (paidByMonth[sqMonth]) {
+                        // アクティブ = 決済ベース（ウィンドウ内にPAID決済がある会員。カードと同一）
+                        if (winMonths.some(m => paidByMonth[m])) {
                             activeList.push(entry);
                         }
                         // 払戻し・期限超過
@@ -4881,15 +4895,10 @@
                         // 解約・一時停止の実効日
                         const subEndDate = sub.canceledDate || sub.pausedDate || null;
 
-                        // アクティブ: 選択月末時点でアクティブなサブスク（直近決済実績がない会員は除外）
-                        // PAUSED は一時停止中タブに振り分けるためアクティブから除外
-                        const start = sub.startDate ? new Date(sub.startDate) : null;
-                        const hasActivity = recentPaidSubIds.has(sub.id) || (sub.monthlyPrice > 0 && toYM(sub.startDate) === sqMonth);
-                        const isActiveAtMonth = hasActivity && start && start <= monthEnd && sub.status !== 'PAUSED' && (
-                            sub.status === 'ACTIVE' ||
-                            (subEndDate && new Date(subEndDate) > monthEnd)
-                        );
-                        if (isActiveAtMonth) {
+                        // アクティブ = KPIカードと同一の決済ベース（ウィンドウ内に決済した顧客）。
+                        // サブスク明細がある会員はここで明細（コース・開始日）付きで積む。
+                        // サブスク明細が未取得の会員は後段でインボイスから補完し、件数をカードと一致させる。
+                        if (activePayerIds.has(sub.customerId)) {
                             activeList.push(entry);
                         }
 
@@ -5051,7 +5060,34 @@
                     }
                 }
 
-                return { activeList: dedup(activeList), newMonthList: dedup(newMonthList), planChangeList: dedup(planChangeList), canceledList: dedup(canceledList), pausedList: dedup(pausedList), resumedList: dedup(resumedList), refundedList, overdueList };
+                // アクティブ会員の補完: 決済はあるがサブスク明細が1件も取得できていない会員を
+                // インボイスから行として追加し、件数をKPIカード（決済ベース）と一致させる。
+                // （pre-dedupのcustomerId集合で判定し、名前重複排除で統合済みの会員を二重追加しない）
+                const rawActiveCustIds = new Set(activeList.map(e => e.customerId));
+                const activeDeduped = dedup(activeList);
+                const missingByCust = {};
+                for (const inv of allInvoices) {
+                    if (!inv.subscriptionId || inv.status !== 'PAID' || !inv.customerId) continue;
+                    if (!activePayerIds.has(inv.customerId) || rawActiveCustIds.has(inv.customerId)) continue;
+                    if (activeLocSet && !activeLocSet.has(inv.locationId)) continue;
+                    (missingByCust[inv.customerId] = missingByCust[inv.customerId] || []).push(inv);
+                }
+                for (const [custId, invs] of Object.entries(missingByCust)) {
+                    const name = cust[custId] ? cust[custId].name : (custId || '不明');
+                    const paidByMonth = {};
+                    for (const inv of invs) { const ym = toYM(inv.createdAt); if (ym && !paidByMonth[ym]) paidByMonth[ym] = inv.amount; }
+                    const paidMonths = Object.keys(paidByMonth);
+                    const latest = paidMonths.length ? paidByMonth[[...paidMonths].sort().reverse()[0]] : 0;
+                    activeDeduped.push({
+                        id: custId, customerId: custId, name, plan: '—',
+                        paidCount: paidMonths.length,
+                        paidTotal: paidMonths.reduce((s, m) => s + paidByMonth[m], 0),
+                        paidByMonth, paidMonths, startDate: null, canceledDate: null,
+                        monthlyPrice: latest, detailPartial: true,
+                    });
+                }
+
+                return { activeList: activeDeduped, newMonthList: dedup(newMonthList), planChangeList: dedup(planChangeList), canceledList: dedup(canceledList), pausedList: dedup(pausedList), resumedList: dedup(resumedList), refundedList, overdueList };
             }, [sqPreprocessed, sqStore, sqMonth, sqStoreLocationIds]);
 
             const sqSortedList = useMemo(() => {

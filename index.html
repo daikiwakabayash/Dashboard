@@ -4347,9 +4347,14 @@
                     }
                     return set;
                 };
+                // アクティブ会員の集計ウィンドウ:
+                //  ・完了した過去月 → 単月（その月に決済した人だけ。月末の過大＝先月だけ決済した離脱者を含めない）
+                //  ・進行中の今月   → 当月＋前月の2ヶ月（課金日が月末寄りでまだ請求が立っていない継続会員の取りこぼしを防ぐ）
+                const memberWindow = (ym) => (ym === currentYM ? [ym, getPrevYM(ym)] : [ym]);
                 const memberLocSet = (sqStore === 'all') ? null : sqStoreLocationIds;
-                let memberCount = payersInMonths([sqMonth, prevYM], memberLocSet).size;
-                let prevMemberCount = payersInMonths([prevYM, getPrevYM(prevYM)], memberLocSet).size;
+                let memberCount = payersInMonths(memberWindow(sqMonth), memberLocSet).size;
+                // 前月は常に完了月（prevYM < sqMonth ≤ currentYM）なので単月で評価される
+                let prevMemberCount = payersInMonths(memberWindow(prevYM), memberLocSet).size;
                 // 決済インボイスが皆無（サブスクAPIのみ取得できた稀なケース）はサブスクステータスで代替
                 if (memberCount === 0 && activeRef.length > 0) {
                     memberCount = countUniqueMembers(activeRef);
@@ -4468,7 +4473,7 @@
                     // 大規模店でサブスクのページ取得が部分的でも正確・完全に出る。
                     const storeLocSet = new Set(storeLocIds);
                     const storeInvsMonth = storeLocIds.flatMap(lid => monthPaidInvByLoc[lid] || []);
-                    const smc = payersInMonths([sqMonth, prevYM], storeLocSet).size;
+                    const smc = payersInMonths(memberWindow(sqMonth), storeLocSet).size;
                     const smrr = storeInvsMonth.reduce((sum, inv) => sum + inv.amount, 0);
                     // 新規入会はサブスク開始日が必要なため取得済みサブスクから（best-effort）
                     const sn = storeHasSubs ? ss.filter(s => toYM(s.startDate) === sqMonth && hasPaymentActivity(s) && !isPlanChange(s)) : [];
@@ -4747,6 +4752,7 @@
                     retention3m, retention6m, retention12m, ltv,
                     byStore, byPlan, monthlyTrends, cohort, availableMonths,
                     isEstimated: useInvoiceFallback,
+                    memberWindowIsDual: sqMonth === currentYM,
                 };
             }, [sqPreprocessed, sqData, sqStore, sqMonth, sqStoreLocationIds]);
 
@@ -11512,7 +11518,7 @@
                                                 <h2 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-2 md:mb-3 flex items-center gap-2"><Users size={14} /> 会員 & 収益</h2>
                                                 <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-2 md:gap-4">
                                                     {[
-                                                        { label: 'アクティブ会員数', value: `${sqMetrics.memberCount.toLocaleString()}名`, sub: sqMetrics.memberCount !== sqMetrics.prevMemberCount ? `前月比 ${sqMetrics.memberCount - sqMetrics.prevMemberCount >= 0 ? '+' : ''}${sqMetrics.memberCount - sqMetrics.prevMemberCount}名` : null, up: sqMetrics.memberCount >= sqMetrics.prevMemberCount, icon: <Users size={22} />, color: 'orange' },
+                                                        { label: 'アクティブ会員数', value: `${sqMetrics.memberCount.toLocaleString()}名`, sub: sqMetrics.memberCount !== sqMetrics.prevMemberCount ? `前月比 ${sqMetrics.memberCount - sqMetrics.prevMemberCount >= 0 ? '+' : ''}${sqMetrics.memberCount - sqMetrics.prevMemberCount}名` : null, up: sqMetrics.memberCount >= sqMetrics.prevMemberCount, icon: <Users size={22} />, color: 'orange', hint: sqMetrics.memberWindowIsDual ? '決済ベース：進行中の今月は当月＋前月に決済した人（課金日ズレの取りこぼし防止）。決済(PAIDインボイス)基準・顧客重複排除' : '決済ベース：その月に決済(PAIDインボイス)した人。顧客重複排除' },
                                                         { label: '総MRR', value: `¥${sqMetrics.mrr.toLocaleString()}`, sub: sqMetrics.mrrChange !== 0 ? `前月比 ${sqMetrics.mrrChange >= 0 ? '+' : ''}${sqMetrics.mrrChange}%` : null, up: sqMetrics.mrrChange >= 0, icon: <Wallet size={22} />, color: 'blue' },
                                                         { label: 'ARPU', value: `¥${sqMetrics.arpu.toLocaleString()}`, sub: 'サブスク決済額÷会員数', icon: <DollarSign size={22} />, color: 'cyan', neutral: true },
                                                         { label: '総売上高', value: sqMetrics.totalSales >= 10000 ? `¥${(sqMetrics.totalSales/10000).toFixed(1)}万` : `¥${sqMetrics.totalSales.toLocaleString()}`, sub: 'Square売上合計（税込）', icon: <TrendingUp size={22} />, color: 'emerald', neutral: true },
@@ -11520,7 +11526,7 @@
                                                         { label: '解約率', value: `${sqMetrics.churnRate}%`, sub: `${sqMetrics.churnedCount}名 / 前月${sqMetrics.churnBase}名`, icon: <UserMinus size={22} />, color: 'orange', neutral: true, warn: sqMetrics.churnRate > 5 },
                                                         { label: 'LTV', value: sqMetrics.ltv >= 10000 ? `¥${(sqMetrics.ltv/10000).toFixed(1)}万` : `¥${sqMetrics.ltv.toLocaleString()}`, sub: '顧客生涯価値', icon: <DollarSign size={22} />, color: 'amber', neutral: true },
                                                     ].map((kpi, idx) => (
-                                                        <div key={idx} className={`p-3 md:p-5 rounded-xl md:rounded-2xl shadow-sm border hover:shadow-md transition-all ${kpi.warn ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200'}`}>
+                                                        <div key={idx} title={kpi.hint || undefined} className={`p-3 md:p-5 rounded-xl md:rounded-2xl shadow-sm border hover:shadow-md transition-all ${kpi.warn ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200'}`}>
                                                             <div className={`p-1.5 md:p-2.5 rounded-lg md:rounded-xl bg-${kpi.color}-500 text-white shadow-lg inline-block mb-2 md:mb-3`}>
                                                                 {React.cloneElement(kpi.icon, { size: window.innerWidth < 768 ? 16 : 22 })}
                                                             </div>

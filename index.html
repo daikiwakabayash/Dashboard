@@ -1957,6 +1957,7 @@
             const [zkProgress, setZkProgress] = useState({ done: 0, total: 0 });
             const [zkError, setZkError] = useState(null);
             const [zkYear, setZkYear] = useState(new Date().getFullYear());
+            const [zkCountry, setZkCountry] = useState('jp');    // 'jp' | 'au' | 'my'
             const [soStoreMenuOpen, setSoStoreMenuOpen] = useState(false);
             const [soStoreSearch, setSoStoreSearch] = useState('');
             const [soStaffMenuOpen, setSoStaffMenuOpen] = useState(false);
@@ -13181,9 +13182,29 @@
                     {/* ===== 全体管理シート（店舗×月マトリクス） ===== */}
                     {currentPage === 'zenkanri' && (() => {
                         const p2 = (x) => String(x).padStart(2, '0');
-                        const man = (n) => { const v = Math.round(Number(n) || 0); return v >= 10000 ? '¥' + (v / 10000).toFixed(1) + '万' : '¥' + v.toLocaleString(); };
+                        // ── 国の判別（同一SalonOneブランド内に混在）──
+                        // 日本語(かな/漢字)を含む→日本／マレーシアの都市名→マレーシア／それ以外のローマ字名→オーストラリア
+                        const zkHasJa = (s) => /[ぁ-んァ-ヶ一-龥々〆ヵヶ]/.test(String(s || ''));
+                        const MY_HINTS = ['malay', 'kuala', 'lumpur', 'petaling', 'johor', 'penang', 'selangor', 'klang', 'ipoh', 'subang', 'cheras', 'puchong'];
+                        const zkCountryOf = (name) => {
+                            const n = String(name || ''); const low = n.toLowerCase();
+                            if (MY_HINTS.some(h => low.includes(h))) return 'my';
+                            if (zkHasJa(n)) return 'jp';
+                            return 'au';
+                        };
+                        const COUNTRIES = [
+                            { k: 'jp', label: '日本', flag: '🇯🇵', sym: '¥', man: true },
+                            { k: 'au', label: 'Australia', flag: '🇦🇺', sym: 'A$', man: false },
+                            { k: 'my', label: 'Malaysia', flag: '🇲🇾', sym: 'RM ', man: false },
+                        ];
+                        const CUR = COUNTRIES.find(c => c.k === zkCountry) || COUNTRIES[0];
+                        const money = (n) => { const v = Math.round(Number(n) || 0); return (CUR.man && v >= 10000) ? CUR.sym + (v / 10000).toFixed(1) + '万' : CUR.sym + v.toLocaleString(); };
                         const months = (zkData && zkData.months) || Array.from({ length: 12 }, (_, i) => `${zkYear}-${p2(i + 1)}`);
-                        const shops = (zkData && zkData.shops) || [];
+                        const allShops = (zkData && zkData.shops) || [];
+                        // 国別に店舗数を数える（タブのバッジ用）
+                        const cntByCountry = { jp: 0, au: 0, my: 0 };
+                        allShops.forEach(s => { cntByCountry[zkCountryOf(s.name)]++; });
+                        const shops = allShops.filter(s => zkCountryOf(s.name) === zkCountry);
                         const stripName = (n) => String(n || '').replace(/^NAORU\s*/, '').trim();
                         const entities = [{ id: '__group__', name: 'グループ全体', group: true }, ...shops.map(s => ({ id: s.id, name: stripName(s.name), shop: s }))];
                         const grpTher = shops.reduce((a, s) => a + (s.therapist || 0), 0);
@@ -13199,7 +13220,7 @@
                             const r = Math.round(cur / prev * 100);
                             return { t: r + '%', cls: r >= 100 ? 'text-emerald-600' : 'text-rose-500' };
                         };
-                        const fmt = (k, v) => k === 'gross' ? man(v) : k === 'karte' ? `${(v || 0).toLocaleString()}枚` : k === 'newc' ? `${(v || 0).toLocaleString()}人` : `${v || 0}名`;
+                        const fmt = (k, v) => k === 'gross' ? money(v) : k === 'karte' ? `${(v || 0).toLocaleString()}枚` : k === 'newc' ? `${(v || 0).toLocaleString()}人` : `${v || 0}名`;
                         const METRICS = [
                             { k: 'gross', label: '総売上', bg: '#fffbeb' },
                             { k: 'karte', label: 'カルテ枚数', bg: '#f0f9ff' },
@@ -13232,6 +13253,16 @@
                                     </div>
                                 </header>
 
+                                {/* 国別タブ */}
+                                <div className="flex items-center gap-2 bg-white p-2 rounded-2xl border border-slate-200 shadow-sm w-fit">
+                                    {COUNTRIES.map(c => (
+                                        <button key={c.k} onClick={() => setZkCountry(c.k)} className={`px-4 py-2 rounded-xl text-sm font-black transition-all flex items-center gap-2 ${zkCountry === c.k ? 'bg-indigo-600 text-white shadow' : 'text-slate-500 hover:bg-slate-50'}`}>
+                                            <span>{c.flag}</span>{c.label}
+                                            <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-full ${zkCountry === c.k ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{cntByCountry[c.k]}</span>
+                                        </button>
+                                    ))}
+                                </div>
+
                                 {zkError && <div className="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm font-bold text-red-600">{zkError}</div>}
                                 {zkLoading && zkProgress.total > 0 && (
                                     <div className="bg-white border border-slate-200 rounded-2xl p-3">
@@ -13244,6 +13275,8 @@
                                     <div className="bg-white border border-slate-200 rounded-2xl p-10 text-center">
                                         <button onClick={() => loadZenkanri(zkYear)} className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-black hover:bg-indigo-700">データを取得</button>
                                     </div>
+                                ) : shops.length === 0 ? (
+                                    <div className="bg-white border border-slate-200 rounded-2xl p-10 text-center text-slate-400 font-bold text-sm">{CUR.flag} {CUR.label} の店舗はまだSalonOneに登録がありません{zkLoading ? '（読み込み中…）' : ''}。</div>
                                 ) : (
                                     <div className="overflow-auto rounded-2xl border border-slate-200 bg-white shadow-sm" style={{ maxHeight: '80vh' }}>
                                         <table className="border-collapse" style={{ minWidth: 'max-content', fontSize: '11px' }}>
@@ -13297,7 +13330,7 @@
                                         </table>
                                     </div>
                                 )}
-                                <p className="text-[11px] text-slate-400 font-bold">※ 総売上=SalonOne税込売上／カルテ枚数=来店数／新規数=新規来店数／セラピスト数=現在の在籍数。当月は前日までの確定分。未来月はデータなし。前月対比は前月実績比。</p>
+                                <p className="text-[11px] text-slate-400 font-bold">※ 国別タブで切替（日本¥／Australia A$／Malaysia RM＝各店舗のSalonOne通貨で表示・換算なし）。総売上=SalonOne税込売上／カルテ枚数=来店数／新規数=新規来店数／セラピスト数=現在の在籍数。当月は前日までの確定分。未来月はデータなし。前月対比は前月実績比。</p>
                             </div>
                         </div>
                         );

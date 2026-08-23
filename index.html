@@ -3873,19 +3873,22 @@
                             if (to > ystr) to = ystr; // 当月は前日まで
                             if (to >= from) {
                                 const r = await fetchSalonOne('sales/summary', { from, to, shop_id: sh.id });
-                                const sum = (r && r.data) ? normalizeSalonSummary({ data: r.data }) : null;
-                                if (sum) {
-                                    let karte = 0, newc = 0;
-                                    (sum.byDay || []).forEach(d => { karte += d.visits || 0; newc += d.newCount || 0; });
-                                    const raw = (r.data && !Array.isArray(r.data)) ? r.data : ((r.data && r.data[0]) || {});
+                                const raw = (r && r.data && !Array.isArray(r.data)) ? r.data : ((r && r.data && r.data[0]) || null);
+                                if (raw) {
+                                    const gross = Number(raw.gross_sales) || 0;                       // 総売上（最小通貨単位）
+                                    const karte = Number(raw.gross_count) || 0;                       // カルテ枚数＝会計数（来店未計上でも計上される）
+                                    const newc = Number(raw.new_visit_count != null ? raw.new_visit_count : raw.new_count) || 0; // 新規来店
                                     const bs = raw.by_staff || raw.byStaff || [];
-                                    // 当月に売上(gross)>0 の担当者。ヘルプ/楽トレ/未割当等は除外
+                                    // 当月に稼働した担当者（売上/会計/施術のいずれかがある人）。ヘルプ/楽トレ/未割当等は除外。
+                                    // ※サブスク店は売上がSquare側でSalonOne上gross=0のため、会計/施術数でも稼働判定する。
                                     const ther = bs.filter(st => {
                                         const nm = String(st.staff_name || st.name || '').trim();
-                                        const g = Number(st.gross_sales != null ? st.gross_sales : st.gross) || 0;
-                                        return g > 0 && !ST_NON_THERAPIST.has(nm);
+                                        const g = Number(st.gross_sales) || 0;
+                                        const it = Number(st.item_count) || 0;
+                                        const tr = Number(st.treatment_count) || 0;
+                                        return (g > 0 || it > 0 || tr > 0) && !ST_NON_THERAPIST.has(nm);
                                     }).length;
-                                    sh.months[ym] = { gross: sum.grossSales || 0, karte, newc, ther };
+                                    sh.months[ym] = { gross, karte, newc, ther };
                                 }
                             }
                         } catch (e) { /* この月は空のまま */ }
@@ -13342,7 +13345,7 @@
                                         </table>
                                     </div>
                                 )}
-                                <p className="text-[11px] text-slate-400 font-bold">※ 国別タブで切替（日本¥／Australia A$／Malaysia RM＝各店舗のSalonOne通貨で表示・換算なし）。総売上=SalonOneの総売上(gross・消化売上ではない)／カルテ枚数=来店数／新規数=新規来店数／セラピスト数=その月に売上が発生した担当者数（ヘルプ/楽トレ等は除外）。当月は前日までの確定分。未来月はデータなし。前月対比は前月実績比。</p>
+                                <p className="text-[11px] text-slate-400 font-bold">※ 国別タブで切替（日本¥／Australia A$／Malaysia RM＝各店舗のSalonOne通貨で表示・換算なし）。総売上=SalonOneの総売上(gross・消化売上ではない)／カルテ枚数=会計数／新規数=新規来店数／セラピスト数=その月に稼働(売上・会計・施術のいずれか)した担当者数（ヘルプ/楽トレ等は除外）。当月は前日までの確定分。未来月はデータなし。前月対比は前月実績比。<br/>※ サブスク中心の店舗（例: 渋谷・大阪京橋）はSalonOne上の総売上が0で計上される場合があります（売上がSquare側に記録されるため）。会計数・稼働人数は表示されます。</p>
                             </div>
                         </div>
                         );

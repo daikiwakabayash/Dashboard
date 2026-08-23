@@ -3846,8 +3846,8 @@
                 setZkLoading(true); setZkError(null);
                 const p2 = (x) => String(x).padStart(2, '0');
                 const months = Array.from({ length: 12 }, (_, i) => `${year}-${p2(i + 1)}`);
-                const yst = new Date(); yst.setHours(0, 0, 0, 0); yst.setDate(yst.getDate() - 1); // 昨日（当日は未確定）
-                const ystr = `${yst.getFullYear()}-${p2(yst.getMonth() + 1)}-${p2(yst.getDate())}`;
+                const tday = new Date(); tday.setHours(0, 0, 0, 0); // 当日まで含める（SalonOne売上ダッシュボードと一致）
+                const ystr = `${tday.getFullYear()}-${p2(tday.getMonth() + 1)}-${p2(tday.getDate())}`;
                 const nowYM = `${new Date().getFullYear()}-${p2(new Date().getMonth() + 1)}`;
                 // 月の確定判定＝「翌月10日」を過ぎたら確定（以降は数字が変わらない＝再取得しない）。
                 const isConfirmed = (ym) => { const [y, m] = ym.split('-').map(Number); return new Date() >= new Date(y, m, 10, 0, 0, 0); };
@@ -13261,11 +13261,11 @@
                         };
                         // カルテ枚数はSalonOneでユニーク患者数が取得できるまで「—」表示（会計数は患者実数と一致しないため）
                         const fmt = (k, v) => k === 'karte' ? '—' : k === 'gross' ? money(v) : k === 'newc' ? `${(v || 0).toLocaleString()}人` : `${v || 0}名`;
+                        // セラピスト数は各店舗ヘッダー（店舗名の右）に表示するため、行としては出さない
                         const METRICS = [
                             { k: 'gross', label: '総売上', bg: '#fffbeb' },
                             { k: 'karte', label: 'カルテ枚数', bg: '#f0f9ff' },
                             { k: 'newc', label: '新規数', bg: '#fdf4ff' },
-                            { k: 'ther', label: 'セラピスト数', bg: '#f8fafc' },
                         ];
                         const W_MONTH = 40, W_ITEM = 92, W_ACT = 90, W_CMP = 58;
                         const L_ITEM = W_MONTH, L_GACT = W_MONTH + W_ITEM, L_GCMP = W_MONTH + W_ITEM + W_ACT;
@@ -13283,6 +13283,15 @@
                                             <p className="text-[11px] text-slate-500 font-bold mt-0.5">SalonOne実績を店舗×月で一覧（横=店舗／縦=月）。過去の確定月（翌月10日以降）は固定表示し、当月のみ取得して高速化。</p>
                                         </div>
                                     </div>
+                                    {/* 国別タブ（ヘッダー内・省スペース化） */}
+                                    <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
+                                        {COUNTRIES.map(c => (
+                                            <button key={c.k} onClick={() => setZkCountry(c.k)} className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all flex items-center gap-1.5 ${zkCountry === c.k ? 'bg-indigo-600 text-white shadow' : 'text-slate-500 hover:bg-white'}`}>
+                                                <span>{c.flag}</span>{c.label}
+                                                <span className={`text-[10px] font-black px-1 rounded-full ${zkCountry === c.k ? 'bg-white/25' : 'bg-slate-200 text-slate-500'}`}>{cntByCountry[c.k]}</span>
+                                            </button>
+                                        ))}
+                                    </div>
                                     <div className="flex items-center gap-2">
                                         <select value={zkYear} onChange={e => { const y = Number(e.target.value); setZkYear(y); setZkData(null); loadZenkanri(y); }} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold">
                                             {yearOpts.map(y => <option key={y} value={y}>{y}年</option>)}
@@ -13293,16 +13302,6 @@
                                         <button onClick={() => loadZenkanri(zkYear, { force: true })} disabled={zkLoading} title="過去月も含めて全期間を取り直す（時間がかかります）" className="px-3 py-2 bg-white border border-slate-200 text-slate-500 rounded-xl text-xs font-bold hover:bg-slate-50 disabled:opacity-50">全期間再取得</button>
                                     </div>
                                 </header>
-
-                                {/* 国別タブ */}
-                                <div className="flex items-center gap-2 bg-white p-2 rounded-2xl border border-slate-200 shadow-sm w-fit">
-                                    {COUNTRIES.map(c => (
-                                        <button key={c.k} onClick={() => setZkCountry(c.k)} className={`px-4 py-2 rounded-xl text-sm font-black transition-all flex items-center gap-2 ${zkCountry === c.k ? 'bg-indigo-600 text-white shadow' : 'text-slate-500 hover:bg-slate-50'}`}>
-                                            <span>{c.flag}</span>{c.label}
-                                            <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-full ${zkCountry === c.k ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{cntByCountry[c.k]}</span>
-                                        </button>
-                                    ))}
-                                </div>
 
                                 {zkError && <div className="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm font-bold text-red-600">{zkError}</div>}
                                 {zkLoading && zkProgress.total > 0 && (

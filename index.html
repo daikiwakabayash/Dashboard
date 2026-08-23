@@ -3848,9 +3848,8 @@
                 const yearEnd = `${year}-12-31`;
                 let to = ystr < yearEnd ? ystr : yearEnd;
                 if (to < from) to = from;
-                // セラピスト数＝現在の在籍ロスター（店舗別・削除除く）
-                const therByShop = {};
-                (soStaffs || []).forEach(st => { if (st.deleted) return; const k = String(st.shop_id || ''); if (!k) return; therByShop[k] = (therByShop[k] || 0) + 1; });
+                // セラピスト数＝手当・領収書タブの氏名リストと同じロジック（stTherapistRoster）で算出。
+                // 在籍・非削除かつ非セラピスト(ヘルプ/楽トレ等)を除外した人数で一致させる。
                 // 店舗の並び＝出店が古い順（SO_SHOP_ORDER: 大森院が先頭）。一覧に無い店舗は末尾へ。
                 const zkOrderIndex = (name) => {
                     const nn = soShopNorm(name);
@@ -3859,7 +3858,7 @@
                     return i < 0 ? 999 : i;
                 };
                 const ordered = [...shopList].sort((a, b) => { const d = zkOrderIndex(a.name) - zkOrderIndex(b.name); return d !== 0 ? d : String(a.name).localeCompare(b.name); });
-                const shops = ordered.map(s => ({ id: String(s.id), name: s.name, therapist: therByShop[String(s.id)] || 0, months: {} }));
+                const shops = ordered.map(s => ({ id: String(s.id), name: s.name, therapist: stTherapistRoster(String(s.id)).length, months: {} }));
                 setZkProgress({ done: 0, total: shops.length });
                 setZkData({ year, months, shops: shops.map(s => ({ ...s })) });
                 let idx = 0, done = 0;
@@ -13207,9 +13206,11 @@
                         const shops = allShops.filter(s => zkCountryOf(s.name) === zkCountry);
                         const stripName = (n) => String(n || '').replace(/^NAORU\s*/, '').trim();
                         const entities = [{ id: '__group__', name: 'グループ全体', group: true }, ...shops.map(s => ({ id: s.id, name: stripName(s.name), shop: s }))];
-                        const grpTher = shops.reduce((a, s) => a + (s.therapist || 0), 0);
+                        // セラピスト数は手当・領収書の氏名リストと同じ stTherapistRoster でライブ算出（取得タイミングに依存しない）
+                        const therOf = (s) => stTherapistRoster(String(s.id)).length;
+                        const grpTher = shops.reduce((a, s) => a + therOf(s), 0);
                         const val = (ent, ym, metric) => {
-                            if (metric === 'ther') return ent.group ? grpTher : (ent.shop.therapist || 0);
+                            if (metric === 'ther') return ent.group ? grpTher : therOf(ent.shop);
                             const get = (s) => { const m = s.months && s.months[ym]; return m ? (m[metric] || 0) : 0; };
                             return ent.group ? shops.reduce((a, s) => a + get(s), 0) : get(ent.shop);
                         };

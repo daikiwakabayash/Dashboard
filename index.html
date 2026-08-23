@@ -13247,15 +13247,37 @@
                         ((zkData && zkData.shops) || []).forEach(s => { cntByCountry[zkCountryOf(s.name)]++; });
                         if (ZK_FIXED) cntByCountry.jp = ZK_FIXED.order.length;
                         let months, shops;
+                        const jpFilled = new Set(); // SalonOne実データで穴埋めした月（グループ合計を実表示値ベースに切替）
                         if (useFixedJp) {
                             months = Object.keys(ZK_FIXED.months).sort();
-                            shops = ZK_FIXED.order.map(name => ({
-                                id: 'fx_' + name, name,
-                                months: Object.fromEntries(months.map(ym => {
-                                    const arr = ZK_FIXED.months[ym] && ZK_FIXED.months[ym][name];
-                                    return [ym, arr ? { gross: arr[0], newc: arr[1], ther: arr[2], karte: 0 } : null];
-                                })),
-                            }));
+                            // SalonOne実データ（当月など公式CSV未入力セルの穴埋め用）。
+                            // CSVは略称(千葉)・SalonOneは正式名(千葉駅院)のため、完全一致→部分一致でマッチ。
+                            const soList = ((zkData && zkData.shops) || []).map(s => ({ nn: soShopNorm(s.name), months: s.months || {} })).filter(x => x.nn);
+                            const soLookup = (name) => {
+                                const nn = soShopNorm(name);
+                                let hit = soList.find(x => x.nn === nn);
+                                if (!hit) hit = soList.find(x => nn.length >= 2 && (x.nn.includes(nn) || nn.includes(x.nn)));
+                                return hit ? hit.months : {};
+                            };
+                            shops = ZK_FIXED.order.map(name => {
+                                const soM = soLookup(name);
+                                return {
+                                    id: 'fx_' + name, name,
+                                    months: Object.fromEntries(months.map(ym => {
+                                        const arr = ZK_FIXED.months[ym] && ZK_FIXED.months[ym][name];
+                                        const hasFixed = arr && arr[0] != null;      // CSVに売上が入っている
+                                        if (hasFixed) return [ym, { gross: arr[0], newc: arr[1], ther: arr[2], karte: 0 }];
+                                        // CSV未入力: SalonOne実データがあれば穴埋め（SalonOne管理店舗のみ該当）
+                                        const so = soM[ym];
+                                        if (so && (Number(so.gross) > 0 || Number(so.newc) > 0)) {
+                                            jpFilled.add(ym);
+                                            return [ym, { gross: Number(so.gross) || 0, newc: Number(so.newc) || 0, ther: (arr && arr[2] != null ? arr[2] : (Number(so.ther) || 0)), karte: 0 }];
+                                        }
+                                        // それでも無ければCSVの人数のみ（売上・新規は空欄）
+                                        return [ym, arr ? { gross: null, newc: null, ther: arr[2], karte: 0 } : null];
+                                    })),
+                                };
+                            });
                         } else {
                             months = (zkData && zkData.months) || Array.from({ length: 12 }, (_, i) => `${zkYear}-${p2(i + 1)}`);
                             shops = ((zkData && zkData.shops) || []).filter(s => zkCountryOf(s.name) === zkCountry);
@@ -13264,15 +13286,17 @@
                         const entities = [{ id: '__group__', name: 'グループ全体', group: true }, ...shops.map(s => ({ id: s.id, name: stripName(s.name), shop: s }))];
                         // すべての指標（総売上/カルテ/新規/セラピスト数）を月次データから取得。
                         // セラピスト数＝その月に売上>0だった担当者数（ヘルプ/楽トレ除外）を店舗ごとに保持。
+                        const get = (s, ym, metric) => { const m = s.months && s.months[ym]; return m ? (m[metric] || 0) : 0; };
                         const val = (ent, ym, metric) => {
                             if (ent.group && useFixedJp) {
                                 const g = ZK_FIXED.months[ym] && ZK_FIXED.months[ym]['__group__'];
-                                if (!g) return 0;
-                                const map = { gross: g[0], newc: g[1], ther: g[2], karte: 0 };
-                                return map[metric] || 0;
+                                // セラピスト数(人数)はCSV公式合計を優先。総売上/新規は、当月をSalonOneで穴埋めした月のみ
+                                // 表示中の店舗合計に切替（公式CSVが未入力店舗を含み過少になるのを防ぐ）。確定月は公式合計。
+                                if (metric === 'ther') return g ? (g[2] || 0) : shops.reduce((a, s) => a + get(s, ym, metric), 0);
+                                if (!jpFilled.has(ym) && g) { const map = { gross: g[0], newc: g[1], karte: 0 }; return map[metric] || 0; }
+                                return shops.reduce((a, s) => a + get(s, ym, metric), 0);
                             }
-                            const get = (s) => { const m = s.months && s.months[ym]; return m ? (m[metric] || 0) : 0; };
-                            return ent.group ? shops.reduce((a, s) => a + get(s), 0) : get(ent.shop);
+                            return ent.group ? shops.reduce((a, s) => a + get(s, ym, metric), 0) : get(ent.shop, ym, metric);
                         };
                         // 前月比: 100%以上=緑／未満=赤／前月0=新規・前月なし=—
                         const cmp = (cur, prev) => {
@@ -13392,7 +13416,7 @@
                                         </table>
                                     </div>
                                 )}
-                                <p className="text-[11px] text-slate-400 font-bold">※ 国別タブで切替（日本¥／Australia A$／Malaysia RM＝各店舗のSalonOne通貨で表示・換算なし）。総売上=SalonOneの総売上(gross・消化売上ではない)／カルテ枚数=対象月のユニーク患者数（SalonOne未提供のため現在は「—」）／新規数=新規来店数／セラピスト数=その月に稼働(売上・会計・施術のいずれか)した担当者数（ヘルプ/楽トレ等は除外）。当月は前日までの確定分。未来月はデータなし。前月対比は前月実績比。</p>
+                                <p className="text-[11px] text-slate-400 font-bold">※ 国別タブで切替（日本¥／Australia A$／Malaysia RM＝各店舗のSalonOne通貨で表示・換算なし）。日本は公式の全体管理シート（1〜8月・出店順90店舗）を表示し、管理シート未入力の当月分はSalonOne実績で自動補完（SalonOne連携店舗のみ）。総売上=総売上(gross・消化売上ではない)／カルテ枚数=対象月のユニーク患者数（SalonOne未提供のため現在は「—」）／新規数=新規来店数／セラピスト数=稼働担当者数。海外(AU/MY)はSalonOneから取得。当月は前日までの確定分。未来月はデータなし。前月対比は前月実績比。</p>
                             </div>
                         </div>
                         );

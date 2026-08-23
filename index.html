@@ -1673,14 +1673,9 @@
             };
 
             // 店舗→オーナー判定。SETTLEMENT_OWNER_SHOPS 設定があればそれを優先、無ければ OWNER_BRANCHES。
-            const stOwnerFor = (shopName) => {
-                if (stOwnerShops && Object.keys(stOwnerShops).length) {
-                    for (const [owner, pats] of Object.entries(stOwnerShops)) {
-                        if ((pats || []).some(p => String(shopName || '').includes(p))) return owner;
-                    }
-                }
-                return soShopOwner(shopName) || '';
-            };
+            // 店舗→オーナーは soShopOwner に一本化（管理表OWNER_BRANCHESを最優先／GAS設定で補完）。
+            // 宛名・共有先タグ・グループ表示すべてで同じ判定にし、静岡=野島 等を各店舗で正しく反映する。
+            const stOwnerFor = (shopName) => soShopOwner(shopName) || '';
             // 明細スナップショット生成（owner.html と本社の描画が完全一致するよう完成値を格納）
             const stComputeSnapshot = (shop, salon, square, manual) => {
                 const m = { ...stManualDefault, ...(manual || {}) };
@@ -3525,16 +3520,29 @@
             // SalonOne店舗名(例「NAORU 千葉駅院」)を OWNER_BRANCHES の短縮名と照合してオーナー判定
             const soShopOwner = (shopName) => {
                 const name = String(shopName || '');
-                // 設定タブ（GASオーナー設定）があれば優先
+                const core = name.replace('NAORU整体', '').replace('NAORU', '').replace(/院$/, '').trim();
+                // 各店舗のオーナーは管理表(OWNER_BRANCHES)を「正」とする（最優先）。
+                // GAS「オーナー設定」はログインアカウント/アクセス管理用で店舗割当が部分的・誤りうるため、
+                // 宛名・オーナー判定では管理表を優先し、管理表に無い店舗のみGAS設定で補完する。
+                if (core) {
+                    // 最も具体的（完全一致＞長い部分一致）なブランチを採用。
+                    // 例: 「広島福山」が「広島」(福本)ではなく「広島福山」(坂田)に正しく紐づくようにする。
+                    let best = null, bestLen = -1;
+                    for (const [owner, branches] of Object.entries(OWNER_BRANCHES)) {
+                        for (const b of branches) {
+                            let len = -1;
+                            if (core === b) len = Infinity;
+                            else if (core.includes(b) || b.includes(core)) len = b.length;
+                            if (len > bestLen) { bestLen = len; best = owner; }
+                        }
+                    }
+                    if (best) return best;
+                }
+                // 管理表に無い店舗のみGAS設定で補完（空文字パターンは全店誤マッチ防止のため除外）
                 if (stOwnerShops && Object.keys(stOwnerShops).length) {
                     for (const [owner, pats] of Object.entries(stOwnerShops)) {
-                        if ((pats || []).some(p => name.includes(p))) return owner;
+                        if ((pats || []).map(p => String(p).trim()).filter(Boolean).some(p => name.includes(p))) return owner;
                     }
-                }
-                const core = name.replace('NAORU整体', '').replace('NAORU', '').replace(/院$/, '').trim();
-                if (!core) return null;
-                for (const [owner, branches] of Object.entries(OWNER_BRANCHES)) {
-                    if (branches.some(b => core === b || core.includes(b) || b.includes(core))) return owner;
                 }
                 return null;
             };

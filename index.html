@@ -3862,6 +3862,18 @@
                 shops.forEach(sh => fetchMonths.forEach(ym => tasks.push({ sh, ym })));
                 setZkProgress({ done: 0, total: tasks.length });
                 setZkData({ year, months, shops: shops.map(s => ({ ...s })) });
+                // レート制限(60/分)対策: 429/5xx はバックオフして再試行（取りこぼしで0になるのを防ぐ）
+                const zkGet = async (shopId, from, to) => {
+                    for (let a = 0; a < 6; a++) {
+                        try {
+                            const res = await fetch(`${SALONONE_API_URL}?resource=sales/summary&from=${from}&to=${to}&shop_id=${shopId}`);
+                            if (res.status === 429 || res.status >= 500) { await new Promise(r => setTimeout(r, 1000 * Math.pow(1.8, a))); continue; }
+                            if (!res.ok) return null;
+                            return await res.json().catch(() => null);
+                        } catch (e) { await new Promise(r => setTimeout(r, 1000 * Math.pow(1.8, a))); }
+                    }
+                    return null;
+                };
                 let idx = 0, done = 0;
                 const worker = async () => {
                     while (idx < tasks.length) {
@@ -3872,7 +3884,7 @@
                             let to = `${ym}-${p2(new Date(yy, mm, 0).getDate())}`;
                             if (to > ystr) to = ystr; // 当月は前日まで
                             if (to >= from) {
-                                const r = await fetchSalonOne('sales/summary', { from, to, shop_id: sh.id });
+                                const r = await zkGet(sh.id, from, to);
                                 const raw = (r && r.data && !Array.isArray(r.data)) ? r.data : ((r && r.data && r.data[0]) || null);
                                 if (raw) {
                                     const gross = Number(raw.gross_sales) || 0;                       // 総売上（最小通貨単位）
@@ -3896,7 +3908,7 @@
                         if (done % 6 === 0) setZkData({ year, months, shops: shops.map(s => ({ ...s })) }); // 逐次反映
                     }
                 };
-                await Promise.all(Array.from({ length: Math.min(8, tasks.length) }, () => worker()));
+                await Promise.all(Array.from({ length: Math.min(4, tasks.length) }, () => worker())); // レート制限に配慮し並列4
                 setZkData({ year, months, shops });
                 setZkLoading(false);
             };
@@ -13345,7 +13357,7 @@
                                         </table>
                                     </div>
                                 )}
-                                <p className="text-[11px] text-slate-400 font-bold">※ 国別タブで切替（日本¥／Australia A$／Malaysia RM＝各店舗のSalonOne通貨で表示・換算なし）。総売上=SalonOneの総売上(gross・消化売上ではない)／カルテ枚数=会計数／新規数=新規来店数／セラピスト数=その月に稼働(売上・会計・施術のいずれか)した担当者数（ヘルプ/楽トレ等は除外）。当月は前日までの確定分。未来月はデータなし。前月対比は前月実績比。<br/>※ サブスク中心の店舗（例: 渋谷・大阪京橋）はSalonOne上の総売上が0で計上される場合があります（売上がSquare側に記録されるため）。会計数・稼働人数は表示されます。</p>
+                                <p className="text-[11px] text-slate-400 font-bold">※ 国別タブで切替（日本¥／Australia A$／Malaysia RM＝各店舗のSalonOne通貨で表示・換算なし）。総売上=SalonOneの総売上(gross・消化売上ではない)／カルテ枚数=会計数／新規数=新規来店数／セラピスト数=その月に稼働(売上・会計・施術のいずれか)した担当者数（ヘルプ/楽トレ等は除外）。当月は前日までの確定分。未来月はデータなし。前月対比は前月実績比。</p>
                             </div>
                         </div>
                         );

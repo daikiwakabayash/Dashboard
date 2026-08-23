@@ -3838,7 +3838,9 @@
             //   総売上=gross_sales（消化ではなく総額）／カルテ枚数=来店数／新規数=新規来店数／
             //   セラピスト数=その月に売上(gross)が1円でも発生した担当者（ヘルプ/楽トレ等は除外）。
             //   金額はSalonOneの最小通貨単位（JPYは円、AUD/MYRはセント）で保持し、表示時に通貨係数で割る。
-            const loadZenkanri = async (year = zkYear) => {
+            const ZK_CACHE_KEY = 'naoru_zk_cache_v1';
+            const loadZenkanri = async (year = zkYear, opts = {}) => {
+                const forceAll = !!opts.force; // 「再取得」ボタン＝全月取り直し
                 const shopList = (soShops && soShops.length) ? soShops : [];
                 if (!shopList.length) { setZkError('店舗一覧を取得できていません。SalonOne売上タブを一度開いてから再度お試しください。'); return; }
                 setZkLoading(true); setZkError(null);
@@ -3847,6 +3849,8 @@
                 const yst = new Date(); yst.setHours(0, 0, 0, 0); yst.setDate(yst.getDate() - 1); // 昨日（当日は未確定）
                 const ystr = `${yst.getFullYear()}-${p2(yst.getMonth() + 1)}-${p2(yst.getDate())}`;
                 const nowYM = `${new Date().getFullYear()}-${p2(new Date().getMonth() + 1)}`;
+                // 月の確定判定＝「翌月10日」を過ぎたら確定（以降は数字が変わらない＝再取得しない）。
+                const isConfirmed = (ym) => { const [y, m] = ym.split('-').map(Number); return new Date() >= new Date(y, m, 10, 0, 0, 0); };
                 // 店舗の並び＝出店が古い順（SO_SHOP_ORDER: 大森院が先頭）。一覧に無い店舗は末尾へ。
                 const zkOrderIndex = (name) => {
                     const nn = soShopNorm(name);
@@ -3855,13 +3859,18 @@
                     return i < 0 ? 999 : i;
                 };
                 const ordered = [...shopList].sort((a, b) => { const d = zkOrderIndex(a.name) - zkOrderIndex(b.name); return d !== 0 ? d : String(a.name).localeCompare(b.name); });
-                const shops = ordered.map(s => ({ id: String(s.id), name: s.name, months: {} }));
-                // 取得対象＝過去〜当月（未来月はスキップ＝0表示）。店舗×月でタスク化。
-                const fetchMonths = months.filter(ym => ym <= nowYM);
+                // キャッシュ読込：過去の確定月は固定値を再利用し、取得に行かない。
+                let cacheAll = {}; try { cacheAll = JSON.parse(localStorage.getItem(ZK_CACHE_KEY) || '{}') || {}; } catch (e) { cacheAll = {}; }
+                const ycache = (cacheAll[year] = cacheAll[year] || {}); // { shopId: { ym: {gross,karte,newc,ther} } }
+                const shops = ordered.map(s => { const id = String(s.id); return { id, name: s.name, months: { ...(ycache[id] || {}) } }; });
+                setZkData({ year, months, shops: shops.map(s => ({ ...s, months: { ...s.months } })) }); // キャッシュ分を即時表示
+                // 取得対象＝「未確定月」または「キャッシュ未取得の確定月」または force。確定済み＆キャッシュ有りはスキップ。
                 const tasks = [];
-                shops.forEach(sh => fetchMonths.forEach(ym => tasks.push({ sh, ym })));
+                shops.forEach(sh => months.forEach(ym => {
+                    if (ym > nowYM) return;                       // 未来月はスキップ
+                    if (forceAll || !isConfirmed(ym) || sh.months[ym] == null) tasks.push({ sh, ym });
+                }));
                 setZkProgress({ done: 0, total: tasks.length });
-                setZkData({ year, months, shops: shops.map(s => ({ ...s })) });
                 // レート制限(60/分)対策: 429/5xx はバックオフして再試行（取りこぼしで0になるのを防ぐ）
                 const zkGet = async (shopId, from, to) => {
                     for (let a = 0; a < 6; a++) {
@@ -3900,7 +3909,9 @@
                                         const tr = Number(st.treatment_count) || 0;
                                         return (g > 0 || it > 0 || tr > 0) && !ST_NON_THERAPIST.has(nm);
                                     }).length;
-                                    sh.months[ym] = { gross, karte, newc, ther };
+                                    const data = { gross, karte, newc, ther };
+                                    sh.months[ym] = data;
+                                    (ycache[sh.id] = ycache[sh.id] || {})[ym] = data; // キャッシュにも保存
                                 }
                             }
                         } catch (e) { /* この月は空のまま */ }
@@ -3909,6 +3920,7 @@
                     }
                 };
                 await Promise.all(Array.from({ length: Math.min(4, tasks.length) }, () => worker())); // レート制限に配慮し並列4
+                try { localStorage.setItem(ZK_CACHE_KEY, JSON.stringify(cacheAll)); } catch (e) { /* 容量超過等は無視 */ }
                 setZkData({ year, months, shops });
                 setZkLoading(false);
             };
@@ -13268,16 +13280,17 @@
                                         <div>
                                             <div className="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-[10px] font-black uppercase tracking-widest mb-1">Overview</div>
                                             <h1 className="text-xl md:text-2xl font-black tracking-tight italic">全体管理シート</h1>
-                                            <p className="text-[11px] text-slate-500 font-bold mt-0.5">SalonOne実績を店舗×月で一覧（横=店舗／縦=月・スクロールで確認）</p>
+                                            <p className="text-[11px] text-slate-500 font-bold mt-0.5">SalonOne実績を店舗×月で一覧（横=店舗／縦=月）。過去の確定月（翌月10日以降）は固定表示し、当月のみ取得して高速化。</p>
                                         </div>
                                     </div>
                                     <div className="flex items-center gap-2">
                                         <select value={zkYear} onChange={e => { const y = Number(e.target.value); setZkYear(y); setZkData(null); loadZenkanri(y); }} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold">
                                             {yearOpts.map(y => <option key={y} value={y}>{y}年</option>)}
                                         </select>
-                                        <button onClick={() => { setZkData(null); loadZenkanri(zkYear); }} disabled={zkLoading} className="px-4 py-2 bg-slate-800 text-white rounded-xl text-sm font-black hover:bg-slate-700 disabled:opacity-50 flex items-center gap-1.5">
-                                            {zkLoading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}{zkLoading ? '取得中' : '再取得'}
+                                        <button onClick={() => loadZenkanri(zkYear)} disabled={zkLoading} title="当月（未確定分）のみ取得。過去の確定月は固定表示" className="px-4 py-2 bg-slate-800 text-white rounded-xl text-sm font-black hover:bg-slate-700 disabled:opacity-50 flex items-center gap-1.5">
+                                            {zkLoading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}{zkLoading ? '取得中' : '更新'}
                                         </button>
+                                        <button onClick={() => loadZenkanri(zkYear, { force: true })} disabled={zkLoading} title="過去月も含めて全期間を取り直す（時間がかかります）" className="px-3 py-2 bg-white border border-slate-200 text-slate-500 rounded-xl text-xs font-bold hover:bg-slate-50 disabled:opacity-50">全期間再取得</button>
                                     </div>
                                 </header>
 

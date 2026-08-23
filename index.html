@@ -1764,7 +1764,7 @@
             }, [currentPage, stMonth]);
             // 返金明細書・手当タブでは在籍スタッフ一覧（諸経費/手当のセラピスト表示用）を取得
             useEffect(() => {
-                if (!['settlement', 'allowance', 'settings'].includes(currentPage) || soStaffs.length > 0) return;
+                if (!['settlement', 'allowance', 'settings', 'zenkanri'].includes(currentPage) || soStaffs.length > 0) return;
                 (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at })); if (arr.length) setSoStaffs(arr); } catch {} })();
             }, [currentPage]);
             // 選択店舗の在籍セラピストを m.therapists に反映（新規在籍を追加・氏名同期。手動入力値は保持）。
@@ -1931,7 +1931,7 @@
             }, [currentPage, stMonth, stSel.join(',')]);
             // 返金明細書・手当タブを開いたら SalonOne 店舗一覧を用意し、初期選択を1店にセット
             useEffect(() => {
-                if (['settlement', 'allowance'].includes(currentPage) && soShopsRaw.length === 0) {
+                if (['settlement', 'allowance', 'zenkanri'].includes(currentPage) && soShopsRaw.length === 0) {
                     fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`).then(r => r.json()).then(j => {
                         const arr = soShopsFromResp(j);
                         if (arr.length) { setSoShops(arr); }
@@ -1940,11 +1940,23 @@
                     setStSel([String(soShops[0].id)]);
                 }
             }, [currentPage, soShops.length]);
+            // 全体管理シートを開いたら（店舗一覧が揃い次第）自動でデータ取得
+            useEffect(() => {
+                if (currentPage === 'zenkanri' && soShops.length && !zkData && !zkLoading) {
+                    loadZenkanri(zkYear);
+                }
+            }, [currentPage, soShops.length]);
             const [soShopSel, setSoShopSel] = useState([]);     // 店舗フィルタ（[]=全店舗 / shop_id配列）
             const [soStaffSel, setSoStaffSel] = useState([]);   // スタッフフィルタ（[]=全スタッフ / staff_id配列）
             const [soOwner, setSoOwner] = useState('');         // オーナー選択（空=なし）
             const [soFrom, setSoFrom] = useState(soDefaultRange.from);
             const [soTo, setSoTo] = useState(soDefaultRange.to);
+            // ── 全体管理シート（店舗×月のマトリクス）状態 ──
+            const [zkData, setZkData] = useState(null);          // { year, months:[YYYY-MM], shops:[{id,name,therapist,months:{ym:{gross,karte,newc}}}] }
+            const [zkLoading, setZkLoading] = useState(false);
+            const [zkProgress, setZkProgress] = useState({ done: 0, total: 0 });
+            const [zkError, setZkError] = useState(null);
+            const [zkYear, setZkYear] = useState(new Date().getFullYear());
             const [soStoreMenuOpen, setSoStoreMenuOpen] = useState(false);
             const [soStoreSearch, setSoStoreSearch] = useState('');
             const [soStaffMenuOpen, setSoStaffMenuOpen] = useState(false);
@@ -3820,6 +3832,50 @@
                 let eff = soTo < yStr ? soTo : yStr;   // 選択期間末が前日以前ならそのまま
                 if (eff < soFrom) eff = soFrom;        // 期間が未来なら開始日にクランプ
                 return eff;
+            };
+            // ── 全体管理シート: 店舗ごとに年間のsales/summaryを1回取得し、by_dayを月次集計 ──
+            const loadZenkanri = async (year = zkYear) => {
+                const shopList = (soShops && soShops.length) ? soShops : [];
+                if (!shopList.length) { setZkError('店舗一覧を取得できていません。SalonOne売上タブを一度開いてから再度お試しください。'); return; }
+                setZkLoading(true); setZkError(null);
+                const p2 = (x) => String(x).padStart(2, '0');
+                const months = Array.from({ length: 12 }, (_, i) => `${year}-${p2(i + 1)}`);
+                const from = `${year}-01-01`;
+                // 取得上限＝昨日（当日は未確定）かつ対象年の12/31まで
+                const yst = new Date(); yst.setHours(0, 0, 0, 0); yst.setDate(yst.getDate() - 1);
+                const ystr = `${yst.getFullYear()}-${p2(yst.getMonth() + 1)}-${p2(yst.getDate())}`;
+                const yearEnd = `${year}-12-31`;
+                let to = ystr < yearEnd ? ystr : yearEnd;
+                if (to < from) to = from;
+                // セラピスト数＝現在の在籍ロスター（店舗別・削除除く）
+                const therByShop = {};
+                (soStaffs || []).forEach(st => { if (st.deleted) return; const k = String(st.shop_id || ''); if (!k) return; therByShop[k] = (therByShop[k] || 0) + 1; });
+                const shops = shopList.map(s => ({ id: String(s.id), name: s.name, therapist: therByShop[String(s.id)] || 0, months: {} }));
+                setZkProgress({ done: 0, total: shops.length });
+                setZkData({ year, months, shops: shops.map(s => ({ ...s })) });
+                let idx = 0, done = 0;
+                const worker = async () => {
+                    while (idx < shops.length) {
+                        const sh = shops[idx++];
+                        try {
+                            const r = await fetchSalonOne('sales/summary', { from, to, shop_id: sh.id });
+                            const sum = (r && r.data) ? normalizeSalonSummary({ data: r.data }) : null;
+                            const agg = {};
+                            if (sum) (sum.byDay || []).forEach(d => {
+                                const ym = String(d.date || '').slice(0, 7);
+                                if (!ym) return;
+                                const e = agg[ym] || (agg[ym] = { gross: 0, karte: 0, newc: 0 });
+                                e.gross += d.gross || 0; e.karte += d.visits || 0; e.newc += d.newCount || 0;
+                            });
+                            sh.months = agg;
+                        } catch (e) { /* この店舗は空のまま */ }
+                        done++; setZkProgress({ done, total: shops.length });
+                        setZkData({ year, months, shops: shops.map(s => ({ ...s })) }); // 逐次反映
+                    }
+                };
+                await Promise.all(Array.from({ length: Math.min(6, shops.length) }, () => worker()));
+                setZkData({ year, months, shops });
+                setZkLoading(false);
             };
             const fetchSalonOneData = async (force = false) => {
                 const reqId = ++soReqRef.current;      // この取得のID
@@ -13114,6 +13170,120 @@
                             );
                         })()}
 
+                    {/* ===== 全体管理シート（店舗×月マトリクス） ===== */}
+                    {currentPage === 'zenkanri' && (() => {
+                        const p2 = (x) => String(x).padStart(2, '0');
+                        const yen = (n) => '¥' + Math.round(Number(n) || 0).toLocaleString();
+                        const months = (zkData && zkData.months) || Array.from({ length: 12 }, (_, i) => `${zkYear}-${p2(i + 1)}`);
+                        const shops = (zkData && zkData.shops) || [];
+                        const entities = [{ id: '__group__', name: 'グループ全体', group: true }, ...shops.map(s => ({ id: s.id, name: s.name, shop: s }))];
+                        const grpTher = shops.reduce((a, s) => a + (s.therapist || 0), 0);
+                        const val = (ent, ym, metric) => {
+                            if (metric === 'ther') return ent.group ? grpTher : (ent.shop.therapist || 0);
+                            const get = (s) => { const m = s.months && s.months[ym]; return m ? (m[metric] || 0) : 0; };
+                            return ent.group ? shops.reduce((a, s) => a + get(s), 0) : get(ent.shop);
+                        };
+                        const pct = (cur, prev) => (prev && prev > 0) ? Math.round(cur / prev * 100) + '%' : '—';
+                        const fmt = (k, v) => k === 'gross' ? yen(v) : k === 'karte' ? `${(v || 0).toLocaleString()}枚` : k === 'newc' ? `${(v || 0).toLocaleString()}人` : `${v || 0}名`;
+                        const METRICS = [
+                            { k: 'gross', label: '総売上', bg: '#fffbeb' },
+                            { k: 'karte', label: 'カルテ枚数', bg: '#fef2f2' },
+                            { k: 'newc', label: '新規数', bg: '#fef2f2' },
+                            { k: 'ther', label: 'セラピスト数', bg: '#f8fafc' },
+                        ];
+                        const W_MONTH = 46, W_ITEM = 96;
+                        const yearOpts = [0, 1, 2].map(d => new Date().getFullYear() - d);
+                        const stkTd = 'border border-slate-200 px-2 py-1 text-right whitespace-nowrap';
+                        return (
+                        <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
+                            <div className="max-w-[1800px] mx-auto space-y-4">
+                                <header className="bg-white p-4 md:p-5 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                    <div className="flex items-center gap-3">
+                                        <div className="p-2 md:p-3 bg-gradient-to-br from-indigo-600 to-blue-500 rounded-xl md:rounded-2xl text-white shadow-lg"><BarChart3 size={24} /></div>
+                                        <div>
+                                            <div className="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-[10px] font-black uppercase tracking-widest mb-1">Overview</div>
+                                            <h1 className="text-xl md:text-2xl font-black tracking-tight italic">全体管理シート</h1>
+                                            <p className="text-[11px] text-slate-500 font-bold mt-0.5">SalonOne実績を店舗×月で一覧（横=店舗／縦=月・スクロールで確認）</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <select value={zkYear} onChange={e => { const y = Number(e.target.value); setZkYear(y); setZkData(null); loadZenkanri(y); }} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold">
+                                            {yearOpts.map(y => <option key={y} value={y}>{y}年</option>)}
+                                        </select>
+                                        <button onClick={() => { setZkData(null); loadZenkanri(zkYear); }} disabled={zkLoading} className="px-4 py-2 bg-slate-800 text-white rounded-xl text-sm font-black hover:bg-slate-700 disabled:opacity-50 flex items-center gap-1.5">
+                                            {zkLoading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}{zkLoading ? '取得中' : '再取得'}
+                                        </button>
+                                    </div>
+                                </header>
+
+                                {zkError && <div className="bg-red-50 border border-red-200 rounded-2xl p-4 text-sm font-bold text-red-600">{zkError}</div>}
+                                {zkLoading && zkProgress.total > 0 && (
+                                    <div className="bg-white border border-slate-200 rounded-2xl p-3">
+                                        <div className="flex justify-between text-[11px] font-bold text-slate-500 mb-1"><span>店舗データ取得中...</span><span>{zkProgress.done}/{zkProgress.total}</span></div>
+                                        <div className="h-2 bg-slate-100 rounded-full overflow-hidden"><div className="h-2 bg-indigo-500 rounded-full transition-all" style={{ width: `${zkProgress.total ? Math.round(zkProgress.done / zkProgress.total * 100) : 0}%` }} /></div>
+                                    </div>
+                                )}
+
+                                {!zkData && !zkLoading ? (
+                                    <div className="bg-white border border-slate-200 rounded-2xl p-10 text-center">
+                                        <button onClick={() => loadZenkanri(zkYear)} className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-black hover:bg-indigo-700">データを取得</button>
+                                    </div>
+                                ) : (
+                                    <div className="overflow-auto rounded-2xl border border-slate-200 bg-white" style={{ maxHeight: '78vh' }}>
+                                        <table className="border-collapse text-xs" style={{ minWidth: 'max-content' }}>
+                                            <tbody>
+                                                {months.map((ym, mi) => {
+                                                    const prevYm = mi > 0 ? months[mi - 1] : null;
+                                                    const mm = Number(ym.split('-')[1]);
+                                                    return (
+                                                    <React.Fragment key={ym}>
+                                                        {/* 店舗ヘッダー */}
+                                                        <tr>
+                                                            <th rowSpan={2 + METRICS.length} className="sticky border border-slate-700 text-white font-black text-sm" style={{ left: 0, minWidth: W_MONTH, width: W_MONTH, background: '#1f2937', zIndex: 30 }}>{mm}月</th>
+                                                            <th className="sticky border border-slate-600 text-white text-[11px] font-black px-2 py-1" style={{ left: W_MONTH, minWidth: W_ITEM, width: W_ITEM, background: '#374151', zIndex: 20 }}>KGI・KPI</th>
+                                                            {entities.map(ent => (
+                                                                <th key={ent.id} colSpan={2} className={`border border-slate-300 px-2 py-1 text-[11px] font-black whitespace-nowrap ${ent.group ? 'bg-indigo-100 text-indigo-800' : 'bg-slate-100 text-slate-700'}`}>{ent.name}<span className="text-slate-400 font-bold ml-1">({val(ent, ym, 'ther')})</span></th>
+                                                            ))}
+                                                        </tr>
+                                                        {/* 実績 / 前月対比 */}
+                                                        <tr>
+                                                            <th className="sticky border border-slate-600 bg-slate-500 text-white text-[10px] font-bold px-2 py-0.5" style={{ left: W_MONTH, zIndex: 20 }}></th>
+                                                            {entities.map(ent => (
+                                                                <React.Fragment key={ent.id}>
+                                                                    <th className="border border-slate-200 bg-slate-50 text-[10px] font-black text-slate-500 px-2 py-0.5">実績</th>
+                                                                    <th className="border border-slate-200 bg-slate-50 text-[10px] font-black text-slate-400 px-2 py-0.5">前月対比</th>
+                                                                </React.Fragment>
+                                                            ))}
+                                                        </tr>
+                                                        {/* 指標行 */}
+                                                        {METRICS.map(mt => (
+                                                            <tr key={mt.k}>
+                                                                <th className="sticky border border-slate-200 text-[11px] font-black text-slate-600 px-2 py-1 text-left" style={{ left: W_MONTH, background: mt.bg, zIndex: 20 }}>{mt.label}</th>
+                                                                {entities.map(ent => {
+                                                                    const cur = val(ent, ym, mt.k);
+                                                                    const prev = prevYm ? val(ent, prevYm, mt.k) : null;
+                                                                    return (
+                                                                        <React.Fragment key={ent.id}>
+                                                                            <td className={`${stkTd} font-bold ${ent.group ? 'text-indigo-900 bg-indigo-50/40' : 'text-slate-800'}`} style={{ background: ent.group ? undefined : mt.bg }}>{fmt(mt.k, cur)}</td>
+                                                                            <td className={stkTd + ' text-slate-400 font-bold'}>{prevYm ? pct(cur, prev) : '—'}</td>
+                                                                        </React.Fragment>
+                                                                    );
+                                                                })}
+                                                            </tr>
+                                                        ))}
+                                                    </React.Fragment>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                )}
+                                <p className="text-[11px] text-slate-400 font-bold">※ 総売上=SalonOne税込売上／カルテ枚数=来店数／新規数=新規来店数／セラピスト数=現在の在籍数。当月は前日までの確定分。未来月はデータなし。前月対比は前月実績比。</p>
+                            </div>
+                        </div>
+                        );
+                    })()}
+
                     {/* ===== 返金明細書（FC精算）タブ ===== */}
                     {currentPage === 'settlement' && (() => {
                         const shopList = (soShops.length ? soShops : soDemoShops);
@@ -16811,6 +16981,7 @@
         const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authOwner = '', authRole = 'root' }) => {
             const menuItems = [
                 { id: 'salonone', label: 'SalonOne売上', icon: <Calendar size={20} />, mobileIcon: <Calendar size={18} /> },
+                { id: 'zenkanri', label: '全体管理シート', icon: <BarChart3 size={20} />, mobileIcon: <BarChart3 size={18} /> },
                 { id: 'square', label: 'サブスク分析', icon: <CreditCard size={20} />, mobileIcon: <CreditCard size={18} /> },
                 { id: 'settlement', label: '返金明細書', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} />, hideForStaff: true },
                 { id: 'allowance', label: '手当・領収書', icon: <FileText size={20} />, mobileIcon: <FileText size={18} /> },

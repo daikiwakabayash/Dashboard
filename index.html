@@ -3850,7 +3850,15 @@
                 // セラピスト数＝現在の在籍ロスター（店舗別・削除除く）
                 const therByShop = {};
                 (soStaffs || []).forEach(st => { if (st.deleted) return; const k = String(st.shop_id || ''); if (!k) return; therByShop[k] = (therByShop[k] || 0) + 1; });
-                const shops = shopList.map(s => ({ id: String(s.id), name: s.name, therapist: therByShop[String(s.id)] || 0, months: {} }));
+                // 店舗の並び＝出店が古い順（SO_SHOP_ORDER: 大森院が先頭）。一覧に無い店舗は末尾へ。
+                const zkOrderIndex = (name) => {
+                    const nn = soShopNorm(name);
+                    let i = SO_SHOP_ORDER.findIndex(o => soShopNorm(o) === nn);
+                    if (i < 0) i = SO_SHOP_ORDER.findIndex(o => { const on = soShopNorm(o); return nn.length >= 2 && (on.includes(nn) || nn.includes(on)); });
+                    return i < 0 ? 999 : i;
+                };
+                const ordered = [...shopList].sort((a, b) => { const d = zkOrderIndex(a.name) - zkOrderIndex(b.name); return d !== 0 ? d : String(a.name).localeCompare(b.name); });
+                const shops = ordered.map(s => ({ id: String(s.id), name: s.name, therapist: therByShop[String(s.id)] || 0, months: {} }));
                 setZkProgress({ done: 0, total: shops.length });
                 setZkData({ year, months, shops: shops.map(s => ({ ...s })) });
                 let idx = 0, done = 0;
@@ -13173,27 +13181,35 @@
                     {/* ===== 全体管理シート（店舗×月マトリクス） ===== */}
                     {currentPage === 'zenkanri' && (() => {
                         const p2 = (x) => String(x).padStart(2, '0');
-                        const yen = (n) => '¥' + Math.round(Number(n) || 0).toLocaleString();
+                        const man = (n) => { const v = Math.round(Number(n) || 0); return v >= 10000 ? '¥' + (v / 10000).toFixed(1) + '万' : '¥' + v.toLocaleString(); };
                         const months = (zkData && zkData.months) || Array.from({ length: 12 }, (_, i) => `${zkYear}-${p2(i + 1)}`);
                         const shops = (zkData && zkData.shops) || [];
-                        const entities = [{ id: '__group__', name: 'グループ全体', group: true }, ...shops.map(s => ({ id: s.id, name: s.name, shop: s }))];
+                        const stripName = (n) => String(n || '').replace(/^NAORU\s*/, '').trim();
+                        const entities = [{ id: '__group__', name: 'グループ全体', group: true }, ...shops.map(s => ({ id: s.id, name: stripName(s.name), shop: s }))];
                         const grpTher = shops.reduce((a, s) => a + (s.therapist || 0), 0);
                         const val = (ent, ym, metric) => {
                             if (metric === 'ther') return ent.group ? grpTher : (ent.shop.therapist || 0);
                             const get = (s) => { const m = s.months && s.months[ym]; return m ? (m[metric] || 0) : 0; };
                             return ent.group ? shops.reduce((a, s) => a + get(s), 0) : get(ent.shop);
                         };
-                        const pct = (cur, prev) => (prev && prev > 0) ? Math.round(cur / prev * 100) + '%' : '—';
-                        const fmt = (k, v) => k === 'gross' ? yen(v) : k === 'karte' ? `${(v || 0).toLocaleString()}枚` : k === 'newc' ? `${(v || 0).toLocaleString()}人` : `${v || 0}名`;
+                        // 前月比: 100%以上=緑／未満=赤／前月0=新規・前月なし=—
+                        const cmp = (cur, prev) => {
+                            if (prev == null) return { t: '—', cls: 'text-slate-300' };
+                            if (!prev) return { t: cur ? '新規' : '—', cls: cur ? 'text-emerald-600' : 'text-slate-300' };
+                            const r = Math.round(cur / prev * 100);
+                            return { t: r + '%', cls: r >= 100 ? 'text-emerald-600' : 'text-rose-500' };
+                        };
+                        const fmt = (k, v) => k === 'gross' ? man(v) : k === 'karte' ? `${(v || 0).toLocaleString()}枚` : k === 'newc' ? `${(v || 0).toLocaleString()}人` : `${v || 0}名`;
                         const METRICS = [
                             { k: 'gross', label: '総売上', bg: '#fffbeb' },
-                            { k: 'karte', label: 'カルテ枚数', bg: '#fef2f2' },
-                            { k: 'newc', label: '新規数', bg: '#fef2f2' },
+                            { k: 'karte', label: 'カルテ枚数', bg: '#f0f9ff' },
+                            { k: 'newc', label: '新規数', bg: '#fdf4ff' },
                             { k: 'ther', label: 'セラピスト数', bg: '#f8fafc' },
                         ];
-                        const W_MONTH = 46, W_ITEM = 96;
+                        const W_MONTH = 40, W_ITEM = 92, W_ACT = 90, W_CMP = 58;
+                        const L_ITEM = W_MONTH, L_GACT = W_MONTH + W_ITEM, L_GCMP = W_MONTH + W_ITEM + W_ACT;
                         const yearOpts = [0, 1, 2].map(d => new Date().getFullYear() - d);
-                        const stkTd = 'border border-slate-200 px-2 py-1 text-right whitespace-nowrap';
+                        const MONTH_DIV = '3px solid #0f172a';
                         return (
                         <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
                             <div className="max-w-[1800px] mx-auto space-y-4">
@@ -13229,43 +13245,46 @@
                                         <button onClick={() => loadZenkanri(zkYear)} className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-black hover:bg-indigo-700">データを取得</button>
                                     </div>
                                 ) : (
-                                    <div className="overflow-auto rounded-2xl border border-slate-200 bg-white" style={{ maxHeight: '78vh' }}>
-                                        <table className="border-collapse text-xs" style={{ minWidth: 'max-content' }}>
+                                    <div className="overflow-auto rounded-2xl border border-slate-200 bg-white shadow-sm" style={{ maxHeight: '80vh' }}>
+                                        <table className="border-collapse" style={{ minWidth: 'max-content', fontSize: '11px' }}>
                                             <tbody>
                                                 {months.map((ym, mi) => {
                                                     const prevYm = mi > 0 ? months[mi - 1] : null;
                                                     const mm = Number(ym.split('-')[1]);
+                                                    const tb = MONTH_DIV;
                                                     return (
                                                     <React.Fragment key={ym}>
                                                         {/* 店舗ヘッダー */}
                                                         <tr>
-                                                            <th rowSpan={2 + METRICS.length} className="sticky border border-slate-700 text-white font-black text-sm" style={{ left: 0, minWidth: W_MONTH, width: W_MONTH, background: '#1f2937', zIndex: 30 }}>{mm}月</th>
-                                                            <th className="sticky border border-slate-600 text-white text-[11px] font-black px-2 py-1" style={{ left: W_MONTH, minWidth: W_ITEM, width: W_ITEM, background: '#374151', zIndex: 20 }}>KGI・KPI</th>
-                                                            {entities.map(ent => (
-                                                                <th key={ent.id} colSpan={2} className={`border border-slate-300 px-2 py-1 text-[11px] font-black whitespace-nowrap ${ent.group ? 'bg-indigo-100 text-indigo-800' : 'bg-slate-100 text-slate-700'}`}>{ent.name}<span className="text-slate-400 font-bold ml-1">({val(ent, ym, 'ther')})</span></th>
+                                                            <th rowSpan={2 + METRICS.length} className="sticky text-white font-black text-center" style={{ left: 0, minWidth: W_MONTH, width: W_MONTH, background: '#0f172a', zIndex: 30, borderTop: tb, fontSize: '15px' }}>{mm}<span className="block text-[9px] font-bold text-slate-400">月</span></th>
+                                                            <th className="sticky text-white text-[11px] font-black px-2 py-1.5 text-left" style={{ left: L_ITEM, minWidth: W_ITEM, width: W_ITEM, background: '#334155', zIndex: 25, borderTop: tb }}>{zkYear}年</th>
+                                                            {entities.map((ent, ei) => (
+                                                                <th key={ent.id} colSpan={2} className="px-2 py-1.5 text-[11px] font-black whitespace-nowrap" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 22 : undefined, minWidth: ent.group ? (W_ACT + W_CMP) : undefined, background: ent.group ? '#4f46e5' : (ei % 2 ? '#e8edf3' : '#dde3ec'), color: ent.group ? '#fff' : '#334155', borderTop: tb, borderLeft: '1px solid #cbd5e1' }}>{ent.name}<span className="font-bold ml-1" style={{ color: ent.group ? '#c7d2fe' : '#94a3b8' }}>{val(ent, ym, 'ther')}名</span></th>
                                                             ))}
                                                         </tr>
-                                                        {/* 実績 / 前月対比 */}
+                                                        {/* 実績 / 前月比 サブヘッダー */}
                                                         <tr>
-                                                            <th className="sticky border border-slate-600 bg-slate-500 text-white text-[10px] font-bold px-2 py-0.5" style={{ left: W_MONTH, zIndex: 20 }}></th>
-                                                            {entities.map(ent => (
+                                                            <th className="sticky text-[9px]" style={{ left: L_ITEM, zIndex: 25, background: '#e2e8f0' }}></th>
+                                                            {entities.map((ent, ei) => (
                                                                 <React.Fragment key={ent.id}>
-                                                                    <th className="border border-slate-200 bg-slate-50 text-[10px] font-black text-slate-500 px-2 py-0.5">実績</th>
-                                                                    <th className="border border-slate-200 bg-slate-50 text-[10px] font-black text-slate-400 px-2 py-0.5">前月対比</th>
+                                                                    <th className="text-[9px] font-black text-slate-500 px-1 py-1" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 22 : undefined, minWidth: W_ACT, background: ent.group ? '#e0e7ff' : '#eef2f7', borderLeft: '1px solid #cbd5e1' }}>実績</th>
+                                                                    <th className="text-[9px] font-black text-slate-400 px-1 py-1" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GCMP : undefined, zIndex: ent.group ? 22 : undefined, minWidth: W_CMP, background: ent.group ? '#e0e7ff' : '#eef2f7' }}>前月比</th>
                                                                 </React.Fragment>
                                                             ))}
                                                         </tr>
                                                         {/* 指標行 */}
-                                                        {METRICS.map(mt => (
+                                                        {METRICS.map((mt, ri) => (
                                                             <tr key={mt.k}>
-                                                                <th className="sticky border border-slate-200 text-[11px] font-black text-slate-600 px-2 py-1 text-left" style={{ left: W_MONTH, background: mt.bg, zIndex: 20 }}>{mt.label}</th>
-                                                                {entities.map(ent => {
+                                                                <th className="sticky text-[11px] font-black text-slate-700 px-2 py-1.5 text-left" style={{ left: L_ITEM, background: mt.bg, zIndex: 25, borderBottom: ri === METRICS.length - 1 ? '2px solid #e2e8f0' : undefined }}>{mt.label}</th>
+                                                                {entities.map((ent, ei) => {
                                                                     const cur = val(ent, ym, mt.k);
                                                                     const prev = prevYm ? val(ent, prevYm, mt.k) : null;
+                                                                    const c = mt.k === 'ther' ? { t: '—', cls: 'text-slate-300' } : cmp(cur, prev);
+                                                                    const zebra = ent.group ? '#eef0ff' : (ei % 2 ? '#ffffff' : '#f9fbfd');
                                                                     return (
                                                                         <React.Fragment key={ent.id}>
-                                                                            <td className={`${stkTd} font-bold ${ent.group ? 'text-indigo-900 bg-indigo-50/40' : 'text-slate-800'}`} style={{ background: ent.group ? undefined : mt.bg }}>{fmt(mt.k, cur)}</td>
-                                                                            <td className={stkTd + ' text-slate-400 font-bold'}>{prevYm ? pct(cur, prev) : '—'}</td>
+                                                                            <td className={`px-2 py-1.5 text-right whitespace-nowrap font-bold ${ent.group ? 'text-indigo-900' : 'text-slate-800'}`} style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 15 : undefined, minWidth: W_ACT, background: zebra, borderLeft: '1px solid #e2e8f0' }}>{fmt(mt.k, cur)}</td>
+                                                                            <td className={`px-1 py-1.5 text-right whitespace-nowrap text-[10px] font-bold ${c.cls}`} style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GCMP : undefined, zIndex: ent.group ? 15 : undefined, minWidth: W_CMP, background: zebra }}>{c.t}</td>
                                                                         </React.Fragment>
                                                                     );
                                                                 })}

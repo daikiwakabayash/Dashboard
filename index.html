@@ -3834,22 +3834,19 @@
                 if (eff < soFrom) eff = soFrom;        // 期間が未来なら開始日にクランプ
                 return eff;
             };
-            // ── 全体管理シート: 店舗ごとに年間のsales/summaryを1回取得し、by_dayを月次集計 ──
+            // ── 全体管理シート: 店舗×月ごとに sales/summary を取得 ──
+            //   総売上=gross_sales（消化ではなく総額）／カルテ枚数=来店数／新規数=新規来店数／
+            //   セラピスト数=その月に売上(gross)が1円でも発生した担当者（ヘルプ/楽トレ等は除外）。
+            //   金額はSalonOneの最小通貨単位（JPYは円、AUD/MYRはセント）で保持し、表示時に通貨係数で割る。
             const loadZenkanri = async (year = zkYear) => {
                 const shopList = (soShops && soShops.length) ? soShops : [];
                 if (!shopList.length) { setZkError('店舗一覧を取得できていません。SalonOne売上タブを一度開いてから再度お試しください。'); return; }
                 setZkLoading(true); setZkError(null);
                 const p2 = (x) => String(x).padStart(2, '0');
                 const months = Array.from({ length: 12 }, (_, i) => `${year}-${p2(i + 1)}`);
-                const from = `${year}-01-01`;
-                // 取得上限＝昨日（当日は未確定）かつ対象年の12/31まで
-                const yst = new Date(); yst.setHours(0, 0, 0, 0); yst.setDate(yst.getDate() - 1);
+                const yst = new Date(); yst.setHours(0, 0, 0, 0); yst.setDate(yst.getDate() - 1); // 昨日（当日は未確定）
                 const ystr = `${yst.getFullYear()}-${p2(yst.getMonth() + 1)}-${p2(yst.getDate())}`;
-                const yearEnd = `${year}-12-31`;
-                let to = ystr < yearEnd ? ystr : yearEnd;
-                if (to < from) to = from;
-                // セラピスト数＝手当・領収書タブの氏名リストと同じロジック（stTherapistRoster）で算出。
-                // 在籍・非削除かつ非セラピスト(ヘルプ/楽トレ等)を除外した人数で一致させる。
+                const nowYM = `${new Date().getFullYear()}-${p2(new Date().getMonth() + 1)}`;
                 // 店舗の並び＝出店が古い順（SO_SHOP_ORDER: 大森院が先頭）。一覧に無い店舗は末尾へ。
                 const zkOrderIndex = (name) => {
                     const nn = soShopNorm(name);
@@ -3858,30 +3855,45 @@
                     return i < 0 ? 999 : i;
                 };
                 const ordered = [...shopList].sort((a, b) => { const d = zkOrderIndex(a.name) - zkOrderIndex(b.name); return d !== 0 ? d : String(a.name).localeCompare(b.name); });
-                const shops = ordered.map(s => ({ id: String(s.id), name: s.name, therapist: stTherapistRoster(String(s.id)).length, months: {} }));
-                setZkProgress({ done: 0, total: shops.length });
+                const shops = ordered.map(s => ({ id: String(s.id), name: s.name, months: {} }));
+                // 取得対象＝過去〜当月（未来月はスキップ＝0表示）。店舗×月でタスク化。
+                const fetchMonths = months.filter(ym => ym <= nowYM);
+                const tasks = [];
+                shops.forEach(sh => fetchMonths.forEach(ym => tasks.push({ sh, ym })));
+                setZkProgress({ done: 0, total: tasks.length });
                 setZkData({ year, months, shops: shops.map(s => ({ ...s })) });
                 let idx = 0, done = 0;
                 const worker = async () => {
-                    while (idx < shops.length) {
-                        const sh = shops[idx++];
+                    while (idx < tasks.length) {
+                        const { sh, ym } = tasks[idx++];
                         try {
-                            const r = await fetchSalonOne('sales/summary', { from, to, shop_id: sh.id });
-                            const sum = (r && r.data) ? normalizeSalonSummary({ data: r.data }) : null;
-                            const agg = {};
-                            if (sum) (sum.byDay || []).forEach(d => {
-                                const ym = String(d.date || '').slice(0, 7);
-                                if (!ym) return;
-                                const e = agg[ym] || (agg[ym] = { gross: 0, karte: 0, newc: 0 });
-                                e.gross += d.gross || 0; e.karte += d.visits || 0; e.newc += d.newCount || 0;
-                            });
-                            sh.months = agg;
-                        } catch (e) { /* この店舗は空のまま */ }
-                        done++; setZkProgress({ done, total: shops.length });
-                        setZkData({ year, months, shops: shops.map(s => ({ ...s })) }); // 逐次反映
+                            const [yy, mm] = ym.split('-').map(Number);
+                            const from = `${ym}-01`;
+                            let to = `${ym}-${p2(new Date(yy, mm, 0).getDate())}`;
+                            if (to > ystr) to = ystr; // 当月は前日まで
+                            if (to >= from) {
+                                const r = await fetchSalonOne('sales/summary', { from, to, shop_id: sh.id });
+                                const sum = (r && r.data) ? normalizeSalonSummary({ data: r.data }) : null;
+                                if (sum) {
+                                    let karte = 0, newc = 0;
+                                    (sum.byDay || []).forEach(d => { karte += d.visits || 0; newc += d.newCount || 0; });
+                                    const raw = (r.data && !Array.isArray(r.data)) ? r.data : ((r.data && r.data[0]) || {});
+                                    const bs = raw.by_staff || raw.byStaff || [];
+                                    // 当月に売上(gross)>0 の担当者。ヘルプ/楽トレ/未割当等は除外
+                                    const ther = bs.filter(st => {
+                                        const nm = String(st.staff_name || st.name || '').trim();
+                                        const g = Number(st.gross_sales != null ? st.gross_sales : st.gross) || 0;
+                                        return g > 0 && !ST_NON_THERAPIST.has(nm);
+                                    }).length;
+                                    sh.months[ym] = { gross: sum.grossSales || 0, karte, newc, ther };
+                                }
+                            }
+                        } catch (e) { /* この月は空のまま */ }
+                        done++; setZkProgress({ done, total: tasks.length });
+                        if (done % 6 === 0) setZkData({ year, months, shops: shops.map(s => ({ ...s })) }); // 逐次反映
                     }
                 };
-                await Promise.all(Array.from({ length: Math.min(6, shops.length) }, () => worker()));
+                await Promise.all(Array.from({ length: Math.min(8, tasks.length) }, () => worker()));
                 setZkData({ year, months, shops });
                 setZkLoading(false);
             };
@@ -13192,12 +13204,13 @@
                             return 'au';
                         };
                         const COUNTRIES = [
-                            { k: 'jp', label: '日本', flag: '🇯🇵', sym: '¥', man: true },
-                            { k: 'au', label: 'Australia', flag: '🇦🇺', sym: 'A$', man: false },
-                            { k: 'my', label: 'Malaysia', flag: '🇲🇾', sym: 'RM ', man: false },
+                            { k: 'jp', label: '日本', flag: '🇯🇵', sym: '¥', man: true, minor: 1 },
+                            { k: 'au', label: 'Australia', flag: '🇦🇺', sym: 'A$', man: false, minor: 100 },
+                            { k: 'my', label: 'Malaysia', flag: '🇲🇾', sym: 'RM ', man: false, minor: 100 },
                         ];
                         const CUR = COUNTRIES.find(c => c.k === zkCountry) || COUNTRIES[0];
-                        const money = (n) => { const v = Math.round(Number(n) || 0); return (CUR.man && v >= 10000) ? CUR.sym + (v / 10000).toFixed(1) + '万' : CUR.sym + v.toLocaleString(); };
+                        // SalonOneは最小通貨単位で保持（JPY=円、AUD/MYR=セント）。通貨係数で割って表示。
+                        const money = (n) => { const v = Math.round((Number(n) || 0) / CUR.minor); return (CUR.man && v >= 10000) ? CUR.sym + (v / 10000).toFixed(1) + '万' : CUR.sym + v.toLocaleString(); };
                         const months = (zkData && zkData.months) || Array.from({ length: 12 }, (_, i) => `${zkYear}-${p2(i + 1)}`);
                         const allShops = (zkData && zkData.shops) || [];
                         // 国別に店舗数を数える（タブのバッジ用）
@@ -13206,11 +13219,9 @@
                         const shops = allShops.filter(s => zkCountryOf(s.name) === zkCountry);
                         const stripName = (n) => String(n || '').replace(/^NAORU\s*/, '').trim();
                         const entities = [{ id: '__group__', name: 'グループ全体', group: true }, ...shops.map(s => ({ id: s.id, name: stripName(s.name), shop: s }))];
-                        // セラピスト数は手当・領収書の氏名リストと同じ stTherapistRoster でライブ算出（取得タイミングに依存しない）
-                        const therOf = (s) => stTherapistRoster(String(s.id)).length;
-                        const grpTher = shops.reduce((a, s) => a + therOf(s), 0);
+                        // すべての指標（総売上/カルテ/新規/セラピスト数）を月次データから取得。
+                        // セラピスト数＝その月に売上>0だった担当者数（ヘルプ/楽トレ除外）を店舗ごとに保持。
                         const val = (ent, ym, metric) => {
-                            if (metric === 'ther') return ent.group ? grpTher : therOf(ent.shop);
                             const get = (s) => { const m = s.months && s.months[ym]; return m ? (m[metric] || 0) : 0; };
                             return ent.group ? shops.reduce((a, s) => a + get(s), 0) : get(ent.shop);
                         };
@@ -13331,7 +13342,7 @@
                                         </table>
                                     </div>
                                 )}
-                                <p className="text-[11px] text-slate-400 font-bold">※ 国別タブで切替（日本¥／Australia A$／Malaysia RM＝各店舗のSalonOne通貨で表示・換算なし）。総売上=SalonOne税込売上／カルテ枚数=来店数／新規数=新規来店数／セラピスト数=現在の在籍数。当月は前日までの確定分。未来月はデータなし。前月対比は前月実績比。</p>
+                                <p className="text-[11px] text-slate-400 font-bold">※ 国別タブで切替（日本¥／Australia A$／Malaysia RM＝各店舗のSalonOne通貨で表示・換算なし）。総売上=SalonOneの総売上(gross・消化売上ではない)／カルテ枚数=来店数／新規数=新規来店数／セラピスト数=その月に売上が発生した担当者数（ヘルプ/楽トレ等は除外）。当月は前日までの確定分。未来月はデータなし。前月対比は前月実績比。</p>
                             </div>
                         </div>
                         );

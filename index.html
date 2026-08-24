@@ -1254,6 +1254,11 @@
                 // 非表示中のページ(経営指標/ダッシュボード/マーケティング)はSalonOne売上に寄せる
                 return (p && !['dashboard', 'charts', 'marketing'].includes(p)) ? p : 'salonone';
             });
+            // サイドバー折りたたみ（画面を広く使う。localStorageで記憶）
+            const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+                try { return localStorage.getItem('naoru_sidebar_collapsed') === '1'; } catch (e) { return false; }
+            });
+            useEffect(() => { try { localStorage.setItem('naoru_sidebar_collapsed', sidebarCollapsed ? '1' : '0'); } catch (e) {} }, [sidebarCollapsed]);
             // 権限外のページを開いていたらSalonOne売上へ退避（オーナー設定=root専用／返金明細書=staff不可）
             useEffect(() => {
                 if (!authState.authenticated) return;
@@ -8656,7 +8661,7 @@
             return (
                 <div className="min-h-screen bg-gradient-to-br from-slate-50 to-brand-50/30 flex">
                     {/* Sidebar */}
-                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} authRoot={authState.root} authOwner={authState.owner} authRole={authRole} />
+                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} authRoot={authState.root} authOwner={authState.owner} authRole={authRole} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} />
 
                     {/* Main Content */}
                     <div className="flex-1 min-w-0 overflow-x-hidden pb-16 md:pb-0">
@@ -13313,7 +13318,7 @@
                             { k: 'karte', label: 'カルテ枚数', bg: '#f0f9ff' },
                             { k: 'newc', label: '新規数', bg: '#fdf4ff' },
                         ];
-                        const W_MONTH = 40, W_ITEM = 92, W_ACT = 90, W_CMP = 58;
+                        const W_MONTH = 44, W_ITEM = 98, W_ACT = 104, W_CMP = 62;
                         const L_ITEM = W_MONTH, L_GACT = W_MONTH + W_ITEM, L_GCMP = W_MONTH + W_ITEM + W_ACT;
                         const yearOpts = [0, 1, 2].map(d => new Date().getFullYear() - d);
                         const MONTH_DIV = '3px solid #0f172a';
@@ -13365,7 +13370,7 @@
                                     <div className="bg-white border border-slate-200 rounded-2xl p-10 text-center text-slate-400 font-bold text-sm">{CUR.flag} {CUR.label} の店舗はまだSalonOneに登録がありません{zkLoading ? '（読み込み中…）' : ''}。</div>
                                 ) : (
                                     <div className="overflow-auto rounded-2xl border border-slate-200 bg-white shadow-sm" style={{ maxHeight: '80vh' }}>
-                                        <table className="border-collapse" style={{ minWidth: 'max-content', fontSize: '11px' }}>
+                                        <table className="border-collapse" style={{ minWidth: 'max-content', fontSize: '13px' }}>
                                             <tbody>
                                                 {months.map((ym, mi) => {
                                                     const prevYm = mi > 0 ? months[mi - 1] : null;
@@ -13375,26 +13380,26 @@
                                                     <React.Fragment key={ym}>
                                                         {/* 店舗ヘッダー */}
                                                         <tr>
-                                                            <th rowSpan={2 + METRICS.length} className="sticky text-white font-black text-center" style={{ left: 0, minWidth: W_MONTH, width: W_MONTH, background: '#0f172a', zIndex: 30, borderTop: tb, fontSize: '15px' }}>{mm}<span className="block text-[9px] font-bold text-slate-400">月</span></th>
-                                                            <th className="sticky text-white text-[11px] font-black px-2 py-1.5 text-left" style={{ left: L_ITEM, minWidth: W_ITEM, width: W_ITEM, background: '#334155', zIndex: 25, borderTop: tb }}>{zkYear}年</th>
+                                                            <th rowSpan={2 + METRICS.length} className="sticky text-white font-black text-center" style={{ left: 0, minWidth: W_MONTH, width: W_MONTH, background: '#0f172a', zIndex: 30, borderTop: tb, fontSize: '18px' }}>{mm}<span className="block text-[10px] font-bold text-slate-400">月</span></th>
+                                                            <th className="sticky text-white text-[13px] font-black px-2 py-1 text-left" style={{ left: L_ITEM, minWidth: W_ITEM, width: W_ITEM, background: '#334155', zIndex: 25, borderTop: tb }}>{zkYear}年</th>
                                                             {entities.map((ent, ei) => (
-                                                                <th key={ent.id} colSpan={2} className="px-2 py-1.5 text-[11px] font-black whitespace-nowrap" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 22 : undefined, minWidth: ent.group ? (W_ACT + W_CMP) : undefined, background: ent.group ? '#4f46e5' : (ei % 2 ? '#e8edf3' : '#dde3ec'), color: ent.group ? '#fff' : '#334155', borderTop: tb, borderLeft: '1px solid #cbd5e1' }}>{ent.name}<span className="font-bold ml-1" style={{ color: ent.group ? '#c7d2fe' : '#94a3b8' }}>{val(ent, ym, 'ther')}名</span></th>
+                                                                <th key={ent.id} colSpan={2} className="px-2 py-1 text-[13px] font-black whitespace-nowrap" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 22 : undefined, minWidth: ent.group ? (W_ACT + W_CMP) : undefined, background: ent.group ? '#4f46e5' : (ei % 2 ? '#e8edf3' : '#dde3ec'), color: ent.group ? '#fff' : '#334155', borderTop: tb, borderLeft: '1px solid #cbd5e1' }}>{ent.name}<span className="font-bold ml-1 text-[11px]" style={{ color: ent.group ? '#c7d2fe' : '#94a3b8' }}>{val(ent, ym, 'ther')}名</span></th>
                                                             ))}
                                                         </tr>
                                                         {/* 実績 / 前月比 サブヘッダー */}
                                                         <tr>
-                                                            <th className="sticky text-[9px]" style={{ left: L_ITEM, zIndex: 25, background: '#e2e8f0' }}></th>
+                                                            <th className="sticky text-[10px]" style={{ left: L_ITEM, zIndex: 25, background: '#e2e8f0' }}></th>
                                                             {entities.map((ent, ei) => (
                                                                 <React.Fragment key={ent.id}>
-                                                                    <th className="text-[9px] font-black text-slate-500 px-1 py-1" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 22 : undefined, minWidth: W_ACT, background: ent.group ? '#e0e7ff' : '#eef2f7', borderLeft: '1px solid #cbd5e1' }}>実績</th>
-                                                                    <th className="text-[9px] font-black text-slate-400 px-1 py-1" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GCMP : undefined, zIndex: ent.group ? 22 : undefined, minWidth: W_CMP, background: ent.group ? '#e0e7ff' : '#eef2f7' }}>前月比</th>
+                                                                    <th className="text-[10px] font-black text-slate-500 px-1 py-0.5" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 22 : undefined, minWidth: W_ACT, background: ent.group ? '#e0e7ff' : '#eef2f7', borderLeft: '1px solid #cbd5e1' }}>実績</th>
+                                                                    <th className="text-[10px] font-black text-slate-400 px-1 py-0.5" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GCMP : undefined, zIndex: ent.group ? 22 : undefined, minWidth: W_CMP, background: ent.group ? '#e0e7ff' : '#eef2f7' }}>前月比</th>
                                                                 </React.Fragment>
                                                             ))}
                                                         </tr>
                                                         {/* 指標行 */}
                                                         {METRICS.map((mt, ri) => (
                                                             <tr key={mt.k}>
-                                                                <th className="sticky text-[11px] font-black text-slate-700 px-2 py-1.5 text-left" style={{ left: L_ITEM, background: mt.bg, zIndex: 25, borderBottom: ri === METRICS.length - 1 ? '2px solid #e2e8f0' : undefined }}>{mt.label}</th>
+                                                                <th className="sticky text-[13px] font-black text-slate-700 px-2 py-1 text-left" style={{ left: L_ITEM, background: mt.bg, zIndex: 25, borderBottom: ri === METRICS.length - 1 ? '2px solid #e2e8f0' : undefined }}>{mt.label}</th>
                                                                 {entities.map((ent, ei) => {
                                                                     const cur = val(ent, ym, mt.k);
                                                                     const prev = prevYm ? val(ent, prevYm, mt.k) : null;
@@ -13402,8 +13407,8 @@
                                                                     const zebra = ent.group ? '#eef0ff' : (ei % 2 ? '#ffffff' : '#f9fbfd');
                                                                     return (
                                                                         <React.Fragment key={ent.id}>
-                                                                            <td className={`px-2 py-1.5 text-right whitespace-nowrap font-bold ${ent.group ? 'text-indigo-900' : 'text-slate-800'}`} style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 15 : undefined, minWidth: W_ACT, background: zebra, borderLeft: '1px solid #e2e8f0' }}>{fmt(mt.k, cur)}</td>
-                                                                            <td className={`px-1 py-1.5 text-right whitespace-nowrap text-[10px] font-bold ${c.cls}`} style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GCMP : undefined, zIndex: ent.group ? 15 : undefined, minWidth: W_CMP, background: zebra }}>{c.t}</td>
+                                                                            <td className={`px-2 py-1 text-right whitespace-nowrap font-bold text-[13px] ${ent.group ? 'text-indigo-900' : 'text-slate-800'}`} style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 15 : undefined, minWidth: W_ACT, background: zebra, borderLeft: '1px solid #e2e8f0' }}>{fmt(mt.k, cur)}</td>
+                                                                            <td className={`px-1 py-1 text-right whitespace-nowrap text-[11px] font-bold ${c.cls}`} style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GCMP : undefined, zIndex: ent.group ? 15 : undefined, minWidth: W_CMP, background: zebra }}>{c.t}</td>
                                                                         </React.Fragment>
                                                                     );
                                                                 })}
@@ -17116,7 +17121,7 @@
             );
         };
 
-        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authOwner = '', authRole = 'root' }) => {
+        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authOwner = '', authRole = 'root', collapsed = false, setCollapsed = () => {} }) => {
             const menuItems = [
                 { id: 'salonone', label: 'SalonOne売上', icon: <Calendar size={20} />, mobileIcon: <Calendar size={18} /> },
                 { id: 'zenkanri', label: '全体管理シート', icon: <BarChart3 size={20} />, mobileIcon: <BarChart3 size={18} /> },
@@ -17138,14 +17143,24 @@
             return (
                 <>
                     {/* Desktop Sidebar */}
-                    <div className="hidden md:flex md:flex-col w-64 shrink-0 min-h-screen bg-white border-r border-brand-100 p-6">
+                    <div className={`hidden md:flex md:flex-col shrink-0 min-h-screen bg-white border-r border-brand-100 relative transition-all duration-200 ${collapsed ? 'w-20 p-3' : 'w-64 p-6'}`}>
+                        {/* 折りたたみトグル（右端のタブ） */}
+                        <button
+                            onClick={() => setCollapsed(!collapsed)}
+                            title={collapsed ? 'サイドバーを開く' : 'サイドバーを隠す'}
+                            className="absolute -right-3 top-8 z-20 w-6 h-6 flex items-center justify-center bg-white border border-brand-200 rounded-full shadow-md text-slate-400 hover:text-brand-600 hover:border-brand-400 transition-all"
+                        >
+                            <ChevronRight size={14} className={collapsed ? '' : 'rotate-180'} />
+                        </button>
                         {/* Logo/Title + Alert Bell */}
-                        <div className="mb-8 flex items-center justify-between">
+                        <div className={`mb-8 flex items-center ${collapsed ? 'justify-center' : 'justify-between'}`}>
+                            {!collapsed && (
                             <div className="flex items-center gap-2">
                                 <div className="sidebar-logo-mark transition-all cursor-default">
                                     <img src="/Naoru_landscape.png" alt="NAORU" className="w-[11.25rem] h-auto object-contain" />
                                 </div>
                             </div>
+                            )}
                             <div className="relative" ref={alertRef}>
                                 <button
                                     onClick={() => setAlertOpen(!alertOpen)}
@@ -17202,7 +17217,8 @@
                                 <button
                                     key={item.id}
                                     onClick={() => setCurrentPage(item.id)}
-                                    className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm transition-all duration-200 relative overflow-hidden group ${
+                                    title={collapsed ? item.label : undefined}
+                                    className={`w-full flex items-center gap-3 rounded-xl font-bold text-sm transition-all duration-200 relative overflow-hidden group ${collapsed ? 'justify-center px-0 py-3' : 'px-4 py-3'} ${
                                         currentPage === item.id
                                             ? 'bg-gradient-to-r from-brand-500 to-brand-400 text-white shadow-lg shadow-brand-200 nav-item-active'
                                             : 'text-slate-600 hover:bg-brand-50 hover:text-brand-600'
@@ -17210,28 +17226,30 @@
                                     style={{ animationDelay: `${idx * 0.05}s` }}
                                 >
                                     <span className={`transition-transform duration-200 ${currentPage === item.id ? 'scale-110' : 'group-hover:scale-110'}`}>{item.icon}</span>
-                                    <span>{item.label}</span>
-                                    {currentPage === item.id && <span className="ml-auto w-1.5 h-1.5 bg-white rounded-full animate-pulse" />}
+                                    {!collapsed && <span>{item.label}</span>}
+                                    {!collapsed && currentPage === item.id && <span className="ml-auto w-1.5 h-1.5 bg-white rounded-full animate-pulse" />}
                                 </button>
                             ))}
                         </nav>
 
                         {/* Footer */}
-                        <div className="mt-auto pt-6 border-t border-slate-200 space-y-3">
+                        <div className={`mt-auto pt-6 border-t border-slate-200 space-y-3 ${collapsed ? 'px-0' : ''}`}>
+                            {!collapsed && (
                             <div className="px-4 py-2 rounded-xl bg-slate-50 border border-slate-200">
                                 <div className="text-[10px] text-slate-400 font-black uppercase tracking-wider">ログイン中</div>
                                 <div className="text-xs font-black text-slate-700 truncate">{authRoot ? '管理者（全店舗）' : (authOwner || 'アカウント')}</div>
                             </div>
-                            <button onClick={handleLogout}
-                                className="w-full flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold text-slate-500 hover:bg-red-50 hover:text-red-600 transition-colors">
+                            )}
+                            <button onClick={handleLogout} title={collapsed ? 'ログアウト' : undefined}
+                                className={`w-full flex items-center gap-2 rounded-xl text-xs font-bold text-slate-500 hover:bg-red-50 hover:text-red-600 transition-colors ${collapsed ? 'justify-center px-0 py-2' : 'px-4 py-2'}`}>
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
                                 </svg>
-                                ログアウト
+                                {!collapsed && 'ログアウト'}
                             </button>
-                            <div className="text-xs text-slate-400 font-bold">
+                            {!collapsed && <div className="text-xs text-slate-400 font-bold">
                                 v1.0.0
-                            </div>
+                            </div>}
                         </div>
                     </div>
 

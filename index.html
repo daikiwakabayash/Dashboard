@@ -3866,6 +3866,24 @@
                     return i < 0 ? 999 : i;
                 };
                 const ordered = [...shopList].sort((a, b) => { const d = zkOrderIndex(a.name) - zkOrderIndex(b.name); return d !== 0 ? d : String(a.name).localeCompare(b.name); });
+                // 公式CSV(全体管理シート)で売上が入っている月はSalonOne取得を丸ごとスキップ（大幅な高速化）。
+                // 日本の確定月(1〜7月)はCSVが唯一の表示ソースのため取得不要。当月(8月)もCSV入力済み店舗はスキップし、
+                // 未入力店舗のみ穴埋め取得する。海外(AU/MY)はCSVに無いので従来どおり取得。
+                const fixedForYear = (year === 2026) ? ZK_FIXED_2026 : null;
+                let fixedCover = null;
+                if (fixedForYear) {
+                    fixedCover = fixedForYear.order.map(nm => {
+                        const cov = {};
+                        Object.keys(fixedForYear.months).forEach(ym => { const arr = fixedForYear.months[ym][nm]; cov[ym] = !!(arr && arr[0] != null); });
+                        return { nn: soShopNorm(nm), cov };
+                    });
+                }
+                const fixedHas = (shopName, ym) => {
+                    if (!fixedCover) return false;
+                    const nn = soShopNorm(shopName);
+                    const hit = fixedCover.find(x => x.nn === nn) || fixedCover.find(x => nn.length >= 2 && (x.nn.includes(nn) || nn.includes(x.nn)));
+                    return hit ? !!hit.cov[ym] : false;
+                };
                 // キャッシュ読込：過去の確定月は固定値を再利用し、取得に行かない。
                 let cacheAll = {}; try { cacheAll = JSON.parse(localStorage.getItem(ZK_CACHE_KEY) || '{}') || {}; } catch (e) { cacheAll = {}; }
                 const ycache = (cacheAll[year] = cacheAll[year] || {}); // { shopId: { ym: {gross,karte,newc,ther} } }
@@ -3875,6 +3893,7 @@
                 const tasks = [];
                 shops.forEach(sh => months.forEach(ym => {
                     if (ym > nowYM) return;                       // 未来月はスキップ
+                    if (fixedHas(sh.name, ym)) return;            // 公式CSVで確定済み→SalonOne取得不要
                     if (forceAll || !isConfirmed(ym) || sh.months[ym] == null) tasks.push({ sh, ym });
                 }));
                 setZkProgress({ done: 0, total: tasks.length });

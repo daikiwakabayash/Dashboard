@@ -1386,7 +1386,6 @@
             const [soShopLoading, setSoShopLoading] = useState(false);
             const [soShopProgress, setSoShopProgress] = useState(null); // { done, total }
             const [soShopSort, setSoShopSort] = useState({ key: 'order', dir: 'asc' }); // 既定=出店順
-            const [soShopExpand, setSoShopExpand] = useState(() => new Set()); // 媒体別内訳を展開中の店舗order
             const soShopReqRef = useRef(0);
             // 全体管理シート セラピスト数の手動上書き（クラウド共有・全端末同期）。key='canonName|YYYY-MM'
             const [zkTherOverrides, setZkTherOverrides] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_zkther_v1') || '{}') || {}; } catch { return {}; } });
@@ -3481,6 +3480,18 @@
                 setSoShopRows(rows);
                 const targets = rows.filter(r => r.active);
                 setSoShopProgress({ done: 0, total: targets.length });
+                // レート制限(60/分)対策: 429/5xx はバックオフ再試行（博多/新越谷/江坂など後半店舗の取りこぼしを防ぐ）
+                const soGet = async (url) => {
+                    for (let a = 0; a < 6; a++) {
+                        try {
+                            const res = await fetch(url);
+                            if (res.status === 429 || res.status >= 500) { await new Promise(r => setTimeout(r, 800 * Math.pow(1.8, a))); continue; }
+                            if (!res.ok) return null;
+                            return await res.json().catch(() => null);
+                        } catch (e) { await new Promise(r => setTimeout(r, 800 * Math.pow(1.8, a))); }
+                    }
+                    return null;
+                };
                 let done = 0, idx = 0;
                 const worker = async () => {
                     while (idx < targets.length) {
@@ -3488,9 +3499,9 @@
                         const q = (res) => `${SALONONE_API_URL}?${new URLSearchParams({ resource: res, from: soFrom, to: cto, shop_id: row.id }).toString()}`;
                         try {
                             const [sumR, chR, rtR] = await Promise.all([
-                                fetch(q('sales/summary')).then(r => r.json()).catch(() => ({})),
-                                fetch(q('marketing/by-channel')).then(r => r.json()).catch(() => ({})),
-                                fetch(q('marketing/retention')).then(r => r.json()).catch(() => ({})),
+                                soGet(q('sales/summary')),
+                                soGet(q('marketing/by-channel')),
+                                soGet(q('marketing/retention')),
                             ]);
                             if (soShopReqRef.current !== reqId) return;
                             const sum = sumR && sumR.data ? normalizeSalonSummary({ data: sumR.data }) : null;
@@ -3769,6 +3780,7 @@
                         cancelRate: booking > 0 ? Math.round(cancel / booking * 1000) / 10 : 0,
                         join: soNum(c, 'join_count'), joinRate: soNum(c, 'join_rate'),
                         sales: soNum(c, 'sales'), adSpend: soNum(c, 'ad_spend'), cpa: soNum(c, 'cpa'), roas: soNum(c, 'roas'),
+                        impressions: soNum(c, 'impressions'), clicks: soNum(c, 'clicks'),
                     };
                 }).filter(c => c.booking > 0 || c.sales > 0).sort((a, b) => b.booking - a.booking);
             };
@@ -12585,21 +12597,10 @@
                                                                     <td className="py-2 px-2 text-right text-slate-600">{tG.toLocaleString()}</td>
                                                                     <td className="py-2 pl-2 text-right text-slate-600">{tH.toLocaleString()}</td>
                                                                 </tr>
-                                                                {sortedShopRows.map((r) => {
-                                                                    const expanded = soShopExpand.has(r.order);
-                                                                    const chans = (r.channels || []).filter(c => (c.visit > 0 || c.join > 0 || c.booking > 0)).sort((a, b) => (b.visit - a.visit) || (b.booking - a.booking));
-                                                                    const canExpand = r.active && !r.loading;
-                                                                    const toggle = () => { if (!canExpand) return; setSoShopExpand(prev => { const n = new Set(prev); n.has(r.order) ? n.delete(r.order) : n.add(r.order); return n; }); };
-                                                                    return (
-                                                                    <React.Fragment key={r.order}>
-                                                                    <tr className={`border-b border-slate-100 hover:bg-slate-50 transition-colors whitespace-nowrap ${!r.active ? 'opacity-50' : ''} ${expanded ? 'bg-emerald-50/40' : ''}`}>
+                                                                {sortedShopRows.map((r) => (
+                                                                    <tr key={r.order} className={`border-b border-slate-100 hover:bg-slate-50 transition-colors whitespace-nowrap ${!r.active ? 'opacity-50' : ''}`}>
                                                                         <td className="py-2.5 pr-2 font-black text-slate-300 sticky left-0 bg-white z-10 w-[34px]">{r.order + 1}</td>
-                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800 sticky left-[34px] bg-white z-10 w-[150px] truncate">
-                                                                            <button onClick={toggle} disabled={!canExpand} title={canExpand ? '媒体別の集客内訳を表示' : ''} className={`inline-flex items-center gap-1 max-w-full ${canExpand ? 'hover:text-emerald-600 cursor-pointer' : 'cursor-default'}`}>
-                                                                                {canExpand && <ChevronRight size={12} className={`shrink-0 text-slate-400 transition-transform ${expanded ? 'rotate-90' : ''}`} />}
-                                                                                <span className="truncate">{r.name}</span>
-                                                                            </button>
-                                                                            {!r.active && <span className="ml-1.5 px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded text-[9px] font-black align-middle">未導入</span>}{r.loading && <span className="ml-1.5 text-[10px] font-bold text-amber-500">…</span>}</td>
+                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800 sticky left-[34px] bg-white z-10 w-[150px] truncate">{r.name}{!r.active && <span className="ml-1.5 px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded text-[9px] font-black align-middle">未導入</span>}{r.loading && <span className="ml-1.5 text-[10px] font-bold text-amber-500">…</span>}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-emerald-700 sticky left-[184px] bg-white z-10">{r.active ? therapistOf(r) + '名' : '—'}</td>
                                                                         <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(r.gross)}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{soYen(r.newSales)}</td>
@@ -12614,47 +12615,10 @@
                                                                         <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.gReview.toLocaleString()}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.hReview.toLocaleString()}</td>
                                                                     </tr>
-                                                                    {expanded && (
-                                                                    <tr className="bg-slate-50/80">
-                                                                        <td colSpan={15} className="px-3 py-3 sticky left-0">
-                                                                            <div className="max-w-[720px]">
-                                                                                <div className="text-[11px] font-black text-slate-500 mb-1.5 flex items-center gap-1.5"><Megaphone size={13} className="text-emerald-600" />{r.name} の集客媒体別 内訳（新規{r.newCount.toLocaleString()}件・入会{r.joinCount.toLocaleString()}件）</div>
-                                                                                {chans.length === 0 ? (
-                                                                                    <div className="text-[11px] font-bold text-slate-400 py-2">この期間の媒体別データはありません。</div>
-                                                                                ) : (
-                                                                                <table className="w-full text-[12px] whitespace-nowrap">
-                                                                                    <thead>
-                                                                                        <tr className="text-left text-[10px] font-black text-slate-400 uppercase border-b border-slate-200">
-                                                                                            <th className="pb-1 pr-2">媒体</th>
-                                                                                            <th className="pb-1 px-2 text-right">予約</th>
-                                                                                            <th className="pb-1 px-2 text-right">新規(来店)</th>
-                                                                                            <th className="pb-1 px-2 text-right">入会</th>
-                                                                                            <th className="pb-1 pl-2 text-right">入会率</th>
-                                                                                        </tr>
-                                                                                    </thead>
-                                                                                    <tbody>
-                                                                                        {chans.map((c, ci) => (
-                                                                                            <tr key={ci} className="border-b border-slate-100 last:border-0">
-                                                                                                <td className="py-1.5 pr-2 font-bold text-slate-700">{c.name}</td>
-                                                                                                <td className="py-1.5 px-2 text-right font-bold text-slate-500">{(c.booking || 0).toLocaleString()}</td>
-                                                                                                <td className="py-1.5 px-2 text-right font-bold text-slate-700">{(c.visit || 0).toLocaleString()}</td>
-                                                                                                <td className="py-1.5 px-2 text-right font-bold text-emerald-600">{(c.join || 0).toLocaleString()}</td>
-                                                                                                <td className="py-1.5 pl-2 text-right font-bold text-slate-600">{c.visit ? (Math.round(c.join / c.visit * 1000) / 10).toFixed(1) + '%' : '—'}</td>
-                                                                                            </tr>
-                                                                                        ))}
-                                                                                    </tbody>
-                                                                                </table>
-                                                                                )}
-                                                                            </div>
-                                                                        </td>
-                                                                    </tr>
-                                                                    )}
-                                                                    </React.Fragment>
-                                                                    );
-                                                                })}
+                                                                ))}
                                                             </tbody>
                                                         </table>
-                                                        <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 既定は出店順（列見出しクリックで並べ替え）。1行目は合計/平均（導入店のみ・入会率と退会率は全体の加重平均）。<span className="text-emerald-600">店舗名をクリックすると集客媒体別の内訳（媒体ごとの予約・新規・入会・入会率）を表示。</span>セラピスト数＝在籍セラピスト数（staffsの店舗一致・ヘルプ/未割当は除外／手当タブの店舗検索と一致・売上0の月も反映）。売上・返金・口コミ＝SalonOne売上、新規数/入会数/入会率＝マーケ、会員数/退会数/退会率＝継続データ。SalonOne未導入の店舗は「未導入」バッジで0表示。</p>
+                                                        <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 既定は出店順（列見出しクリックで並べ替え）。1行目は合計/平均（導入店のみ・入会率と退会率は全体の加重平均）。セラピスト数＝全体管理シートと一致（手動上書き優先→CSV人数→在籍/稼働）。売上・返金・口コミ＝SalonOne売上、新規数/入会数/入会率＝マーケ、会員数/退会数/退会率＝継続データ。集客媒体別の内訳は「マーケ」タブの「店舗別×媒体」を参照。SalonOne未導入の店舗は「未導入」バッジで0表示。</p>
                                                     </div>
                                                 )}
                                             </div>
@@ -12731,16 +12695,39 @@
                                                     <p className="text-[10px] text-slate-400 mt-2 font-bold">※ 入会率＝入会数÷来店数（管理画面と同一定義。初回予約が先の契約が分子に入り100%超となる場合あり）。ｷｬﾝｾﾙ率＝ｷｬﾝｾﾙ÷予約。広告費・CPA・ROASはSalonOneに広告費が入力されている媒体のみ表示（未入力は「—」）。店舗を絞るには上部の店舗フィルタを使用。</p>
                                                 </div>
 
-                                                {/* ===== 店舗別 × 媒体（集客内訳・スクロール/フィルタ） ===== */}
+                                                {/* ===== 店舗別 × 媒体（集客内訳・全指標・合計付き・スクロール/フィルタ） ===== */}
                                                 {(() => {
                                                     const active = (soShopRows || []).filter(r => r.active);
-                                                    const jr = (c) => c && c.visit ? (Math.round(c.join / c.visit * 1000) / 10) : 0;
-                                                    // 全媒体名（来店/予約/入会いずれか>0）を集客数の多い順に
+                                                    const nz = (c) => (c && (c.visit > 0 || c.booking > 0 || c.join > 0 || c.sales > 0 || c.adSpend > 0));
+                                                    const pct = (n, d) => d ? (Math.round(n / d * 1000) / 10).toFixed(1) + '%' : '—';
+                                                    // 複数の媒体行を合算（合計行用）
+                                                    const sumCh = (list) => list.reduce((a, c) => ({ booking: a.booking + (c.booking || 0), visit: a.visit + (c.visit || 0), join: a.join + (c.join || 0), cancel: a.cancel + (c.cancel || 0), remaining: a.remaining + (c.remaining || 0), adSpend: a.adSpend + (c.adSpend || 0), sales: a.sales + (c.sales || 0), impressions: a.impressions + (c.impressions || 0), clicks: a.clicks + (c.clicks || 0) }), { booking: 0, visit: 0, join: 0, cancel: 0, remaining: 0, adSpend: 0, sales: 0, impressions: 0, clicks: 0 });
+                                                    // 全媒体名（実績のある媒体）を集客数の多い順に
                                                     const mediaAgg = {};
-                                                    active.forEach(r => (r.channels || []).forEach(c => { if (!(c.visit > 0 || c.booking > 0 || c.join > 0)) return; const m = mediaAgg[c.name] = mediaAgg[c.name] || { name: c.name, booking: 0, visit: 0, join: 0 }; m.booking += c.booking || 0; m.visit += c.visit || 0; m.join += c.join || 0; }));
+                                                    active.forEach(r => (r.channels || []).forEach(c => { if (!nz(c)) return; const m = mediaAgg[c.name] = mediaAgg[c.name] || { name: c.name, visit: 0, booking: 0 }; m.visit += c.visit || 0; m.booking += c.booking || 0; }));
                                                     const allMedia = Object.values(mediaAgg).sort((a, b) => b.visit - a.visit || b.booking - a.booking);
                                                     const storeMatch = (nm) => !soMxStore || String(nm).includes(soMxStore);
                                                     const shopsF = active.filter(r => storeMatch(r.name));
+                                                    // 指標セル（予約/来店/入会/入会率/ｷｬﾝｾﾙ/ｷｬﾝｾﾙ率/残新規/広告費/予約CPA/来店CPA/売上/ROAS/CTR）
+                                                    const MCells = (d, strong) => { const cn = strong ? 'font-black' : 'font-bold'; return (<>
+                                                        <td className={`py-1.5 px-2 text-right ${cn} text-slate-500`}>{(d.booking || 0).toLocaleString()}</td>
+                                                        <td className={`py-1.5 px-2 text-right ${cn} text-slate-700`}>{(d.visit || 0).toLocaleString()}</td>
+                                                        <td className={`py-1.5 px-2 text-right font-black text-emerald-600`}>{(d.join || 0).toLocaleString()}</td>
+                                                        <td className={`py-1.5 px-2 text-right ${cn} text-slate-600`}>{pct(d.join, d.visit)}</td>
+                                                        <td className={`py-1.5 px-2 text-right ${cn} text-amber-600`}>{(d.cancel || 0).toLocaleString()}</td>
+                                                        <td className={`py-1.5 px-2 text-right ${cn} text-amber-600`}>{pct(d.cancel, d.booking)}</td>
+                                                        <td className={`py-1.5 px-2 text-right ${cn} text-slate-500`}>{(d.remaining || 0).toLocaleString()}</td>
+                                                        <td className={`py-1.5 px-2 text-right ${cn} text-slate-600`}>{d.adSpend ? soYen(d.adSpend) : '—'}</td>
+                                                        <td className={`py-1.5 px-2 text-right ${cn} text-slate-600`}>{d.adSpend && d.booking ? soYen(Math.round(d.adSpend / d.booking)) : '—'}</td>
+                                                        <td className={`py-1.5 px-2 text-right ${cn} text-slate-600`}>{d.adSpend && d.visit ? soYen(Math.round(d.adSpend / d.visit)) : '—'}</td>
+                                                        <td className={`py-1.5 px-2 text-right ${cn} text-slate-900`}>{soYen(d.sales || 0)}</td>
+                                                        <td className={`py-1.5 px-2 text-right ${cn} text-slate-600`}>{d.adSpend ? pct(d.sales, d.adSpend) : '—'}</td>
+                                                        <td className={`py-1.5 px-3 text-right ${cn} text-slate-600`}>{d.impressions ? pct(d.clicks, d.impressions) : '—'}</td>
+                                                    </>); };
+                                                    const MHead = (firstLabel) => (<tr className="text-left text-[10px] font-black text-slate-400 uppercase border-b border-slate-200 bg-slate-50/60">
+                                                        <th className="py-1.5 px-3 sticky left-0 bg-slate-50">{firstLabel}</th>
+                                                        <th className="py-1.5 px-2 text-right">予約</th><th className="py-1.5 px-2 text-right">実来院</th><th className="py-1.5 px-2 text-right">入会</th><th className="py-1.5 px-2 text-right">入会率</th><th className="py-1.5 px-2 text-right">ｷｬﾝｾﾙ</th><th className="py-1.5 px-2 text-right">ｷｬﾝｾﾙ率</th><th className="py-1.5 px-2 text-right">残新規</th><th className="py-1.5 px-2 text-right">広告費</th><th className="py-1.5 px-2 text-right">予約CPA</th><th className="py-1.5 px-2 text-right">来店CPA</th><th className="py-1.5 px-2 text-right">売上</th><th className="py-1.5 px-2 text-right">ROAS</th><th className="py-1.5 px-3 text-right">CTR</th>
+                                                    </tr>);
                                                     return (
                                                     <div className="bg-white rounded-2xl border border-emerald-100 p-4 md:p-5">
                                                         <div className="flex items-center gap-2 mb-3 flex-wrap">
@@ -12763,73 +12750,49 @@
                                                         {active.length === 0 ? (
                                                             <p className="text-center text-slate-400 font-bold py-6 text-sm">{soShopLoading ? '店舗別データを集計中…' : '店舗別データがありません（店舗タブを開くと集計されます）'}</p>
                                                         ) : soMxMode === 'shop' ? (
-                                                            <div className="overflow-auto max-h-[65vh] space-y-3">
+                                                            <div className="overflow-auto max-h-[70vh] space-y-3">
                                                                 {shopsF.map(r => {
-                                                                    const chans = (r.channels || []).filter(c => (soMxMedia ? c.name === soMxMedia : (c.visit > 0 || c.booking > 0 || c.join > 0))).sort((a, b) => b.visit - a.visit || b.booking - a.booking);
+                                                                    const chans = (r.channels || []).filter(c => (soMxMedia ? c.name === soMxMedia : nz(c))).sort((a, b) => b.visit - a.visit || b.booking - a.booking);
                                                                     if (soMxMedia && chans.length === 0) return null;
+                                                                    const tot = sumCh(chans);
                                                                     return (
                                                                     <div key={r.order} className="border border-slate-100 rounded-xl overflow-hidden">
-                                                                        <div className="bg-slate-50 px-3 py-1.5 flex items-center gap-2 text-[12px] font-black text-slate-700 sticky top-0">
-                                                                            <span className="text-slate-400">{r.order + 1}</span>{r.name}
-                                                                            <span className="ml-auto text-[11px] font-bold text-slate-400">新規 {r.newCount.toLocaleString()}・入会 <span className="text-emerald-600">{r.joinCount.toLocaleString()}</span>・入会率 {r.newCount ? r.joinRate.toFixed(1) + '%' : '—'}</span>
-                                                                        </div>
-                                                                        {chans.length === 0 ? (<div className="px-3 py-2 text-[11px] font-bold text-slate-400">媒体データなし</div>) : (
-                                                                        <table className="w-full text-[12px] whitespace-nowrap">
-                                                                            <thead><tr className="text-left text-[10px] font-black text-slate-400 uppercase border-b border-slate-100">
-                                                                                <th className="py-1 px-3">媒体</th><th className="py-1 px-2 text-right">予約</th><th className="py-1 px-2 text-right">来店</th><th className="py-1 px-2 text-right">入会</th><th className="py-1 px-2 text-right">入会率</th><th className="py-1 px-3 text-right">売上</th>
-                                                                            </tr></thead>
+                                                                        <div className="bg-slate-100 px-3 py-1.5 flex items-center gap-2 text-[12px] font-black text-slate-700"><span className="text-slate-400">{r.order + 1}</span>{r.name}</div>
+                                                                        {chans.length === 0 ? (<div className="px-3 py-2 text-[11px] font-bold text-slate-400">この期間の媒体データなし</div>) : (
+                                                                        <div className="overflow-x-auto"><table className="w-full text-[12px] whitespace-nowrap">
+                                                                            <thead>{MHead('媒体')}</thead>
                                                                             <tbody>
-                                                                                {chans.map((c, ci) => (
-                                                                                    <tr key={ci} className="border-b border-slate-50 last:border-0">
-                                                                                        <td className="py-1.5 px-3 font-bold text-slate-700">{c.name}</td>
-                                                                                        <td className="py-1.5 px-2 text-right font-bold text-slate-500">{(c.booking || 0).toLocaleString()}</td>
-                                                                                        <td className="py-1.5 px-2 text-right font-bold text-slate-700">{(c.visit || 0).toLocaleString()}</td>
-                                                                                        <td className="py-1.5 px-2 text-right font-black text-emerald-600">{(c.join || 0).toLocaleString()}</td>
-                                                                                        <td className="py-1.5 px-2 text-right font-bold text-slate-600">{c.visit ? jr(c).toFixed(1) + '%' : '—'}</td>
-                                                                                        <td className="py-1.5 px-3 text-right font-bold text-slate-500">{c.sales ? soYen(c.sales) : '¥0'}</td>
-                                                                                    </tr>
-                                                                                ))}
+                                                                                <tr className="border-b border-slate-200 bg-emerald-50/60"><td className="py-1.5 px-3 font-black text-slate-800 sticky left-0 bg-emerald-50">合計</td>{MCells(tot, true)}</tr>
+                                                                                {chans.map((c, ci) => (<tr key={ci} className="border-b border-slate-50 last:border-0 hover:bg-slate-50"><td className="py-1.5 px-3 font-bold text-slate-700 sticky left-0 bg-white">{c.name}</td>{MCells(c)}</tr>))}
                                                                             </tbody>
-                                                                        </table>
+                                                                        </table></div>
                                                                         )}
                                                                     </div>
                                                                     );
                                                                 })}
                                                             </div>
                                                         ) : (
-                                                            <div className="overflow-auto max-h-[65vh] space-y-3">
+                                                            <div className="overflow-auto max-h-[70vh] space-y-3">
                                                                 {(soMxMedia ? allMedia.filter(m => m.name === soMxMedia) : allMedia).map(m => {
-                                                                    const rows = shopsF.map(r => ({ name: r.name, order: r.order, ch: (r.channels || []).find(c => c.name === m.name) })).filter(x => x.ch && (x.ch.visit > 0 || x.ch.booking > 0 || x.ch.join > 0)).sort((a, b) => (b.ch.visit || 0) - (a.ch.visit || 0));
+                                                                    const rows = shopsF.map(r => ({ name: r.name, order: r.order, ch: (r.channels || []).find(c => c.name === m.name) })).filter(x => x.ch && nz(x.ch)).sort((a, b) => (b.ch.visit || 0) - (a.ch.visit || 0));
                                                                     if (rows.length === 0) return null;
-                                                                    const tb = rows.reduce((a, x) => a + (x.ch.booking || 0), 0), tv = rows.reduce((a, x) => a + (x.ch.visit || 0), 0), tj = rows.reduce((a, x) => a + (x.ch.join || 0), 0);
+                                                                    const tot = sumCh(rows.map(x => x.ch));
                                                                     return (
                                                                     <div key={m.name} className="border border-slate-100 rounded-xl overflow-hidden">
-                                                                        <div className="bg-emerald-50 px-3 py-1.5 flex items-center gap-2 text-[12px] font-black text-emerald-800 sticky top-0">
-                                                                            {m.name}<span className="ml-auto text-[11px] font-bold text-slate-500">合計 予約{tb.toLocaleString()}・来店{tv.toLocaleString()}・入会<span className="text-emerald-600">{tj.toLocaleString()}</span>・入会率 {tv ? (Math.round(tj / tv * 1000) / 10).toFixed(1) + '%' : '—'}</span>
-                                                                        </div>
-                                                                        <table className="w-full text-[12px] whitespace-nowrap">
-                                                                            <thead><tr className="text-left text-[10px] font-black text-slate-400 uppercase border-b border-slate-100">
-                                                                                <th className="py-1 px-3">店舗</th><th className="py-1 px-2 text-right">予約</th><th className="py-1 px-2 text-right">来店</th><th className="py-1 px-2 text-right">入会</th><th className="py-1 px-2 text-right">入会率</th><th className="py-1 px-3 text-right">売上</th>
-                                                                            </tr></thead>
+                                                                        <div className="bg-emerald-100 px-3 py-1.5 text-[12px] font-black text-emerald-800">{m.name} <span className="text-emerald-600">（{rows.length}店舗）</span></div>
+                                                                        <div className="overflow-x-auto"><table className="w-full text-[12px] whitespace-nowrap">
+                                                                            <thead>{MHead('店舗')}</thead>
                                                                             <tbody>
-                                                                                {rows.map((x, xi) => (
-                                                                                    <tr key={xi} className="border-b border-slate-50 last:border-0">
-                                                                                        <td className="py-1.5 px-3 font-bold text-slate-700"><span className="text-slate-300 mr-1">{x.order + 1}</span>{x.name}</td>
-                                                                                        <td className="py-1.5 px-2 text-right font-bold text-slate-500">{(x.ch.booking || 0).toLocaleString()}</td>
-                                                                                        <td className="py-1.5 px-2 text-right font-bold text-slate-700">{(x.ch.visit || 0).toLocaleString()}</td>
-                                                                                        <td className="py-1.5 px-2 text-right font-black text-emerald-600">{(x.ch.join || 0).toLocaleString()}</td>
-                                                                                        <td className="py-1.5 px-2 text-right font-bold text-slate-600">{x.ch.visit ? jr(x.ch).toFixed(1) + '%' : '—'}</td>
-                                                                                        <td className="py-1.5 px-3 text-right font-bold text-slate-500">{x.ch.sales ? soYen(x.ch.sales) : '¥0'}</td>
-                                                                                    </tr>
-                                                                                ))}
+                                                                                <tr className="border-b border-slate-200 bg-emerald-50/60"><td className="py-1.5 px-3 font-black text-slate-800 sticky left-0 bg-emerald-50">合計</td>{MCells(tot, true)}</tr>
+                                                                                {rows.map((x, xi) => (<tr key={xi} className="border-b border-slate-50 last:border-0 hover:bg-slate-50"><td className="py-1.5 px-3 font-bold text-slate-700 sticky left-0 bg-white"><span className="text-slate-300 mr-1">{x.order + 1}</span>{x.name}</td>{MCells(x.ch)}</tr>))}
                                                                             </tbody>
-                                                                        </table>
+                                                                        </table></div>
                                                                     </div>
                                                                     );
                                                                 })}
                                                             </div>
                                                         )}
-                                                        <p className="text-[10px] text-slate-400 mt-2 font-bold">※ 全店の集客を店舗別／媒体別で一覧（スクロール＋フィルタ）。データは「店舗別売上」と同じSalonOne集計。入会率＝入会÷来店。全体の媒体別集計は上表を参照。</p>
+                                                        <p className="text-[10px] text-slate-400 mt-2 font-bold">※ 全店の集客を店舗別／媒体別で一覧（各ブロックに合計行）。スクロール＋店舗名/媒体フィルタで絞込可。入会率＝入会÷来店、ｷｬﾝｾﾙ率＝ｷｬﾝｾﾙ÷予約、予約CPA＝広告費÷予約、来店CPA＝広告費÷来店、ROAS＝売上÷広告費、CTR＝クリック÷表示。広告費/CPA/ROAS/CTRはSalonOneに広告データがある媒体のみ表示。データは「店舗別売上」と同じSalonOne集計。</p>
                                                     </div>
                                                     );
                                                 })()}

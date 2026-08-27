@@ -1388,8 +1388,18 @@
             const [soShopSort, setSoShopSort] = useState({ key: 'order', dir: 'asc' }); // 既定=出店順
             const [soShopExpand, setSoShopExpand] = useState(() => new Set()); // 媒体別内訳を展開中の店舗order
             const soShopReqRef = useRef(0);
+            // 全体管理シート セラピスト数の手動上書き（クラウド共有・全端末同期）。key='canonName|YYYY-MM'
+            const [zkTherOverrides, setZkTherOverrides] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_zkther_v1') || '{}') || {}; } catch { return {}; } });
+            useEffect(() => { (async () => { try { const r = await fetch('/api/plan-store?type=zktherapist'); const j = await r.json().catch(() => ({})); if (j && j.overrides && typeof j.overrides === 'object') setZkTherOverrides(prev => ({ ...prev, ...j.overrides })); } catch {} })(); }, []);
+            const saveZkTherOverride = async (key, value) => {
+                setZkTherOverrides(prev => { const n = { ...prev }; if (value == null || value === '') delete n[key]; else n[key] = Number(value) || 0; try { localStorage.setItem('naoru_zkther_v1', JSON.stringify(n)); } catch {} return n; });
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'zktherapist', action: 'set', key, value }) }); } catch {}
+            };
             const [soStaffSort, setSoStaffSort] = useState({ key: 'gross', dir: 'desc' });  // スタッフ別売上ソート
             const [soChSort, setSoChSort] = useState({ key: 'booking', dir: 'desc' });      // 媒体別ソート
+            const [soMxMode, setSoMxMode] = useState('shop');    // 店舗×媒体一覧: 'shop'(店舗ごと) | 'media'(媒体ごと)
+            const [soMxStore, setSoMxStore] = useState('');      // 店舗名フィルタ
+            const [soMxMedia, setSoMxMedia] = useState('');      // 媒体フィルタ（''=全媒体）
             const [soMkSort, setSoMkSort] = useState({ key: 'booking', dir: 'desc' });      // 担当者別ソート
             const [soDailySort, setSoDailySort] = useState({ key: 'date', dir: 'asc' });    // 日報ソート
             // 事業計画（計画サブタブ）
@@ -3443,6 +3453,18 @@
             };
             // 店舗別集計: 出店順(SO_SHOP_ORDER)で全店を並べ、SalonOne導入店(soShopsに一致)のみ実データを取得。未導入は0。
             const soShopNorm = (n) => String(n || '').replace('NAORU整体', '').replace('NAORU', '').replace(/\s+/g, '').replace(/[院店]$/, '').trim();
+            // セラピスト数の共通化: 店舗名を全体管理シート(ZK_FIXED)の正規名に寄せ、上書きキーを一意化。
+            // これにより SalonOne売上分析(店舗別) と 全体管理シート のセラピスト数を必ず一致させる。
+            const zkCanonName = (name) => {
+                const nn = soShopNorm(name);
+                const hit = ZK_FIXED_2026.order.find(o => soShopNorm(o) === nn) || ZK_FIXED_2026.order.find(o => { const on = soShopNorm(o); return nn.length >= 2 && (on.includes(nn) || nn.includes(on)); });
+                return hit || String(name || '').replace(/^NAORU\s*/, '').replace(/[院店]$/, '').trim();
+            };
+            const zkTherKey = (name, ym) => `${zkCanonName(name)}|${ym}`;
+            // 手動上書きがあればそれを、無ければ base（全体管理シートのCSV人数 or SalonOne稼働者数）を返す
+            const zkTherResolved = (name, ym, base) => { const ov = zkTherOverrides[zkTherKey(name, ym)]; return (ov != null) ? Number(ov) : (Number(base) || 0); };
+            // 全体管理シートCSVの人数（JP店舗）。無ければnull。
+            const zkCsvTherapist = (name, ym) => { const arr = (ZK_FIXED_2026.months[ym] || {})[zkCanonName(name)]; return (arr && arr[2] != null) ? Number(arr[2]) : null; };
             const loadShopBreakdown = async () => {
                 const reqId = ++soShopReqRef.current;
                 setSoShopLoading(true);
@@ -4145,9 +4167,16 @@
                 else if (currentPage !== 'salonone') setSoFutureNew({ sales: 0, visits: 0, ready: false, loading: false });
             }, [currentPage, soView, soShopSel.join(','), soFrom, soTo, soChannels, soSummary]);
 
-            // 店舗別タブを開いたら（期間変更時も）全店を出店順で集計
+            // 店舗別タブ／マーケタブを開いたら（期間変更時も）全店を出店順で集計。マーケの店舗×媒体一覧も同データを使用。
+            const soShopLoadedKeyRef = useRef('');
             useEffect(() => {
-                if (currentPage === 'salonone' && soView === 'shops' && soShops.length) loadShopBreakdown();
+                if (currentPage !== 'salonone' || !soShops.length) return;
+                if (soView !== 'shops' && soView !== 'marketing') return;
+                const key = `${soFrom}_${soTo}`;
+                // 同一期間で取得済み（実データあり）なら再取得しない（shops↔marketing切替の二重取得を防止）
+                if (soShopLoadedKeyRef.current === key && soShopRows.some(r => r.active && !r.loading)) return;
+                soShopLoadedKeyRef.current = key;
+                loadShopBreakdown();
             }, [currentPage, soView, soFrom, soTo, soShops.length]);
 
             // クリエイティブ分析タブ（媒体×メニュー）: 開いた/店舗/期間が変わったら受付履歴を再集計
@@ -12496,8 +12525,11 @@
                                         const tSum = (k) => tRows.reduce((a, r) => a + (Number(r[k]) || 0), 0);
                                         const tGross = tSum('gross'), tNewSales = tSum('newSales'), tExist = tSum('existSales'), tRefund = tSum('refund');
                                         const tNewCount = tSum('newCount'), tJoin = tSum('joinCount'), tActive = tSum('active_count'), tChurn = tSum('churn'), tRjoin = tSum('rjoin');
-                                        // セラピスト数は在籍ロスター（soStaffs）から常に最新で算出（取得後にstaffsが揃っても反映）
-                                        const therapistOf = (r) => r.active ? (stTherapistRoster(r.id).length || Number(r.therapist) || 0) : 0;
+                                        // セラピスト数＝全体管理シートと必ず一致させる。
+                                        // 優先: 手動上書き > 全体管理シートCSV人数 > 在籍ロスター > 稼働者数(売上1円でも計上)。
+                                        const zkYmCur = (soFrom || '').slice(0, 7);
+                                        const therBaseOf = (r) => { const csv = zkCsvTherapist(r.name, zkYmCur); if (csv != null) return csv; const roster = r.active ? stTherapistRoster(r.id).length : 0; return roster || Number(r.therapist) || 0; };
+                                        const therapistOf = (r) => r.active ? zkTherResolved(r.name, zkYmCur, therBaseOf(r)) : 0;
                                         const tTherapist = tRows.reduce((a, r) => a + therapistOf(r), 0), tG = tSum('gReview'), tH = tSum('hReview');
                                         const tJoinRate = tNewCount ? Math.round(tJoin / tNewCount * 1000) / 10 : 0;
                                         const tChurnRate = tRjoin ? Math.round(tChurn / tRjoin * 1000) / 10 : 0;
@@ -12696,8 +12728,111 @@
                                                             </table>
                                                         </div>
                                                     )}
-                                                    <p className="text-[10px] text-slate-400 mt-2 font-bold">※ 入会率＝入会数÷来店数（管理画面と同一定義。初回予約が先の契約が分子に入り100%超となる場合あり）。ｷｬﾝｾﾙ率＝ｷｬﾝｾﾙ÷予約。広告費・CPA・ROASはSalonOneに広告費が入力されている媒体のみ表示（未入力は「—」）。</p>
+                                                    <p className="text-[10px] text-slate-400 mt-2 font-bold">※ 入会率＝入会数÷来店数（管理画面と同一定義。初回予約が先の契約が分子に入り100%超となる場合あり）。ｷｬﾝｾﾙ率＝ｷｬﾝｾﾙ÷予約。広告費・CPA・ROASはSalonOneに広告費が入力されている媒体のみ表示（未入力は「—」）。店舗を絞るには上部の店舗フィルタを使用。</p>
                                                 </div>
+
+                                                {/* ===== 店舗別 × 媒体（集客内訳・スクロール/フィルタ） ===== */}
+                                                {(() => {
+                                                    const active = (soShopRows || []).filter(r => r.active);
+                                                    const jr = (c) => c && c.visit ? (Math.round(c.join / c.visit * 1000) / 10) : 0;
+                                                    // 全媒体名（来店/予約/入会いずれか>0）を集客数の多い順に
+                                                    const mediaAgg = {};
+                                                    active.forEach(r => (r.channels || []).forEach(c => { if (!(c.visit > 0 || c.booking > 0 || c.join > 0)) return; const m = mediaAgg[c.name] = mediaAgg[c.name] || { name: c.name, booking: 0, visit: 0, join: 0 }; m.booking += c.booking || 0; m.visit += c.visit || 0; m.join += c.join || 0; }));
+                                                    const allMedia = Object.values(mediaAgg).sort((a, b) => b.visit - a.visit || b.booking - a.booking);
+                                                    const storeMatch = (nm) => !soMxStore || String(nm).includes(soMxStore);
+                                                    const shopsF = active.filter(r => storeMatch(r.name));
+                                                    return (
+                                                    <div className="bg-white rounded-2xl border border-emerald-100 p-4 md:p-5">
+                                                        <div className="flex items-center gap-2 mb-3 flex-wrap">
+                                                            <MapPin size={15} className="text-emerald-600" />
+                                                            <h3 className="text-sm md:text-base font-black text-slate-800">店舗別 × 媒体（集客内訳）</h3>
+                                                            {soShopLoading && <span className="text-xs font-bold text-amber-600">集計中… {soShopProgress ? `${soShopProgress.done}/${soShopProgress.total}` : ''}</span>}
+                                                            <div className="ml-auto flex items-center gap-2 flex-wrap">
+                                                                <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg">
+                                                                    {[{ k: 'shop', l: '店舗ごと' }, { k: 'media', l: '媒体ごと' }].map(m => (
+                                                                        <button key={m.k} onClick={() => setSoMxMode(m.k)} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition-all ${soMxMode === m.k ? 'bg-emerald-600 text-white shadow' : 'text-slate-500 hover:bg-white'}`}>{m.l}</button>
+                                                                    ))}
+                                                                </div>
+                                                                <input value={soMxStore} onChange={e => setSoMxStore(e.target.value)} placeholder="店舗名で絞る" className="px-2 py-1 text-[12px] font-bold border border-slate-200 rounded-lg w-28" />
+                                                                <select value={soMxMedia} onChange={e => setSoMxMedia(e.target.value)} className="px-2 py-1 text-[12px] font-bold border border-slate-200 rounded-lg bg-white">
+                                                                    <option value="">全媒体</option>
+                                                                    {allMedia.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
+                                                                </select>
+                                                            </div>
+                                                        </div>
+                                                        {active.length === 0 ? (
+                                                            <p className="text-center text-slate-400 font-bold py-6 text-sm">{soShopLoading ? '店舗別データを集計中…' : '店舗別データがありません（店舗タブを開くと集計されます）'}</p>
+                                                        ) : soMxMode === 'shop' ? (
+                                                            <div className="overflow-auto max-h-[65vh] space-y-3">
+                                                                {shopsF.map(r => {
+                                                                    const chans = (r.channels || []).filter(c => (soMxMedia ? c.name === soMxMedia : (c.visit > 0 || c.booking > 0 || c.join > 0))).sort((a, b) => b.visit - a.visit || b.booking - a.booking);
+                                                                    if (soMxMedia && chans.length === 0) return null;
+                                                                    return (
+                                                                    <div key={r.order} className="border border-slate-100 rounded-xl overflow-hidden">
+                                                                        <div className="bg-slate-50 px-3 py-1.5 flex items-center gap-2 text-[12px] font-black text-slate-700 sticky top-0">
+                                                                            <span className="text-slate-400">{r.order + 1}</span>{r.name}
+                                                                            <span className="ml-auto text-[11px] font-bold text-slate-400">新規 {r.newCount.toLocaleString()}・入会 <span className="text-emerald-600">{r.joinCount.toLocaleString()}</span>・入会率 {r.newCount ? r.joinRate.toFixed(1) + '%' : '—'}</span>
+                                                                        </div>
+                                                                        {chans.length === 0 ? (<div className="px-3 py-2 text-[11px] font-bold text-slate-400">媒体データなし</div>) : (
+                                                                        <table className="w-full text-[12px] whitespace-nowrap">
+                                                                            <thead><tr className="text-left text-[10px] font-black text-slate-400 uppercase border-b border-slate-100">
+                                                                                <th className="py-1 px-3">媒体</th><th className="py-1 px-2 text-right">予約</th><th className="py-1 px-2 text-right">来店</th><th className="py-1 px-2 text-right">入会</th><th className="py-1 px-2 text-right">入会率</th><th className="py-1 px-3 text-right">売上</th>
+                                                                            </tr></thead>
+                                                                            <tbody>
+                                                                                {chans.map((c, ci) => (
+                                                                                    <tr key={ci} className="border-b border-slate-50 last:border-0">
+                                                                                        <td className="py-1.5 px-3 font-bold text-slate-700">{c.name}</td>
+                                                                                        <td className="py-1.5 px-2 text-right font-bold text-slate-500">{(c.booking || 0).toLocaleString()}</td>
+                                                                                        <td className="py-1.5 px-2 text-right font-bold text-slate-700">{(c.visit || 0).toLocaleString()}</td>
+                                                                                        <td className="py-1.5 px-2 text-right font-black text-emerald-600">{(c.join || 0).toLocaleString()}</td>
+                                                                                        <td className="py-1.5 px-2 text-right font-bold text-slate-600">{c.visit ? jr(c).toFixed(1) + '%' : '—'}</td>
+                                                                                        <td className="py-1.5 px-3 text-right font-bold text-slate-500">{c.sales ? soYen(c.sales) : '¥0'}</td>
+                                                                                    </tr>
+                                                                                ))}
+                                                                            </tbody>
+                                                                        </table>
+                                                                        )}
+                                                                    </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        ) : (
+                                                            <div className="overflow-auto max-h-[65vh] space-y-3">
+                                                                {(soMxMedia ? allMedia.filter(m => m.name === soMxMedia) : allMedia).map(m => {
+                                                                    const rows = shopsF.map(r => ({ name: r.name, order: r.order, ch: (r.channels || []).find(c => c.name === m.name) })).filter(x => x.ch && (x.ch.visit > 0 || x.ch.booking > 0 || x.ch.join > 0)).sort((a, b) => (b.ch.visit || 0) - (a.ch.visit || 0));
+                                                                    if (rows.length === 0) return null;
+                                                                    const tb = rows.reduce((a, x) => a + (x.ch.booking || 0), 0), tv = rows.reduce((a, x) => a + (x.ch.visit || 0), 0), tj = rows.reduce((a, x) => a + (x.ch.join || 0), 0);
+                                                                    return (
+                                                                    <div key={m.name} className="border border-slate-100 rounded-xl overflow-hidden">
+                                                                        <div className="bg-emerald-50 px-3 py-1.5 flex items-center gap-2 text-[12px] font-black text-emerald-800 sticky top-0">
+                                                                            {m.name}<span className="ml-auto text-[11px] font-bold text-slate-500">合計 予約{tb.toLocaleString()}・来店{tv.toLocaleString()}・入会<span className="text-emerald-600">{tj.toLocaleString()}</span>・入会率 {tv ? (Math.round(tj / tv * 1000) / 10).toFixed(1) + '%' : '—'}</span>
+                                                                        </div>
+                                                                        <table className="w-full text-[12px] whitespace-nowrap">
+                                                                            <thead><tr className="text-left text-[10px] font-black text-slate-400 uppercase border-b border-slate-100">
+                                                                                <th className="py-1 px-3">店舗</th><th className="py-1 px-2 text-right">予約</th><th className="py-1 px-2 text-right">来店</th><th className="py-1 px-2 text-right">入会</th><th className="py-1 px-2 text-right">入会率</th><th className="py-1 px-3 text-right">売上</th>
+                                                                            </tr></thead>
+                                                                            <tbody>
+                                                                                {rows.map((x, xi) => (
+                                                                                    <tr key={xi} className="border-b border-slate-50 last:border-0">
+                                                                                        <td className="py-1.5 px-3 font-bold text-slate-700"><span className="text-slate-300 mr-1">{x.order + 1}</span>{x.name}</td>
+                                                                                        <td className="py-1.5 px-2 text-right font-bold text-slate-500">{(x.ch.booking || 0).toLocaleString()}</td>
+                                                                                        <td className="py-1.5 px-2 text-right font-bold text-slate-700">{(x.ch.visit || 0).toLocaleString()}</td>
+                                                                                        <td className="py-1.5 px-2 text-right font-black text-emerald-600">{(x.ch.join || 0).toLocaleString()}</td>
+                                                                                        <td className="py-1.5 px-2 text-right font-bold text-slate-600">{x.ch.visit ? jr(x.ch).toFixed(1) + '%' : '—'}</td>
+                                                                                        <td className="py-1.5 px-3 text-right font-bold text-slate-500">{x.ch.sales ? soYen(x.ch.sales) : '¥0'}</td>
+                                                                                    </tr>
+                                                                                ))}
+                                                                            </tbody>
+                                                                        </table>
+                                                                    </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        )}
+                                                        <p className="text-[10px] text-slate-400 mt-2 font-bold">※ 全店の集客を店舗別／媒体別で一覧（スクロール＋フィルタ）。データは「店舗別売上」と同じSalonOne集計。入会率＝入会÷来店。全体の媒体別集計は上表を参照。</p>
+                                                    </div>
+                                                    );
+                                                })()}
 
                                                 {/* 担当者別 新規獲得 */}
                                                 <div className="bg-white rounded-2xl border border-emerald-100 p-4 md:p-5">
@@ -13376,6 +13511,11 @@
                             }
                             return ent.group ? shops.reduce((a, s) => a + get(s, ym, metric), 0) : get(ent.shop, ym, metric);
                         };
+                        // セラピスト数（手動上書き優先）。店舗=個別値／グループ=表示店舗の合計。SalonOne売上分析と共通ロジック。
+                        const therOf = (ent, ym) => ent.group
+                            ? shops.reduce((a, s) => a + zkTherResolved(s.name, ym, get(s, ym, 'ther')), 0)
+                            : zkTherResolved(ent.shop.name, ym, get(ent.shop, ym, 'ther'));
+                        const therOverridden = (ent, ym) => !ent.group && zkTherOverrides[zkTherKey(ent.shop.name, ym)] != null;
                         // 前月比: 100%以上=緑／未満=赤／前月0=新規・前月なし=—
                         const cmp = (cur, prev) => {
                             if (prev == null) return { t: '—', cls: 'text-slate-300' };
@@ -13456,7 +13596,7 @@
                                                             <th rowSpan={2 + METRICS.length} className="sticky text-white font-black text-center" style={{ left: 0, minWidth: W_MONTH, width: W_MONTH, background: '#0f172a', zIndex: 30, borderTop: tb, fontSize: '18px' }}>{mm}<span className="block text-[10px] font-bold text-slate-400">月</span></th>
                                                             <th className="sticky text-white text-[13px] font-black px-2 py-1 text-left" style={{ left: L_ITEM, minWidth: W_ITEM, width: W_ITEM, background: '#334155', zIndex: 25, borderTop: tb }}>{zkYear}年</th>
                                                             {entities.map((ent, ei) => (
-                                                                <th key={ent.id} colSpan={2} className="px-2 py-1 text-[13px] font-black whitespace-nowrap" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 22 : undefined, minWidth: ent.group ? (W_ACT + W_CMP) : undefined, background: ent.group ? '#4f46e5' : (ei % 2 ? '#e8edf3' : '#dde3ec'), color: ent.group ? '#fff' : '#334155', borderTop: tb, borderLeft: '1px solid #cbd5e1' }}>{ent.name}<span className="font-bold ml-1 text-[11px]" style={{ color: ent.group ? '#c7d2fe' : '#94a3b8' }}>{val(ent, ym, 'ther')}名</span></th>
+                                                                <th key={ent.id} colSpan={2} className="px-2 py-1 text-[13px] font-black whitespace-nowrap" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 22 : undefined, minWidth: ent.group ? (W_ACT + W_CMP) : undefined, background: ent.group ? '#4f46e5' : (ei % 2 ? '#e8edf3' : '#dde3ec'), color: ent.group ? '#fff' : '#334155', borderTop: tb, borderLeft: '1px solid #cbd5e1' }}>{ent.name}<ZkTherCell value={therOf(ent, ym)} editable={!ent.group} overridden={therOverridden(ent, ym)} color={ent.group ? '#c7d2fe' : '#94a3b8'} onSave={(v) => saveZkTherOverride(zkTherKey(ent.shop.name, ym), v)} /></th>
                                                             ))}
                                                         </tr>
                                                         {/* 実績 / 前月比 サブヘッダー */}
@@ -15797,6 +15937,25 @@
         // --- Sub-Components ---
 
         // Portal付きドロップダウン（親のtransform/animationに影響されずに最前面表示）
+        // 全体管理シートのセラピスト数セル（クリックで編集・クラウド保存）
+        const ZkTherCell = ({ value, onSave, editable, color, overridden }) => {
+            const [editing, setEditing] = useState(false);
+            const [v, setV] = useState(value);
+            useEffect(() => { setV(value); }, [value]);
+            if (!editable) return <span className="font-bold ml-1 text-[11px]" style={{ color }}>{value}名</span>;
+            const commit = () => { setEditing(false); if (String(v) !== String(value)) onSave(v); };
+            if (editing) return (
+                <input autoFocus type="number" min="0" value={v}
+                    onChange={e => setV(e.target.value)} onBlur={commit}
+                    onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setEditing(false); setV(value); } }}
+                    onClick={e => e.stopPropagation()}
+                    className="ml-1 w-11 text-[11px] px-1 py-0.5 rounded border border-indigo-400 text-slate-800 bg-white" />
+            );
+            return (
+                <button onClick={e => { e.stopPropagation(); setEditing(true); }} title="クリックでセラピスト数を編集（クラウド保存・全端末共有）"
+                    className={`font-bold ml-1 text-[11px] underline decoration-dotted underline-offset-2 hover:opacity-80 ${overridden ? 'italic' : ''}`} style={{ color }}>{value}名{overridden ? '✎' : ''}</button>
+            );
+        };
         const PortalDropdown = ({ anchorRef, isOpen, onClose, children, align = 'left', width = 'auto' }) => {
             const [pos, setPos] = useState({ top: 0, left: 0 });
             useEffect(() => {

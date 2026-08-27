@@ -22,6 +22,7 @@ const GOALS_KEY = 'naoru:plan:goals';
 const ACTIONS_KEY = 'naoru:plan:actions';
 const ALLOWANCE_KEY = 'naoru:allowance:v1'; // { submissions:[...], productivity:{staffId:{'YYYY-MM':gross}} }
 const ACCTMETA_KEY = 'naoru:accountmeta:v1'; // { owner: { role, staffId, staffName } }
+const ZKTHERAPIST_KEY = 'naoru:zktherapist:v1'; // { 'shopName|YYYY-MM': count } 全体管理シートのセラピスト数 手動上書き
 
 // ── Vercel KV (Upstash REST) ──
 async function kvGet(key) {
@@ -154,6 +155,29 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
       return res.status(400).json({ ok: false, error: 'invalid accountmeta action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── 全体管理シート セラピスト数の手動上書き: ?type=zktherapist ──
+  // { 'shopName|YYYY-MM': count } を全端末で共有。SalonOne売上分析の店舗別セラピスト数もこの値を優先。
+  const isZkTher = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'zktherapist';
+  if (isZkTher) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ overrides: {}, configured: false });
+    try {
+      const cur = (await blobGet(ZKTHERAPIST_KEY, hasKV, hasSB, gas)) || {};
+      const overrides = (cur && typeof cur === 'object') ? cur : {};
+      if (req.method === 'GET') return res.status(200).json({ overrides, configured: true });
+      const body = req.body || {};
+      if (body.action === 'set' && body.key) {
+        const next = { ...overrides };
+        if (body.value == null || body.value === '') delete next[String(body.key)];
+        else next[String(body.key)] = Number(body.value) || 0;
+        await blobSet(ZKTHERAPIST_KEY, next, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid zktherapist action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
     }

@@ -1386,6 +1386,7 @@
             const [soShopLoading, setSoShopLoading] = useState(false);
             const [soShopProgress, setSoShopProgress] = useState(null); // { done, total }
             const [soShopSort, setSoShopSort] = useState({ key: 'order', dir: 'asc' }); // 既定=出店順
+            const [soShopExpand, setSoShopExpand] = useState(() => new Set()); // 媒体別内訳を展開中の店舗order
             const soShopReqRef = useRef(0);
             const [soStaffSort, setSoStaffSort] = useState({ key: 'gross', dir: 'desc' });  // スタッフ別売上ソート
             const [soChSort, setSoChSort] = useState({ key: 'booking', dir: 'desc' });      // 媒体別ソート
@@ -3453,7 +3454,7 @@
                     const sh = shopList.find(x => soShopNorm(x.name) === nn)
                         || shopList.find(x => { const xn = soShopNorm(x.name); return nn.length >= 2 && (xn.includes(nn) || nn.includes(xn)); });
                     return { order: i, name, id: sh ? sh.id : null, active: !!sh, loading: !!sh,
-                             gross: 0, newSales: 0, existSales: 0, refund: 0, newCount: 0, joinCount: 0, joinRate: 0, active_count: 0, churn: 0, churnRate: 0, rjoin: 0, gReview: 0, hReview: 0, therapist: 0 };
+                             gross: 0, newSales: 0, existSales: 0, refund: 0, newCount: 0, joinCount: 0, joinRate: 0, active_count: 0, churn: 0, churnRate: 0, rjoin: 0, gReview: 0, hReview: 0, therapist: 0, channels: [] };
                 });
                 setSoShopRows(rows);
                 const targets = rows.filter(r => r.active);
@@ -3483,10 +3484,13 @@
                             const churn = rt ? (Number(rt.summary.churn_count) || 0) : 0;
                             const rjoin = rt ? (Number(rt.summary.join_count) || 0) : 0;
                             const churnRate = rjoin ? Math.round(churn / rjoin * 1000) / 10 : 0;
-                            // セラピスト数＝その月に稼働した担当者数。ヘルプ/楽トレ/未割当等の非セラピストは除外し、実績(施術or売上)がある人のみ
+                            // セラピスト数＝在籍セラピスト（staffs の shop_id 一致・ヘルプ/楽トレ等除外）。手当タブの店舗検索と一致。
+                            // ※売上0の月でも在籍者を反映。ロスター未取得の場合のみ「稼働者数」で補完。
+                            const rosterN = stTherapistRoster(row.id).length;
                             const soNonTherapist = new Set(['ヘルプ', '楽トレ', '未割当', '(不明)', '不明']);
-                            const therapist = sum ? sum.byStaff.filter(st => !soNonTherapist.has(String(st.name || '').trim()) && ((st.treatments || 0) > 0 || (st.gross || 0) > 0)).length : 0;
-                            setSoShopRows(prev => prev.map(r => r.order === row.order ? { ...r, loading: false, gross, newSales, existSales: Math.max(0, gross - newSales), refund, newCount, joinCount, joinRate, active_count, churn, churnRate, rjoin, gReview, hReview, therapist } : r));
+                            const activityN = sum ? sum.byStaff.filter(st => !soNonTherapist.has(String(st.name || '').trim()) && ((st.treatments || 0) > 0 || (st.gross || 0) > 0)).length : 0;
+                            const therapist = rosterN || activityN;
+                            setSoShopRows(prev => prev.map(r => r.order === row.order ? { ...r, loading: false, gross, newSales, existSales: Math.max(0, gross - newSales), refund, newCount, joinCount, joinRate, active_count, churn, churnRate, rjoin, gReview, hReview, therapist, channels: ch } : r));
                         } catch (e) {
                             setSoShopRows(prev => prev.map(r => r.order === row.order ? { ...r, loading: false } : r));
                         }
@@ -12492,7 +12496,9 @@
                                         const tSum = (k) => tRows.reduce((a, r) => a + (Number(r[k]) || 0), 0);
                                         const tGross = tSum('gross'), tNewSales = tSum('newSales'), tExist = tSum('existSales'), tRefund = tSum('refund');
                                         const tNewCount = tSum('newCount'), tJoin = tSum('joinCount'), tActive = tSum('active_count'), tChurn = tSum('churn'), tRjoin = tSum('rjoin');
-                                        const tTherapist = tSum('therapist'), tG = tSum('gReview'), tH = tSum('hReview');
+                                        // セラピスト数は在籍ロスター（soStaffs）から常に最新で算出（取得後にstaffsが揃っても反映）
+                                        const therapistOf = (r) => r.active ? (stTherapistRoster(r.id).length || Number(r.therapist) || 0) : 0;
+                                        const tTherapist = tRows.reduce((a, r) => a + therapistOf(r), 0), tG = tSum('gReview'), tH = tSum('hReview');
                                         const tJoinRate = tNewCount ? Math.round(tJoin / tNewCount * 1000) / 10 : 0;
                                         const tChurnRate = tRjoin ? Math.round(tChurn / tRjoin * 1000) / 10 : 0;
                                         return (
@@ -12547,11 +12553,22 @@
                                                                     <td className="py-2 px-2 text-right text-slate-600">{tG.toLocaleString()}</td>
                                                                     <td className="py-2 pl-2 text-right text-slate-600">{tH.toLocaleString()}</td>
                                                                 </tr>
-                                                                {sortedShopRows.map((r) => (
-                                                                    <tr key={r.order} className={`border-b border-slate-100 hover:bg-slate-50 transition-colors whitespace-nowrap ${!r.active ? 'opacity-50' : ''}`}>
+                                                                {sortedShopRows.map((r) => {
+                                                                    const expanded = soShopExpand.has(r.order);
+                                                                    const chans = (r.channels || []).filter(c => (c.visit > 0 || c.join > 0 || c.booking > 0)).sort((a, b) => (b.visit - a.visit) || (b.booking - a.booking));
+                                                                    const canExpand = r.active && !r.loading;
+                                                                    const toggle = () => { if (!canExpand) return; setSoShopExpand(prev => { const n = new Set(prev); n.has(r.order) ? n.delete(r.order) : n.add(r.order); return n; }); };
+                                                                    return (
+                                                                    <React.Fragment key={r.order}>
+                                                                    <tr className={`border-b border-slate-100 hover:bg-slate-50 transition-colors whitespace-nowrap ${!r.active ? 'opacity-50' : ''} ${expanded ? 'bg-emerald-50/40' : ''}`}>
                                                                         <td className="py-2.5 pr-2 font-black text-slate-300 sticky left-0 bg-white z-10 w-[34px]">{r.order + 1}</td>
-                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800 sticky left-[34px] bg-white z-10 w-[150px] truncate">{r.name}{!r.active && <span className="ml-1.5 px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded text-[9px] font-black align-middle">未導入</span>}{r.loading && <span className="ml-1.5 text-[10px] font-bold text-amber-500">…</span>}</td>
-                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-700 sticky left-[184px] bg-white z-10">{r.active ? r.therapist + '名' : '—'}</td>
+                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800 sticky left-[34px] bg-white z-10 w-[150px] truncate">
+                                                                            <button onClick={toggle} disabled={!canExpand} title={canExpand ? '媒体別の集客内訳を表示' : ''} className={`inline-flex items-center gap-1 max-w-full ${canExpand ? 'hover:text-emerald-600 cursor-pointer' : 'cursor-default'}`}>
+                                                                                {canExpand && <ChevronRight size={12} className={`shrink-0 text-slate-400 transition-transform ${expanded ? 'rotate-90' : ''}`} />}
+                                                                                <span className="truncate">{r.name}</span>
+                                                                            </button>
+                                                                            {!r.active && <span className="ml-1.5 px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded text-[9px] font-black align-middle">未導入</span>}{r.loading && <span className="ml-1.5 text-[10px] font-bold text-amber-500">…</span>}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-700 sticky left-[184px] bg-white z-10">{r.active ? therapistOf(r) + '名' : '—'}</td>
                                                                         <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(r.gross)}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{soYen(r.newSales)}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-slate-500">{soYen(r.existSales)}</td>
@@ -12565,10 +12582,47 @@
                                                                         <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.gReview.toLocaleString()}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-slate-500">{r.hReview.toLocaleString()}</td>
                                                                     </tr>
-                                                                ))}
+                                                                    {expanded && (
+                                                                    <tr className="bg-slate-50/80">
+                                                                        <td colSpan={15} className="px-3 py-3 sticky left-0">
+                                                                            <div className="max-w-[720px]">
+                                                                                <div className="text-[11px] font-black text-slate-500 mb-1.5 flex items-center gap-1.5"><Megaphone size={13} className="text-emerald-600" />{r.name} の集客媒体別 内訳（新規{r.newCount.toLocaleString()}件・入会{r.joinCount.toLocaleString()}件）</div>
+                                                                                {chans.length === 0 ? (
+                                                                                    <div className="text-[11px] font-bold text-slate-400 py-2">この期間の媒体別データはありません。</div>
+                                                                                ) : (
+                                                                                <table className="w-full text-[12px] whitespace-nowrap">
+                                                                                    <thead>
+                                                                                        <tr className="text-left text-[10px] font-black text-slate-400 uppercase border-b border-slate-200">
+                                                                                            <th className="pb-1 pr-2">媒体</th>
+                                                                                            <th className="pb-1 px-2 text-right">予約</th>
+                                                                                            <th className="pb-1 px-2 text-right">新規(来店)</th>
+                                                                                            <th className="pb-1 px-2 text-right">入会</th>
+                                                                                            <th className="pb-1 pl-2 text-right">入会率</th>
+                                                                                        </tr>
+                                                                                    </thead>
+                                                                                    <tbody>
+                                                                                        {chans.map((c, ci) => (
+                                                                                            <tr key={ci} className="border-b border-slate-100 last:border-0">
+                                                                                                <td className="py-1.5 pr-2 font-bold text-slate-700">{c.name}</td>
+                                                                                                <td className="py-1.5 px-2 text-right font-bold text-slate-500">{(c.booking || 0).toLocaleString()}</td>
+                                                                                                <td className="py-1.5 px-2 text-right font-bold text-slate-700">{(c.visit || 0).toLocaleString()}</td>
+                                                                                                <td className="py-1.5 px-2 text-right font-bold text-emerald-600">{(c.join || 0).toLocaleString()}</td>
+                                                                                                <td className="py-1.5 pl-2 text-right font-bold text-slate-600">{c.visit ? (Math.round(c.join / c.visit * 1000) / 10).toFixed(1) + '%' : '—'}</td>
+                                                                                            </tr>
+                                                                                        ))}
+                                                                                    </tbody>
+                                                                                </table>
+                                                                                )}
+                                                                            </div>
+                                                                        </td>
+                                                                    </tr>
+                                                                    )}
+                                                                    </React.Fragment>
+                                                                    );
+                                                                })}
                                                             </tbody>
                                                         </table>
-                                                        <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 既定は出店順（列見出しクリックで並べ替え）。1行目は合計/平均（導入店のみ・入会率と退会率は全体の加重平均）。セラピスト数＝選択月に稼働した担当者数（ヘルプ/未割当は除外・施術または売上のある人のみ）。売上・返金・口コミ＝SalonOne売上、新規数/入会数/入会率＝マーケ、会員数/退会数/退会率＝継続データ。SalonOne未導入の店舗は「未導入」バッジで0表示。</p>
+                                                        <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 既定は出店順（列見出しクリックで並べ替え）。1行目は合計/平均（導入店のみ・入会率と退会率は全体の加重平均）。<span className="text-emerald-600">店舗名をクリックすると集客媒体別の内訳（媒体ごとの予約・新規・入会・入会率）を表示。</span>セラピスト数＝在籍セラピスト数（staffsの店舗一致・ヘルプ/未割当は除外／手当タブの店舗検索と一致・売上0の月も反映）。売上・返金・口コミ＝SalonOne売上、新規数/入会数/入会率＝マーケ、会員数/退会数/退会率＝継続データ。SalonOne未導入の店舗は「未導入」バッジで0表示。</p>
                                                     </div>
                                                 )}
                                             </div>

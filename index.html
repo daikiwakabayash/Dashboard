@@ -1372,7 +1372,7 @@
                 return arr.filter(s => pats.some(p => String(s.name || '').includes(p)));
             }, [soShopsRaw, authState.root, authState.shops]);
             // SalonOne /shops レスポンスを店舗配列に変換（削除済み店舗は除外）
-            const soShopsFromResp = (j) => (j && (j.data || j) || []).filter(s => !s.deleted_at).map(s => ({ id: String(s.id ?? s.shop_id ?? ''), name: s.name || s.shop_name || `店舗${s.id}` }));
+            const soShopsFromResp = (j) => (j && (j.data || j) || []).filter(s => !s.deleted_at).map(s => ({ id: String(s.id ?? s.shop_id ?? ''), name: s.name || s.shop_name || `店舗${s.id}`, area_id: String(s.area_id ?? '') }));
             const [soStaffs, setSoStaffs] = useState([]);       // スタッフ一覧
             const [soLoading, setSoLoading] = useState(false);
             const [soError, setSoError] = useState(null);
@@ -3956,7 +3956,7 @@
                 // キャッシュ読込：過去の確定月は固定値を再利用し、取得に行かない。
                 let cacheAll = {}; try { cacheAll = JSON.parse(localStorage.getItem(ZK_CACHE_KEY) || '{}') || {}; } catch (e) { cacheAll = {}; }
                 const ycache = (cacheAll[year] = cacheAll[year] || {}); // { shopId: { ym: {gross,karte,newc,ther} } }
-                const shops = ordered.map(s => { const id = String(s.id); return { id, name: s.name, months: { ...(ycache[id] || {}) } }; });
+                const shops = ordered.map(s => { const id = String(s.id); return { id, name: s.name, area_id: String(s.area_id || ''), months: { ...(ycache[id] || {}) } }; });
                 setZkData({ year, months, shops: shops.map(s => ({ ...s, months: { ...s.months } })) }); // キャッシュ分を即時表示
                 // 取得対象＝「未確定月」または「キャッシュ未取得の確定月」または force。確定済み＆キャッシュ有りはスキップ。
                 const tasks = [];
@@ -13431,9 +13431,14 @@
                         // ── 国の判別（同一SalonOneブランド内に混在）──
                         // 日本語(かな/漢字)を含む→日本／マレーシアの都市名→マレーシア／それ以外のローマ字名→オーストラリア
                         const zkHasJa = (s) => /[ぁ-んァ-ヶ一-龥々〆ヵヶ]/.test(String(s || ''));
-                        const MY_HINTS = ['malay', 'kuala', 'lumpur', 'petaling', 'johor', 'penang', 'selangor', 'klang', 'ipoh', 'subang', 'cheras', 'puchong'];
-                        const zkCountryOf = (name) => {
-                            const n = String(name || ''); const low = n.toLowerCase();
+                        const MY_HINTS = ['malay', 'kuala', 'lumpur', 'petaling', 'johor', 'penang', 'selangor', 'klang', 'ipoh', 'subang', 'cheras', 'puchong', 'mont kiara', 'kiara', 'damansara', 'desa park', 'bukit jalil', 'sunway', 'velocity'];
+                        // area_id で国を厳密判定（900000341=Malaysia / 900000342=Australia）。無ければ名称ヒントで推定。
+                        const ZK_AREA_MY = '900000341', ZK_AREA_AU = '900000342';
+                        const zkCountryOf = (s) => {
+                            const aid = String((s && typeof s === 'object' && s.area_id) || '');
+                            if (aid === ZK_AREA_MY) return 'my';
+                            if (aid === ZK_AREA_AU) return 'au';
+                            const n = String((s && typeof s === 'object') ? (s.name || '') : (s || '')); const low = n.toLowerCase();
                             if (MY_HINTS.some(h => low.includes(h))) return 'my';
                             if (zkHasJa(n)) return 'jp';
                             return 'au';
@@ -13452,7 +13457,7 @@
                         const useFixedJp = (zkCountry === 'jp' && !!ZK_FIXED);
                         // 国別に店舗数を数える（タブのバッジ用）: AU/MYはSalonOne、日本は固定90店舗
                         const cntByCountry = { jp: 0, au: 0, my: 0 };
-                        ((zkData && zkData.shops) || []).forEach(s => { cntByCountry[zkCountryOf(s.name)]++; });
+                        ((zkData && zkData.shops) || []).forEach(s => { cntByCountry[zkCountryOf(s)]++; });
                         if (ZK_FIXED) cntByCountry.jp = ZK_FIXED.order.length;
                         let months, shops;
                         const jpFilled = new Set(); // SalonOne実データで穴埋めした月（グループ合計を実表示値ベースに切替）
@@ -13488,7 +13493,7 @@
                             });
                         } else {
                             months = (zkData && zkData.months) || Array.from({ length: 12 }, (_, i) => `${zkYear}-${p2(i + 1)}`);
-                            shops = ((zkData && zkData.shops) || []).filter(s => zkCountryOf(s.name) === zkCountry);
+                            shops = ((zkData && zkData.shops) || []).filter(s => zkCountryOf(s) === zkCountry);
                         }
                         const stripName = (n) => String(n || '').replace(/^NAORU\s*/, '').trim();
                         const entities = [{ id: '__group__', name: 'グループ全体', group: true }, ...shops.map(s => ({ id: s.id, name: stripName(s.name), shop: s }))];
@@ -13526,7 +13531,7 @@
                             { k: 'karte', label: 'カルテ枚数', bg: '#f0f9ff' },
                             { k: 'newc', label: '新規数', bg: '#fdf4ff' },
                         ];
-                        const W_MONTH = 44, W_ITEM = 98, W_ACT = 104, W_CMP = 62;
+                        const W_MONTH = 44, W_ITEM = 92, W_ACT = 82, W_CMP = 46;
                         const L_ITEM = W_MONTH, L_GACT = W_MONTH + W_ITEM, L_GCMP = W_MONTH + W_ITEM + W_ACT;
                         const yearOpts = [0, 1, 2].map(d => new Date().getFullYear() - d);
                         const MONTH_DIV = '3px solid #0f172a';
@@ -13585,7 +13590,7 @@
                                                             <th rowSpan={2 + METRICS.length} className="sticky text-white font-black text-center" style={{ left: 0, minWidth: W_MONTH, width: W_MONTH, background: '#0f172a', zIndex: 30, borderTop: tb, fontSize: '18px' }}>{mm}<span className="block text-[10px] font-bold text-slate-400">月</span></th>
                                                             <th className="sticky text-white text-[13px] font-black px-2 py-1 text-left" style={{ left: L_ITEM, minWidth: W_ITEM, width: W_ITEM, background: '#334155', zIndex: 25, borderTop: tb }}>{zkYear}年</th>
                                                             {entities.map((ent, ei) => (
-                                                                <th key={ent.id} colSpan={2} className="px-2 py-1 text-[13px] font-black whitespace-nowrap" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 22 : undefined, minWidth: ent.group ? (W_ACT + W_CMP) : undefined, background: ent.group ? '#4f46e5' : (ei % 2 ? '#e8edf3' : '#dde3ec'), color: ent.group ? '#fff' : '#334155', borderTop: tb, borderLeft: '1px solid #cbd5e1' }}>{ent.name}<ZkTherCell value={therOf(ent, ym)} editable={!ent.group} overridden={therOverridden(ent, ym)} color={ent.group ? '#c7d2fe' : '#94a3b8'} onSave={(v) => saveZkTherOverride(zkTherKey(ent.shop.name, ym), v)} /></th>
+                                                                <th key={ent.id} colSpan={2} className="px-1.5 py-1 text-[13px] font-black whitespace-nowrap" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 22 : undefined, minWidth: ent.group ? (W_ACT + W_CMP) : undefined, background: ent.group ? '#4f46e5' : (ei % 2 ? '#e8edf3' : '#dde3ec'), color: ent.group ? '#fff' : '#334155', borderTop: tb, borderLeft: '1px solid #cbd5e1' }}>{ent.name}<ZkTherCell value={therOf(ent, ym)} editable={!ent.group} overridden={therOverridden(ent, ym)} color={ent.group ? '#c7d2fe' : '#94a3b8'} onSave={(v) => saveZkTherOverride(zkTherKey(ent.shop.name, ym), v)} /></th>
                                                             ))}
                                                         </tr>
                                                         {/* 実績 / 前月比 サブヘッダー */}
@@ -13609,7 +13614,7 @@
                                                                     const zebra = ent.group ? '#eef0ff' : (ei % 2 ? '#ffffff' : '#f9fbfd');
                                                                     return (
                                                                         <React.Fragment key={ent.id}>
-                                                                            <td className={`px-2 py-1 text-right whitespace-nowrap font-bold text-[13px] ${ent.group ? 'text-indigo-900' : 'text-slate-800'}`} style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 15 : undefined, minWidth: W_ACT, background: zebra, borderLeft: '1px solid #e2e8f0' }}>{fmt(mt.k, cur)}</td>
+                                                                            <td className={`px-1.5 py-1 text-right whitespace-nowrap font-bold text-[13px] ${ent.group ? 'text-indigo-900' : 'text-slate-800'}`} style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 15 : undefined, minWidth: W_ACT, background: zebra, borderLeft: '1px solid #e2e8f0' }}>{fmt(mt.k, cur)}</td>
                                                                             <td className={`px-1 py-1 text-right whitespace-nowrap text-[11px] font-bold ${c.cls}`} style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GCMP : undefined, zIndex: ent.group ? 15 : undefined, minWidth: W_CMP, background: zebra }}>{c.t}</td>
                                                                         </React.Fragment>
                                                                     );

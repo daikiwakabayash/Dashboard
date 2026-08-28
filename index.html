@@ -3464,21 +3464,38 @@
             const zkTherResolved = (name, ym, base) => { const ov = zkTherOverrides[zkTherKey(name, ym)]; return (ov != null) ? Number(ov) : (Number(base) || 0); };
             // 全体管理シートCSVの人数（JP店舗）。無ければnull。
             const zkCsvTherapist = (name, ym) => { const arr = (ZK_FIXED_2026.months[ym] || {})[zkCanonName(name)]; return (arr && arr[2] != null) ? Number(arr[2]) : null; };
-            const loadShopBreakdown = async () => {
+            const SB_CACHE_KEY = 'so_shopbreak_cache_v1';
+            const loadShopBreakdown = async (opts = {}) => {
+                const forceAll = !!opts.force;
                 const reqId = ++soShopReqRef.current;
                 setSoShopLoading(true);
                 const shopList = soShops.length ? soShops : [];
                 const cto = soConfirmedTo();  // 確定分の締め日（当日は除外）
+                // ── キャッシュ: 期間(pkey)ごとに店舗結果を保存し、再取得を回避して高速化 ──
+                // 過去の確定期間は永続キャッシュ、当月(進行中)は20分TTLで再利用。
+                const p2b = (x) => String(x).padStart(2, '0');
+                const nowMonth = `${new Date().getFullYear()}-${p2b(new Date().getMonth() + 1)}`;
+                const periodConfirmed = soFrom.slice(0, 7) < nowMonth && soTo.slice(0, 7) < nowMonth;
+                const pkey = `${soFrom}_${cto}`;
+                let sbCacheAll = {}; try { sbCacheAll = JSON.parse(localStorage.getItem(SB_CACHE_KEY) || '{}') || {}; } catch { sbCacheAll = {}; }
+                const pc = sbCacheAll[pkey];
+                const cacheFresh = !forceAll && pc && (periodConfirmed || (Date.now() - (pc.ts || 0) < 20 * 60 * 1000));
+                const cached = (cacheFresh && pc.shops && typeof pc.shops === 'object') ? pc.shops : {};
+                // 保存先（既存キャッシュを引き継ぎつつ今回の取得分を追記）
+                const scache = (sbCacheAll[pkey] = { ts: Date.now(), shops: { ...cached } });
                 const rows = SO_SHOP_ORDER.map((name, i) => {
                     const nn = soShopNorm(name);
                     // 完全一致を優先、無ければ部分一致（例: SalonOne側が「横浜関内院」等でも「関内」で拾う）
                     const sh = shopList.find(x => soShopNorm(x.name) === nn)
                         || shopList.find(x => { const xn = soShopNorm(x.name); return nn.length >= 2 && (xn.includes(nn) || nn.includes(xn)); });
-                    return { order: i, name, id: sh ? sh.id : null, active: !!sh, loading: !!sh,
+                    const base = { order: i, name, id: sh ? sh.id : null, active: !!sh, loading: !!sh,
                              gross: 0, newSales: 0, existSales: 0, refund: 0, newCount: 0, joinCount: 0, joinRate: 0, active_count: 0, churn: 0, churnRate: 0, rjoin: 0, gReview: 0, hReview: 0, therapist: 0, channels: [] };
+                    // キャッシュ命中: 即時反映（取得対象から除外）
+                    if (sh && cached[String(sh.id)]) return { ...base, ...cached[String(sh.id)], loading: false };
+                    return base;
                 });
                 setSoShopRows(rows);
-                const targets = rows.filter(r => r.active);
+                const targets = rows.filter(r => r.active && !cached[String(r.id)]);
                 setSoShopProgress({ done: 0, total: targets.length });
                 // レート制限(60/分)対策: 429/5xx はバックオフ再試行（博多/新越谷/江坂など後半店舗の取りこぼしを防ぐ）
                 const soGet = async (url) => {
@@ -3523,15 +3540,24 @@
                             const soNonTherapist = new Set(['ヘルプ', '楽トレ', '未割当', '(不明)', '不明']);
                             const activityN = sum ? sum.byStaff.filter(st => !soNonTherapist.has(String(st.name || '').trim()) && ((st.treatments || 0) > 0 || (st.gross || 0) > 0)).length : 0;
                             const therapist = rosterN || activityN;
-                            setSoShopRows(prev => prev.map(r => r.order === row.order ? { ...r, loading: false, gross, newSales, existSales: Math.max(0, gross - newSales), refund, newCount, joinCount, joinRate, active_count, churn, churnRate, rjoin, gReview, hReview, therapist, channels: ch } : r));
+                            const data = { gross, newSales, existSales: Math.max(0, gross - newSales), refund, newCount, joinCount, joinRate, active_count, churn, churnRate, rjoin, gReview, hReview, therapist, channels: ch };
+                            scache.shops[String(row.id)] = data;   // キャッシュに保存
+                            setSoShopRows(prev => prev.map(r => r.order === row.order ? { ...r, loading: false, ...data } : r));
                         } catch (e) {
                             setSoShopRows(prev => prev.map(r => r.order === row.order ? { ...r, loading: false } : r));
                         }
                         done++; setSoShopProgress({ done, total: targets.length });
                     }
                 };
-                await Promise.all(Array.from({ length: 4 }, worker));   // 並列度4でレート制限を抑制
-                if (soShopReqRef.current === reqId) setSoShopLoading(false);
+                await Promise.all(Array.from({ length: 5 }, worker));   // 並列度5（429はリトライで吸収）
+                if (soShopReqRef.current !== reqId) return;             // 途中で新しい取得が始まったら保存しない
+                // キャッシュ永続化（古い期間は最新8件に間引き）
+                try {
+                    const keys = Object.keys(sbCacheAll);
+                    if (keys.length > 8) keys.map(k => [k, sbCacheAll[k].ts || 0]).sort((a, b) => a[1] - b[1]).slice(0, keys.length - 8).forEach(([k]) => delete sbCacheAll[k]);
+                    localStorage.setItem(SB_CACHE_KEY, JSON.stringify(sbCacheAll));
+                } catch {}
+                setSoShopLoading(false);
             };
             const soAiAnalyze = async () => {
                 setSoAiLoading(true); setSoAiResult('');
@@ -12552,6 +12578,7 @@
                                                     <h2 className="text-base md:text-lg font-black text-slate-900">店舗別売上</h2>
                                                     <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-[10px] font-black">出店順</span>
                                                     {soShopLoading && soShopProgress && (<span className="text-xs font-bold text-amber-600">集計中… {soShopProgress.done}/{soShopProgress.total}店舗</span>)}
+                                                    <button onClick={() => loadShopBreakdown({ force: true })} disabled={soShopLoading} title="キャッシュを無視して最新を再取得" className="text-[11px] font-bold text-slate-400 hover:text-emerald-600 disabled:opacity-40 inline-flex items-center gap-1"><RefreshCw size={12} className={soShopLoading ? 'animate-spin' : ''} />更新</button>
                                                     <span className="text-xs font-bold text-slate-400 ml-auto">全{soShopRows.length}店舗（SalonOne導入 {activeCount}）</span>
                                                 </div>
                                                 {soShopRows.length === 0 ? (

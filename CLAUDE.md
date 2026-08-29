@@ -22,6 +22,8 @@ npm run test:watch  # ウォッチモード
 ### デプロイ
 Vercelにpushすると自動デプロイ。
 
+**ビルド（初回表示の高速化）**: `index.html` は開発上のソース（`<script type="text/babel">` のまま編集）。Vercelビルド時に `scripts/precompile.mjs`（`vercel.json` の `buildCommand`）が esbuild で JSX→JS に事前変換し、`@babel/standalone` を除去した `index.html` を配信する（ブラウザ内Babelコンパイルを排除）。ローカルは変換不要でそのまま動作。ビルドが失敗してもVercelは直前の正常デプロイを配信するため本番は壊れない。
+
 ## テスト構成
 
 | ファイル | 内容 |

@@ -1131,7 +1131,8 @@
                     const role = localStorage.getItem('naoru_auth_role') || (root ? 'root' : 'owner');
                     const staffId = localStorage.getItem('naoru_auth_staffid') || '';
                     const staffName = localStorage.getItem('naoru_auth_staffname') || '';
-                    return token ? { checking: true, authenticated: false, token, owner, root, shops, role, staffId, staffName }
+                    // 保存トークンがあれば即ログイン状態で表示（楽観的表示）。検証はバックグラウンドで行い、無効なら後でログイン画面に戻す。
+                    return token ? { checking: false, authenticated: true, token, owner, root, shops, role, staffId, staffName }
                                  : { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '' };
                 } catch { return { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '' }; }
             });
@@ -1156,9 +1157,9 @@
             const loadAcctMeta = async () => { try { const r = await fetch('/api/plan-store?type=accountmeta'); const j = await r.json().catch(() => ({})); return (j && j.meta && typeof j.meta === 'object') ? j.meta : {}; } catch { return {}; } };
             const saveAcctMeta = async (owner, role, staffId, staffName) => { try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'accountmeta', action: 'set', owner, role, staffId, staffName }) }); } catch {} };
 
-            // 起動時: 保存トークンを検証（＋店舗アクセスを最新化）。未設定環境（開発）は認証スキップ。
+            // 起動時: 保存トークンをバックグラウンド検証（＋店舗アクセスを最新化）。画面は先に表示済み。無効なら後でログインへ。
             useEffect(() => {
-                if (!authState.token || !authState.checking) return;
+                if (!authState.token) return;
                 fetch('/api/settlement-auth', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1656,6 +1657,11 @@
             const [stBulkSel, setStBulkSel] = useState([]);   // 対象店舗名
             const [stBulkBusy, setStBulkBusy] = useState(false);
             const [stBulkMsg, setStBulkMsg] = useState('');
+            // CSV一括登録
+            const [stCsvOpen, setStCsvOpen] = useState(false);
+            const [stCsvText, setStCsvText] = useState('');
+            const [stCsvBusy, setStCsvBusy] = useState(false);
+            const [stCsvMsg, setStCsvMsg] = useState('');
             const [stAdminOpen, setStAdminOpen] = useState(false);
             const [stSel, setStSel] = useState([]);                // 表示する店舗ID（複数選択）
             const [stData, setStData] = useState({});              // id -> { salon, square }
@@ -1942,6 +1948,81 @@
                 await stLoadAccounts(); setStOwnerShops(null);
                 setStBulkMsg(`✅ ${ok}件作成${fail ? `／${fail}件失敗` : ''}（初期PASS: ${password}）`);
                 setStBulkBusy(false);
+            };
+            // ── CSV一括登録 ──
+            // 1行=1アカウント。ヘッダー行必須。列（日本語/英語エイリアス対応）:
+            //   種別/role（owner|staff）, 氏名/ID/name, パスワード/password, 店舗/shops（複数は ; 、｜ 区切り）, staffId（任意・SalonOne）
+            const stCsvParse = (text) => {
+                // RFC風CSVパーサ（ダブルクオート対応）
+                const rows = []; let row = [], cell = '', q = false;
+                const s = String(text || '').replace(/\r\n?/g, '\n');
+                for (let i = 0; i < s.length; i++) { const c = s[i];
+                    if (q) { if (c === '"') { if (s[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += c; }
+                    else if (c === '"') q = true;
+                    else if (c === ',') { row.push(cell); cell = ''; }
+                    else if (c === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
+                    else cell += c;
+                }
+                if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+                const nonEmpty = rows.filter(r => r.some(x => String(x).trim() !== ''));
+                if (nonEmpty.length < 2) return [];
+                const norm = (h) => String(h || '').trim().toLowerCase();
+                const header = nonEmpty[0].map(norm);
+                const col = (aliases) => header.findIndex(h => aliases.includes(h));
+                const iRole = col(['種別', 'role', 'ロール', '権限']);
+                const iName = col(['氏名', 'name', 'id', 'ログインid', 'ログインID'.toLowerCase(), 'ユーザー名', 'アカウント']);
+                const iPass = col(['パスワード', 'password', 'pass', 'pw']);
+                const iShops = col(['店舗', 'shops', '店舗名', 'アクセス店舗', 'アクセス他店舗', '所属店舗']);
+                const iSid = col(['staffid', 'スタッフid', 'salononeid']);
+                const splitShops = (v) => String(v || '').split(/[;；、｜|]/).map(x => x.trim()).filter(Boolean);
+                const roleOf = (v) => { const t = String(v || '').trim().toLowerCase(); if (/owner|オーナー/.test(t)) return 'owner'; if (/staff|セラピスト|スタッフ|マネージャー|マネジャー/.test(t)) return 'staff'; return 'staff'; };
+                return nonEmpty.slice(1).map((r, idx) => {
+                    const owner = (iName >= 0 ? r[iName] : r[0] || '').trim();
+                    const password = (iPass >= 0 ? r[iPass] : '').trim();
+                    const role = roleOf(iRole >= 0 ? r[iRole] : '');
+                    let shops = iShops >= 0 ? splitShops(r[iShops]) : [];
+                    let staffId = (iSid >= 0 ? r[iSid] : '').trim();
+                    let staffName = role === 'staff' ? owner : '';
+                    // staffId未指定なら氏名でSalonOneスタッフを解決（在籍中のみ）
+                    if (role === 'staff' && !staffId && owner) { const st = (soStaffs || []).find(x => !x.deleted && String(x.name).replace(/\s/g, '') === owner.replace(/\s/g, '')); if (st) { staffId = String(st.id); staffName = st.name; } }
+                    const err = !owner ? '氏名なし' : (!password ? 'パスワードなし' : '');
+                    return { line: idx + 2, owner, password, role, shops, staffId, staffName, err };
+                });
+            };
+            const stCsvImport = async () => {
+                const rows = stCsvParse(stCsvText);
+                if (!rows.length) { setStCsvMsg('CSVを読み取れませんでした（ヘッダー行＋1行以上必要）'); return; }
+                const valid = rows.filter(r => !r.err);
+                const bad = rows.filter(r => r.err);
+                if (!valid.length) { setStCsvMsg(`有効な行がありません（${bad.length}件エラー）`); return; }
+                setStCsvBusy(true); setStCsvMsg(`登録中… 0/${valid.length}`);
+                let ok = 0, fail = 0, done = 0, idx = 0;
+                const token = stAuthToken();
+                const worker = async () => {
+                    while (idx < valid.length) {
+                        const r = valid[idx++];
+                        try {
+                            const res = await fetch('/api/settlement-owners', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hqToken: token, action: 'upsert', owner: r.owner, password: r.password, shops: r.shops, role: r.role, staffId: r.staffId, staffName: r.staffName }) });
+                            const j = await res.json().catch(() => ({}));
+                            if (j.ok) { ok++; await saveAcctMeta(r.owner, r.role, r.staffId || '', r.staffName || ''); } else fail++;
+                        } catch { fail++; }
+                        done++; setStCsvMsg(`登録中… ${done}/${valid.length}`);
+                    }
+                };
+                await Promise.all(Array.from({ length: Math.min(4, valid.length) }, worker));
+                await stLoadAccounts(); setStOwnerShops(null);
+                setStCsvMsg(`✅ ${ok}件登録${fail ? `／${fail}件失敗` : ''}${bad.length ? `／${bad.length}件はエラー行(${bad.slice(0, 3).map(b => b.line + '行目:' + b.err).join(', ')}${bad.length > 3 ? '…' : ''})` : ''}`);
+                setStCsvBusy(false);
+            };
+            // SalonOneの在籍スタッフからCSV雛形を生成（氏名・所属店舗・staffIdを自動・パスワードは空欄で管理者が入力）
+            const stCsvFromSalonOne = () => {
+                const shopName = (sid) => { const sh = (soShops || []).find(x => String(x.id) === String(sid)); return sh ? sh.name : ''; };
+                const list = (soStaffs || []).filter(st => !st.deleted && !ST_NON_THERAPIST.has(String(st.name || '').trim()));
+                const esc = (v) => /[",\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : String(v);
+                const lines = ['種別,氏名,パスワード,店舗,staffId'];
+                list.forEach(st => { lines.push(['staff', st.name, '', shopName(st.shop_id), st.id].map(esc).join(',')); });
+                setStCsvText(lines.join('\n'));
+                setStCsvMsg(`SalonOneの在籍スタッフ ${list.length}名を読み込みました。各行にパスワードを入力し、必要なら店舗（複数は ; 区切り）を追記してから「一括登録」してください。`);
             };
             useEffect(() => {
                 if (((currentPage === 'settlement' && stAdminOpen) || currentPage === 'settings') && stAccounts === null) stLoadAccounts();
@@ -14025,6 +14106,59 @@
                                             </div>
                                         </div>
                                     )}
+                                </div>
+
+                                {/* CSV一括登録 */}
+                                <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-5">
+                                    <button onClick={() => setStCsvOpen(o => !o)} className="w-full flex items-center justify-between text-sm font-black text-slate-800">
+                                        <span className="flex items-center gap-2"><FileText size={16} className="text-brand-500" /> CSVで一括登録（氏名・パスワード・店舗・種別）</span>
+                                        <ChevronDown size={16} className={`text-slate-400 transition-transform ${stCsvOpen ? 'rotate-180' : ''}`} />
+                                    </button>
+                                    {stCsvOpen && (() => {
+                                        const preview = stCsvText.trim() ? stCsvParse(stCsvText) : [];
+                                        const okN = preview.filter(r => !r.err).length, badN = preview.length - okN;
+                                        return (
+                                        <div className="mt-3 space-y-3">
+                                            <div className="text-[11px] text-slate-500 font-bold leading-relaxed bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+                                                <div className="font-black text-slate-700 mb-1">CSVの形式（1行目はヘッダー）</div>
+                                                <code className="block bg-white border border-slate-200 rounded px-2 py-1 text-[11px] whitespace-pre overflow-x-auto">種別,氏名,パスワード,店舗,staffId{'\n'}staff,増田 太郎,pass1234,新宿;渋谷,118{'\n'}owner,野島 大輔,ownerpass,静岡;沼津,</code>
+                                                <ul className="mt-1.5 list-disc pl-4 space-y-0.5">
+                                                    <li><b>種別</b>=owner（オーナー）/ staff（セラピスト）</li>
+                                                    <li><b>氏名</b>=ログインID（＝ログイン時の名前）／<b>パスワード</b>=ログインPASS</li>
+                                                    <li><b>店舗</b>=アクセスできる店舗。複数は「;」区切り（staffは所属店舗・ownerは管轄店舗）</li>
+                                                    <li><b>staffId</b>=任意。SalonOneのスタッフIDを入れると手当/返金明細に本人が自動紐付け（空欄なら氏名で自動照合）</li>
+                                                </ul>
+                                            </div>
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <button onClick={stCsvFromSalonOne} className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-[12px] font-black hover:bg-emerald-700">SalonOne在籍スタッフを読み込む</button>
+                                                <button onClick={() => setStCsvText('')} className="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-[12px] font-bold hover:bg-slate-200">クリア</button>
+                                                <label className="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-[12px] font-bold hover:bg-slate-200 cursor-pointer">CSVファイルを選択<input type="file" accept=".csv,text/csv" className="hidden" onChange={e => { const f = e.target.files && e.target.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => setStCsvText(String(rd.result || '')); rd.readAsText(f, 'utf-8'); e.target.value = ''; }} /></label>
+                                            </div>
+                                            <textarea value={stCsvText} onChange={e => setStCsvText(e.target.value)} rows={8} placeholder="ここにCSVを貼り付け、または上のボタンから読み込み" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-[12px] font-mono" />
+                                            {preview.length > 0 && (
+                                                <div className="border border-slate-200 rounded-lg overflow-hidden">
+                                                    <div className="px-3 py-1.5 bg-slate-50 text-[11px] font-black text-slate-600 flex items-center justify-between"><span>プレビュー {preview.length}行（有効 {okN}／エラー {badN}）</span></div>
+                                                    <div className="max-h-52 overflow-auto"><table className="w-full text-[11px] whitespace-nowrap">
+                                                        <thead><tr className="text-left text-[10px] font-black text-slate-400 border-b border-slate-100"><th className="px-2 py-1">種別</th><th className="px-2 py-1">氏名(ID)</th><th className="px-2 py-1">PASS</th><th className="px-2 py-1">店舗</th><th className="px-2 py-1">staffId</th><th className="px-2 py-1">状態</th></tr></thead>
+                                                        <tbody>{preview.slice(0, 200).map((r, i) => (
+                                                            <tr key={i} className={`border-b border-slate-50 ${r.err ? 'bg-rose-50' : ''}`}>
+                                                                <td className="px-2 py-1 font-bold">{r.role === 'owner' ? 'オーナー' : 'セラピスト'}</td>
+                                                                <td className="px-2 py-1 font-bold text-slate-800">{r.owner || '—'}</td>
+                                                                <td className="px-2 py-1 text-slate-400">{r.password ? '••••' : '—'}</td>
+                                                                <td className="px-2 py-1 text-slate-600">{r.shops.join('・') || (r.role === 'owner' ? '（未指定）' : '—')}</td>
+                                                                <td className="px-2 py-1 text-slate-500">{r.staffId || '—'}</td>
+                                                                <td className={`px-2 py-1 font-bold ${r.err ? 'text-rose-600' : 'text-emerald-600'}`}>{r.err || 'OK'}</td>
+                                                            </tr>))}</tbody>
+                                                    </table></div>
+                                                </div>
+                                            )}
+                                            <div className="flex items-center gap-2">
+                                                <button onClick={stCsvImport} disabled={stCsvBusy || okN === 0} className="px-5 py-2 bg-brand-500 text-white rounded-lg text-sm font-black hover:bg-brand-600 disabled:opacity-40">{stCsvBusy ? '登録中...' : `${okN}件を一括登録`}</button>
+                                                {stCsvMsg && <span className="text-xs font-bold text-slate-600">{stCsvMsg}</span>}
+                                            </div>
+                                        </div>
+                                        );
+                                    })()}
                                 </div>
 
                                 {/* 追加/更新フォーム */}

@@ -19,6 +19,7 @@ if (m) {
     jsxFactory: 'React.createElement',
     jsxFragment: 'React.Fragment',
     target: 'es2019',
+    charset: 'utf8',          // 日本語を\uXXXXにエスケープせずUTF-8のまま出力（サイズ削減・可読性）
     minifyWhitespace: true,   // 空白/コメント除去のみ（識別子・構文は保持＝挙動一致）
     legalComments: 'none',
   });

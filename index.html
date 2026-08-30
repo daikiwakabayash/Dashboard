@@ -4196,16 +4196,31 @@
                     const ids = soShopSel;
                     const cto = soConfirmedTo();       // 確定分の締め日（当日は除外）
                     // 1リソースを選択店舗分（[]なら全店ブランド）取得
+                    // レート制限(60/分)対策: 429/rate_limited/5xx はバックオフ再試行。
+                    // 全店表示で店舗別売上の一括取得と競合しても、サマリ/マーケが取りこぼしで失敗しないようにする。
+                    const soFetchRetry = async (url) => {
+                        for (let a = 0; a < 5; a++) {
+                            try {
+                                const r = await fetch(url);
+                                const json = await r.json().catch(() => ({}));
+                                const limited = r.status === 429 || r.status >= 500 || (json && json.error && json.error.code === 'rate_limited');
+                                if (limited && a < 4) { await new Promise(res => setTimeout(res, 900 * Math.pow(1.8, a))); continue; }
+                                return { status: r.status, json };
+                            } catch (e) {
+                                if (a < 4) { await new Promise(res => setTimeout(res, 900 * Math.pow(1.8, a))); continue; }
+                                return { status: 0, json: {} };
+                            }
+                        }
+                        return { status: 0, json: {} };
+                    };
                     const fetchResource = async (resource, extra = {}) => {
                         if (ids.length === 0) {
                             const p = new URLSearchParams({ resource, from: soFrom, to: cto, ...extra });
-                            const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`);
-                            return [{ status: r.status, json: await r.json().catch(() => ({})) }];
+                            return [await soFetchRetry(`${SALONONE_API_URL}?${p.toString()}`)];
                         }
                         return Promise.all(ids.map(async id => {
                             const p = new URLSearchParams({ resource, from: soFrom, to: cto, shop_id: id, ...extra });
-                            const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`);
-                            return { status: r.status, json: await r.json().catch(() => ({})) };
+                            return await soFetchRetry(`${SALONONE_API_URL}?${p.toString()}`);
                         }));
                     };
 

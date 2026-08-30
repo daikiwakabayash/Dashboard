@@ -71,6 +71,44 @@ function writePlanKey_(key, obj) {
   sh.appendRow([key, json, now]);
 }
 
+// ── 汎用KVブロブ（手当/accountmeta/全体管理セラピスト数/サンクスギフト等の共有ストア） ──
+// api/plan-store.js の blobGet/blobSet が使う。Vercel KV/Supabase 未設定時のGASフォールバック。
+// GET  ?type=kv&key=... → { value }
+// POST { action:'saveKv', key, value } → { ok:true }
+// 値はJSON文字列で1セルに格納（Sheetsのセル上限=約50,000文字。超える規模ならVercel KV推奨）。
+var KV_SHEET = 'KVStore';
+var KV_HEADERS = ['key', 'value', 'updatedAt'];
+function getKvSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(KV_SHEET);
+  if (!sh) { sh = ss.insertSheet(KV_SHEET); sh.getRange(1, 1, 1, KV_HEADERS.length).setValues([KV_HEADERS]); }
+  return sh;
+}
+function readKvBlob_(key) {
+  if (!key) return null;
+  var sh = getKvSheet_();
+  var values = sh.getDataRange().getValues();
+  for (var r = 1; r < values.length; r++) {
+    if (String(values[r][0]) === String(key)) {
+      var s = String(values[r][1] || '');
+      if (!s) return null;
+      try { return JSON.parse(s); } catch (e) { return null; }
+    }
+  }
+  return null;
+}
+function writeKvBlob_(key, value) {
+  if (!key) return;
+  var sh = getKvSheet_();
+  var values = sh.getDataRange().getValues();
+  var now = new Date().toISOString();
+  var json = JSON.stringify(value == null ? null : value);
+  for (var r = 1; r < values.length; r++) {
+    if (String(values[r][0]) === String(key)) { sh.getRange(r + 1, 1, 1, 3).setValues([[String(key), json, now]]); return; }
+  }
+  sh.appendRow([String(key), json, now]);
+}
+
 function getSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sh = ss.getSheetByName(SHEET_NAME);
@@ -148,6 +186,10 @@ function doGet(e) {
     if (String(p.type) === 'planStore') {
       return json_(readPlanStore_());
     }
+    // 汎用KVブロブ取得（手当/accountmeta/サンクスギフト等）
+    if (String(p.type) === 'kv') {
+      return json_({ value: readKvBlob_(String(p.key || '')) });
+    }
     // オーナーアカウント一覧（サーバー間通信のみ・password含む）
     if (String(p.type) === 'owners') {
       var owners = readOwners_().map(function (o) {
@@ -189,6 +231,12 @@ function doPost(e) {
     if (body.action === 'savePlanStore') {
       writePlanKey_('goals', body.goals || {});
       writePlanKey_('actions', body.actions || []);
+      return json_({ ok: true });
+    }
+
+    // ── 汎用KVブロブ保存（手当/accountmeta/サンクスギフト等） ──
+    if (body.action === 'saveKv') {
+      writeKvBlob_(String(body.key || ''), body.value);
       return json_({ ok: true });
     }
 

@@ -33,6 +33,7 @@ Vercelにpushすると自動デプロイ。
 | `tests/markdown.test.js` | Markdownパーサー（見出し・リスト・テーブル・インライン要素） |
 | `tests/plan-calc.test.js` | 事業計画データ計算（店舗別集計・媒体別CPA・ランキング） |
 | `tests/html-structure.test.js` | フロントエンド構造検証（認証・API・セキュリティ） |
+| `tests/thanksgift.test.js` | サンクスギフト（投票期間判定・1人1票・自分不可・ランキング集計） |
 
 ## ファイル構成
 ```
@@ -45,7 +46,7 @@ api/                # ⚠️ Vercel Hobbyの関数数上限(12)対策で「1エ�
   feedback.js       # フィードバックAPI（GAS連携・取得/送信）
   health.js         # ヘルスチェック（env.planStore で保存先の有効状態も返す）
   salonone.js       # SalonOne 分析APIプロキシ（APIキー隠蔽・GET限定・許可リスト）
-  plan-store.js     # SalonOne計画の目標・アクション共有ストア（全デバイス同期）。保存先=Vercel KV(推奨) or Supabase or GAS。未設定時はlocalStorage継続。?type=allowance で手当（領収書）の提出・個人別生産性も同ストアに保存（submit/delete/recordProductivity）
+  plan-store.js     # SalonOne計画の目標・アクション共有ストア（全デバイス同期）。保存先=Vercel KV(推奨) or Supabase or GAS。未設定時はlocalStorage継続。?type=allowance で手当（領収書）の提出・個人別生産性も同ストアに保存（submit/delete/recordProductivity）。?type=thanksgift でサンクスギフト投票を保存（vote/delete・投票期間と自分不可はサーバー側でも強制）
   tasks.js          # タスク系API
   settlement.js     # 返金明細書ディスパッチャ → /api/settlement-auth|owners|store（?fn=auth/owners/store・rewrite）
   square.js         # Squareディスパッチャ → /api/square/metrics|settlement|test（?fn=metrics/settlement/test・rewrite）
@@ -56,6 +57,7 @@ lib/
   plan-calc.js      # 事業計画計算ロジック（テスト用分離モジュール）
   salonone.js       # SalonOne API連携ロジック（エンドポイント許可リスト・検証・URL組立）
   allowances.js     # 手当（領収書）計算ロジック（毎月上限型/通算チャージ型・年末失効）。tests/allowances.test.js
+  thanksgift.js     # サンクスギフト（感謝の投票）ロジック（投票期間の判定=毎月1日00:01〜2日23:59 JST・対象=前月／1人1票upsert・自分不可・ランキング集計）。tests/thanksgift.test.js
   settlement.js     # 返金明細書 共通ロジック（オーナー認証トークン・スナップショット・計算・期日/注意書き）
   handlers/         # api/ ディスパッチャから呼ばれる実ハンドラ群（Serverless Functionにカウントされない）
     settlement-auth.js / settlement-owners.js / settlement-store.js
@@ -121,6 +123,15 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
 - **照合**: SalonOneスクエア売上 と Square(総決済−返金) が不一致なら明細に ⚠️ を表示
 - **期日/注意書き**: `lib/settlement.js` の `SETTLEMENT_SCHEDULE`/`SETTLEMENT_NOTES` が唯一の定義（2日売上確定→5日明細作成→10日オーナーチェック→15日振込、期日超過で修正不可）
 - ロジックは `lib/settlement.js` に分離し `tests/settlement.test.js` でカバー
+
+## サンクスギフト（感謝の投票）
+スタッフ同士が毎月「お世話になった1人」に感謝コメントを送る仕組み。特典付与の基礎データにする。
+- **タブの表示**: `staff`（セラピスト）と `root` のみ表示（`thanksOnly`）。owner には出さない。staff=投票＋自分がもらった感謝の閲覧／root=全体集計・ランキング。
+- **投票ルール**: 1人につき**月1票**（複数人不可・自分不可・1票=1ポイント）。同店/他店どちらにも送れる。**記名**（誰から・内容が相手に見える）。
+- **投票期間**: 毎月**1日00:01〜2日23:59（JST）**の2日間のみ。この期間の投票は**前月（対象月）**への感謝として記録（例: 9/1〜2の投票＝8月分）。UIとサーバー（`api/plan-store` の `type=thanksgift`）の両方で期間・対象月・自分不可を強制。
+- **相手の候補**: 「店舗を選択→その店舗の対象月に**売上>0**のスタッフ」を表示（SalonOne `sales/summary?shop_id=…` の `by_staff` を店舗選択時に1回取得）。自分は除外。
+- **保存**: 共有ストア（`/api/plan-store?type=thanksgift`・KV/Supabase/GAS）に `{votes:[{period,fromStaffId,fromStaffName,fromShop,toStaffId,toStaffName,toShop,comment,createdAt}]}` を月別に蓄積。`id=対象月__投票者ID` で1人1票をupsert。
+- ロジックは `lib/thanksgift.js`（`getVotingState`/`validateVote`/`upsertVote`/`tallyRanking`/`receivedFor`）に分離しテスト済み。フロントは投票状態をサーバーGETの `votingState` から受け取る。
 
 ## 開発ルール
 - `index.html` を編集したら `npm test` を実行して構造テストを通す

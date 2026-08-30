@@ -1527,6 +1527,48 @@
             const stRecordProductivity = async (staffId, month, gross) => {
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'allowance', action: 'recordProductivity', staffId: String(staffId), month, gross: Number(gross) || 0 }) }); } catch {}
             };
+
+            // ── サンクスギフト（感謝の投票）── スタッフが月1票、前月(対象月)にお世話になった1人へ感謝コメントを送る
+            const [tgData, setTgData] = useState({ votes: [], votingState: null, configured: true, loaded: false });
+            const [tgForm, setTgForm] = useState({ shopId: '', toStaffId: '', comment: '' });
+            const [tgRoster, setTgRoster] = useState({ shopId: '', loading: false, list: [] }); // 選択店舗の対象月「売上>0」スタッフ
+            const [tgMsg, setTgMsg] = useState('');
+            const [tgBusy, setTgBusy] = useState(false);
+            const [tgRootPeriod, setTgRootPeriod] = useState(''); // root集計の対象月フィルタ（''=全期間）
+            const tgMonthLabel = (ym) => { if (!ym) return ''; const [y, m] = String(ym).split('-'); return `${y}年${Number(m)}月`; };
+            const tgLoad = async () => {
+                try { const r = await fetch('/api/plan-store?type=thanksgift'); const j = await r.json().catch(() => ({})); setTgData({ votes: Array.isArray(j.votes) ? j.votes : [], votingState: j.votingState || null, configured: j.configured !== false, loaded: true }); }
+                catch { setTgData(d => ({ ...d, loaded: true })); }
+            };
+            // 選択店舗の「対象月に売上>0」スタッフを取得（=感謝を送れる相手。店舗ごとに1回のSalonOne呼び出し）
+            const tgLoadRoster = async (shopId, targetMonth) => {
+                if (!shopId || !targetMonth) { setTgRoster({ shopId: '', loading: false, list: [] }); return; }
+                setTgRoster({ shopId, loading: true, list: [] });
+                try {
+                    const [y, m] = targetMonth.split('-').map(Number);
+                    const from = `${targetMonth}-01`; const last = new Date(y, m, 0); const to = `${targetMonth}-${String(last.getDate()).padStart(2, '0')}`;
+                    const r = await fetch(`${SALONONE_API_URL}?resource=sales/summary&from=${from}&to=${to}&shop_id=${shopId}`);
+                    const j = await r.json().catch(() => ({}));
+                    const data = j.data || j;
+                    const bs = (data.by_staff || data.byStaff || []);
+                    const list = bs.map(s => ({ id: String(s.staff_id ?? s.id ?? ''), name: s.staff_name || s.name || '', gross: Number(s.gross_sales ?? s.gross ?? 0) }))
+                        .filter(s => s.id && s.gross > 0)
+                        .sort((a, b) => b.gross - a.gross);
+                    setTgRoster({ shopId, loading: false, list });
+                } catch { setTgRoster({ shopId, loading: false, list: [] }); }
+            };
+            const tgSubmitVote = async (vote) => {
+                setTgBusy(true); setTgMsg('');
+                try {
+                    const r = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'thanksgift', action: 'vote', vote }) });
+                    const j = await r.json().catch(() => ({}));
+                    await tgLoad();
+                    if (j.ok) setTgMsg('送信しました！ありがとうを届けました🎁');
+                    else setTgMsg('送信できませんでした（' + (j.error === 'closed' ? '投票期間外です' : j.error === 'self_vote' ? '自分には送れません' : j.error === 'wrong_period' ? '対象月が違います' : (j.error || 'エラー')) + '）');
+                    return j;
+                } catch { setTgMsg('通信エラーが発生しました'); return { ok: false }; }
+                finally { setTgBusy(false); }
+            };
             // 領収書写真 → Claude Vision で金額を自動抽出（画像は保存せず金額のみ）
             const alwReadReceipt = async (file) => {
                 if (!file) return;
@@ -1799,10 +1841,19 @@
             useEffect(() => {
                 if (currentPage === 'settlement') { stLoadStatus(); stLoadAllowance(); }
                 if (currentPage === 'allowance') stLoadAllowance();
+                if (currentPage === 'thanksgift') tgLoad();
             }, [currentPage, stMonth]);
+            // サンクスギフト: 全店舗一覧（他店にも送れるので soShopsRaw を使用）を確保
+            useEffect(() => {
+                if (currentPage === 'thanksgift' && soShopsRaw.length === 0) {
+                    fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`).then(r => r.json()).then(j => {
+                        const arr = soShopsFromResp(j); if (arr.length) setSoShops(arr);
+                    }).catch(() => {});
+                }
+            }, [currentPage]);
             // 返金明細書・手当タブでは在籍スタッフ一覧（諸経費/手当のセラピスト表示用）を取得
             useEffect(() => {
-                if (!['settlement', 'allowance', 'settings', 'zenkanri'].includes(currentPage) || soStaffs.length > 0) return;
+                if (!['settlement', 'allowance', 'settings', 'zenkanri', 'thanksgift'].includes(currentPage) || soStaffs.length > 0) return;
                 (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at })); if (arr.length) setSoStaffs(arr); } catch {} })();
             }, [currentPage]);
             // 選択店舗の在籍セラピストを m.therapists に反映（新規在籍を追加・氏名同期。手動入力値は保持）。
@@ -14432,6 +14483,191 @@
                         );
                     })()}
 
+                    {/* ===== サンクスギフト（感謝の投票）タブ ===== */}
+                    {currentPage === 'thanksgift' && (() => {
+                        const vs = tgData.votingState || {};
+                        const targetMonth = vs.targetMonth || '';
+                        const isOpen = !!vs.open;
+                        const myStaffId = String(authState.staffId || '');
+                        const myName = authState.staffName || authState.owner || '';
+                        const meInRoster = (soStaffs || []).find(s => String(s.id) === myStaffId);
+                        const myShopId = meInRoster ? meInRoster.shop_id : '';
+                        const myShop = (() => { const sh = (soShopsRaw || []).find(s => String(s.id) === String(myShopId)); return sh ? sh.name : ''; })();
+                        const allShops = (soShopsRaw || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
+                        const votes = tgData.votes || [];
+                        const myVote = votes.find(v => v.period === targetMonth && String(v.fromStaffId) === myStaffId) || null;
+                        // 受け取った票（自分宛）を対象月降順に
+                        const received = votes.filter(v => String(v.toStaffId) === myStaffId)
+                            .sort((a, b) => (b.period || '').localeCompare(a.period || '') || (b.createdAt || '').localeCompare(a.createdAt || ''));
+                        const receivedPeriods = [...new Set(received.map(v => v.period))];
+                        // root集計
+                        const isRoot = !!authState.root;
+                        const allPeriods = [...new Set(votes.map(v => v.period).filter(Boolean))].sort((a, b) => b.localeCompare(a));
+                        const rankPeriod = tgRootPeriod || '';
+                        const ranking = (() => {
+                            const list = votes.filter(v => !rankPeriod || v.period === rankPeriod);
+                            const map = {};
+                            for (const v of list) {
+                                const k = String(v.toStaffId);
+                                if (!map[k]) map[k] = { id: k, name: v.toStaffName || '', shop: v.toShop || '', points: 0, voters: [] };
+                                map[k].points += 1;
+                                if (v.toStaffName) map[k].name = v.toStaffName;
+                                if (v.toShop) map[k].shop = v.toShop;
+                                map[k].voters.push({ name: v.fromStaffName || '', shop: v.fromShop || '', comment: v.comment || '', period: v.period });
+                            }
+                            return Object.values(map).sort((a, b) => b.points - a.points || String(a.name).localeCompare(String(b.name), 'ja'));
+                        })();
+                        const rosterList = (tgRoster.shopId === tgForm.shopId ? tgRoster.list : []).filter(s => String(s.id) !== myStaffId);
+                        const selectedShopName = (() => { const sh = (soShopsRaw || []).find(s => String(s.id) === String(tgForm.shopId)); return sh ? sh.name : ''; })();
+                        const canSubmit = !!(myStaffId && tgForm.shopId && tgForm.toStaffId && tgForm.comment.trim() && isOpen && !tgBusy);
+                        const doSubmit = async () => {
+                            const target = rosterList.find(s => String(s.id) === String(tgForm.toStaffId));
+                            if (!target) { setTgMsg('相手を選んでください'); return; }
+                            const vote = {
+                                period: targetMonth,
+                                fromStaffId: myStaffId, fromStaffName: myName, fromShop: myShop,
+                                toStaffId: String(target.id), toStaffName: target.name, toShop: selectedShopName,
+                                comment: tgForm.comment.trim(),
+                            };
+                            const j = await tgSubmitVote(vote);
+                            if (j && j.ok) setTgForm({ shopId: '', toStaffId: '', comment: '' });
+                        };
+                        return (
+                        <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
+                            <div className="max-w-3xl mx-auto space-y-5">
+                                <header className="bg-white p-4 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
+                                    <div className="flex items-center gap-3">
+                                        <div className="p-2 md:p-3 bg-gradient-to-br from-rose-500 to-pink-500 rounded-xl md:rounded-2xl text-white shadow-lg"><Gift size={24} /></div>
+                                        <div>
+                                            <div className="inline-flex items-center gap-1 px-2 py-0.5 bg-rose-100 text-rose-700 rounded-full text-[10px] font-black uppercase tracking-widest mb-1">Thanks Gift</div>
+                                            <h1 className="text-xl md:text-2xl font-black tracking-tight italic">サンクスギフト</h1>
+                                        </div>
+                                    </div>
+                                    <p className="text-xs text-slate-500 font-bold mt-3 leading-relaxed">毎月お世話になった<b>1人</b>に感謝を届けましょう。投票は<b>毎月1日0:01〜2日23:59</b>の2日間だけ。その月は<b>前月分</b>への感謝として記録されます（例: 9/1〜2の投票＝8月分）。1人1票・自分には送れません。</p>
+                                </header>
+
+                                {tgData.configured === false && (
+                                    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs font-bold text-amber-800">⚠️ 保存先（KV/Supabase/GAS）が未設定のため投票を保存できません。管理者に共有ストアの設定をご依頼ください。</div>
+                                )}
+
+                                {!tgData.loaded && <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center text-sm font-bold text-slate-400">読み込み中…</div>}
+
+                                {/* ── スタッフ投票フォーム（staffのみ・root集計は下部） ── */}
+                                {tgData.loaded && authRole === 'staff' && (
+                                    <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6 space-y-4">
+                                        <div className="flex items-center justify-between flex-wrap gap-2">
+                                            <h2 className="text-base font-black flex items-center gap-2"><Gift size={18} className="text-rose-500" />{targetMonth ? `${tgMonthLabel(targetMonth)}分の感謝を送る` : '感謝を送る'}</h2>
+                                            <span className={`text-[11px] font-black px-2 py-1 rounded-full ${isOpen ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{isOpen ? '投票受付中（本日〜2日23:59）' : '投票期間外（毎月1〜2日のみ）'}</span>
+                                        </div>
+
+                                        {!myStaffId && (
+                                            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs font-bold text-amber-800">アカウントにスタッフ（SalonOne）の紐付けがありません。オーナー設定で本人を紐付けると投票できます。</div>
+                                        )}
+
+                                        {myStaffId && !isOpen && (
+                                            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-sm font-bold text-slate-500">
+                                                いまは投票期間外です。投票は<b className="text-slate-700">毎月1日0:01〜2日23:59</b>の2日間のみ受け付けます。翌月1日にまた開きます。
+                                            </div>
+                                        )}
+
+                                        {myStaffId && isOpen && (
+                                            <>
+                                                {myVote && (
+                                                    <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 text-xs font-bold text-rose-700">投票済み：<b>{myVote.toStaffName}</b>（{myVote.toShop}）さんへ。締切まで下から変更できます。</div>
+                                                )}
+                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                    <div>
+                                                        <label className="text-[11px] font-black text-slate-400">相手の店舗（他店もOK）</label>
+                                                        <select value={tgForm.shopId} onChange={e => { const shopId = e.target.value; setTgForm(f => ({ ...f, shopId, toStaffId: '' })); tgLoadRoster(shopId, targetMonth); }} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white">
+                                                            <option value="">店舗を選択</option>
+                                                            {allShops.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                                        </select>
+                                                    </div>
+                                                    <div>
+                                                        <label className="text-[11px] font-black text-slate-400">感謝する相手（その月に売上がある方）</label>
+                                                        <select value={tgForm.toStaffId} onChange={e => setTgForm(f => ({ ...f, toStaffId: e.target.value }))} disabled={!tgForm.shopId || tgRoster.loading} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white disabled:bg-slate-50 disabled:text-slate-300">
+                                                            <option value="">{!tgForm.shopId ? '先に店舗を選択' : tgRoster.loading ? '読み込み中…' : rosterList.length ? '相手を選択' : '対象者がいません'}</option>
+                                                            {rosterList.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                                        </select>
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <label className="text-[11px] font-black text-slate-400">感謝のひとこと</label>
+                                                    <textarea value={tgForm.comment} onChange={e => setTgForm(f => ({ ...f, comment: e.target.value.slice(0, 500) }))} rows={3} placeholder="例：忙しい時に予約を代わりに取ってくれて本当に助かりました！" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white resize-none" />
+                                                    <div className="text-[10px] text-slate-400 font-bold text-right mt-0.5">{tgForm.comment.length}/500</div>
+                                                </div>
+                                                <div className="flex items-center gap-3 flex-wrap">
+                                                    <button onClick={doSubmit} disabled={!canSubmit} className="px-6 py-2.5 bg-rose-600 text-white rounded-xl hover:bg-rose-700 transition-colors font-black text-sm disabled:bg-slate-200 disabled:text-slate-400">{myVote ? '投票を更新' : '感謝を送る'}🎁</button>
+                                                    {tgMsg && <span className="text-xs font-black text-slate-600">{tgMsg}</span>}
+                                                </div>
+                                            </>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* ── もらった感謝（staff本人向け） ── */}
+                                {tgData.loaded && authRole === 'staff' && myStaffId && (
+                                    <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6">
+                                        <h2 className="text-base font-black flex items-center gap-2 mb-3"><Heart size={18} className="text-rose-500" />あなたがもらった感謝 <span className="text-xs text-slate-400">（合計 {received.length} 票）</span></h2>
+                                        {received.length === 0 && <div className="text-sm font-bold text-slate-400 py-4 text-center">まだ感謝は届いていません。</div>}
+                                        <div className="space-y-4">
+                                            {receivedPeriods.map(p => (
+                                                <div key={p}>
+                                                    <div className="text-xs font-black text-slate-500 mb-2">{tgMonthLabel(p)}分 <span className="text-rose-600">{received.filter(v => v.period === p).length}票</span></div>
+                                                    <div className="space-y-2">
+                                                        {received.filter(v => v.period === p).map((v, i) => (
+                                                            <div key={i} className="bg-rose-50/60 border border-rose-100 rounded-xl p-3">
+                                                                <div className="text-[11px] font-black text-rose-700">{v.fromStaffName}{v.fromShop ? `（${v.fromShop}）` : ''} さんより</div>
+                                                                <div className="text-sm font-bold text-slate-700 mt-1 whitespace-pre-wrap">{v.comment}</div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* ── 本部/root：全体集計・ランキング ── */}
+                                {tgData.loaded && isRoot && (
+                                    <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6 space-y-4">
+                                        <div className="flex items-center justify-between flex-wrap gap-2">
+                                            <h2 className="text-base font-black flex items-center gap-2"><BarChart3 size={18} className="text-rose-500" />全体集計・ランキング</h2>
+                                            <select value={tgRootPeriod} onChange={e => setTgRootPeriod(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-black bg-white">
+                                                <option value="">全期間</option>
+                                                {allPeriods.map(p => <option key={p} value={p}>{tgMonthLabel(p)}分</option>)}
+                                            </select>
+                                        </div>
+                                        {ranking.length === 0 && <div className="text-sm font-bold text-slate-400 py-6 text-center">まだ投票データがありません。</div>}
+                                        {ranking.length > 0 && (
+                                            <div className="space-y-2">
+                                                {ranking.map((r, i) => (
+                                                    <details key={r.id} className="bg-slate-50 border border-slate-200 rounded-xl overflow-hidden">
+                                                        <summary className="flex items-center gap-3 p-3 cursor-pointer list-none">
+                                                            <span className={`w-7 h-7 shrink-0 flex items-center justify-center rounded-full font-black text-sm ${i === 0 ? 'bg-amber-400 text-white' : i === 1 ? 'bg-slate-300 text-white' : i === 2 ? 'bg-orange-400 text-white' : 'bg-white text-slate-500 border border-slate-200'}`}>{i + 1}</span>
+                                                            <span className="flex-1 font-black text-slate-800">{r.name}<span className="text-[11px] text-slate-400 font-bold ml-2">{r.shop}</span></span>
+                                                            <span className="font-black text-rose-600">{r.points} <span className="text-[11px] text-slate-400">pt</span></span>
+                                                        </summary>
+                                                        <div className="px-3 pb-3 space-y-2 border-t border-slate-100 pt-2">
+                                                            {r.voters.map((vt, k) => (
+                                                                <div key={k} className="text-xs">
+                                                                    <span className="font-black text-slate-600">{vt.name}{vt.shop ? `（${vt.shop}）` : ''}</span>
+                                                                    {!rankPeriod && <span className="text-slate-400 font-bold ml-1">[{tgMonthLabel(vt.period)}分]</span>}
+                                                                    <span className="text-slate-500 font-bold">：{vt.comment}</span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </details>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                        );
+                    })()}
+
                     {/* ===== 事業計画相談タブ ===== */}
                     {currentPage === 'planning' && (
                         <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
@@ -17526,6 +17762,7 @@
                 { id: 'square', label: 'サブスク分析', icon: <CreditCard size={20} />, mobileIcon: <CreditCard size={18} /> },
                 { id: 'settlement', label: '返金明細書', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} />, hideForStaff: true },
                 { id: 'allowance', label: '手当・領収書', icon: <FileText size={20} />, mobileIcon: <FileText size={18} /> },
+                { id: 'thanksgift', label: 'サンクスギフト', icon: <Gift size={20} />, mobileIcon: <Gift size={18} />, thanksOnly: true },
                 { id: 'planning', label: '事業計画', icon: <Target size={20} />, mobileIcon: <Target size={18} /> },
                 { id: 'settings', label: 'オーナー設定', icon: <Users size={20} />, mobileIcon: <Users size={18} />, rootOnly: true },
                 // 一旦非表示（必要時に下記を復帰）。ページ自体は残しているのでidを戻せば復活する
@@ -17534,7 +17771,7 @@
                 // { id: 'marketing', label: 'マーケティング', icon: <Megaphone size={20} />, mobileIcon: <Megaphone size={18} /> },
                 // { id: 'customers', label: '顧客管理', icon: <Users size={20} />, mobileIcon: <Users size={18} /> },
                 // { id: 'finance', label: '経理・財務', icon: <Banknote size={20} />, mobileIcon: <Banknote size={18} /> }
-            ].filter(it => (authRoot || !it.rootOnly) && !(it.hideForStaff && authRole === 'staff'));
+            ].filter(it => (authRoot || !it.rootOnly) && !(it.hideForStaff && authRole === 'staff') && (!it.thanksOnly || authRole === 'staff' || authRoot));
 
             const alertCount = cpaAlerts.length;
 

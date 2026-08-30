@@ -95,6 +95,7 @@ tests/              # Vitestテスト
   - `SETTLEMENT_OWNER_SHOPS` — オーナー別アクセス権限（オプション・JSON `{"オーナー名":["店舗名の一部",...]}`）。設定時はこれが公開範囲の唯一の基準。未設定時は `OWNER_BRANCHES` にフォールバック
   - `SETTLEMENT_GAS_URL` — 返金明細書ストア用GAS WebアプリURL（`gas/settlement-gas-sample.js` を配置）
   - `KV_REST_API_URL` / `KV_REST_API_TOKEN` — 計画の目標・アクション共有ストア（`api/plan-store.js`）用のVercel KV。VercelのStorageでKVを作成すると自動注入（GAS不要・推奨）
+  - ⚠️ **共有ストアの有効化が必要**: `api/plan-store.js` のブロブ系ストア（手当`allowance`・`accountmeta`・`zktherapist`・サンクスギフト`thanksgift`）は **KV or Supabase or「KVStore対応のGAS」** のいずれかが必要。GASを使う場合は `gas/settlement-gas-sample.js` の最新版（`type=kv`/`action=saveKv` 実装済み）を再デプロイすること。未対応だと保存が無反応（`configured:true` でも永続化されない）
   - `AUTH_SALT` — トークン用ソルト（オプション・オーナー認証で使用）
 
 ## SalonOne 分析API連携

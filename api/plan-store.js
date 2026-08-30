@@ -13,6 +13,8 @@
 // GET  /api/plan-store            → { goals:{...}, actions:[...], configured:boolean }
 // POST /api/plan-store {goals,actions} → { ok:true }
 
+import { getVotingState, validateVote, upsertVote, removeVote } from '../lib/thanksgift.js';
+
 const KV_URL = () => process.env.KV_REST_API_URL || '';
 const KV_TOKEN = () => process.env.KV_REST_API_TOKEN || '';
 const SB_URL = () => process.env.SUPABASE_URL || '';
@@ -23,6 +25,7 @@ const ACTIONS_KEY = 'naoru:plan:actions';
 const ALLOWANCE_KEY = 'naoru:allowance:v1'; // { submissions:[...], productivity:{staffId:{'YYYY-MM':gross}} }
 const ACCTMETA_KEY = 'naoru:accountmeta:v1'; // { owner: { role, staffId, staffName } }
 const ZKTHERAPIST_KEY = 'naoru:zktherapist:v1'; // { 'shopName|YYYY-MM': count } 全体管理シートのセラピスト数 手動上書き
+const THANKSGIFT_KEY = 'naoru:thanksgift:v1'; // { votes:[{id,period,fromStaffId,fromStaffName,fromShop,toStaffId,toStaffName,toShop,comment,createdAt}] } サンクスギフト投票
 
 // ── Vercel KV (Upstash REST) ──
 async function kvGet(key) {
@@ -178,6 +181,52 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
       return res.status(400).json({ ok: false, error: 'invalid zktherapist action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── サンクスギフト（感謝の投票）ストア: ?type=thanksgift ──
+  // スタッフが月1票（前月の対象月へ）感謝を送る。全端末共有・月別に蓄積。
+  const isThanks = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'thanksgift';
+  if (isThanks) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ votes: [], votingState: getVotingState(), configured: false });
+    try {
+      const cur = (await blobGet(THANKSGIFT_KEY, hasKV, hasSB, gas)) || {};
+      const votes = Array.isArray(cur.votes) ? cur.votes : [];
+      const state = getVotingState();
+      if (req.method === 'GET') {
+        return res.status(200).json({ votes, votingState: state, configured: true });
+      }
+      const body = req.body || {};
+      const action = body.action;
+      if (action === 'vote' && body.vote) {
+        const v = body.vote;
+        // サーバー側でも投票期間・対象月・自分不可を強制（UIすり抜け防止）
+        if (!state.open) return res.status(200).json({ ok: false, error: 'closed', votingState: state });
+        if (String(v.period) !== String(state.targetMonth)) return res.status(200).json({ ok: false, error: 'wrong_period', votingState: state });
+        const chk = validateVote(v);
+        if (!chk.ok) return res.status(200).json({ ok: false, error: chk.error });
+        const rec = {
+          period: String(v.period),
+          fromStaffId: String(v.fromStaffId), fromStaffName: String(v.fromStaffName || ''), fromShop: String(v.fromShop || ''),
+          toStaffId: String(v.toStaffId), toStaffName: String(v.toStaffName || ''), toShop: String(v.toShop || ''),
+          comment: String(v.comment || '').slice(0, 500),
+          createdAt: new Date().toISOString(),
+        };
+        const next = upsertVote(votes, rec);
+        await blobSet(THANKSGIFT_KEY, { votes: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, id: `${rec.period}__${rec.fromStaffId}` });
+      }
+      if (action === 'delete' && body.period && body.fromStaffId) {
+        if (!state.open || String(body.period) !== String(state.targetMonth)) {
+          return res.status(200).json({ ok: false, error: 'closed', votingState: state });
+        }
+        const next = removeVote(votes, String(body.period), String(body.fromStaffId));
+        await blobSet(THANKSGIFT_KEY, { votes: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid thanksgift action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
     }

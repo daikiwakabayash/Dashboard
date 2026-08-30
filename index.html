@@ -1536,6 +1536,7 @@
             const [tgBusy, setTgBusy] = useState(false);
             const [tgRootPeriod, setTgRootPeriod] = useState(''); // root集計の対象月フィルタ（''=全期間）
             const [tgTestMonth, setTgTestMonth] = useState('2026-07'); // テストモードの対象月（root）
+            const [tgShopQuery, setTgShopQuery] = useState(''); // サンクスギフト相手店舗の検索
             const tgMonthLabel = (ym) => { if (!ym) return ''; const [y, m] = String(ym).split('-'); return `${y}年${Number(m)}月`; };
             const tgLoad = async () => {
                 try { const r = await fetch('/api/plan-store?type=thanksgift'); const j = await r.json().catch(() => ({})); setTgData({ votes: Array.isArray(j.votes) ? j.votes : [], votingState: j.votingState || null, test: j.test || { open: false, period: '' }, configured: j.configured !== false, loaded: true }); }
@@ -5119,7 +5120,9 @@
                     }
                 }
                 const now = new Date();
-                for (let i = 0; i < 12; i++) {
+                // 未来2ヶ月（i=-2,-1）〜過去11ヶ月まで常に選択肢に含める。
+                // 未来月は「課金予定（次回決済日）」を見るために店舗を問わず選べるようにする。
+                for (let i = -2; i < 12; i++) {
                     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
                     allMonths.add(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
                 }
@@ -14561,8 +14564,11 @@
                         const allShops = (soShopsRaw || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
                         const votes = tgData.votes || [];
                         const myVote = votes.find(v => v.period === targetMonth && String(v.fromStaffId) === myStaffId) || null;
-                        // 受け取った票（自分宛）を対象月降順に
-                        const received = votes.filter(v => String(v.toStaffId) === myStaffId)
+                        // 受け取った票（自分宛）を対象月降順に。
+                        // 一次キーはSalonOne staffId（投票時の宛先=SalonOne id）。紐付け未設定の場合の保険として
+                        // 表示名(本名)の完全一致でも拾う（例: 表示名「岡田健斗」＝SalonOne名と一致していれば届く）。
+                        const myNameKey = String(authState.staffName || '').replace(/\s/g, '');
+                        const received = votes.filter(v => String(v.toStaffId) === myStaffId || (myNameKey && String(v.toStaffName || '').replace(/\s/g, '') === myNameKey))
                             .sort((a, b) => (b.period || '').localeCompare(a.period || '') || (b.createdAt || '').localeCompare(a.createdAt || ''));
                         const receivedPeriods = [...new Set(received.map(v => v.period))];
                         // root集計
@@ -14662,10 +14668,13 @@
                                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                                     <div>
                                                         <label className="text-[11px] font-black text-slate-400">相手の店舗（他店もOK）</label>
-                                                        <select value={tgForm.shopId} onChange={e => { const shopId = e.target.value; setTgForm(f => ({ ...f, shopId, toStaffId: '' })); tgLoadRoster(shopId, targetMonth); }} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white">
-                                                            <option value="">店舗を選択</option>
-                                                            {allShops.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                                        <input value={tgShopQuery} onChange={e => setTgShopQuery(e.target.value)} placeholder="🔍 店舗名で検索" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white" />
+                                                        {(() => { const fShops = tgShopQuery.trim() ? allShops.filter(s => String(s.name).includes(tgShopQuery.trim())) : allShops; return (
+                                                        <select value={tgForm.shopId} onChange={e => { const shopId = e.target.value; setTgForm(f => ({ ...f, shopId, toStaffId: '' })); tgLoadRoster(shopId, targetMonth); }} size={tgShopQuery.trim() ? Math.min(8, fShops.length + 1) : 1} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white">
+                                                            <option value="">{fShops.length ? '店舗を選択' : '該当店舗なし'}</option>
+                                                            {fShops.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                                                         </select>
+                                                        ); })()}
                                                     </div>
                                                     <div>
                                                         <label className="text-[11px] font-black text-slate-400">感謝する相手（その月に売上がある方）</label>

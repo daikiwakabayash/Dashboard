@@ -14259,23 +14259,54 @@
                                 {/* 追加/更新フォーム */}
                                 {(() => {
                                     const acctRoster = (() => { const seen = new Set(); const out = []; stAcctForm.shops.forEach(nm => { const shop = shopList.find(s => s.name === nm); if (shop) stTherapistRoster(shop.id).forEach(st => { const k = String(st.id); if (!seen.has(k)) { seen.add(k); out.push(st); } }); }); return out; })();
+                                    const idTrim = stAcctForm.owner.trim();
+                                    const isExistingAcct = Array.isArray(stAccounts) && stAccounts.some(a => String(a.owner) === idTrim);
+                                    const passRequired = !isExistingAcct; // 新規はPASS必須
+                                    const passMissing = passRequired && !stAcctForm.password.trim();
+                                    const isStaffForm = stAcctForm.role === 'staff';
                                     return (
-                                <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-5 space-y-3">
-                                    <div className="text-sm font-black text-slate-800">アカウントを追加 / 更新</div>
-                                    {/* ロール選択 */}
-                                    <div className="flex gap-2">
-                                        {[{ v: 'owner', l: 'オーナー' }, { v: 'staff', l: 'セラピスト/マネージャー' }].map(r => (
-                                            <button key={r.v} onClick={() => setStAcctForm(f => ({ ...f, role: r.v }))} className={`px-3 py-1.5 rounded-lg text-xs font-black border ${stAcctForm.role === r.v ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}>{r.l}</button>
-                                        ))}
-                                        <span className="text-[11px] text-slate-400 font-bold self-center ml-1">{stAcctForm.role === 'staff' ? '返金明細書は非表示・手当は本人名で自動入力' : '返金明細書を閲覧可'}</span>
+                                <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-5 space-y-4">
+                                    <div className="flex items-center justify-between flex-wrap gap-2">
+                                        <div className="text-sm font-black text-slate-800">アカウントを{isExistingAcct ? '更新' : '追加'}</div>
+                                        <div className="text-[11px] font-black px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">{isExistingAcct ? `既存「${idTrim}」を編集中` : '新規作成'}</div>
                                     </div>
-                                    <div className="flex flex-col md:flex-row gap-2">
-                                        <input value={stAcctForm.owner} onChange={e => setStAcctForm(f => ({ ...f, owner: e.target.value }))} placeholder={stAcctForm.role === 'staff' ? '氏名（ログインID・スタッフ選択で自動入力）' : 'オーナー氏名（例: 野島オーナー）'} className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold" list="settings-owner-suggest" />
-                                        <datalist id="settings-owner-suggest">{Object.keys(OWNER_BRANCHES).map(o => <option key={o} value={o} />)}</datalist>
-                                        <input value={stAcctForm.password} onChange={e => setStAcctForm(f => ({ ...f, password: e.target.value }))} placeholder="ログインPASS（変更する場合のみ入力）" className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold" />
-                                    </div>
+
+                                    {/* 種別 */}
                                     <div>
-                                        <div className="text-[11px] font-black text-slate-400 mb-1">{stAcctForm.role === 'staff' ? '所属/管轄店舗（複数可＝マネージャー）' : '管轄店舗（SalonOne店舗から選択）'}</div>
+                                        <div className="text-[11px] font-black text-slate-400 mb-1">種別</div>
+                                        <div className="flex gap-2 flex-wrap">
+                                            {[{ v: 'owner', l: 'オーナー' }, { v: 'staff', l: 'セラピスト/マネージャー' }].map(r => (
+                                                <button key={r.v} onClick={() => setStAcctForm(f => ({ ...f, role: r.v }))} className={`px-3 py-1.5 rounded-lg text-xs font-black border ${stAcctForm.role === r.v ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}>{r.l}</button>
+                                            ))}
+                                            <span className="text-[11px] text-slate-400 font-bold self-center ml-1">{isStaffForm ? 'サンクスギフト表示・返金明細書は非表示' : '返金明細書を閲覧可'}</span>
+                                        </div>
+                                    </div>
+
+                                    {/* ① ログインID / ② PASS */}
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        <div>
+                                            <label className="text-[11px] font-black text-slate-500">① ログインID <span className="text-rose-500">必須</span></label>
+                                            <input value={stAcctForm.owner} onChange={e => setStAcctForm(f => ({ ...f, owner: e.target.value }))} placeholder="例: youta / daiki / 野島オーナー" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold" list="settings-owner-suggest" />
+                                            <datalist id="settings-owner-suggest">{Object.keys(OWNER_BRANCHES).map(o => <option key={o} value={o} />)}</datalist>
+                                            <div className="text-[10px] text-slate-400 font-bold mt-0.5">ログイン画面で入力するID</div>
+                                        </div>
+                                        <div>
+                                            <label className="text-[11px] font-black text-slate-500">② ログインPASS {passRequired ? <span className="text-rose-500">必須</span> : <span className="text-slate-400">（変更時のみ）</span>}</label>
+                                            <input value={stAcctForm.password} onChange={e => setStAcctForm(f => ({ ...f, password: e.target.value }))} placeholder={passRequired ? 'ログインPASS（必須）' : '空欄なら現在のPASSのまま'} className={`w-full mt-1 px-3 py-2 border rounded-lg text-sm font-bold ${passMissing ? 'border-rose-300 bg-rose-50' : 'border-slate-200'}`} />
+                                            <div className="text-[10px] font-bold mt-0.5">{passMissing ? <span className="text-rose-500">新規アカウントはPASSが必須です</span> : <span className="text-slate-400">現在のPASSは表示されません（入力すると上書き）</span>}</div>
+                                        </div>
+                                    </div>
+
+                                    {/* ③ 表示名（本名・任意） */}
+                                    <div>
+                                        <label className="text-[11px] font-black text-slate-500">③ 表示名（画面に出る名前・任意）</label>
+                                        <input value={stAcctForm.staffName} onChange={e => setStAcctForm(f => ({ ...f, staffName: e.target.value }))} placeholder="例: 八尋ようた（空欄ならログインIDを表示）" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold" />
+                                        <div className="text-[10px] text-slate-400 font-bold mt-0.5">ログインIDと別にできます（ID=youta／表示名=八尋ようた 等）</div>
+                                    </div>
+
+                                    {/* ④ 店舗 */}
+                                    <div>
+                                        <div className="text-[11px] font-black text-slate-500 mb-1">④ {isStaffForm ? '所属/管轄店舗（複数可＝マネージャー）' : '管轄店舗（SalonOne店舗から選択）'}</div>
                                         <div className="max-h-56 overflow-y-auto border border-slate-200 rounded-lg p-2 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1 bg-white">
                                             {shopList.map(s => {
                                                 const on = stAcctForm.shops.includes(s.name);
@@ -14286,18 +14317,29 @@
                                         </div>
                                         {stAcctForm.shops.length > 0 && <div className="flex items-center gap-2 mt-1"><span className="text-[11px] text-slate-400 font-bold">{stAcctForm.shops.length}店舗選択中</span><button onClick={() => setStAcctForm(f => ({ ...f, shops: [] }))} className="text-[11px] text-slate-400 font-bold hover:text-slate-600">クリア</button></div>}
                                     </div>
-                                    {stAcctForm.role === 'staff' && (
+
+                                    {/* ⑤ SalonOne本人（任意・紐付け） */}
+                                    {isStaffForm && (
                                         <div>
-                                            <div className="text-[11px] font-black text-slate-400 mb-1">本人（SalonOne配属スタッフ）※手当の自動反映に使用</div>
-                                            <select value={stAcctForm.staffId} onChange={e => { const st = acctRoster.find(x => String(x.id) === e.target.value); setStAcctForm(f => ({ ...f, staffId: e.target.value, staffName: st ? st.name : '', owner: (st && (!f.owner || f.owner === f.staffName)) ? st.name : f.owner })); }} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white" disabled={!stAcctForm.shops.length}>
-                                                <option value="">{stAcctForm.shops.length ? 'スタッフを選択（氏名がIDに自動入力）' : '先に店舗を選択'}</option>
+                                            <label className="text-[11px] font-black text-slate-500">⑤ SalonOne本人（任意・手当/もらった感謝の紐付け）</label>
+                                            <select value={stAcctForm.staffId} onChange={e => { const st = acctRoster.find(x => String(x.id) === e.target.value); setStAcctForm(f => ({ ...f, staffId: e.target.value, staffName: st ? st.name : f.staffName })); }} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white" disabled={!stAcctForm.shops.length}>
+                                                <option value="">{stAcctForm.shops.length ? '本人を選択（表示名に自動入力・IDは変わりません）' : '先に店舗を選択'}</option>
                                                 {acctRoster.map(st => <option key={st.id} value={st.id}>{st.name}</option>)}
                                             </select>
+                                            <div className="text-[10px] text-slate-400 font-bold mt-0.5">選んでもログインIDは変わりません。本人がSalonOne未登録なら空欄でOK。</div>
                                         </div>
                                     )}
-                                    <div className="flex items-center gap-2">
-                                        <button onClick={() => stSaveAccount(stAcctForm.owner.trim(), stAcctForm.password, stAcctForm.shops, stAcctForm.role, stAcctForm.staffId, stAcctForm.staffName)} disabled={stAcctBusy || !stAcctForm.owner.trim()} className="px-5 py-2 bg-brand-500 text-white rounded-lg text-sm font-black hover:bg-brand-600 disabled:opacity-40">{stAcctBusy ? '保存中...' : '保存'}</button>
-                                        {stAcctForm.owner && <button onClick={() => setStAcctForm({ owner: '', password: '', shops: [], role: 'owner', staffId: '', staffName: '' })} className="px-3 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-black hover:bg-slate-200">新規入力</button>}
+
+                                    {/* ログインプレビュー */}
+                                    {idTrim && (
+                                        <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs font-black text-slate-600">
+                                            ▶ ログイン画面で入力： ID <span className="text-brand-600">{idTrim}</span> ／ PASS <span className="text-brand-600">{stAcctForm.password ? stAcctForm.password : (isExistingAcct ? '（現在のまま）' : '（未入力）')}</span>
+                                        </div>
+                                    )}
+
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <button onClick={() => stSaveAccount(idTrim, stAcctForm.password, stAcctForm.shops, stAcctForm.role, stAcctForm.staffId, stAcctForm.staffName)} disabled={stAcctBusy || !idTrim || passMissing} className="px-6 py-2.5 bg-brand-500 text-white rounded-lg text-sm font-black hover:bg-brand-600 disabled:opacity-40">{stAcctBusy ? '保存中...' : (isExistingAcct ? '更新して保存' : '作成する')}</button>
+                                        {stAcctForm.owner && <button onClick={() => setStAcctForm({ owner: '', password: '', shops: [], role: 'owner', staffId: '', staffName: '' })} className="px-3 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-black hover:bg-slate-200">新規入力にする</button>}
                                         {stAcctMsg && <span className="text-xs font-bold text-slate-600">{stAcctMsg}</span>}
                                     </div>
                                 </div>

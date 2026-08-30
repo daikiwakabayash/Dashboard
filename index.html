@@ -2973,14 +2973,28 @@
                     setSqLoading(true);
                     setSqLoadingProgress({ total: 0, completed: 0, failed: 0 });
 
-                    // 非rootはアクセス店舗のSquareアカウントのみ取得（全91件を取りに行かない）
-                    // 各アカウントは元のindexを保持しているため、絞り込んでもサーバー側の対応は崩れない
+                    // 店舗スコープ取得: root=全店／非root（オーナー・マネージャー・スタッフ）=アクセス店舗のSquareアカウントのみ取得。
+                    // 対象アカウント数を減らすことで会員が多い店舗でも高速化し、自店舗のデータだけを読み込む。
+                    // 各アカウントは元のindex（Squareトークン順）を保持するため、絞り込んでもサーバー側の対応は崩れない。
+                    // ⚠️ SalonOne店舗名（例「NAORU 大森院」）とSquareアカウント名（例「大森院」）は表記が異なるため、
+                    //    両者を同じルールで強く正規化（NAORU/整骨院/整体の接頭辞・院/店の接尾辞・空白を除去）して部分一致で対応付ける。
                     let accounts = infoData.accounts;
+                    const normStore = (n) => String(n || '')
+                        .replace(/NAORU整骨院|NAORU整体|NAORU/g, '')
+                        .replace(/[院店]\s*$/, '')
+                        .replace(/\s+/g, '')
+                        .trim();
                     if (!authState.root && Array.isArray(authState.shops) && authState.shops.length) {
-                        const cores = authState.shops.map(n => String(n).replace(/^NAORU整体\s*/, '').replace(/^NAORU\s*/, '').trim()).filter(Boolean);
+                        const cores = authState.shops.map(normStore).filter(Boolean);
                         if (cores.length) {
-                            const scoped = accounts.filter(a => { const nm = String(a.name || ''); return cores.some(c => nm.includes(c) || c.includes(nm)); });
-                            if (scoped.length) { accounts = scoped; totalAccounts = scoped.length; }
+                            const scoped = accounts.filter(a => { const nm = normStore(a.name); return !!nm && cores.some(c => nm.includes(c) || c.includes(nm)); });
+                            if (scoped.length) {
+                                accounts = scoped; totalAccounts = scoped.length;
+                                console.log(`[Square] 店舗スコープ取得: ${scoped.length}/${infoData.accounts.length}アカウント (アクセス店舗: ${authState.shops.join('・')})`);
+                            } else {
+                                // アクセス店舗にマッチするSquareアカウントが0件＝店舗名の対応漏れ。全件取得にフォールバックし警告。
+                                console.warn(`[Square] アクセス店舗にマッチするアカウントが0件のため全件取得にフォールバック。アクセス店舗:`, authState.shops);
+                            }
                         }
                     }
                     let completedBatches = 0;
@@ -4405,14 +4419,19 @@
 
             // Squareデータ先読み: アプリ起動後にバックグラウンドで取得開始
             // タブ遷移前にデータを準備することで体感速度を大幅改善
+            // ⚠️ 認証（root/アクセス店舗）が確定してから開始する。未確定のまま走らせると
+            //    店舗スコープが効かず全店取得してしまうため。確定後に一度だけ実行。
+            const sqPrefetchedRef = useRef(false);
             useEffect(() => {
-                if (!sqData && !sqLoading && !sqError) {
-                    const id = typeof requestIdleCallback === 'function'
-                        ? requestIdleCallback(() => fetchSquareData())
-                        : setTimeout(() => fetchSquareData(), 1500);
-                    return () => (typeof cancelIdleCallback === 'function' ? cancelIdleCallback(id) : clearTimeout(id));
-                }
-            }, []);
+                if (sqPrefetchedRef.current) return;
+                if (authState.checking || !authState.authenticated) return;  // 認証確定＆ログイン済みを待つ
+                if (sqData || sqLoading || sqError) return;
+                sqPrefetchedRef.current = true;
+                const id = typeof requestIdleCallback === 'function'
+                    ? requestIdleCallback(() => fetchSquareData())
+                    : setTimeout(() => fetchSquareData(), 1500);
+                return () => (typeof cancelIdleCallback === 'function' ? cancelIdleCallback(id) : clearTimeout(id));
+            }, [authState.checking, authState.authenticated, authState.root, authState.shops, sqData, sqLoading, sqError]);
 
             // sqData読み込み時にデフォルト月を設定
             useEffect(() => {

@@ -1387,6 +1387,15 @@
                 }
                 return arr;
             }, [soShopsRaw, authState.root, authState.role, authState.shops]);
+            // アカウントのアクセス店舗のみ（root=全店）。事業計画・手当など「自分の店舗」を扱う画面で使う。
+            // SalonOne売上/全体管理は soShops（全店表示）、こちらは自店舗スコープ、と使い分ける。
+            const soShopsMine = useMemo(() => {
+                const arr = soShopsRaw || [];
+                if (authState.root) return arr;
+                const pats = Array.isArray(authState.shops) ? authState.shops : [];
+                if (!pats.length) return arr;
+                return arr.filter(s => pats.some(p => String(s.name || '').includes(p)));
+            }, [soShopsRaw, authState.root, authState.shops]);
             // SalonOne /shops レスポンスを店舗配列に変換（削除済み店舗は除外）
             const soShopsFromResp = (j) => (j && (j.data || j) || []).filter(s => !s.deleted_at).map(s => ({ id: String(s.id ?? s.shop_id ?? ''), name: s.name || s.shop_name || `店舗${s.id}`, area_id: String(s.area_id ?? '') }));
             const [soStaffs, setSoStaffs] = useState([]);       // スタッフ一覧
@@ -1559,8 +1568,15 @@
                 try {
                     const [y, m] = targetMonth.split('-').map(Number);
                     const from = `${targetMonth}-01`; const last = new Date(y, m, 0); const to = `${targetMonth}-${String(last.getDate()).padStart(2, '0')}`;
-                    const r = await fetch(`${SALONONE_API_URL}?resource=sales/summary&from=${from}&to=${to}&shop_id=${shopId}`);
-                    const j = await r.json().catch(() => ({}));
+                    // レート制限(60/分)対策: 429/rate_limited/5xx はバックオフ再試行（全店集計と競合しても対象者を取りこぼさない）
+                    let j = {};
+                    for (let a = 0; a < 5; a++) {
+                        const r = await fetch(`${SALONONE_API_URL}?resource=sales/summary&from=${from}&to=${to}&shop_id=${shopId}`);
+                        j = await r.json().catch(() => ({}));
+                        const limited = r.status === 429 || r.status >= 500 || (j && j.error && j.error.code === 'rate_limited');
+                        if (limited && a < 4) { await new Promise(res => setTimeout(res, 900 * Math.pow(1.8, a))); continue; }
+                        break;
+                    }
                     const data = j.data || j;
                     const bs = (data.by_staff || data.byStaff || []);
                     const list = bs.map(s => ({ id: String(s.staff_id ?? s.id ?? ''), name: s.staff_name || s.name || '', gross: Number(s.gross_sales ?? s.gross ?? 0) }))
@@ -2197,23 +2213,23 @@
             const planSoReqRef = useRef(0);
             // staffが事業計画を開いたら自分の店舗の計画を自動表示
             useEffect(() => {
-                if (currentPage === 'planning' && isStaff && !planSoShopId && soShops.length) {
-                    const s = soShops[0]; setPlanSoShopId(String(s.id)); setPlanSelectedBranch(s.name);
+                if (currentPage === 'planning' && isStaff && !planSoShopId && soShopsMine.length) {
+                    const s = soShopsMine[0]; setPlanSoShopId(String(s.id)); setPlanSelectedBranch(s.name);
                 }
-            }, [currentPage, isStaff, soShops.length]);
+            }, [currentPage, isStaff, soShopsMine.length]);
             // 手当タブ: ログイン中アカウントの店舗・氏名を自動入力（打たなくてよい）
             //  staffId 紐付けがあればそれを、無ければ所属店舗の先頭スタッフを既定にする
             useEffect(() => {
-                if (currentPage !== 'allowance' || authState.root || !soShops.length) return;
+                if (currentPage !== 'allowance' || authState.root || !soShopsMine.length) return;
                 setAlwForm(f => {
                     if (f.staffId) return f; // 既に選択済みは尊重
-                    const shopId = String(soShops[0].id);
+                    const shopId = String(soShopsMine[0].id);
                     if (authState.staffId) return { ...f, shopId, staffId: String(authState.staffId), staffName: authState.staffName || '' };
                     const roster = stTherapistRoster(shopId);
                     const first = roster[0];
                     return first ? { ...f, shopId, staffId: String(first.id), staffName: first.name } : { ...f, shopId };
                 });
-            }, [currentPage, authState.root, authState.staffId, soShops.length, soStaffs.length]);
+            }, [currentPage, authState.root, authState.staffId, soShopsMine.length, soStaffs.length]);
             // 参考リンク管理
             const [planLinks, setPlanLinks] = useState(() => {
                 try {
@@ -14411,7 +14427,7 @@
 
                     {/* ===== 手当・領収書タブ ===== */}
                     {currentPage === 'allowance' && (() => {
-                        const shopList = (soShops.length ? soShops : soDemoShops);
+                        const shopList = (soShopsMine.length ? soShopsMine : soDemoShops);
                         const roster = alwForm.shopId ? stTherapistRoster(alwForm.shopId) : [];
                         const cat = stAllowanceCat(alwForm.category);
                         // 選択スタッフ・カテゴリの年内チャージ残高（charge型のみ）
@@ -14811,14 +14827,14 @@
                                                 <input type="text" placeholder="店舗を検索..." className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold focus:ring-2 focus:ring-brand-400 outline-none" value={planBranchSearch} onChange={(e) => setPlanBranchSearch(e.target.value)} />
                                             </div>
                                             <div className="overflow-y-auto flex-1 space-y-1">
-                                                {/* 全店 */}
-                                                {(!planBranchSearch || '全店舗'.includes(planBranchSearch)) && (
+                                                {/* 全店（ブランド合計）はroot/管轄複数店のみ。単店スタッフには出さない（自店舗のみ） */}
+                                                {(authState.root || soShopsMine.length > 1) && (!planBranchSearch || '全店舗'.includes(planBranchSearch)) && (
                                                     <div key="__all__" onClick={() => { setPlanSoShopId(''); setPlanSelectedBranch('全店舗'); setPlanMessages([]); setPlanBranchMenuOpen(false); setPlanBranchSearch(''); }} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${planSoShopId === '' ? 'bg-brand-50 text-brand-600' : 'hover:bg-slate-50 text-slate-600'}`}>
                                                         <span className="text-sm font-black">全店舗（ブランド合計）</span>
                                                     </div>
                                                 )}
-                                                {/* SalonOne店舗（rawDataが無くても選択可能）。soShops未取得時はrawDataブランチにフォールバック */}
-                                                {(soShops.length ? soShops : Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).filter(b => !EXCLUDED_BRANCHES.has(b)).sort().map((b, i) => ({ id: '', name: b })))
+                                                {/* 事業計画は「対象の店舗のみ」＝アカウントのアクセス店舗にスコープ（root=全店） */}
+                                                {(soShopsMine.length ? soShopsMine : Array.from(new Set(rawData.map(d => d.branch).filter(Boolean))).filter(b => !EXCLUDED_BRANCHES.has(b)).sort().map((b, i) => ({ id: '', name: b })))
                                                     .filter(sh => !planBranchSearch || String(sh.name).toLowerCase().includes(planBranchSearch.toLowerCase()))
                                                     .map(sh => (
                                                         <div key={sh.id || sh.name} onClick={() => { setPlanSoShopId(String(sh.id || '')); setPlanSelectedBranch(sh.name); setPlanMessages([]); setPlanBranchMenuOpen(false); setPlanBranchSearch(''); }} className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors ${planSelectedBranch === sh.name ? 'bg-brand-50 text-brand-600' : 'hover:bg-slate-50 text-slate-600'}`}>

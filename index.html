@@ -4490,6 +4490,22 @@
                 return () => (typeof cancelIdleCallback === 'function' ? cancelIdleCallback(id) : clearTimeout(id));
             }, [authState.checking, authState.authenticated, authState.root, authState.shops, sqData, sqLoading, sqError]);
 
+            // アカウント切替（ログイン/ログアウト）でSquareデータをリセットし、新しいアクセス店舗スコープで取り直す。
+            // これをしないと、root（全店）→ 店舗スタッフ に切り替えても前アカウントの全店データが残り、
+            // 「浦添だけでいいのに全店読み込む」状態になる。
+            const sqAuthKeyRef = useRef(null);
+            const sqAuthKey = authState.authenticated
+                ? `${authState.owner}|${authState.root ? 'root' : 'scoped'}|${Array.isArray(authState.shops) ? authState.shops.join(',') : 'all'}`
+                : '__loggedout__';
+            useEffect(() => {
+                if (sqAuthKeyRef.current === null) { sqAuthKeyRef.current = sqAuthKey; return; } // 初回マウントは維持
+                if (sqAuthKeyRef.current !== sqAuthKey) {
+                    sqAuthKeyRef.current = sqAuthKey;
+                    setSqData(null); setSqError(null);
+                    sqPrefetchedRef.current = false; // 新スコープで先読みを再実行させる
+                }
+            }, [sqAuthKey]);
+
             // sqData読み込み時にデフォルト月を設定
             useEffect(() => {
                 if (sqData && sqData.subscriptions && !sqMonth) {

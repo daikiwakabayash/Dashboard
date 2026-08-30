@@ -94,6 +94,10 @@
     <script crossorigin src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
 
     <style>
+        /* 全体を90%スケール（＝ブラウザ90%相当）を基準サイズに。PCのみ適用しスマホは等倍でタップしやすく保つ */
+        @media (min-width: 768px) {
+            body { zoom: 0.9; }
+        }
         .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
         .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
         .scrollbar-thin::-webkit-scrollbar-thumb { background-color: #FFC4A8; border-radius: 20px; }
@@ -748,6 +752,12 @@
         const MARKETING_API_URL = '/api/gas-proxy?type=marketing';
         const SQUARE_API_URL = '/api/square/metrics';
         const CUSTOMERS_API_URL = '/api/customers';
+        // 金額を「万」表記で統一（¥13,899万 ／ -¥230.5万）。1億(=10000万)以上は整数万、未満は小数1桁。カンマ区切り。
+        const manYen = (n) => {
+            const num = Number(n) || 0; const neg = num < 0; const v = Math.abs(num) / 10000;
+            const body = v >= 10000 ? Math.round(v).toLocaleString('en-US') : (Math.round(v * 10) / 10).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+            return (neg ? '-¥' : '¥') + body + '万';
+        };
         // SalonOne 分析API（読み取り専用）はサーバーサイドプロキシ経由でキーを隠蔽
         const SALONONE_API_URL = '/api/salonone';
         // 例: fetch(`${SALONONE_API_URL}?resource=sales/summary&from=2026-07-01&to=2026-07-31`)
@@ -11826,12 +11836,12 @@
                                                 <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-2 md:gap-4">
                                                     {[
                                                         { label: 'アクティブ会員数', value: `${sqMetrics.memberCount.toLocaleString()}名`, sub: sqMetrics.memberCount !== sqMetrics.prevMemberCount ? `前月比 ${sqMetrics.memberCount - sqMetrics.prevMemberCount >= 0 ? '+' : ''}${sqMetrics.memberCount - sqMetrics.prevMemberCount}名` : null, up: sqMetrics.memberCount >= sqMetrics.prevMemberCount, icon: <Users size={22} />, color: 'orange', hint: sqMetrics.memberWindowIsDual ? '決済ベース：進行中の今月は当月＋前月に決済した人（課金日ズレの取りこぼし防止）。決済(PAIDインボイス)基準・顧客重複排除' : '決済ベース：その月に決済(PAIDインボイス)した人。顧客重複排除' },
-                                                        { label: '総MRR', value: `¥${sqMetrics.mrr.toLocaleString()}`, sub: sqMetrics.mrrChange !== 0 ? `前月比 ${sqMetrics.mrrChange >= 0 ? '+' : ''}${sqMetrics.mrrChange}%` : null, up: sqMetrics.mrrChange >= 0, icon: <Wallet size={22} />, color: 'blue' },
+                                                        { label: '総MRR', value: manYen(sqMetrics.mrr), sub: sqMetrics.mrrChange !== 0 ? `前月比 ${sqMetrics.mrrChange >= 0 ? '+' : ''}${sqMetrics.mrrChange}%` : null, up: sqMetrics.mrrChange >= 0, icon: <Wallet size={22} />, color: 'blue' },
                                                         { label: 'ARPU', value: `¥${sqMetrics.arpu.toLocaleString()}`, sub: 'サブスク決済額÷会員数', icon: <DollarSign size={22} />, color: 'cyan', neutral: true },
-                                                        { label: '総売上高', value: sqMetrics.totalSales >= 10000 ? `¥${(sqMetrics.totalSales/10000).toFixed(1)}万` : `¥${sqMetrics.totalSales.toLocaleString()}`, sub: 'Square売上合計（税込）', icon: <TrendingUp size={22} />, color: 'emerald', neutral: true },
-                                                        { label: '返品', value: sqMetrics.totalRefunds > 0 ? (sqMetrics.totalRefunds >= 10000 ? `-¥${(sqMetrics.totalRefunds/10000).toFixed(1)}万` : `-¥${sqMetrics.totalRefunds.toLocaleString()}`) : '¥0', sub: '返金・払戻', icon: <RefreshCw size={22} />, color: 'rose', neutral: true, warn: sqMetrics.totalRefunds > 0 },
+                                                        { label: '総売上高', value: manYen(sqMetrics.totalSales), sub: 'Square売上合計（税込）', icon: <TrendingUp size={22} />, color: 'emerald', neutral: true },
+                                                        { label: '返品', value: sqMetrics.totalRefunds > 0 ? manYen(-sqMetrics.totalRefunds) : '¥0', sub: '返金・払戻', icon: <RefreshCw size={22} />, color: 'rose', neutral: true, warn: sqMetrics.totalRefunds > 0 },
                                                         { label: '解約率', value: `${sqMetrics.churnRate}%`, sub: `${sqMetrics.churnedCount}名 / 前月${sqMetrics.churnBase}名`, icon: <UserMinus size={22} />, color: 'orange', neutral: true, warn: sqMetrics.churnRate > 5 },
-                                                        { label: 'LTV', value: sqMetrics.ltv >= 10000 ? `¥${(sqMetrics.ltv/10000).toFixed(1)}万` : `¥${sqMetrics.ltv.toLocaleString()}`, sub: '顧客生涯価値', icon: <DollarSign size={22} />, color: 'amber', neutral: true },
+                                                        { label: 'LTV', value: manYen(sqMetrics.ltv), sub: '顧客生涯価値', icon: <DollarSign size={22} />, color: 'amber', neutral: true },
                                                     ].map((kpi, idx) => (
                                                         <div key={idx} title={kpi.hint || undefined} className={`p-3 md:p-5 rounded-xl md:rounded-2xl shadow-sm border hover:shadow-md transition-all ${kpi.warn ? 'bg-rose-50 border-rose-200' : 'bg-white border-slate-200'}`}>
                                                             <div className={`p-1.5 md:p-2.5 rounded-lg md:rounded-xl bg-${kpi.color}-500 text-white shadow-lg inline-block mb-2 md:mb-3`}>

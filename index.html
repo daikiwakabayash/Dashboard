@@ -4229,15 +4229,28 @@
                         }
                         return { status: 0, json: {} };
                     };
+                    // 同時実行数を絞ったmap（全店フォールバックのper-shop取得でレート制限を避ける）
+                    const mapPool = async (items, fn, poolSize) => {
+                        const out = new Array(items.length); let k = 0;
+                        const worker = async () => { while (k < items.length) { const i = k++; out[i] = await fn(items[i]); } };
+                        await Promise.all(Array.from({ length: Math.min(poolSize, items.length || 1) }, worker));
+                        return out;
+                    };
+                    const soDoOne = (resource, shopId, extra) => {
+                        const p = new URLSearchParams({ resource, from: soFrom, to: cto, ...(shopId ? { shop_id: shopId } : {}), ...extra });
+                        return soFetchRetry(`${SALONONE_API_URL}?${p.toString()}`);
+                    };
+                    const allShopIds = (soShops || []).map(s => String(s.id)).filter(Boolean);
                     const fetchResource = async (resource, extra = {}) => {
-                        if (ids.length === 0) {
-                            const p = new URLSearchParams({ resource, from: soFrom, to: cto, ...extra });
-                            return [await soFetchRetry(`${SALONONE_API_URL}?${p.toString()}`)];
+                        if (ids.length) {
+                            return mapPool(ids, id => soDoOne(resource, id, extra), 5);
                         }
-                        return Promise.all(ids.map(async id => {
-                            const p = new URLSearchParams({ resource, from: soFrom, to: cto, shop_id: id, ...extra });
-                            return await soFetchRetry(`${SALONONE_API_URL}?${p.toString()}`);
-                        }));
+                        // 全店: まずブランド全店(shop_id無し)で試す。SalonOneが invalid_request 等で拒否する場合は
+                        // 全店をper-shopで取得してマージ（soMergeSummary/正規化が複数店を合算）。
+                        const brand = await soDoOne(resource, '', extra);
+                        const brandOk = brand && brand.status === 200 && brand.json && brand.json.data && !brand.json.error;
+                        if (brandOk || !allShopIds.length) return [brand];
+                        return mapPool(allShopIds, id => soDoOne(resource, id, extra), 5);
                     };
 
                     const salesRes = await fetchResource('sales/summary');

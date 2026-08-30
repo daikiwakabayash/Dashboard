@@ -4655,7 +4655,15 @@
                 // アクティブ会員の集計ウィンドウ:
                 //  ・完了した過去月 → 単月（その月に決済した人だけ。月末の過大＝先月だけ決済した離脱者を含めない）
                 //  ・進行中の今月   → 当月＋前月の2ヶ月（課金日が月末寄りでまだ請求が立っていない継続会員の取りこぼしを防ぐ）
-                const memberWindow = (ym) => (ym === currentYM ? [ym, getPrevYM(ym)] : [ym]);
+                // 集計ウィンドウ:
+                //  ・完了した過去月 → 単月（その月に決済した人だけ）
+                //  ・進行中の今月   → 当月＋前月（課金日が月末寄りの継続会員の取りこぼし防止）
+                //  ・未来月         → まだ決済が発生していないため、直近実績(当月＋前月)の継続会員を予定人数として表示
+                //                    （未来月を単月で見ると、先に請求が立った一部の人だけになり過少になる）
+                const memberWindow = (ym) => { const base = ym > currentYM ? currentYM : ym; return base === currentYM ? [base, getPrevYM(base)] : [base]; };
+                const sqMonthIsFuture = sqMonth > currentYM;
+                // 未来月はまだ決済がないため、MRR/ARPU/店舗別売上は「直近の完了実績月」を予定値として使う。
+                const mrrYM = sqMonthIsFuture ? currentYM : sqMonth;
                 const memberLocSet = (sqStore === 'all') ? null : sqStoreLocationIds;
                 let memberCount = payersInMonths(memberWindow(sqMonth), memberLocSet).size;
                 // 前月は常に完了月（prevYM < sqMonth ≤ currentYM）なので単月で評価される
@@ -4672,7 +4680,7 @@
                 //    ARPUが不当に低く出る（店舗別ARPU>1万なのに総ARPUが7千台になる不整合）。
                 //    → 会員数・店舗別MRR(smrr)と同じくインボイス基準（ロケーションで絞る／realSubIds不使用）に統一。
                 const subInvsMonth = allInvoices.filter(inv =>
-                    inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === sqMonth
+                    inv.subscriptionId && inv.status === 'PAID' && toYM(inv.createdAt) === mrrYM
                     && (!memberLocSet || memberLocSet.has(inv.locationId))
                 );
                 const mrr = subInvsMonth.reduce((sum, inv) => sum + inv.amount, 0);
@@ -4759,7 +4767,7 @@
                 // フォールバック用: 当月PAIDインボイスをロケーション別にグループ化
                 const monthPaidInvByLoc = {};
                 for (const inv of allInvoices) {
-                    if (!inv.subscriptionId || inv.status !== 'PAID' || toYM(inv.createdAt) !== sqMonth) continue;
+                    if (!inv.subscriptionId || inv.status !== 'PAID' || toYM(inv.createdAt) !== mrrYM) continue;
                     if (!monthPaidInvByLoc[inv.locationId]) monthPaidInvByLoc[inv.locationId] = [];
                     monthPaidInvByLoc[inv.locationId].push(inv);
                 }
@@ -5035,6 +5043,7 @@
                     byStore, byPlan, monthlyTrends, cohort, availableMonths,
                     isEstimated: useInvoiceFallback,
                     memberWindowIsDual: sqMonth === currentYM,
+                    sqMonthIsFuture, mrrYM,
                 };
             }, [sqPreprocessed, sqData, sqStore, sqMonth, sqStoreLocationIds]);
 
@@ -11835,7 +11844,7 @@
                                                 <h2 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-2 md:mb-3 flex items-center gap-2"><Users size={14} /> 会員 & 収益</h2>
                                                 <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-2 md:gap-4">
                                                     {[
-                                                        { label: 'アクティブ会員数', value: `${sqMetrics.memberCount.toLocaleString()}名`, sub: sqMetrics.memberCount !== sqMetrics.prevMemberCount ? `前月比 ${sqMetrics.memberCount - sqMetrics.prevMemberCount >= 0 ? '+' : ''}${sqMetrics.memberCount - sqMetrics.prevMemberCount}名` : null, up: sqMetrics.memberCount >= sqMetrics.prevMemberCount, icon: <Users size={22} />, color: 'orange', hint: sqMetrics.memberWindowIsDual ? '決済ベース：進行中の今月は当月＋前月に決済した人（課金日ズレの取りこぼし防止）。決済(PAIDインボイス)基準・顧客重複排除' : '決済ベース：その月に決済(PAIDインボイス)した人。顧客重複排除' },
+                                                        { label: 'アクティブ会員数', value: `${sqMetrics.memberCount.toLocaleString()}名`, sub: sqMetrics.memberCount !== sqMetrics.prevMemberCount ? `前月比 ${sqMetrics.memberCount - sqMetrics.prevMemberCount >= 0 ? '+' : ''}${sqMetrics.memberCount - sqMetrics.prevMemberCount}名` : null, up: sqMetrics.memberCount >= sqMetrics.prevMemberCount, icon: <Users size={22} />, color: 'orange', hint: sqMetrics.sqMonthIsFuture ? '未来月：まだ決済が発生していないため、直近の実績（当月＋前月に決済した継続会員）を「予定人数」として表示。顧客重複排除' : (sqMetrics.memberWindowIsDual ? '決済ベース：進行中の今月は当月＋前月に決済した人（課金日ズレの取りこぼし防止）。決済(PAIDインボイス)基準・顧客重複排除' : '決済ベース：その月に決済(PAIDインボイス)した人。顧客重複排除') },
                                                         { label: '総MRR', value: manYen(sqMetrics.mrr), sub: sqMetrics.mrrChange !== 0 ? `前月比 ${sqMetrics.mrrChange >= 0 ? '+' : ''}${sqMetrics.mrrChange}%` : null, up: sqMetrics.mrrChange >= 0, icon: <Wallet size={22} />, color: 'blue' },
                                                         { label: 'ARPU', value: `¥${sqMetrics.arpu.toLocaleString()}`, sub: 'サブスク決済額÷会員数', icon: <DollarSign size={22} />, color: 'cyan', neutral: true },
                                                         { label: '総売上高', value: manYen(sqMetrics.totalSales), sub: 'Square売上合計（税込）', icon: <TrendingUp size={22} />, color: 'emerald', neutral: true },

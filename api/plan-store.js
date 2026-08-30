@@ -194,12 +194,26 @@ export default async function handler(req, res) {
     try {
       const cur = (await blobGet(THANKSGIFT_KEY, hasKV, hasSB, gas)) || {};
       const votes = Array.isArray(cur.votes) ? cur.votes : [];
-      const state = getVotingState();
+      const test = (cur.test && typeof cur.test === 'object') ? cur.test : { open: false, period: '' };
+      // テストモード: root が任意の対象月を「受付中」にできる（期間外テスト用）。通常は期間ロジックに従う。
+      const base = getVotingState();
+      const state = (test.open && /^\d{4}-\d{2}$/.test(String(test.period || '')))
+        ? { ...base, open: true, targetMonth: String(test.period), test: true }
+        : { ...base, test: false };
       if (req.method === 'GET') {
-        return res.status(200).json({ votes, votingState: state, configured: true });
+        return res.status(200).json({ votes, votingState: state, test, configured: true });
       }
       const body = req.body || {};
       const action = body.action;
+      // テストモードの切替（root用UIから。期間外でも指定月を受付にできる）
+      if (action === 'settest') {
+        const nextTest = { open: !!body.open, period: String(body.period || '') };
+        await blobSet(THANKSGIFT_KEY, { votes, test: nextTest }, hasKV, hasSB, gas);
+        const st2 = (nextTest.open && /^\d{4}-\d{2}$/.test(nextTest.period))
+          ? { ...base, open: true, targetMonth: nextTest.period, test: true }
+          : { ...base, test: false };
+        return res.status(200).json({ ok: true, test: nextTest, votingState: st2 });
+      }
       if (action === 'vote' && body.vote) {
         const v = body.vote;
         // サーバー側でも投票期間・対象月・自分不可を強制（UIすり抜け防止）
@@ -215,7 +229,7 @@ export default async function handler(req, res) {
           createdAt: new Date().toISOString(),
         };
         const next = upsertVote(votes, rec);
-        await blobSet(THANKSGIFT_KEY, { votes: next }, hasKV, hasSB, gas);
+        await blobSet(THANKSGIFT_KEY, { votes: next, test }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true, id: `${rec.period}__${rec.fromStaffId}` });
       }
       if (action === 'delete' && body.period && body.fromStaffId) {
@@ -223,7 +237,7 @@ export default async function handler(req, res) {
           return res.status(200).json({ ok: false, error: 'closed', votingState: state });
         }
         const next = removeVote(votes, String(body.period), String(body.fromStaffId));
-        await blobSet(THANKSGIFT_KEY, { votes: next }, hasKV, hasSB, gas);
+        await blobSet(THANKSGIFT_KEY, { votes: next, test }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true });
       }
       return res.status(400).json({ ok: false, error: 'invalid thanksgift action' });

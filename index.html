@@ -1529,16 +1529,22 @@
             };
 
             // ── サンクスギフト（感謝の投票）── スタッフが月1票、前月(対象月)にお世話になった1人へ感謝コメントを送る
-            const [tgData, setTgData] = useState({ votes: [], votingState: null, configured: true, loaded: false });
+            const [tgData, setTgData] = useState({ votes: [], votingState: null, test: { open: false, period: '' }, configured: true, loaded: false });
             const [tgForm, setTgForm] = useState({ shopId: '', toStaffId: '', comment: '' });
             const [tgRoster, setTgRoster] = useState({ shopId: '', loading: false, list: [] }); // 選択店舗の対象月「売上>0」スタッフ
             const [tgMsg, setTgMsg] = useState('');
             const [tgBusy, setTgBusy] = useState(false);
             const [tgRootPeriod, setTgRootPeriod] = useState(''); // root集計の対象月フィルタ（''=全期間）
+            const [tgTestMonth, setTgTestMonth] = useState('2026-07'); // テストモードの対象月（root）
             const tgMonthLabel = (ym) => { if (!ym) return ''; const [y, m] = String(ym).split('-'); return `${y}年${Number(m)}月`; };
             const tgLoad = async () => {
-                try { const r = await fetch('/api/plan-store?type=thanksgift'); const j = await r.json().catch(() => ({})); setTgData({ votes: Array.isArray(j.votes) ? j.votes : [], votingState: j.votingState || null, configured: j.configured !== false, loaded: true }); }
+                try { const r = await fetch('/api/plan-store?type=thanksgift'); const j = await r.json().catch(() => ({})); setTgData({ votes: Array.isArray(j.votes) ? j.votes : [], votingState: j.votingState || null, test: j.test || { open: false, period: '' }, configured: j.configured !== false, loaded: true }); }
                 catch { setTgData(d => ({ ...d, loaded: true })); }
+            };
+            // テストモード切替（root専用・期間外でも指定月を受付にできる）
+            const tgSetTest = async (open, period) => {
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'thanksgift', action: 'settest', open, period }) }); await tgLoad(); }
+                catch {}
             };
             // 選択店舗の「対象月に売上>0」スタッフを取得（=感謝を送れる相手。店舗ごとに1回のSalonOne呼び出し）
             const tgLoadRoster = async (shopId, targetMonth) => {
@@ -14488,7 +14494,8 @@
                         const vs = tgData.votingState || {};
                         const targetMonth = vs.targetMonth || '';
                         const isOpen = !!vs.open;
-                        const myStaffId = String(authState.staffId || '');
+                        // 投票者ID: SalonOne紐付けがあればそれを、無ければログインID（owner）を使う
+                        const myStaffId = String(authState.staffId || authState.owner || '');
                         const myName = authState.staffName || authState.owner || '';
                         const meInRoster = (soStaffs || []).find(s => String(s.id) === myStaffId);
                         const myShopId = meInRoster ? meInRoster.shop_id : '';
@@ -14552,12 +14559,31 @@
 
                                 {!tgData.loaded && <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center text-sm font-bold text-slate-400">読み込み中…</div>}
 
+                                {/* ── テストモード（root専用・期間外でも指定月を開放） ── */}
+                                {tgData.loaded && authState.root && (
+                                    <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-4 space-y-3">
+                                        <div className="flex items-center justify-between flex-wrap gap-2">
+                                            <h2 className="text-sm font-black text-indigo-800 flex items-center gap-2">🧪 テストモード（root専用）</h2>
+                                            <span className={`text-[11px] font-black px-2 py-1 rounded-full ${tgData.test && tgData.test.open ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{tgData.test && tgData.test.open ? `受付中：${tgMonthLabel(tgData.test.period)}分` : 'オフ（通常の期間ロジック）'}</span>
+                                        </div>
+                                        <p className="text-[11px] font-bold text-indigo-700 leading-relaxed">投票期間（毎月1〜2日）外でも、指定した対象月をスタッフが投票できるよう一時的に開放します。動作確認後は<b>オフに戻して</b>ください。</p>
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                            <span className="text-[11px] font-black text-indigo-700">対象月</span>
+                                            <select value={tgTestMonth} onChange={e => setTgTestMonth(e.target.value)} className="px-2 py-1.5 border border-indigo-200 rounded-lg text-xs font-black bg-white">
+                                                {(() => { const arr = []; const n = new Date(); for (let i = 0; i < 12; i++) { const d = new Date(n.getFullYear(), n.getMonth() - i, 1); arr.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); } return arr; })().map(m => <option key={m} value={m}>{tgMonthLabel(m)}分</option>)}
+                                            </select>
+                                            <button onClick={() => tgSetTest(true, tgTestMonth)} className="px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-black hover:bg-indigo-700">この月を受付開始</button>
+                                            <button onClick={() => tgSetTest(false, '')} className="px-3 py-1.5 bg-white text-indigo-700 border border-indigo-300 rounded-lg text-xs font-black hover:bg-indigo-50">オフに戻す</button>
+                                        </div>
+                                    </div>
+                                )}
+
                                 {/* ── スタッフ投票フォーム（staffのみ・root集計は下部） ── */}
                                 {tgData.loaded && authRole === 'staff' && (
                                     <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6 space-y-4">
                                         <div className="flex items-center justify-between flex-wrap gap-2">
                                             <h2 className="text-base font-black flex items-center gap-2"><Gift size={18} className="text-rose-500" />{targetMonth ? `${tgMonthLabel(targetMonth)}分の感謝を送る` : '感謝を送る'}</h2>
-                                            <span className={`text-[11px] font-black px-2 py-1 rounded-full ${isOpen ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{isOpen ? '投票受付中（本日〜2日23:59）' : '投票期間外（毎月1〜2日のみ）'}</span>
+                                            <span className={`text-[11px] font-black px-2 py-1 rounded-full ${isOpen ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{isOpen ? (vs.test ? '🧪 テスト受付中' : '投票受付中（本日〜2日23:59）') : '投票期間外（毎月1〜2日のみ）'}</span>
                                         </div>
 
                                         {!myStaffId && (

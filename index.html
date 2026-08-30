@@ -1378,10 +1378,15 @@
             // ログイン中アカウントのアクセス店舗に絞る（root=全店。非root=許可パターンに一致する店舗のみ）
             const soShops = useMemo(() => {
                 const arr = soShopsRaw || [];
-                if (authState.root) return arr;
-                const pats = Array.isArray(authState.shops) ? authState.shops : [];
-                return arr.filter(s => pats.some(p => String(s.name || '').includes(p)));
-            }, [soShopsRaw, authState.root, authState.shops]);
+                // SalonOne売上は全店舗の情報を表示OK（重いSquare=サブスク分析のみアクセス店舗にスコープ）。
+                // オーナーのみ返金明細書の管轄店舗に絞る（他FCの店舗を出さない）。staff/root は全店。
+                const role = authState.root ? 'root' : (authState.role || 'owner');
+                if (role === 'owner' && Array.isArray(authState.shops) && authState.shops.length) {
+                    const pats = authState.shops;
+                    return arr.filter(s => pats.some(p => String(s.name || '').includes(p)));
+                }
+                return arr;
+            }, [soShopsRaw, authState.root, authState.role, authState.shops]);
             // SalonOne /shops レスポンスを店舗配列に変換（削除済み店舗は除外）
             const soShopsFromResp = (j) => (j && (j.data || j) || []).filter(s => !s.deleted_at).map(s => ({ id: String(s.id ?? s.shop_id ?? ''), name: s.name || s.shop_name || `店舗${s.id}`, area_id: String(s.area_id ?? '') }));
             const [soStaffs, setSoStaffs] = useState([]);       // スタッフ一覧
@@ -14560,7 +14565,13 @@
                         const myName = authState.staffName || authState.owner || '';
                         const meInRoster = (soStaffs || []).find(s => String(s.id) === myStaffId);
                         const myShopId = meInRoster ? meInRoster.shop_id : '';
-                        const myShop = (() => { const sh = (soShopsRaw || []).find(s => String(s.id) === String(myShopId)); return sh ? sh.name : ''; })();
+                        // 自分の店舗（＝送信元店舗）: SalonOne紐付けがあればそこから、無ければアカウントのアクセス店舗を使う
+                        const myShop = (() => {
+                            const sh = (soShopsRaw || []).find(s => String(s.id) === String(myShopId));
+                            if (sh) return sh.name;
+                            if (Array.isArray(authState.shops) && authState.shops.length) return String(authState.shops[0]);
+                            return '';
+                        })();
                         const allShops = (soShopsRaw || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
                         const votes = tgData.votes || [];
                         const myVote = votes.find(v => v.period === targetMonth && String(v.fromStaffId) === myStaffId) || null;

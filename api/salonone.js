@@ -116,8 +116,11 @@ export default async function handler(req, res) {
 
   try {
     const alwaysBearer = resource === 'me';
-    // ブランド全体（Bearer無し）のデータGETはKVで共有キャッシュ（レート制限対策）。
-    const cacheable = !alwaysBearer && !bearer && kvConfigured();
+    // データGETはKVで全ユーザー共有キャッシュ（レート制限対策）。ブランド全体（キーのみ）で
+    // 取得した結果は誰にとっても同じなので、クライアントがBearerを送っていてもキャッシュを配信・
+    // 蓄積してよい（旧フロントの全店取得もキャッシュに乗せて上流負荷を即座に下げるため）。
+    // ただしログイン必須キーで「Bearerフォールバック＝ユーザー個別スコープ」になった応答は蓄積しない。
+    const cacheable = !alwaysBearer && kvConfigured();
     const ckey = cacheable ? soCacheKey(resource, rest) : '';
     let cachedStale = null; // 期限切れでも保持（レート制限時のフォールバック用）
     if (cacheable) {
@@ -136,22 +139,24 @@ export default async function handler(req, res) {
 
     // 全店ビューはまず【キーのみ】で取得＝全店。ログイン必須キーで user_auth_required の
     // ときのみ Bearer を付けて再取得（そのスタッフのスコープ）。me は常に Bearer。
+    let usedFallback = false; // Bearerフォールバック＝ユーザー個別スコープ（＝共有キャッシュに載せない）
     let { status, headers, data } = await fetchSalonOne(upstream.url, apiKey, alwaysBearer ? bearer : '');
     if (!alwaysBearer && bearer && status === 401) {
       const code = data && data.error && data.error.code;
       if (code === 'user_auth_required' || code === 'invalid_token' || code === 'unauthorized') {
+        usedFallback = true;
         ({ status, headers, data } = await fetchSalonOne(upstream.url, apiKey, bearer));
       }
     }
     // レート制限/エラー時は、古いキャッシュがあればそれを返す（エラー連鎖・再試行の嵐を防ぐ）。
     const isErr = status !== 200 || (data && data.error);
-    if (cacheable && isErr && cachedStale) {
+    if (cacheable && !usedFallback && isErr && cachedStale) {
       res.setHeader('X-SO-Cache', 'STALE');
       res.setHeader('Cache-Control', 'no-store');
       return res.status(200).json(cachedStale);
     }
-    // 成功応答をKVへ（fire-and-forget）。
-    if (cacheable && status === 200 && data && !data.error) {
+    // 成功応答をKVへ（fire-and-forget）。フォールバック（ユーザー個別）は載せない。
+    if (cacheable && !usedFallback && status === 200 && data && !data.error) {
       kvBlobSet(ckey, { ts: Date.now(), data }).catch(() => {});
       res.setHeader('X-SO-Cache', 'MISS');
     }

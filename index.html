@@ -3878,7 +3878,11 @@
                 // 過去の確定期間は永続キャッシュ、当月(進行中)は20分TTLで再利用。
                 const p2b = (x) => String(x).padStart(2, '0');
                 const nowMonth = `${new Date().getFullYear()}-${p2b(new Date().getMonth() + 1)}`;
-                const periodConfirmed = soFrom.slice(0, 7) < nowMonth && soTo.slice(0, 7) < nowMonth;
+                // 確定判定＝「翌月2日で売上確定 → 翌月3日以降は固定」。確定した過去月は永続キャッシュ、当月は20分TTL。
+                const periodConfirmed = (() => {
+                    const [py, pm] = soTo.slice(0, 7).split('-').map(Number);
+                    return new Date() >= new Date(py, pm, 3, 0, 0, 0);
+                })();
                 const pkey = `${soFrom}_${cto}`;
                 let sbCacheAll = {}; try { sbCacheAll = JSON.parse(localStorage.getItem(SB_CACHE_KEY) || '{}') || {}; } catch { sbCacheAll = {}; }
                 const pc = sbCacheAll[pkey];
@@ -4323,8 +4327,8 @@
                 const tday = new Date(); tday.setHours(0, 0, 0, 0); // 当日まで含める（SalonOne売上ダッシュボードと一致）
                 const ystr = `${tday.getFullYear()}-${p2(tday.getMonth() + 1)}-${p2(tday.getDate())}`;
                 const nowYM = `${new Date().getFullYear()}-${p2(new Date().getMonth() + 1)}`;
-                // 月の確定判定＝「翌月10日」を過ぎたら確定（以降は数字が変わらない＝再取得しない）。
-                const isConfirmed = (ym) => { const [y, m] = ym.split('-').map(Number); return new Date() >= new Date(y, m, 10, 0, 0, 0); };
+                // 月の確定判定＝「翌月2日」で売上確定 → 翌月3日以降は数字が変わらない＝再取得しない（過去月は固定・キャッシュのみ）。
+                const isConfirmed = (ym) => { const [y, m] = ym.split('-').map(Number); return new Date() >= new Date(y, m, 3, 0, 0, 0); };
                 // 店舗の並び＝出店が古い順（SO_SHOP_ORDER: 大森院が先頭）。一覧に無い店舗は末尾へ。
                 const zkOrderIndex = (name) => {
                     const nn = soShopNorm(name);
@@ -12649,10 +12653,10 @@
                             const soToggleShop = (id) => { setSoOwner(''); setSoShopSel(sel => sel.map(String).includes(String(id)) ? sel.filter(x => String(x) !== String(id)) : [...sel, String(id)]); };
                             const soToggleStaff = (id) => setSoStaffSel(sel => sel.map(String).includes(String(id)) ? sel.filter(x => String(x) !== String(id)) : [...sel, String(id)]);
                             const soSelectOwner = (owner) => { const g = ownerGroups[owner] || []; setSoOwner(owner); setSoShopSel(g.map(s => String(s.id))); };
-                            // クイック選択肢: 翌月・当月・前月（例: 8月時点なら 9月／8月／7月）。翌月は計画用に先出し。
+                            // クイック選択肢: 当月・前月・前々月（例: 9月時点なら 9月／8月／7月）。翌月(来月)は取りに行かない。
                             const monthQuick = (() => {
                                 const arr = [], now = new Date(), pad = n => String(n).padStart(2, '0');
-                                for (const off of [1, 0, -1]) {
+                                for (const off of [0, -1, -2]) {
                                     const d = new Date(now.getFullYear(), now.getMonth() + off, 1);
                                     const last = new Date(d.getFullYear(), d.getMonth() + 1, 0);
                                     arr.push({
@@ -13945,13 +13949,12 @@
                         let months, shops;
                         const jpFilled = new Set(); // SalonOne実データで穴埋めした月（グループ合計を実表示値ベースに切替）
                         if (useFixedJp) {
-                            // 固定CSV(1〜8月)に加え、当年の当月＋翌月まで列を用意。9月以降はCSVが無いので
-                            // 全店SalonOne実データで自動補完される（2026-09からは全店SalonOne移行）。
+                            // 固定CSV(1〜8月)に加え、当年の「当月まで」列を用意（翌月は表示・取得しない）。
+                            // 9月以降はCSVが無いので全店SalonOne実データで自動補完（2026-09からは全店SalonOne移行）。
                             const _nowD = new Date();
-                            const _nextD = new Date(_nowD.getFullYear(), _nowD.getMonth() + 1, 1);
-                            const _nextYM = `${_nextD.getFullYear()}-${p2(_nextD.getMonth() + 1)}`;
+                            const _nowYM = `${_nowD.getFullYear()}-${p2(_nowD.getMonth() + 1)}`;
                             const _dyn = [];
-                            for (let _mo = 1; _mo <= 12; _mo++) { const _ym = `${zkYear}-${p2(_mo)}`; if (_ym <= _nextYM) _dyn.push(_ym); }
+                            for (let _mo = 1; _mo <= 12; _mo++) { const _ym = `${zkYear}-${p2(_mo)}`; if (_ym <= _nowYM) _dyn.push(_ym); }
                             months = [...new Set([...Object.keys(ZK_FIXED.months), ..._dyn])].sort();
                             // SalonOne実データ（当月など公式CSV未入力セルの穴埋め用）。
                             // CSVは略称(千葉)・SalonOneは正式名(千葉駅院)のため、完全一致→部分一致でマッチ。

@@ -1377,12 +1377,16 @@
                 setAuthLoading(true);
                 setAuthError('');
                 try {
-                    const res = await fetch('/api/settlement-auth', {
+                    // 高速化: settlement-auth と サロンワンSSO を並列で試行（サロンワンユーザーの待ち時間短縮）。
+                    // settlementが成功すれば優先（本社root/オーナー）、失敗ならSSOの結果を使う。
+                    const id = authId.trim();
+                    const settlementP = fetch('/api/settlement-auth', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ action: 'login', owner: authId.trim() || undefined, password: pw })
-                    });
-                    const data = await res.json();
+                        body: JSON.stringify({ action: 'login', owner: id || undefined, password: pw })
+                    }).then(r => r.json()).catch(() => ({ ok: false }));
+                    const ssoP = id ? soLogin(id, pw) : Promise.resolve({ ok: false });
+                    const data = await settlementP;
                     if (data.ok) {
                         const shops = data.root ? null : (Array.isArray(data.shops) ? data.shops : []);
                         let role = data.role || (data.root ? 'root' : 'owner'), staffId = data.staffId || '', staffName = data.staffName || '';
@@ -1390,9 +1394,9 @@
                         persistAuth(data.owner || '', data.token, !!data.root, shops, role, staffId, staffName, 'settlement');
                         setAuthState({ checking: false, authenticated: true, token: data.token, owner: data.owner || '', root: !!data.root, shops, role, staffId, staffName, provider: 'settlement' });
                         setAuthPassword(''); setAuthId('');
-                    } else if (authId.trim()) {
-                        // 本社/オーナー(settlement)で不一致 → サロンワンのアカウントでログインを試行(SSO)
-                        const so = await soLogin(authId.trim(), pw);
+                    } else if (id) {
+                        // 本社/オーナー(settlement)で不一致 → 並列で走らせたサロンワンSSOの結果を使う
+                        const so = await ssoP;
                         if (so.ok) {
                             const ns = authStateFromSo(so.user);
                             try { localStorage.setItem('naoru_so_user', JSON.stringify(so.user || {})); } catch {}
@@ -2357,6 +2361,7 @@
             const [zkError, setZkError] = useState(null);
             const [zkYear, setZkYear] = useState(new Date().getFullYear());
             const [zkCountry, setZkCountry] = useState('jp');    // 'jp' | 'au' | 'my'
+            const [zkMobileEnt, setZkMobileEnt] = useState('__group__'); // モバイル全体管理シートで表示する店舗（既定=グループ全体）
             const [soStoreMenuOpen, setSoStoreMenuOpen] = useState(false);
             const [soStoreSearch, setSoStoreSearch] = useState('');
             const [soStaffMenuOpen, setSoStaffMenuOpen] = useState(false);
@@ -14051,8 +14056,51 @@
                                     </div>
                                 ) : shops.length === 0 ? (
                                     <div className="bg-white border border-slate-200 rounded-2xl p-10 text-center text-slate-400 font-bold text-sm">{CUR.flag} {CUR.label} の店舗はまだSalonOneに登録がありません{zkLoading ? '（読み込み中…）' : ''}。</div>
-                                ) : (
-                                    <div className="overflow-auto rounded-2xl border border-slate-200 bg-white shadow-sm" style={{ maxHeight: '90vh' }}>
+                                ) : (<>
+                                    {/* ── モバイル: 店舗を選んで月別カードで縦に見る（横スクロール不要・見やすさ優先） ── */}
+                                    <div className="sm:hidden space-y-2.5">
+                                        <div className="bg-white rounded-2xl border border-slate-200 p-2.5 shadow-sm sticky top-0 z-20">
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-[11px] font-black text-slate-400 shrink-0">店舗</span>
+                                                <select value={zkMobileEnt} onChange={e => setZkMobileEnt(e.target.value)}
+                                                    className="flex-1 min-w-0 px-3 py-2 border border-slate-200 rounded-xl text-sm font-black bg-white">
+                                                    {entities.map(ent => <option key={ent.id} value={ent.id}>{ent.name}</option>)}
+                                                </select>
+                                            </div>
+                                        </div>
+                                        {(() => {
+                                            const ent = entities.find(e => e.id === zkMobileEnt) || entities[0];
+                                            return [...months].reverse().map((ym) => {
+                                                const mi = months.indexOf(ym);
+                                                const prevYm = mi > 0 ? months[mi - 1] : null;
+                                                const mm = Number(ym.split('-')[1]);
+                                                return (
+                                                    <div key={ym} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                                                        <div className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white">
+                                                            <span className="text-xl font-black leading-none">{mm}<span className="text-[11px] font-bold text-slate-300 ml-0.5">月</span></span>
+                                                            <span className="ml-auto text-[11px] font-bold text-slate-300 truncate">{ent.name}・セラピスト{therOf(ent, ym)}名</span>
+                                                        </div>
+                                                        <div className="divide-y divide-slate-100">
+                                                            {METRICS.filter(mt => mt.k !== 'karte').map((mt) => {
+                                                                const cur = val(ent, ym, mt.k);
+                                                                const prev = prevYm ? val(ent, prevYm, mt.k) : null;
+                                                                const c = mt.k === 'ther' ? null : cmp(cur, prev);
+                                                                return (
+                                                                    <div key={mt.k} className="flex items-center px-4 py-2.5">
+                                                                        <span className="text-xs font-black text-slate-500 w-24 shrink-0">{mt.label}</span>
+                                                                        <span className="ml-auto text-lg font-black text-slate-800 whitespace-nowrap">{fmt(mt.k, cur)}</span>
+                                                                        {c && <span className={`ml-3 text-xs font-black w-14 text-right shrink-0 ${c.cls}`}>{c.t}</span>}
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            });
+                                        })()}
+                                    </div>
+                                    {/* ── PC: マトリクス表（横スクロール） ── */}
+                                    <div className="hidden sm:block overflow-auto rounded-2xl border border-slate-200 bg-white shadow-sm" style={{ maxHeight: '90vh' }}>
                                         <table className="border-collapse" style={{ minWidth: 'max-content', fontSize: '13px' }}>
                                             <tbody>
                                                 {months.map((ym, mi) => {
@@ -14103,7 +14151,7 @@
                                             </tbody>
                                         </table>
                                     </div>
-                                )}
+                                </>)}
                                 <p className="text-[11px] text-slate-400 font-bold">※ 国別タブで切替（日本¥／Australia A$／Malaysia RM＝各店舗のSalonOne通貨で表示・換算なし）。日本は公式の全体管理シート（1〜8月・出店順90店舗）を表示し、9月以降は全店SalonOne実績を自動表示（管理シート未入力セルもSalonOneで補完）。総売上=総売上(gross・消化売上ではない)／カルテ枚数=対象月のユニーク患者数（SalonOne未提供のため現在は「—」）／新規数=新規来店数／セラピスト数=稼働担当者数。海外(AU/MY)はSalonOneから取得。当月は前日までの確定分。未来月はデータなし。前月対比は前月実績比。</p>
                             </div>
                         </div>
@@ -15344,92 +15392,6 @@
                                                 })}
                                             </div>
                                         </div>
-
-                                        {/* ── ユニットエコノミクス（採算指標） ── */}
-                                        {(() => {
-                                            const norm = (n) => String(n || '').replace(/NAORU整骨院|NAORU整体|NAORU/g, '').replace(/[院店]\s*$/, '').replace(/\s+/g, '').trim();
-                                            // 広告経由売上 = 媒体別売上の合計
-                                            const adRevenue = a.mediaBreakdown.reduce((s, m) => s + (m.revenue || 0), 0);
-                                            const cpaV = a.cpa;                                                   // CPA = 広告費 ÷ 新規来店数
-                                            const cac = a.totalNewEnroll > 0 ? Math.round(a.totalAdSpend / a.totalNewEnroll) : 0; // CAC = 広告費 ÷ 入会者数
-                                            const roas = a.totalAdSpend > 0 ? Math.round((adRevenue / a.totalAdSpend) * 100) : 0;   // ROAS = 広告経由売上 ÷ 広告費 × 100
-                                            const churn = a.churnRate;                                            // Churn = 解約率(%)
-                                            const retentionMonths = churn > 0 ? Math.round(100 / churn) : 0;      // 平均継続月数 ≒ 100 ÷ 月次解約率
-                                            // 1人あたり月平均売上（ARPU）: Square サブスクの該当店舗 → 全店 の順に採用
-                                            let arpu = 0, arpuScope = '';
-                                            if (sqMetrics) {
-                                                const core = norm(planSelectedBranch);
-                                                let matched = null;
-                                                if (core && sqMetrics.byStore) {
-                                                    matched = Object.values(sqMetrics.byStore).find(s => { const nm = norm(s.name); return nm && (nm.includes(core) || core.includes(nm)); });
-                                                }
-                                                if (matched && matched.arpu > 0) { arpu = Math.round(matched.arpu); arpuScope = '当店'; }
-                                                else if (sqMetrics.arpu > 0) { arpu = Math.round(sqMetrics.arpu); arpuScope = '全店'; }
-                                            }
-                                            // LTV = 1人あたり月平均売上 × 平均継続月数
-                                            let ltv = 0, ltvEst = false;
-                                            if (arpu > 0 && retentionMonths > 0) { ltv = arpu * retentionMonths; }
-                                            else if (sqMetrics && sqMetrics.ltv > 0) { ltv = Math.round(sqMetrics.ltv); ltvEst = true; }
-                                            const unitEcon = (cac > 0 && ltv > 0) ? Math.round((ltv / cac) * 10) / 10 : 0; // Unit Economics = LTV ÷ CAC
-                                            const man = (v) => '¥' + (Math.round(v / 10000)).toLocaleString() + '万';
-                                            const tiles = [
-                                                { key: 'cpa', label: 'CPA', full: '新規来店獲得単価',
-                                                  value: cpaV > 0 ? '¥' + cpaV.toLocaleString() : '—',
-                                                  tone: cpaV === 0 ? 'na' : cpaV <= (planGoals.cpaTarget || 5000) ? 'good' : cpaV <= (planGoals.cpaTarget || 5000) * 1.5 ? 'ok' : 'bad',
-                                                  note: '広告費 ÷ 新規来店数。1人を来店させるのにかかった広告コスト。' },
-                                                { key: 'cac', label: 'CAC', full: '入会獲得単価',
-                                                  value: cac > 0 ? '¥' + cac.toLocaleString() : '—',
-                                                  tone: cac === 0 ? 'na' : 'neutral',
-                                                  note: '広告費 ÷ 入会者数。1人を「入会」まで導くのにかかったコスト。' },
-                                                { key: 'ltv', label: 'LTV', full: '顧客生涯価値',
-                                                  value: ltv > 0 ? man(ltv) : '—',
-                                                  tone: ltv === 0 ? 'na' : 'neutral',
-                                                  note: '1人あたり月平均売上 × 平均継続月数。1顧客が生涯にもたらす売上。'
-                                                        + (ltv > 0 ? (ltvEst ? '（Square全店の推定LTV）' : `（${arpuScope}ARPU ¥${arpu.toLocaleString()} × 継続${retentionMonths}ヶ月）`) : '（Squareサブスクデータが必要）') },
-                                                { key: 'ue', label: 'Unit Economics', full: '顧客単位の採算性',
-                                                  value: unitEcon > 0 ? unitEcon.toFixed(1) + '倍' : '—',
-                                                  tone: unitEcon === 0 ? 'na' : unitEcon >= 3 ? 'good' : unitEcon >= 1 ? 'ok' : 'bad',
-                                                  note: 'LTV ÷ CAC。獲得コストの何倍を1顧客から回収できるか（目安 3倍以上）。' },
-                                                { key: 'roas', label: 'ROAS', full: '広告費用対効果',
-                                                  value: roas > 0 ? roas + '%' : '—',
-                                                  tone: roas === 0 ? 'na' : roas >= 300 ? 'good' : roas >= 150 ? 'ok' : 'bad',
-                                                  note: '広告経由売上 ÷ 広告費 × 100。広告費1円が生んだ売上（目安 300%以上）。' },
-                                                { key: 'churn', label: 'Churn', full: '解約率',
-                                                  value: churn > 0 ? churn + '%' : (a.churnRate === 0 ? '0%' : '—'),
-                                                  tone: churn === 0 ? 'good' : churn <= 5 ? 'good' : churn <= 10 ? 'ok' : 'bad',
-                                                  note: '会員のうち一定期間内に解約した割合。平均継続 ≒ 約' + (retentionMonths || '—') + 'ヶ月。' },
-                                            ];
-                                            const toneCls = { good: 'text-emerald-600', ok: 'text-blue-600', bad: 'text-red-500', neutral: 'text-slate-800', na: 'text-slate-300' };
-                                            return (
-                                                <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
-                                                    <div className="flex items-center gap-1.5 mb-1">
-                                                        <Activity size={15} className="text-brand-400" />
-                                                        <h3 className="text-sm font-black text-slate-700">ユニットエコノミクス（採算指標）</h3>
-                                                        <span className="ml-auto text-[10px] font-bold text-slate-400">{a.latestMonth}</span>
-                                                    </div>
-                                                    <p className="text-[11px] text-slate-400 font-bold mb-3 leading-relaxed">
-                                                        獲得コスト（CPA/CAC）と回収（LTV/ROAS/継続）から<span className="text-brand-500">1顧客あたりの採算</span>を可視化。概念は各項目の補足を参照。
-                                                    </p>
-                                                    <div className="grid grid-cols-2 gap-2">
-                                                        {tiles.map((t) => (
-                                                            <div key={t.key} className="bg-slate-50 rounded-lg px-2.5 py-2">
-                                                                <div className="flex items-baseline gap-1 mb-0.5">
-                                                                    <span className="text-[11px] font-black text-slate-600">{t.label}</span>
-                                                                    <span className="text-[9px] font-bold text-slate-400 truncate">{t.full}</span>
-                                                                </div>
-                                                                <div className={`text-base font-black ${toneCls[t.tone] || 'text-slate-800'}`}>{t.value}</div>
-                                                                <div className="text-[9.5px] text-slate-400 font-bold leading-snug mt-1">{t.note}</div>
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                    {!sqMetrics && (
-                                                        <p className="text-[10px] text-amber-500 font-bold mt-2 leading-relaxed">
-                                                            ※ LTV・Unit Economics は「サブスク分析（Square）」の読み込み後に表示されます。
-                                                        </p>
-                                                    )}
-                                                </div>
-                                            );
-                                        })()}
 
                                         {/* ── ユニットエコノミクス（採算指標） ── */}
                                         {(() => {

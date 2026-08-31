@@ -12113,7 +12113,7 @@
                                                 {sqData.subscriptions && sqData.subscriptions.length === 0 && (
                                                     <span className="ml-2 px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full text-xs font-bold">サブスク0件</span>
                                                 )}
-                                                {sqData.meta.diagnostics.some(d => d.subscriptionsApi && !d.subscriptionsApi.startsWith('ok') && !d.subscriptionsApi.includes('タイムアウト') && !d.subscriptionsApi.includes('部分結果')) && (
+                                                {sqData.meta.diagnostics.some(d => d.subscriptionsApi && (d.subscriptionsApi.includes('エラー') || d.subscriptionsApi.startsWith('timeout'))) && (
                                                     <span className="ml-1 px-2 py-0.5 bg-red-100 text-red-700 rounded-full text-xs font-bold">APIエラーあり</span>
                                                 )}
                                                 {sqData.meta.diagnostics.some(d => d.subscriptionsApi && (d.subscriptionsApi.includes('タイムアウト') || d.subscriptionsApi.includes('部分結果'))) && (
@@ -12611,11 +12611,11 @@
                             const soToggleShop = (id) => { setSoOwner(''); setSoShopSel(sel => sel.map(String).includes(String(id)) ? sel.filter(x => String(x) !== String(id)) : [...sel, String(id)]); };
                             const soToggleStaff = (id) => setSoStaffSel(sel => sel.map(String).includes(String(id)) ? sel.filter(x => String(x) !== String(id)) : [...sel, String(id)]);
                             const soSelectOwner = (owner) => { const g = ownerGroups[owner] || []; setSoOwner(owner); setSoShopSel(g.map(s => String(s.id))); };
-                            // 直近6ヶ月のクイック選択肢
+                            // クイック選択肢: 翌月・当月・前月（例: 8月時点なら 9月／8月／7月）。翌月は計画用に先出し。
                             const monthQuick = (() => {
                                 const arr = [], now = new Date(), pad = n => String(n).padStart(2, '0');
-                                for (let i = 0; i < 6; i++) {
-                                    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+                                for (const off of [1, 0, -1]) {
+                                    const d = new Date(now.getFullYear(), now.getMonth() + off, 1);
                                     const last = new Date(d.getFullYear(), d.getMonth() + 1, 0);
                                     arr.push({
                                         label: `${d.getFullYear()}年${d.getMonth() + 1}月`,

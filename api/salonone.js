@@ -23,6 +23,16 @@ import {
   pickAuthBody,
   SalonOneValidationError,
 } from '../lib/salonone.js';
+import { kvConfigured, kvBlobGet, kvBlobSet } from '../lib/kvblob.js';
+
+// ── サーバー側 応答キャッシュ（KV）──────────────────────────────
+// 全店取得(最大90店)を全ユーザーで共有キャッシュし、SalonOneのレート制限(60/分)
+// 超過を防ぐ。Bearer無し（＝ブランド全体）のデータGETのみ対象。
+const SO_CACHE_TTL_MS = (kind) => (kind === 'summary' ? 300000 : 120000); // 集計5分・明細2分
+function soCacheKey(resource, params) {
+  const q = Object.keys(params || {}).sort().map(k => `${k}=${params[k]}`).join('&');
+  return `naoru:so:cache:${resource}:${q}`;
+}
 
 export const config = {
   maxDuration: 60,
@@ -105,17 +115,45 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 全店ビュー（全体管理シート・SalonOne売上分析等）はブランド全体で見たいので、
-    // まず【キーのみ（ユーザートークン無し）】で取得＝全店。キーが「ログイン必須」で
-    // user_auth_required を返す場合のみ、ユーザーのBearerを付けて再取得（そのスタッフのスコープ）。
-    // meはユーザー本人の情報なので常にBearerを使う。
     const alwaysBearer = resource === 'me';
+    // ブランド全体（Bearer無し）のデータGETはKVで共有キャッシュ（レート制限対策）。
+    const cacheable = !alwaysBearer && !bearer && kvConfigured();
+    const ckey = cacheable ? soCacheKey(resource, rest) : '';
+    let cachedStale = null; // 期限切れでも保持（レート制限時のフォールバック用）
+    if (cacheable) {
+      try {
+        const c = await kvBlobGet(ckey);
+        if (c && c.ts && c.data) {
+          cachedStale = c.data;
+          if ((Date.now() - c.ts) < SO_CACHE_TTL_MS(upstream.endpoint.kind)) {
+            res.setHeader('X-SO-Cache', 'HIT');
+            res.setHeader('Cache-Control', `s-maxage=${Math.round(SO_CACHE_TTL_MS(upstream.endpoint.kind) / 1000)}, stale-while-revalidate=600`);
+            return res.status(200).json(c.data);
+          }
+        }
+      } catch (_) { /* キャッシュ不通は素通りで上流取得 */ }
+    }
+
+    // 全店ビューはまず【キーのみ】で取得＝全店。ログイン必須キーで user_auth_required の
+    // ときのみ Bearer を付けて再取得（そのスタッフのスコープ）。me は常に Bearer。
     let { status, headers, data } = await fetchSalonOne(upstream.url, apiKey, alwaysBearer ? bearer : '');
     if (!alwaysBearer && bearer && status === 401) {
       const code = data && data.error && data.error.code;
       if (code === 'user_auth_required' || code === 'invalid_token' || code === 'unauthorized') {
         ({ status, headers, data } = await fetchSalonOne(upstream.url, apiKey, bearer));
       }
+    }
+    // レート制限/エラー時は、古いキャッシュがあればそれを返す（エラー連鎖・再試行の嵐を防ぐ）。
+    const isErr = status !== 200 || (data && data.error);
+    if (cacheable && isErr && cachedStale) {
+      res.setHeader('X-SO-Cache', 'STALE');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(200).json(cachedStale);
+    }
+    // 成功応答をKVへ（fire-and-forget）。
+    if (cacheable && status === 200 && data && !data.error) {
+      kvBlobSet(ckey, { ts: Date.now(), data }).catch(() => {});
+      res.setHeader('X-SO-Cache', 'MISS');
     }
 
     // レート制限ヘッダを透過（フロントが残数を把握できる）

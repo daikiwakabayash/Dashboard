@@ -2362,6 +2362,7 @@
             const [zkYear, setZkYear] = useState(new Date().getFullYear());
             const [zkCountry, setZkCountry] = useState('jp');    // 'jp' | 'au' | 'my'
             const [zkMobileEnt, setZkMobileEnt] = useState('__group__'); // モバイル全体管理シートで表示する店舗（既定=グループ全体）
+            const [zkZoom, setZkZoom] = useState(1); // 全体管理シート(PC表)の表示倍率（縮小して一覧性UP）
             const [soStoreMenuOpen, setSoStoreMenuOpen] = useState(false);
             const [soStoreSearch, setSoStoreSearch] = useState('');
             const [soStaffMenuOpen, setSoStaffMenuOpen] = useState(false);
@@ -4356,11 +4357,18 @@
                 const shops = ordered.map(s => { const id = String(s.id); return { id, name: s.name, area_id: String(s.area_id || ''), months: { ...(ycache[id] || {}) } }; });
                 setZkData({ year, months, shops: shops.map(s => ({ ...s, months: { ...s.months } })) }); // キャッシュ分を即時表示
                 // 取得対象＝「未確定月」または「キャッシュ未取得の確定月」または force。確定済み＆キャッシュ有りはスキップ。
+                // さらに、直近（10分以内）に取得済みなら未確定月も再取得しない（毎回全件取り直すのを防ぐ）。
+                const stampFresh = !forceAll && cacheAll._stamp && cacheAll._stamp[year] && (Date.now() - cacheAll._stamp[year] < 10 * 60 * 1000);
                 const tasks = [];
                 shops.forEach(sh => months.forEach(ym => {
                     if (ym > nowYM) return;                       // 未来月はスキップ
                     if (fixedHas(sh.name, ym)) return;            // 公式CSVで確定済み→SalonOne取得不要
-                    if (forceAll || !isConfirmed(ym) || sh.months[ym] == null) tasks.push({ sh, ym });
+                    const has = sh.months[ym] != null;
+                    if (forceAll) { tasks.push({ sh, ym }); return; }
+                    if (!has) { tasks.push({ sh, ym }); return; } // 未取得は必ず取得
+                    if (isConfirmed(ym)) return;                  // 確定済み＆取得済み→スキップ
+                    if (stampFresh) return;                       // 未確定でも直近取得済みなら再取得しない
+                    tasks.push({ sh, ym });                       // 未確定＆古い→再取得
                 }));
                 setZkProgress({ done: 0, total: tasks.length });
                 // レート制限(60/分)対策: 429/5xx はバックオフして再試行（取りこぼしで0になるのを防ぐ）
@@ -4412,6 +4420,7 @@
                     }
                 };
                 await Promise.all(Array.from({ length: Math.min(2, tasks.length) }, () => worker())); // レート制限(60/分)配慮: 全店取得は並列2に抑える（ログイン等の他リクエストを枯渇させない）
+                cacheAll._stamp = cacheAll._stamp || {}; cacheAll._stamp[year] = Date.now(); // 取得完了時刻（10分以内は再取得しない）
                 try { localStorage.setItem(ZK_CACHE_KEY, JSON.stringify(cacheAll)); } catch (e) { /* 容量超過等は無視 */ }
                 setZkData({ year, months, shops });
                 setZkLoading(false);
@@ -14100,8 +14109,15 @@
                                         })()}
                                     </div>
                                     {/* ── PC: マトリクス表（横スクロール） ── */}
+                                    {/* PC: ズーム操作（縮小して一覧性を上げる） */}
+                                    <div className="hidden sm:flex items-center justify-end gap-1.5 mb-2">
+                                        <span className="text-[11px] font-bold text-slate-400 mr-1">表示倍率</span>
+                                        <button onClick={() => setZkZoom(z => Math.max(0.5, Math.round((z - 0.1) * 10) / 10))} disabled={zkZoom <= 0.5} className="w-7 h-7 flex items-center justify-center bg-white border border-slate-200 rounded-lg text-slate-600 font-black hover:bg-slate-50 disabled:opacity-40">−</button>
+                                        <span className="text-xs font-black text-slate-600 w-10 text-center">{Math.round(zkZoom * 100)}%</span>
+                                        <button onClick={() => setZkZoom(z => Math.min(1, Math.round((z + 0.1) * 10) / 10))} disabled={zkZoom >= 1} className="w-7 h-7 flex items-center justify-center bg-white border border-slate-200 rounded-lg text-slate-600 font-black hover:bg-slate-50 disabled:opacity-40">＋</button>
+                                    </div>
                                     <div className="hidden sm:block overflow-auto rounded-2xl border border-slate-200 bg-white shadow-sm" style={{ maxHeight: '90vh' }}>
-                                        <table className="border-collapse" style={{ minWidth: 'max-content', fontSize: '13px' }}>
+                                        <table className="border-collapse" style={{ minWidth: 'max-content', fontSize: '13px', zoom: zkZoom }}>
                                             <tbody>
                                                 {months.map((ym, mi) => {
                                                     const prevYm = mi > 0 ? months[mi - 1] : null;
@@ -14114,7 +14130,7 @@
                                                             <th rowSpan={2 + METRICS.length} className="sticky text-white font-black text-center" style={{ left: 0, minWidth: W_MONTH, width: W_MONTH, background: '#0f172a', zIndex: 30, borderTop: tb, fontSize: '18px' }}>{mm}<span className="block text-[10px] font-bold text-slate-400">月</span></th>
                                                             <th className="sticky text-white text-[13px] font-black px-2 py-1 text-left" style={{ left: L_ITEM, minWidth: W_ITEM, width: W_ITEM, background: '#334155', zIndex: 25, borderTop: tb }}>{zkYear}年</th>
                                                             {entities.map((ent, ei) => (
-                                                                <th key={ent.id} colSpan={2} className="px-1.5 py-1 text-[13px] font-black whitespace-nowrap" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 22 : undefined, minWidth: ent.group ? (W_ACT + W_CMP) : undefined, background: ent.group ? '#4f46e5' : (ei % 2 ? '#e8edf3' : '#dde3ec'), color: ent.group ? '#fff' : '#334155', borderTop: tb, borderLeft: '1px solid #cbd5e1' }}>{ent.name}<ZkTherCell value={therOf(ent, ym)} editable={!ent.group} overridden={therOverridden(ent, ym)} color={ent.group ? '#c7d2fe' : '#94a3b8'} onSave={(v) => saveZkTherOverride(zkTherKey(ent.shop.name, ym), v)} /></th>
+                                                                <th key={ent.id} colSpan={2} className="px-1.5 py-1 text-[13px] font-black whitespace-nowrap" style={{ minWidth: ent.group ? (W_ACT + W_CMP) : undefined, background: ent.group ? '#4f46e5' : (ei % 2 ? '#e8edf3' : '#dde3ec'), color: ent.group ? '#fff' : '#334155', borderTop: tb, borderLeft: '1px solid #cbd5e1' }}>{ent.name}<ZkTherCell value={therOf(ent, ym)} editable={!ent.group} overridden={therOverridden(ent, ym)} color={ent.group ? '#c7d2fe' : '#94a3b8'} onSave={(v) => saveZkTherOverride(zkTherKey(ent.shop.name, ym), v)} /></th>
                                                             ))}
                                                         </tr>
                                                         {/* 実績 / 前月比 サブヘッダー */}
@@ -14122,8 +14138,8 @@
                                                             <th className="sticky text-[10px]" style={{ left: L_ITEM, zIndex: 25, background: '#e2e8f0' }}></th>
                                                             {entities.map((ent, ei) => (
                                                                 <React.Fragment key={ent.id}>
-                                                                    <th className="text-[10px] font-black text-slate-500 px-1 py-0.5" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 22 : undefined, minWidth: W_ACT, background: ent.group ? '#e0e7ff' : '#eef2f7', borderLeft: '1px solid #cbd5e1' }}>実績</th>
-                                                                    <th className="text-[10px] font-black text-slate-400 px-1 py-0.5" style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GCMP : undefined, zIndex: ent.group ? 22 : undefined, minWidth: W_CMP, background: ent.group ? '#e0e7ff' : '#eef2f7' }}>前月比</th>
+                                                                    <th className="text-[10px] font-black text-slate-500 px-1 py-0.5" style={{ minWidth: W_ACT, background: ent.group ? '#e0e7ff' : '#eef2f7', borderLeft: '1px solid #cbd5e1' }}>実績</th>
+                                                                    <th className="text-[10px] font-black text-slate-400 px-1 py-0.5" style={{ minWidth: W_CMP, background: ent.group ? '#e0e7ff' : '#eef2f7' }}>前月比</th>
                                                                 </React.Fragment>
                                                             ))}
                                                         </tr>
@@ -14138,8 +14154,8 @@
                                                                     const zebra = ent.group ? '#eef0ff' : (ei % 2 ? '#ffffff' : '#f9fbfd');
                                                                     return (
                                                                         <React.Fragment key={ent.id}>
-                                                                            <td className={`px-1.5 py-1 text-right whitespace-nowrap font-bold text-[13px] ${ent.group ? 'text-indigo-900' : 'text-slate-800'}`} style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GACT : undefined, zIndex: ent.group ? 15 : undefined, minWidth: W_ACT, background: zebra, borderLeft: '1px solid #e2e8f0' }}>{fmt(mt.k, cur)}</td>
-                                                                            <td className={`px-1 py-1 text-right whitespace-nowrap text-[11px] font-bold ${c.cls}`} style={{ position: ent.group ? 'sticky' : undefined, left: ent.group ? L_GCMP : undefined, zIndex: ent.group ? 15 : undefined, minWidth: W_CMP, background: zebra }}>{c.t}</td>
+                                                                            <td className={`px-1.5 py-1 text-right whitespace-nowrap font-bold text-[13px] ${ent.group ? 'text-indigo-900' : 'text-slate-800'}`} style={{ minWidth: W_ACT, background: zebra, borderLeft: '1px solid #e2e8f0' }}>{fmt(mt.k, cur)}</td>
+                                                                            <td className={`px-1 py-1 text-right whitespace-nowrap text-[11px] font-bold ${c.cls}`} style={{ minWidth: W_CMP, background: zebra }}>{c.t}</td>
                                                                         </React.Fragment>
                                                                     );
                                                                 })}

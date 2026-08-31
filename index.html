@@ -13907,7 +13907,14 @@
                         let months, shops;
                         const jpFilled = new Set(); // SalonOne実データで穴埋めした月（グループ合計を実表示値ベースに切替）
                         if (useFixedJp) {
-                            months = Object.keys(ZK_FIXED.months).sort();
+                            // 固定CSV(1〜8月)に加え、当年の当月＋翌月まで列を用意。9月以降はCSVが無いので
+                            // 全店SalonOne実データで自動補完される（2026-09からは全店SalonOne移行）。
+                            const _nowD = new Date();
+                            const _nextD = new Date(_nowD.getFullYear(), _nowD.getMonth() + 1, 1);
+                            const _nextYM = `${_nextD.getFullYear()}-${p2(_nextD.getMonth() + 1)}`;
+                            const _dyn = [];
+                            for (let _mo = 1; _mo <= 12; _mo++) { const _ym = `${zkYear}-${p2(_mo)}`; if (_ym <= _nextYM) _dyn.push(_ym); }
+                            months = [...new Set([...Object.keys(ZK_FIXED.months), ..._dyn])].sort();
                             // SalonOne実データ（当月など公式CSV未入力セルの穴埋め用）。
                             // CSVは略称(千葉)・SalonOneは正式名(千葉駅院)のため、完全一致→部分一致でマッチ。
                             const soList = ((zkData && zkData.shops) || []).map(s => ({ nn: soShopNorm(s.name), months: s.months || {} })).filter(x => x.nn);
@@ -14073,7 +14080,7 @@
                                         </table>
                                     </div>
                                 )}
-                                <p className="text-[11px] text-slate-400 font-bold">※ 国別タブで切替（日本¥／Australia A$／Malaysia RM＝各店舗のSalonOne通貨で表示・換算なし）。日本は公式の全体管理シート（1〜8月・出店順90店舗）を表示し、管理シート未入力の当月分はSalonOne実績で自動補完（SalonOne連携店舗のみ）。総売上=総売上(gross・消化売上ではない)／カルテ枚数=対象月のユニーク患者数（SalonOne未提供のため現在は「—」）／新規数=新規来店数／セラピスト数=稼働担当者数。海外(AU/MY)はSalonOneから取得。当月は前日までの確定分。未来月はデータなし。前月対比は前月実績比。</p>
+                                <p className="text-[11px] text-slate-400 font-bold">※ 国別タブで切替（日本¥／Australia A$／Malaysia RM＝各店舗のSalonOne通貨で表示・換算なし）。日本は公式の全体管理シート（1〜8月・出店順90店舗）を表示し、9月以降は全店SalonOne実績を自動表示（管理シート未入力セルもSalonOneで補完）。総売上=総売上(gross・消化売上ではない)／カルテ枚数=対象月のユニーク患者数（SalonOne未提供のため現在は「—」）／新規数=新規来店数／セラピスト数=稼働担当者数。海外(AU/MY)はSalonOneから取得。当月は前日までの確定分。未来月はデータなし。前月対比は前月実績比。</p>
                             </div>
                         </div>
                         );

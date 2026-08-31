@@ -105,7 +105,18 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { status, headers, data } = await fetchSalonOne(upstream.url, apiKey, bearer);
+    // 全店ビュー（全体管理シート・SalonOne売上分析等）はブランド全体で見たいので、
+    // まず【キーのみ（ユーザートークン無し）】で取得＝全店。キーが「ログイン必須」で
+    // user_auth_required を返す場合のみ、ユーザーのBearerを付けて再取得（そのスタッフのスコープ）。
+    // meはユーザー本人の情報なので常にBearerを使う。
+    const alwaysBearer = resource === 'me';
+    let { status, headers, data } = await fetchSalonOne(upstream.url, apiKey, alwaysBearer ? bearer : '');
+    if (!alwaysBearer && bearer && status === 401) {
+      const code = data && data.error && data.error.code;
+      if (code === 'user_auth_required' || code === 'invalid_token' || code === 'unauthorized') {
+        ({ status, headers, data } = await fetchSalonOne(upstream.url, apiKey, bearer));
+      }
+    }
 
     // レート制限ヘッダを透過（フロントが残数を把握できる）
     for (const name of RATE_LIMIT_HEADERS) {

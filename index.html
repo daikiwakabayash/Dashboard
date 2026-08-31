@@ -1689,7 +1689,7 @@
             };
 
             // ── サンクスギフト（感謝の投票）── スタッフが月1票、前月(対象月)にお世話になった1人へ感謝コメントを送る
-            const [tgData, setTgData] = useState({ votes: [], log: [], votingState: null, test: { open: false, period: '' }, published: [], configured: true, loaded: false });
+            const [tgData, setTgData] = useState({ votes: [], log: [], votingState: null, test: { open: false, period: '' }, published: [], dir: { shops: [], staff: [] }, configured: true, loaded: false });
             const [tgForm, setTgForm] = useState({ shopId: '', toStaffId: '', comment: '' });
             const [tgRoster, setTgRoster] = useState({ shopId: '', loading: false, list: [] }); // 選択店舗の対象月「売上>0」スタッフ
             const [tgMsg, setTgMsg] = useState('');
@@ -1699,8 +1699,21 @@
             const [tgShopQuery, setTgShopQuery] = useState(''); // サンクスギフト相手店舗の検索
             const tgMonthLabel = (ym) => { if (!ym) return ''; const [y, m] = String(ym).split('-'); return `${y}年${Number(m)}月`; };
             const tgLoad = async () => {
-                try { const r = await fetch('/api/plan-store?type=thanksgift'); const j = await r.json().catch(() => ({})); setTgData({ votes: Array.isArray(j.votes) ? j.votes : [], log: Array.isArray(j.log) ? j.log : [], votingState: j.votingState || null, test: j.test || { open: false, period: '' }, published: Array.isArray(j.published) ? j.published : [], configured: j.configured !== false, loaded: true }); }
+                try { const r = await fetch('/api/plan-store?type=thanksgift'); const j = await r.json().catch(() => ({})); setTgData({ votes: Array.isArray(j.votes) ? j.votes : [], log: Array.isArray(j.log) ? j.log : [], votingState: j.votingState || null, test: j.test || { open: false, period: '' }, published: Array.isArray(j.published) ? j.published : [], dir: (j.dir && typeof j.dir === 'object') ? { shops: Array.isArray(j.dir.shops) ? j.dir.shops : [], staff: Array.isArray(j.dir.staff) ? j.dir.staff : [] } : { shops: [], staff: [] }, configured: j.configured !== false, loaded: true }); }
                 catch { setTgData(d => ({ ...d, loaded: true })); }
+            };
+            // 全店ディレクトリの保存: 広い閲覧権限のセッション（root/brand_admin/複数店）が全店の店舗・スタッフを共有ストアへ。
+            // これにより、SSOで自店のみにスコープされたスタッフでも「他店」へ感謝を送れる（相手候補は共有ディレクトリから）。
+            const tgSyncedRef = useRef('');
+            const tgSyncDir = async (shopsRaw, staffs) => {
+                try {
+                    const shops = (shopsRaw || []).map(s => ({ id: String(s.id), name: s.name })).filter(s => s.id && s.name);
+                    const staff = (staffs || []).map(s => ({ id: String(s.id), name: s.name, shopId: String(s.shop_id || ''), deleted: !!s.deleted })).filter(s => s.id && s.name);
+                    if (shops.length < 2 && staff.length < 2) return; // 単一店スタッフ等・広い権限のときだけ土台を作る（自店ぶんは投票時に自然に蓄積）
+                    const sig = `${shops.length}:${staff.length}`;
+                    if (tgSyncedRef.current === sig) return; tgSyncedRef.current = sig;
+                    await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'thanksgift', action: 'setdir', shops, staff }) });
+                } catch {}
             };
             // テストモード切替（root専用・期間外でも指定月を受付にできる）
             const tgSetTest = async (open, period) => {
@@ -2050,6 +2063,11 @@
                 if (!['settlement', 'allowance', 'settings', 'zenkanri', 'thanksgift'].includes(currentPage) || soStaffs.length > 0) return;
                 (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at })); if (arr.length) setSoStaffs(arr); } catch {} })();
             }, [currentPage]);
+            // サンクスギフト: 広い権限のセッション（全店が見える）が全店ディレクトリを共有ストアへ土台保存
+            useEffect(() => {
+                if (currentPage !== 'thanksgift') return;
+                if ((soShopsRaw || []).length >= 2 || (soStaffs || []).length >= 2) tgSyncDir(soShopsRaw, soStaffs);
+            }, [currentPage, soShopsRaw.length, soStaffs.length]);
             // 選択店舗の在籍セラピストを m.therapists に反映（新規在籍を追加・氏名同期。手動入力値は保持）。
             // 前月から引き継いだ入力（子供/誕生日/実費）は staff id で維持され、在籍者のみ表示される。
             useEffect(() => {
@@ -14802,7 +14820,14 @@
                             if (Array.isArray(authState.shops) && authState.shops.length) return String(authState.shops[0]);
                             return '';
                         })();
-                        const allShops = (soShopsRaw || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
+                        // 相手店舗の候補: 自分に見えるSalonOne店舗 ＋ 共有ディレクトリの全店（他店へ送るため）をマージ
+                        const tgDir = tgData.dir || { shops: [], staff: [] };
+                        const allShops = (() => {
+                            const map = new Map();
+                            for (const s of (soShopsRaw || [])) { if (s && s.id) map.set(String(s.id), { id: String(s.id), name: s.name }); }
+                            for (const s of (tgDir.shops || [])) { if (s && s.id && !map.has(String(s.id))) map.set(String(s.id), { id: String(s.id), name: s.name }); }
+                            return [...map.values()].sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
+                        })();
                         const votes = tgData.votes || [];
                         const myVote = votes.find(v => v.period === targetMonth && String(v.fromStaffId) === myStaffId) || null;
                         // 受け取った票（自分宛）を対象月降順に。
@@ -14831,7 +14856,10 @@
                             }
                             return Object.values(map).sort((a, b) => b.points - a.points || String(a.name).localeCompare(String(b.name), 'ja'));
                         })();
-                        const rosterList = (tgRoster.shopId === tgForm.shopId ? tgRoster.list : []).filter(s => String(s.id) !== myStaffId);
+                        // 相手候補: ライブのSalonOne実績（自店＝売上>0）を優先。取得不可/空（他店＝SSOスコープ外）は共有ディレクトリの在籍スタッフで補完。
+                        const liveRoster = (tgRoster.shopId === tgForm.shopId ? tgRoster.list : []);
+                        const dirRoster = (tgDir.staff || []).filter(s => s && String(s.shopId) === String(tgForm.shopId) && !s.deleted).map(s => ({ id: String(s.id), name: s.name }));
+                        const rosterList = (liveRoster.length ? liveRoster : dirRoster).filter(s => String(s.id) !== myStaffId).sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
                         const selectedShopName = (() => { const sh = (soShopsRaw || []).find(s => String(s.id) === String(tgForm.shopId)); return sh ? sh.name : ''; })();
                         const canSubmit = !!(myStaffId && tgForm.shopId && tgForm.toStaffId && tgForm.comment.trim() && isOpen && !tgBusy);
                         const doSubmit = async () => {
@@ -14849,15 +14877,19 @@
                         return (
                         <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
                             <div className="max-w-3xl mx-auto space-y-5">
-                                <header className="bg-white p-4 md:p-6 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
-                                    <div className="flex items-center gap-3">
-                                        <div className="p-2 md:p-3 bg-gradient-to-br from-rose-500 to-pink-500 rounded-xl md:rounded-2xl text-white shadow-lg"><Gift size={24} /></div>
-                                        <div>
-                                            <div className="inline-flex items-center gap-1 px-2 py-0.5 bg-rose-100 text-rose-700 rounded-full text-[10px] font-black uppercase tracking-widest mb-1">Thanks Gift</div>
-                                            <h1 className="text-xl md:text-2xl font-black tracking-tight italic">サンクスギフト</h1>
+                                <header className="relative overflow-hidden bg-gradient-to-br from-rose-500 via-pink-500 to-fuchsia-500 p-5 md:p-7 rounded-3xl shadow-lg shadow-rose-200/60 text-white">
+                                    <div className="pointer-events-none absolute -top-10 -right-6 w-40 h-40 bg-white/15 rounded-full blur-2xl"></div>
+                                    <div className="pointer-events-none absolute -bottom-12 right-16 w-32 h-32 bg-white/10 rounded-full blur-2xl"></div>
+                                    <div className="relative">
+                                        <div className="flex items-center gap-3">
+                                            <div className="p-2.5 md:p-3 bg-white/20 backdrop-blur rounded-2xl text-white shadow-inner"><Gift size={26} /></div>
+                                            <div>
+                                                <div className="inline-flex items-center gap-1 px-2 py-0.5 bg-white/20 text-white rounded-full text-[10px] font-black uppercase tracking-[0.2em] mb-1">Thanks Gift</div>
+                                                <h1 className="text-2xl md:text-3xl font-black tracking-tight italic">サンクスギフト</h1>
+                                            </div>
                                         </div>
+                                        <p className="text-[13px] text-white/90 font-bold mt-3 leading-relaxed">毎月お世話になった<b className="text-white">1人</b>に、感謝を贈りましょう🎁<br className="hidden sm:block" />投票は<b className="text-white">毎月1日0:01〜2日23:59</b>の2日間だけ。その月は<b className="text-white">前月分</b>への感謝として記録されます（例: 9/1〜2＝8月分）。1人1票・自分には送れません。</p>
                                     </div>
-                                    <p className="text-xs text-slate-500 font-bold mt-3 leading-relaxed">毎月お世話になった<b>1人</b>に感謝を届けましょう。投票は<b>毎月1日0:01〜2日23:59</b>の2日間だけ。その月は<b>前月分</b>への感謝として記録されます（例: 9/1〜2の投票＝8月分）。1人1票・自分には送れません。</p>
                                 </header>
 
                                 {tgData.configured === false && (
@@ -14920,7 +14952,7 @@
                                                         ); })()}
                                                     </div>
                                                     <div>
-                                                        <label className="text-[11px] font-black text-slate-400">感謝する相手（その月に売上がある方）</label>
+                                                        <label className="text-[11px] font-black text-slate-400">感謝する相手</label>
                                                         <select value={tgForm.toStaffId} onChange={e => setTgForm(f => ({ ...f, toStaffId: e.target.value }))} disabled={!tgForm.shopId || tgRoster.loading} className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white disabled:bg-slate-50 disabled:text-slate-300">
                                                             <option value="">{!tgForm.shopId ? '先に店舗を選択' : tgRoster.loading ? '読み込み中…' : rosterList.length ? '相手を選択' : '対象者がいません'}</option>
                                                             {rosterList.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -14932,9 +14964,9 @@
                                                     <textarea value={tgForm.comment} onChange={e => setTgForm(f => ({ ...f, comment: e.target.value.slice(0, 500) }))} rows={3} placeholder="例：忙しい時に予約を代わりに取ってくれて本当に助かりました！" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white resize-none" />
                                                     <div className="text-[10px] text-slate-400 font-bold text-right mt-0.5">{tgForm.comment.length}/500</div>
                                                 </div>
-                                                <div className="flex items-center gap-3 flex-wrap">
-                                                    <button onClick={doSubmit} disabled={!canSubmit} className="px-6 py-2.5 bg-rose-600 text-white rounded-xl hover:bg-rose-700 transition-colors font-black text-sm disabled:bg-slate-200 disabled:text-slate-400">{myVote ? '投票を更新' : '感謝を送る'}🎁</button>
-                                                    {tgMsg && <span className="text-xs font-black text-slate-600">{tgMsg}</span>}
+                                                <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                                                    <button onClick={doSubmit} disabled={!canSubmit} className="w-full sm:w-auto px-7 py-3 bg-gradient-to-r from-rose-500 to-pink-500 text-white rounded-2xl hover:from-rose-600 hover:to-pink-600 transition-all font-black text-sm shadow-lg shadow-rose-200/60 active:scale-[0.98] disabled:from-slate-200 disabled:to-slate-200 disabled:text-slate-400 disabled:shadow-none">{myVote ? '投票を更新する 🎁' : '感謝を送る 🎁'}</button>
+                                                    {tgMsg && <span className="text-xs font-black text-rose-600 text-center sm:text-left">{tgMsg}</span>}
                                                 </div>
                                             </>
                                         )}
@@ -14943,23 +14975,48 @@
 
                                 {/* ── もらった感謝（本人向け・匿名）── 誰から・どの店舗かは表示しない。件数と内容のみ。staff/owner共通。 */}
                                 {tgData.loaded && !isRoot && myStaffId && (
-                                    <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6">
-                                        <h2 className="text-base font-black flex items-center gap-2 mb-1"><Heart size={18} className="text-rose-500" />あなたがもらった感謝 <span className="text-xs text-slate-400">（合計 {received.length} 票）</span></h2>
-                                        <p className="text-[11px] text-slate-400 font-bold mb-3">匿名です（誰から・どの店舗かは表示されません）。<span className="text-rose-500">管理者が【公開】した月分のみ表示されます</span>。</p>
-                                        {received.length === 0 && <div className="text-sm font-bold text-slate-400 py-4 text-center">公開済みの感謝はまだありません。<span className="block text-[11px] text-slate-400 mt-1">（投票後、管理者が公開すると表示されます）</span></div>}
-                                        <div className="space-y-4">
-                                            {receivedPeriods.map(p => (
-                                                <div key={p}>
-                                                    <div className="text-xs font-black text-slate-500 mb-2">{tgMonthLabel(p)}分 <span className="text-rose-600">{received.filter(v => v.period === p).length}票</span></div>
-                                                    <div className="space-y-2">
-                                                        {received.filter(v => v.period === p).map((v, i) => (
-                                                            <div key={i} className="bg-rose-50/60 border border-rose-100 rounded-xl p-3">
-                                                                <div className="text-sm font-bold text-slate-700 whitespace-pre-wrap">{v.comment}</div>
-                                                            </div>
-                                                        ))}
-                                                    </div>
+                                    <div className="relative overflow-hidden bg-gradient-to-br from-rose-50 via-white to-pink-50 rounded-3xl border border-rose-100 shadow-sm p-5 md:p-7">
+                                        <div className="pointer-events-none absolute -top-10 -right-10 w-40 h-40 bg-rose-200/40 rounded-full blur-3xl"></div>
+                                        <div className="pointer-events-none absolute -bottom-12 -left-8 w-40 h-40 bg-pink-200/30 rounded-full blur-3xl"></div>
+                                        <div className="relative">
+                                            <div className="flex items-center gap-3 mb-1.5">
+                                                <div className="p-2.5 bg-gradient-to-br from-rose-500 to-pink-500 rounded-2xl text-white shadow-lg shadow-rose-200/70"><Heart size={20} /></div>
+                                                <div className="min-w-0">
+                                                    <h2 className="text-lg font-black text-slate-800 tracking-tight">あなたがもらった感謝</h2>
+                                                    <p className="text-[11px] text-slate-400 font-bold">匿名で、あたたかい気持ちが届いています</p>
                                                 </div>
-                                            ))}
+                                                <div className="ml-auto text-center shrink-0">
+                                                    <div className="text-3xl md:text-4xl font-black bg-gradient-to-br from-rose-500 to-pink-500 bg-clip-text text-transparent leading-none">{received.length}</div>
+                                                    <div className="text-[9px] font-black text-rose-400 tracking-[0.2em] mt-0.5">THANKS</div>
+                                                </div>
+                                            </div>
+                                            <p className="text-[11px] text-slate-400 font-bold mb-4 leading-relaxed">誰から・どの店舗かは表示されません。<span className="text-rose-500 font-black">管理者が【公開】した月分</span>のみ表示されます。</p>
+                                            {received.length === 0 && (
+                                                <div className="text-center py-10">
+                                                    <div className="text-5xl mb-3">💌</div>
+                                                    <div className="text-sm font-black text-slate-500">公開済みの感謝はまだありません</div>
+                                                    <div className="text-[11px] text-slate-400 font-bold mt-1.5 leading-relaxed">投票のあと、管理者が公開すると<br className="sm:hidden" />ここに届きます</div>
+                                                </div>
+                                            )}
+                                            <div className="space-y-5">
+                                                {receivedPeriods.map(p => (
+                                                    <div key={p}>
+                                                        <div className="flex items-center gap-2 mb-2.5">
+                                                            <span className="text-[11px] font-black text-rose-700 bg-rose-100 px-2.5 py-1 rounded-full">🎀 {tgMonthLabel(p)}分</span>
+                                                            <span className="text-[11px] font-black text-slate-400">{received.filter(v => v.period === p).length}件の感謝</span>
+                                                        </div>
+                                                        <div className="space-y-2.5">
+                                                            {received.filter(v => v.period === p).map((v, i) => (
+                                                                <div key={i} className="relative bg-white rounded-2xl border border-rose-100 p-4 pl-11 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all">
+                                                                    <span className="absolute top-2.5 left-3.5 text-3xl leading-none text-rose-200 font-black">“</span>
+                                                                    <div className="text-sm font-bold text-slate-700 whitespace-pre-wrap leading-relaxed">{v.comment}</div>
+                                                                    <div className="flex items-center gap-1 mt-2 text-rose-400"><Heart size={11} /><span className="text-[10px] font-black tracking-wide">匿名の仲間より</span></div>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
                                         </div>
                                     </div>
                                 )}
@@ -14971,25 +15028,43 @@
                                     const sentPeriods = [...new Set(myLog.map(l => l.period))];
                                     const fmtTs = (s) => { try { const d = new Date(s); return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; } catch { return s || ''; } };
                                     return (
-                                    <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6">
-                                        <h2 className="text-base font-black flex items-center gap-2 mb-1"><Gift size={18} className="text-rose-500" />あなたが送った感謝（履歴）</h2>
-                                        <p className="text-[11px] text-slate-400 font-bold mb-3">いつ・誰に・どの内容で送ったかの記録です（編集した場合は履歴も残ります）。</p>
-                                        {myLog.length === 0 && <div className="text-sm font-bold text-slate-400 py-4 text-center">まだ送った感謝はありません。</div>}
-                                        <div className="space-y-4">
+                                    <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-5 md:p-7">
+                                        <div className="flex items-center gap-3 mb-1.5">
+                                            <div className="p-2.5 bg-gradient-to-br from-violet-500 to-fuchsia-500 rounded-2xl text-white shadow-lg shadow-violet-200/70"><Gift size={20} /></div>
+                                            <div className="min-w-0">
+                                                <h2 className="text-lg font-black text-slate-800 tracking-tight">あなたが送った感謝</h2>
+                                                <p className="text-[11px] text-slate-400 font-bold">いつ・誰に・どんな言葉を贈ったかの記録</p>
+                                            </div>
+                                        </div>
+                                        {myLog.length === 0 && (
+                                            <div className="text-center py-10">
+                                                <div className="text-5xl mb-3">🎁</div>
+                                                <div className="text-sm font-black text-slate-500">まだ送った感謝はありません</div>
+                                                <div className="text-[11px] text-slate-400 font-bold mt-1.5">お世話になった1人に、感謝を贈ってみましょう</div>
+                                            </div>
+                                        )}
+                                        <div className="space-y-5 mt-3">
                                             {sentPeriods.map(p => (
                                                 <div key={p}>
-                                                    <div className="text-xs font-black text-slate-500 mb-2">{tgMonthLabel(p)}分</div>
-                                                    <div className="space-y-2">
-                                                        {myLog.filter(l => l.period === p).map((l, i) => (
-                                                            <div key={l.id || i} className="bg-slate-50 border border-slate-200 rounded-xl p-3">
+                                                    <div className="flex items-center gap-2 mb-2.5">
+                                                        <span className="text-[11px] font-black text-violet-700 bg-violet-100 px-2.5 py-1 rounded-full">{tgMonthLabel(p)}分</span>
+                                                    </div>
+                                                    <div className="relative pl-4 space-y-2.5 before:content-[''] before:absolute before:left-1 before:top-1 before:bottom-1 before:w-0.5 before:bg-slate-100 before:rounded-full">
+                                                        {myLog.filter(l => l.period === p).map((l, i) => {
+                                                            const isDel = l.action === 'delete', isEdit = l.action === 'edit';
+                                                            const dot = isDel ? 'bg-slate-300' : isEdit ? 'bg-amber-400' : 'bg-emerald-400';
+                                                            return (
+                                                            <div key={l.id || i} className="relative bg-slate-50 border border-slate-200 rounded-2xl p-3.5">
+                                                                <span className={`absolute -left-[13px] top-4 w-2.5 h-2.5 rounded-full ring-2 ring-white ${dot}`}></span>
                                                                 <div className="flex items-center gap-2 flex-wrap text-[11px] font-black">
-                                                                    <span className={`px-1.5 py-0.5 rounded ${l.action === 'delete' ? 'bg-slate-200 text-slate-500' : l.action === 'edit' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{l.action === 'delete' ? '取消' : l.action === 'edit' ? '編集' : '送信'}</span>
-                                                                    {l.action !== 'delete' && <span className="text-slate-700">{l.toStaffName}{l.toShop ? `（${l.toShop}）` : ''} さんへ</span>}
+                                                                    <span className={`px-2 py-0.5 rounded-full ${isDel ? 'bg-slate-200 text-slate-500' : isEdit ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{isDel ? '取消' : isEdit ? '編集' : '🎁 送信'}</span>
+                                                                    {!isDel && <span className="text-slate-700">{l.toStaffName}{l.toShop ? `（${l.toShop}）` : ''} さんへ</span>}
                                                                     <span className="text-slate-400 font-bold ml-auto">{fmtTs(l.createdAt)}</span>
                                                                 </div>
-                                                                {l.action !== 'delete' && l.comment && <div className="text-sm font-bold text-slate-700 mt-1 whitespace-pre-wrap">{l.comment}</div>}
+                                                                {!isDel && l.comment && <div className="text-sm font-bold text-slate-700 mt-1.5 whitespace-pre-wrap leading-relaxed">{l.comment}</div>}
                                                             </div>
-                                                        ))}
+                                                            );
+                                                        })}
                                                     </div>
                                                 </div>
                                             ))}

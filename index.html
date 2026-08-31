@@ -823,12 +823,17 @@
           }
           const ok = await _soRefreshPromise; _soRefreshPromise = null; return ok;
         };
-        // Bearer を付ける対象: サロンワンプロキシ＋（SSO認可を橋渡しする）返金明細書系API
-        const soBearerUrl = (url) => typeof url === 'string' && (
-          url.indexOf(SALONONE_API_URL) === 0 ||
-          url.indexOf('/api/settlement-store') === 0 ||
-          url.indexOf('/api/settlement-owners') === 0
-        );
+        // Bearer を付ける対象: 返金明細書系API（SSO認可の橋渡し）＋ SalonOneは me（本人情報）のみ。
+        // ⚠️ SalonOneのデータGET（sales/summary・shops・staffs・marketing/* 等）にはBearerを付けない。
+        //    Authorizationヘッダがあると Vercel のエッジキャッシュが効かず、全店取得(最大90店)が毎回
+        //    上流に飛んでレート制限(60/分)を超過し、ログイン(auth/login)まで rate_limited になるため。
+        //    データは非ログインキーでブランド全体を取得＝キャッシュ可能にする。
+        const soBearerUrl = (url) => {
+          if (typeof url !== 'string') return false;
+          if (url.indexOf('/api/settlement-store') === 0 || url.indexOf('/api/settlement-owners') === 0) return true;
+          if (url.indexOf(SALONONE_API_URL) === 0) return url.indexOf('resource=me') !== -1;
+          return false;
+        };
         window.fetch = async (input, init) => {
           const url = typeof input === 'string' ? input : (input && input.url) || '';
           if (!soBearerUrl(url)) return _origFetch(input, init);

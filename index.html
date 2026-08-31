@@ -1366,14 +1366,16 @@
 
             const handleLogin = async (e) => {
                 if (e) e.preventDefault();
-                if (!authPassword.trim()) return;
+                // コピペで末尾に空白・改行が入るとログインできないため前後の空白を除去
+                const pw = authPassword.trim();
+                if (!pw) return;
                 setAuthLoading(true);
                 setAuthError('');
                 try {
                     const res = await fetch('/api/settlement-auth', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ action: 'login', owner: authId.trim() || undefined, password: authPassword })
+                        body: JSON.stringify({ action: 'login', owner: authId.trim() || undefined, password: pw })
                     });
                     const data = await res.json();
                     if (data.ok) {
@@ -1385,7 +1387,7 @@
                         setAuthPassword(''); setAuthId('');
                     } else if (authId.trim()) {
                         // 本社/オーナー(settlement)で不一致 → サロンワンのアカウントでログインを試行(SSO)
-                        const so = await soLogin(authId.trim(), authPassword);
+                        const so = await soLogin(authId.trim(), pw);
                         if (so.ok) {
                             const ns = authStateFromSo(so.user);
                             try { localStorage.setItem('naoru_so_user', JSON.stringify(so.user || {})); } catch {}
@@ -3263,17 +3265,18 @@
                         .replace(/[院店]\s*$/, '')
                         .replace(/\s+/g, '')
                         .trim();
-                    if (!authState.root && Array.isArray(authState.shops) && authState.shops.length) {
-                        const cores = authState.shops.map(normStore).filter(Boolean);
-                        if (cores.length) {
-                            const scoped = accounts.filter(a => { const nm = normStore(a.name); return !!nm && cores.some(c => nm.includes(c) || c.includes(nm)); });
-                            if (scoped.length) {
-                                accounts = scoped; totalAccounts = scoped.length;
-                                console.log(`[Square] 店舗スコープ取得: ${scoped.length}/${infoData.accounts.length}アカウント (アクセス店舗: ${authState.shops.join('・')})`);
-                            } else {
-                                // アクセス店舗にマッチするSquareアカウントが0件＝店舗名の対応漏れ。全件取得にフォールバックし警告。
-                                console.warn(`[Square] アクセス店舗にマッチするアカウントが0件のため全件取得にフォールバック。アクセス店舗:`, authState.shops);
-                            }
+                    if (!authState.root) {
+                        // 非root（オーナー/マネージャー/スタッフ）は常にアクセス店舗のみ。
+                        // ⚠️ マッチ0件でも全店にフォールバックしない（＝他店のサブスク情報を絶対に読み込まない）。
+                        const cores = (Array.isArray(authState.shops) ? authState.shops : []).map(normStore).filter(Boolean);
+                        const scoped = cores.length
+                            ? accounts.filter(a => { const nm = normStore(a.name); return !!nm && cores.some(c => nm.includes(c) || c.includes(nm)); })
+                            : [];
+                        accounts = scoped; totalAccounts = scoped.length;
+                        if (scoped.length) {
+                            console.log(`[Square] 店舗スコープ取得: ${scoped.length}/${infoData.accounts.length}アカウント (アクセス店舗: ${authState.shops && authState.shops.join('・')})`);
+                        } else {
+                            console.warn('[Square] 非root: アクセス店舗にマッチするSquareアカウントが0件（全店取得はしません）。アクセス店舗:', authState.shops);
                         }
                     }
                     let completedBatches = 0;

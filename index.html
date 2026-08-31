@@ -3906,13 +3906,18 @@
                 setSoShopProgress({ done: 0, total: targets.length });
                 // レート制限(60/分)対策: 429/5xx はバックオフ再試行（博多/新越谷/江坂など後半店舗の取りこぼしを防ぐ）
                 const soGet = async (url) => {
-                    for (let a = 0; a < 6; a++) {
+                    for (let a = 0; a < 8; a++) {
                         try {
                             const res = await fetch(url);
-                            if (res.status === 429 || res.status >= 500) { await new Promise(r => setTimeout(r, 800 * Math.pow(1.8, a))); continue; }
+                            if (res.status === 429 || res.status >= 500) {
+                                // レート制限枠が空くまで待つ（Retry-Afterを尊重・最大30秒）
+                                const ra = Number(res.headers.get('retry-after')) || 0;
+                                const waitMs = ra > 0 ? Math.min(ra, 30) * 1000 + 300 : Math.min(800 * Math.pow(1.8, a), 8000);
+                                await new Promise(r => setTimeout(r, waitMs)); continue;
+                            }
                             if (!res.ok) return null;
                             return await res.json().catch(() => null);
-                        } catch (e) { await new Promise(r => setTimeout(r, 800 * Math.pow(1.8, a))); }
+                        } catch (e) { await new Promise(r => setTimeout(r, Math.min(1200 * Math.pow(1.6, a), 8000))); }
                     }
                     return null;
                 };
@@ -3956,7 +3961,7 @@
                         done++; setSoShopProgress({ done, total: targets.length });
                     }
                 };
-                await Promise.all(Array.from({ length: 5 }, worker));   // 並列度5（429はリトライで吸収）
+                await Promise.all(Array.from({ length: 2 }, worker));   // 並列度2（レート制限60/分に配慮・Retry-After尊重で取りこぼしゼロ）
                 if (soShopReqRef.current !== reqId) return;             // 途中で新しい取得が始まったら保存しない
                 // キャッシュ永続化（古い期間は最新8件に間引き）
                 try {
@@ -4377,10 +4382,13 @@
                 setZkProgress({ done: 0, total: tasks.length });
                 // レート制限(60/分)対策: 429/5xx はバックオフして再試行（取りこぼしで0になるのを防ぐ）
                 const zkGet = async (shopId, from, to) => {
-                    for (let a = 0; a < 6; a++) {
+                    for (let a = 0; a < 8; a++) {
                         try {
                             const res = await fetch(`${SALONONE_API_URL}?resource=sales/summary&from=${from}&to=${to}&shop_id=${shopId}`);
-                            if (res.status === 429 || res.status >= 500) { await new Promise(r => setTimeout(r, 1000 * Math.pow(1.8, a))); continue; }
+                            if (res.status === 429 || res.status >= 500) {
+                                const ra = Number(res.headers.get('retry-after')) || 0;
+                                await new Promise(r => setTimeout(r, ra > 0 ? Math.min(ra, 30) * 1000 + 300 : Math.min(1000 * Math.pow(1.8, a), 8000))); continue;
+                            }
                             if (!res.ok) return null;
                             return await res.json().catch(() => null);
                         } catch (e) { await new Promise(r => setTimeout(r, 1000 * Math.pow(1.8, a))); }
@@ -4441,15 +4449,20 @@
                     // レート制限(60/分)対策: 429/rate_limited/5xx はバックオフ再試行。
                     // 全店表示で店舗別売上の一括取得と競合しても、サマリ/マーケが取りこぼしで失敗しないようにする。
                     const soFetchRetry = async (url) => {
-                        for (let a = 0; a < 5; a++) {
+                        for (let a = 0; a < 8; a++) {
                             try {
                                 const r = await fetch(url);
                                 const json = await r.json().catch(() => ({}));
                                 const limited = r.status === 429 || r.status >= 500 || (json && json.error && json.error.code === 'rate_limited');
-                                if (limited && a < 4) { await new Promise(res => setTimeout(res, 900 * Math.pow(1.8, a))); continue; }
+                                if (limited && a < 7) {
+                                    // レート制限枠が空くまで待つ（Retry-Afterを尊重・最大30秒）。無ければ指数バックオフ。
+                                    const ra = Number(r.headers.get('retry-after')) || 0;
+                                    const waitMs = ra > 0 ? Math.min(ra, 30) * 1000 + 300 : Math.min(900 * Math.pow(1.8, a), 8000);
+                                    await new Promise(res => setTimeout(res, waitMs)); continue;
+                                }
                                 return { status: r.status, json };
                             } catch (e) {
-                                if (a < 4) { await new Promise(res => setTimeout(res, 900 * Math.pow(1.8, a))); continue; }
+                                if (a < 7) { await new Promise(res => setTimeout(res, Math.min(1500 * Math.pow(1.6, a), 8000))); continue; }
                                 return { status: 0, json: {} };
                             }
                         }
@@ -4469,14 +4482,14 @@
                     const allShopIds = (soShops || []).map(s => String(s.id)).filter(Boolean);
                     const fetchResource = async (resource, extra = {}) => {
                         if (ids.length) {
-                            return mapPool(ids, id => soDoOne(resource, id, extra), 5);
+                            return mapPool(ids, id => soDoOne(resource, id, extra), 3);
                         }
                         // 全店: まずブランド全店(shop_id無し)で試す。SalonOneが invalid_request 等で拒否する場合は
                         // 全店をper-shopで取得してマージ（soMergeSummary/正規化が複数店を合算）。
                         const brand = await soDoOne(resource, '', extra);
                         const brandOk = brand && brand.status === 200 && brand.json && brand.json.data && !brand.json.error;
                         if (brandOk || !allShopIds.length) return [brand];
-                        return mapPool(allShopIds, id => soDoOne(resource, id, extra), 5);
+                        return mapPool(allShopIds, id => soDoOne(resource, id, extra), 3);
                     };
 
                     const salesRes = await fetchResource('sales/summary');
@@ -4523,7 +4536,9 @@
                         const code = (err && err.code) || `HTTP ${first.status || '?'}`;
                         const eid = err && err.error_id ? `／ID: ${err.error_id}` : '';
                         setSoSummary(null);
-                        setSoError(`売上サマリの取得に失敗しました（SalonOne側: ${code}${eid}）。マーケ分析など取得できたデータは表示しています。`);
+                        setSoError(code === 'rate_limited'
+                            ? 'SalonOneが混雑しています（アクセス集中）。少し待つと自動で表示されます。すぐ見たい場合は「再試行」を押してください。'
+                            : `売上サマリの取得に失敗しました（SalonOne側: ${code}${eid}）。マーケ分析など取得できたデータは表示しています。`);
                     }
                     setSoLastFetch(new Date());
 
@@ -12824,11 +12839,18 @@
                                                     </PortalDropdown>
                                                 </div>
                                                 {/* 期間フィルタ */}
+                                                {/* 期間フィルタ: iOSの和暦(令和)表示を避けるため、ネイティブ入力の文字は透明にして西暦ラベルを重ねる */}
                                                 <div className="flex items-center gap-1.5 px-2 md:px-3 py-1.5 md:py-2 bg-slate-50 border border-slate-200 rounded-xl">
                                                     <Calendar size={16} className="text-slate-400 flex-shrink-0" />
-                                                    <input type="date" value={soFrom} max={soTo} onChange={e => setSoFrom(e.target.value)} className="bg-transparent text-xs md:text-sm font-bold text-slate-700 focus:outline-none w-[120px]" />
+                                                    <div className="relative w-[110px]">
+                                                        <input type="date" value={soFrom} max={soTo} onChange={e => setSoFrom(e.target.value)} className="bg-transparent text-xs md:text-sm font-bold focus:outline-none w-full" style={{ color: 'transparent', WebkitTextFillColor: 'transparent' }} />
+                                                        <span className="absolute inset-0 flex items-center text-xs md:text-sm font-bold text-slate-700 pointer-events-none">{String(soFrom).replace(/-/g, '/')}</span>
+                                                    </div>
                                                     <span className="text-slate-400 font-bold">〜</span>
-                                                    <input type="date" value={soTo} min={soFrom} onChange={e => setSoTo(e.target.value)} className="bg-transparent text-xs md:text-sm font-bold text-slate-700 focus:outline-none w-[120px]" />
+                                                    <div className="relative w-[110px]">
+                                                        <input type="date" value={soTo} min={soFrom} onChange={e => setSoTo(e.target.value)} className="bg-transparent text-xs md:text-sm font-bold focus:outline-none w-full" style={{ color: 'transparent', WebkitTextFillColor: 'transparent' }} />
+                                                        <span className="absolute inset-0 flex items-center text-xs md:text-sm font-bold text-slate-700 pointer-events-none">{String(soTo).replace(/-/g, '/')}</span>
+                                                    </div>
                                                 </div>
                                                 <button onClick={() => fetchSalonOneData(true)}
                                                     className="p-3 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-all shadow-lg flex items-center gap-2 font-black text-sm uppercase tracking-tighter disabled:opacity-50"

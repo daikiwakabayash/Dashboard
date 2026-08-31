@@ -36,7 +36,7 @@ if (m) {
 writeFileSync(`${OUT}/index.html`, html);
 
 // 静的アセットを public/ へコピー（HTMLと画像）
-for (const f of ['owner.html', 'logo.png', 'Naoru_landscape.png']) {
+for (const f of ['owner.html', 'logo.png', 'Naoru_landscape.png', 'mascot.png']) {
   if (existsSync(f)) copyFileSync(f, `${OUT}/${f}`);
 }
 console.log('[precompile] output ready in public/');

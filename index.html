@@ -1780,7 +1780,7 @@
                     }
                     const data = j.data || j;
                     const bs = (data.by_staff || data.byStaff || []);
-                    const list = bs.map(s => ({ id: String(s.staff_id ?? s.id ?? ''), name: s.staff_name || s.name || '', gross: Number(s.gross_sales ?? s.gross ?? 0) }))
+                    const list = bs.map(s => ({ id: String(s.staff_id ?? s.id ?? ''), name: s.staff_name || s.name || '', gross: Number(s.digest_sales ?? s.gross_sales ?? s.gross ?? 0) }))
                         .filter(s => s.id && s.gross > 0)
                         .sort((a, b) => b.gross - a.gross);
                     // 成功時のみキャッシュ（空応答=レート制限失敗は保存しない）
@@ -1969,12 +1969,12 @@
                         (s.by_day || []).forEach(d => (d.payment_breakdown || []).forEach(p => { pay[p.name] = (pay[p.name] || 0) + soNum(p, 'amount'); }));
                         const pick = (...keys) => keys.reduce((a, k) => a + Object.entries(pay).filter(([n]) => n.includes(k)).reduce((x, [, v]) => x + v, 0), 0);
                         salon = {
-                            gross: soNum(s, 'gross_sales'),
+                            gross: soNum(s, 'digest_sales', 'gross_sales'), // 入金ベース(会計済み売上)
                             cash: pick('現金'),
                             square: Object.entries(pay).filter(([n]) => n.includes('スクエア')).reduce((a, [, v]) => a + v, 0),
                             hpb: pick('HPBポイント', 'ホットペッパー'),
                             payments: Object.entries(pay).map(([name, amount]) => ({ name, amount })).sort((a, b) => b.amount - a.amount),
-                            byStaff: (s.by_staff || []).map(st => ({ id: String(st.staff_id ?? st.id ?? ''), name: st.staff_name || st.name || '', gross: soNum(st, 'gross_sales', 'grossSales', 'gross') })),
+                            byStaff: (s.by_staff || []).map(st => ({ id: String(st.staff_id ?? st.id ?? ''), name: st.staff_name || st.name || '', gross: soNum(st, 'digest_sales', 'gross_sales', 'grossSales', 'gross') })),
                         };
                     } else { salon = { error: soJson?.error?.code || `HTTP ${soRes.status}` }; }
                 } catch (e) { salon = { error: e.message }; }
@@ -3867,7 +3867,7 @@
             const zkTherResolved = (name, ym, base) => { const ov = zkTherOverrides[zkTherKey(name, ym)]; return (ov != null) ? Number(ov) : (Number(base) || 0); };
             // 全体管理シートCSVの人数（JP店舗）。無ければnull。
             const zkCsvTherapist = (name, ym) => { const arr = (ZK_FIXED_2026.months[ym] || {})[zkCanonName(name)]; return (arr && arr[2] != null) ? Number(arr[2]) : null; };
-            const SB_CACHE_KEY = 'so_shopbreak_cache_v1';
+            const SB_CACHE_KEY = 'so_shopbreak_cache_v2_digest';
             const loadShopBreakdown = async (opts = {}) => {
                 const forceAll = !!opts.force;
                 const reqId = ++soShopReqRef.current;
@@ -4165,7 +4165,8 @@
                 const media = Object.entries(mediaMap).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
                 const payments = Object.entries(payMap).map(([name, amount]) => ({ name, amount })).sort((a, b) => b.amount - a.amount);
                 return {
-                    grossSales: soNum(s, 'gross_sales', 'grossSales'),
+                    // 売上＝会計済み売上(digest＝入金ベース)を採用。予測を含む粗売上(gross)はフォールバックのみ。
+                    grossSales: soNum(s, 'digest_sales', 'gross_sales', 'grossSales'),
                     consumedSales: soNum(s, 'consumed_sales', 'consumedSales'),
                     digestSales: soNum(s, 'digest_sales', 'digestSales'),
                     newSales: soNum(s, 'new_customer_sales', 'newCustomerSales'),
@@ -4178,7 +4179,7 @@
                     refund: soNum(s, 'refund_amount', 'refundAmount'),
                     byDay: byDayRaw.map(d => ({
                         date: d.date || d.day || '',
-                        gross: soNum(d, 'gross_sales', 'grossSales', 'gross'),
+                        gross: soNum(d, 'digest_sales', 'gross_sales', 'grossSales', 'gross'), // 入金ベース(digest優先)
                         digest: soNum(d, 'digest_sales', 'digestSales'),
                         consumed: soNum(d, 'consumed_sales', 'consumedSales', 'consumed'),
                         newSales: soNum(d, 'new_sales'),
@@ -4192,7 +4193,7 @@
                     byStaff: byStaffRaw.map(st => ({
                         id: String(st.staff_id ?? st.id ?? st.staffId ?? ''),
                         name: st.staff_name || st.name || st.staffName || '(不明)',
-                        gross: soNum(st, 'gross_sales', 'grossSales', 'gross'),
+                        gross: soNum(st, 'digest_sales', 'gross_sales', 'grossSales', 'gross'), // 入金ベース(digest優先)
                         refund: soNum(st, 'refund_amount', 'refundAmount'),
                         consumed: soNum(st, 'consumed_sales', 'consumedSales', 'consumed'),
                         digest: soNum(st, 'digest_sales', 'digestSales', 'digest'),
@@ -4321,7 +4322,7 @@
             //   総売上=gross_sales（消化ではなく総額）／カルテ枚数=来店数／新規数=新規来店数／
             //   セラピスト数=その月に売上(gross)が1円でも発生した担当者（ヘルプ/楽トレ等は除外）。
             //   金額はSalonOneの最小通貨単位（JPYは円、AUD/MYRはセント）で保持し、表示時に通貨係数で割る。
-            const ZK_CACHE_KEY = 'naoru_zk_cache_v1';
+            const ZK_CACHE_KEY = 'naoru_zk_cache_v2_digest';
             const loadZenkanri = async (year = zkYear, opts = {}) => {
                 const forceAll = !!opts.force; // 「再取得」ボタン＝全月取り直し
                 const shopList = (soShops && soShops.length) ? soShops : [];
@@ -4368,16 +4369,16 @@
                 // 取得対象＝「未確定月」または「キャッシュ未取得の確定月」または force。確定済み＆キャッシュ有りはスキップ。
                 // さらに、直近（10分以内）に取得済みなら未確定月も再取得しない（毎回全件取り直すのを防ぐ）。
                 const stampFresh = !forceAll && cacheAll._stamp && cacheAll._stamp[year] && (Date.now() - cacheAll._stamp[year] < 10 * 60 * 1000);
+                // 取得対象: 当月のみ（過去月は取得済みなら固定＝再取得しない・未取得のみ初回取得）。翌月は取得しない。
                 const tasks = [];
                 shops.forEach(sh => months.forEach(ym => {
-                    if (ym > nowYM) return;                       // 未来月はスキップ
+                    if (ym > nowYM) return;                       // 翌月・未来は取得しない
                     if (fixedHas(sh.name, ym)) return;            // 公式CSVで確定済み→SalonOne取得不要
                     const has = sh.months[ym] != null;
-                    if (forceAll) { tasks.push({ sh, ym }); return; }
-                    if (!has) { tasks.push({ sh, ym }); return; } // 未取得は必ず取得
-                    if (isConfirmed(ym)) return;                  // 確定済み＆取得済み→スキップ
-                    if (stampFresh) return;                       // 未確定でも直近取得済みなら再取得しない
-                    tasks.push({ sh, ym });                       // 未確定＆古い→再取得
+                    if (forceAll) { tasks.push({ sh, ym }); return; }   // 手動「更新」＝全部再取得
+                    if (!has) { tasks.push({ sh, ym }); return; }       // 未取得は初回のみ取得
+                    // 取得済み: 当月だけ10分ごとに更新。前月以前は固定（再取得しない）＝高速化。
+                    if (ym === nowYM && !stampFresh) tasks.push({ sh, ym });
                 }));
                 setZkProgress({ done: 0, total: tasks.length });
                 // レート制限(60/分)対策: 429/5xx はバックオフして再試行（取りこぼしで0になるのを防ぐ）
@@ -4408,7 +4409,7 @@
                                 const r = await zkGet(sh.id, from, to);
                                 const raw = (r && r.data && !Array.isArray(r.data)) ? r.data : ((r && r.data && r.data[0]) || null);
                                 if (raw) {
-                                    const gross = Number(raw.gross_sales) || 0;                       // 総売上（最小通貨単位）
+                                    const gross = Number(raw.digest_sales != null ? raw.digest_sales : raw.gross_sales) || 0; // 総売上＝会計済み売上(digest＝入金ベース)。無ければgross
                                     const karte = Number(raw.gross_count) || 0;                       // カルテ枚数＝会計数（来店未計上でも計上される）
                                     const newc = Number(raw.new_visit_count != null ? raw.new_visit_count : raw.new_count) || 0; // 新規来店
                                     const bs = raw.by_staff || raw.byStaff || [];

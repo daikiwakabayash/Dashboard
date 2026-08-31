@@ -2208,8 +2208,8 @@
             const [planGoals, setPlanGoals] = useState(() => {
                 try {
                     const saved = localStorage.getItem('naoru_plan_goals');
-                    return saved ? JSON.parse(saved) : { newCustomers: 50, sales: 250, enrollRate: 50, cpaTarget: 10000 };
-                } catch { return { newCustomers: 50, sales: 250, enrollRate: 50, cpaTarget: 10000 }; }
+                    return saved ? JSON.parse(saved) : { newCustomers: 50, sales: 250, enrollRate: 50, cpaTarget: 5000 };
+                } catch { return { newCustomers: 50, sales: 250, enrollRate: 50, cpaTarget: 5000 }; }
             });
             const [planSelectedBranch, setPlanSelectedBranch] = useState('');
             const [planMessages, setPlanMessages] = useState([]);
@@ -8658,6 +8658,12 @@
                     'CPA: ¥' + a.cpa.toLocaleString(),
                     '広告費合計: ¥' + a.totalAdSpend.toLocaleString(),
                     '',
+                    '【先月（' + (a.latestMonth || '') + '）目標対結果サマリ】',
+                    '新規: 目標' + eg.newCustomers + '名 / 実績' + a.totalNewCount + '名 → ' + (a.totalNewCount >= eg.newCustomers ? '達成' : '未達（あと' + (eg.newCustomers - a.totalNewCount) + '名）'),
+                    '売上: 目標' + eg.sales + '万円 / 実績' + Math.round(a.totalSales / 10000) + '万円 → ' + (a.totalSales >= goalSalesYen ? '達成' : '未達（' + Math.round(salesGap / 10000) + '万円不足）'),
+                    '入会率: 目標' + eg.enrollRate + '% / 実績' + a.enrollRate + '% → ' + (a.enrollRate >= eg.enrollRate ? '達成' : '未達（あと' + (eg.enrollRate - a.enrollRate) + 'pt）'),
+                    'CPA: 目標¥' + eg.cpaTarget.toLocaleString() + ' / 実績¥' + a.cpa.toLocaleString() + ' → ' + (a.cpa > 0 && a.cpa <= eg.cpaTarget ? '達成' : '未達'),
+                    '',
                     '【媒体別パフォーマンス（' + a.branchName + '）】',
                 ];
                 a.mediaBreakdown.forEach(m => {
@@ -8928,12 +8934,17 @@
                                 <p className="text-[10px] text-slate-400 mt-1 font-bold tracking-widest uppercase">Dashboard</p>
                                 <p className="text-xs text-slate-400 mt-2">経営ダッシュボードにログイン</p>
                             </div>
-                            <form onSubmit={handleLogin} className="space-y-4" autoComplete="on">
+                            {/* ブラウザのパスワード管理（保存・漏洩チェックのポップアップ）を出さないため、
+                                認証情報フォームとして認識させない（autoComplete=off・非標準name・new-password）。
+                                共有IDのため保存/漏洩警告は不要。 */}
+                            <form onSubmit={handleLogin} className="space-y-4" autoComplete="off">
                                 <div>
                                     <input
                                         type="text"
-                                        name="username"
-                                        autoComplete="username"
+                                        name="naoru-login-id"
+                                        autoComplete="off"
+                                        data-1p-ignore
+                                        data-lpignore="true"
                                         value={authId}
                                         onChange={e => setAuthId(e.target.value)}
                                         placeholder="ID（氏名／管理者は空欄でOK）"
@@ -8944,8 +8955,10 @@
                                 <div>
                                     <input
                                         type="password"
-                                        name="password"
-                                        autoComplete="current-password"
+                                        name="naoru-login-pw"
+                                        autoComplete="new-password"
+                                        data-1p-ignore
+                                        data-lpignore="true"
                                         value={authPassword}
                                         onChange={e => setAuthPassword(e.target.value)}
                                         placeholder="パスワードを入力"
@@ -15207,18 +15220,18 @@
                                         {/* クイックアクション */}
                                         <div className="flex flex-wrap gap-1.5 mb-3">
                                             {[
-                                                planSelectedBranch + 'で新規' + eg.newCustomers + '名達成するための施策は？',
-                                                planSelectedBranch + 'の売上' + eg.sales + '万円へのアクションプランを作って',
-                                                planSelectedBranch + 'の媒体別CPAを分析して改善提案して',
-                                                planSelectedBranch + 'と他店舗を比較して強み・弱みを教えて',
-                                                planSelectedBranch + 'の来月の事業計画を立てて',
-                                            ].map((q, i) => (
+                                                { label: planSelectedBranch + 'で新規' + eg.newCustomers + '名達成するための施策は？', prompt: planSelectedBranch + 'で新規' + eg.newCustomers + '名達成するための施策は？' },
+                                                { label: planSelectedBranch + 'の売上' + eg.sales + '万円へのアクションプランを作って', prompt: planSelectedBranch + 'の売上' + eg.sales + '万円へのアクションプランを作って' },
+                                                { label: planSelectedBranch + 'の媒体別CPAを分析して改善提案して', prompt: planSelectedBranch + 'の媒体別CPAを分析して改善提案して（CPA目標は5,000円が基準）' },
+                                                { label: planSelectedBranch + 'と他店舗を比較して強み・弱みを教えて', prompt: planSelectedBranch + 'とNAORU他店舗を比較して強み・弱みを教えてください。売上・新規数・入会率・CPAを店舗ごとの数字で示し、自店の順位も明記してください。' },
+                                                { label: planSelectedBranch + 'の来月の事業計画を立てて', prompt: planSelectedBranch + 'の来月の事業計画を立ててください。次の順番でお願いします。①先月の目標に対する結果の振り返り（新規数・売上・入会率・CPAを目標対比で。CPA目標は5,000円が基準）②NAORU他店舗との比較（売上・新規数・入会率・CPAを店舗ごとの数字で提示し、自店の順位と強み・弱みを明確に）③それを踏まえた来月の目標と、媒体別の具体的な施策。数字は必ず店舗ごとに出してください。' },
+                                            ].map((item, i) => (
                                                 <button key={i}
-                                                    onClick={() => handlePlanSubmit(q)}
+                                                    onClick={() => handlePlanSubmit(item.prompt)}
                                                     disabled={planLoading}
                                                     className="text-xs bg-brand-50 text-brand-600 font-bold px-2.5 py-1.5 rounded-full hover:bg-brand-100 transition-colors border border-brand-200 disabled:opacity-50"
                                                 >
-                                                    <Lightbulb size={11} className="inline mr-0.5" />{q}
+                                                    <Lightbulb size={11} className="inline mr-0.5" />{item.label}
                                                 </button>
                                             ))}
                                         </div>
@@ -16365,7 +16378,8 @@
 
                     </div>{/* ← メインコンテンツ(flex-1)の閉じタグ。全タブをflex-1内に収める（返金明細書/手当等が右に寄るのを修正） */}
 
-                    {/* チャットアシスタント */}
+                    {/* チャットアシスタント（AIアシスタントはroot専用・オーナー/スタッフには非表示） */}
+                    {authState.root && (
                     <div className={`fixed bottom-6 right-6 z-50 chat-container${chatOpen ? ' chat-open' : ''}`}>
                         {/* チャットパネル */}
                         {chatOpen && (
@@ -16531,6 +16545,7 @@
                             )}
                         </button>
                     </div>
+                    )}
                 </div>
             );
         };

@@ -128,10 +128,11 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
 ## サンクスギフト（感謝の投票）
 スタッフ同士が毎月「お世話になった1人」に感謝コメントを送る仕組み。特典付与の基礎データにする。
 - **タブの表示**: `staff`（セラピスト）と `root` のみ表示（`thanksOnly`）。owner には出さない。staff=投票＋自分がもらった感謝の閲覧／root=全体集計・ランキング。
-- **投票ルール**: 1人につき**月1票**（複数人不可・自分不可・1票=1ポイント）。同店/他店どちらにも送れる。**記名**（誰から・内容が相手に見える）。
+- **投票ルール**: 1人につき**月1票**（複数人不可・自分不可・1票=1ポイント）。同店/他店どちらにも送れる。
+- **匿名性**: 受け取った側は**匿名**で表示（誰から・どの店舗かは出さない／件数と内容のみ）。root（本部）は集計・ランキングで送信者も見える（特典付与のため）。送った本人は**送信履歴（誰に・いつ・内容・編集/取消履歴）**を確認できる（`log` 追記のみ）。
 - **投票期間**: 毎月**1日00:01〜2日23:59（JST）**の2日間のみ。この期間の投票は**前月（対象月）**への感謝として記録（例: 9/1〜2の投票＝8月分）。UIとサーバー（`api/plan-store` の `type=thanksgift`）の両方で期間・対象月・自分不可を強制。
 - **相手の候補**: 「店舗を選択→その店舗の対象月に**売上>0**のスタッフ」を表示（SalonOne `sales/summary?shop_id=…` の `by_staff` を店舗選択時に1回取得）。自分は除外。
-- **保存**: 共有ストア（`/api/plan-store?type=thanksgift`・KV/Supabase/GAS）に `{votes:[{period,fromStaffId,fromStaffName,fromShop,toStaffId,toStaffName,toShop,comment,createdAt}]}` を月別に蓄積。`id=対象月__投票者ID` で1人1票をupsert。
+- **保存**: 共有ストア（`/api/plan-store?type=thanksgift`・KV/Supabase/GAS）に `{votes:[...], log:[...]}` を保存。`votes` は現状（`id=対象月__投票者ID` で1人1票upsert）、`log` は送信/編集/取消の追記のみ履歴（送信履歴表示用・上限3000件）。
 - ロジックは `lib/thanksgift.js`（`getVotingState`/`validateVote`/`upsertVote`/`tallyRanking`/`receivedFor`）に分離しテスト済み。フロントは投票状態をサーバーGETの `votingState` から受け取る。
 
 ## 開発ルール

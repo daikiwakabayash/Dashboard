@@ -1544,7 +1544,7 @@
             };
 
             // ── サンクスギフト（感謝の投票）── スタッフが月1票、前月(対象月)にお世話になった1人へ感謝コメントを送る
-            const [tgData, setTgData] = useState({ votes: [], votingState: null, test: { open: false, period: '' }, configured: true, loaded: false });
+            const [tgData, setTgData] = useState({ votes: [], log: [], votingState: null, test: { open: false, period: '' }, configured: true, loaded: false });
             const [tgForm, setTgForm] = useState({ shopId: '', toStaffId: '', comment: '' });
             const [tgRoster, setTgRoster] = useState({ shopId: '', loading: false, list: [] }); // 選択店舗の対象月「売上>0」スタッフ
             const [tgMsg, setTgMsg] = useState('');
@@ -1554,7 +1554,7 @@
             const [tgShopQuery, setTgShopQuery] = useState(''); // サンクスギフト相手店舗の検索
             const tgMonthLabel = (ym) => { if (!ym) return ''; const [y, m] = String(ym).split('-'); return `${y}年${Number(m)}月`; };
             const tgLoad = async () => {
-                try { const r = await fetch('/api/plan-store?type=thanksgift'); const j = await r.json().catch(() => ({})); setTgData({ votes: Array.isArray(j.votes) ? j.votes : [], votingState: j.votingState || null, test: j.test || { open: false, period: '' }, configured: j.configured !== false, loaded: true }); }
+                try { const r = await fetch('/api/plan-store?type=thanksgift'); const j = await r.json().catch(() => ({})); setTgData({ votes: Array.isArray(j.votes) ? j.votes : [], log: Array.isArray(j.log) ? j.log : [], votingState: j.votingState || null, test: j.test || { open: false, period: '' }, configured: j.configured !== false, loaded: true }); }
                 catch { setTgData(d => ({ ...d, loaded: true })); }
             };
             // テストモード切替（root専用・期間外でも指定月を受付にできる）
@@ -14755,10 +14755,11 @@
                                     </div>
                                 )}
 
-                                {/* ── もらった感謝（staff本人向け） ── */}
+                                {/* ── もらった感謝（staff本人向け・匿名）── 誰から・どの店舗かは表示しない。件数と内容のみ。 */}
                                 {tgData.loaded && authRole === 'staff' && myStaffId && (
                                     <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6">
-                                        <h2 className="text-base font-black flex items-center gap-2 mb-3"><Heart size={18} className="text-rose-500" />あなたがもらった感謝 <span className="text-xs text-slate-400">（合計 {received.length} 票）</span></h2>
+                                        <h2 className="text-base font-black flex items-center gap-2 mb-1"><Heart size={18} className="text-rose-500" />あなたがもらった感謝 <span className="text-xs text-slate-400">（合計 {received.length} 票）</span></h2>
+                                        <p className="text-[11px] text-slate-400 font-bold mb-3">匿名です（誰から・どの店舗かは表示されません）。届いた件数と内容のみ確認できます。</p>
                                         {received.length === 0 && <div className="text-sm font-bold text-slate-400 py-4 text-center">まだ感謝は届いていません。</div>}
                                         <div className="space-y-4">
                                             {receivedPeriods.map(p => (
@@ -14767,8 +14768,7 @@
                                                     <div className="space-y-2">
                                                         {received.filter(v => v.period === p).map((v, i) => (
                                                             <div key={i} className="bg-rose-50/60 border border-rose-100 rounded-xl p-3">
-                                                                <div className="text-[11px] font-black text-rose-700">{v.fromStaffName}{v.fromShop ? `（${v.fromShop}）` : ''} さんより</div>
-                                                                <div className="text-sm font-bold text-slate-700 mt-1 whitespace-pre-wrap">{v.comment}</div>
+                                                                <div className="text-sm font-bold text-slate-700 whitespace-pre-wrap">{v.comment}</div>
                                                             </div>
                                                         ))}
                                                     </div>
@@ -14777,6 +14777,40 @@
                                         </div>
                                     </div>
                                 )}
+
+                                {/* ── 自分が送った感謝（送信履歴・編集履歴つき）── */}
+                                {tgData.loaded && authRole === 'staff' && myStaffId && (() => {
+                                    const myLog = (tgData.log || []).filter(l => String(l.fromStaffId) === myStaffId)
+                                        .sort((a, b) => (b.period || '').localeCompare(a.period || '') || (b.createdAt || '').localeCompare(a.createdAt || ''));
+                                    const sentPeriods = [...new Set(myLog.map(l => l.period))];
+                                    const fmtTs = (s) => { try { const d = new Date(s); return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; } catch { return s || ''; } };
+                                    return (
+                                    <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6">
+                                        <h2 className="text-base font-black flex items-center gap-2 mb-1"><Gift size={18} className="text-rose-500" />あなたが送った感謝（履歴）</h2>
+                                        <p className="text-[11px] text-slate-400 font-bold mb-3">いつ・誰に・どの内容で送ったかの記録です（編集した場合は履歴も残ります）。</p>
+                                        {myLog.length === 0 && <div className="text-sm font-bold text-slate-400 py-4 text-center">まだ送った感謝はありません。</div>}
+                                        <div className="space-y-4">
+                                            {sentPeriods.map(p => (
+                                                <div key={p}>
+                                                    <div className="text-xs font-black text-slate-500 mb-2">{tgMonthLabel(p)}分</div>
+                                                    <div className="space-y-2">
+                                                        {myLog.filter(l => l.period === p).map((l, i) => (
+                                                            <div key={l.id || i} className="bg-slate-50 border border-slate-200 rounded-xl p-3">
+                                                                <div className="flex items-center gap-2 flex-wrap text-[11px] font-black">
+                                                                    <span className={`px-1.5 py-0.5 rounded ${l.action === 'delete' ? 'bg-slate-200 text-slate-500' : l.action === 'edit' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{l.action === 'delete' ? '取消' : l.action === 'edit' ? '編集' : '送信'}</span>
+                                                                    {l.action !== 'delete' && <span className="text-slate-700">{l.toStaffName}{l.toShop ? `（${l.toShop}）` : ''} さんへ</span>}
+                                                                    <span className="text-slate-400 font-bold ml-auto">{fmtTs(l.createdAt)}</span>
+                                                                </div>
+                                                                {l.action !== 'delete' && l.comment && <div className="text-sm font-bold text-slate-700 mt-1 whitespace-pre-wrap">{l.comment}</div>}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    );
+                                })()}
 
                                 {/* ── 本部/root：全体集計・ランキング ── */}
                                 {tgData.loaded && isRoot && (

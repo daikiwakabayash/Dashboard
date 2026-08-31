@@ -195,6 +195,7 @@ export default async function handler(req, res) {
     try {
       const cur = (await blobGet(THANKSGIFT_KEY, hasKV, hasSB, gas)) || {};
       const votes = Array.isArray(cur.votes) ? cur.votes : [];
+      const log = Array.isArray(cur.log) ? cur.log : []; // 送信履歴（追記のみ・編集履歴を残す）
       const test = (cur.test && typeof cur.test === 'object') ? cur.test : { open: false, period: '' };
       // テストモード: root が任意の対象月を「受付中」にできる（期間外テスト用）。通常は期間ロジックに従う。
       const base = getVotingState();
@@ -202,14 +203,14 @@ export default async function handler(req, res) {
         ? { ...base, open: true, targetMonth: String(test.period), test: true }
         : { ...base, test: false };
       if (req.method === 'GET') {
-        return res.status(200).json({ votes, votingState: state, test, configured: true });
+        return res.status(200).json({ votes, log, votingState: state, test, configured: true });
       }
       const body = req.body || {};
       const action = body.action;
       // テストモードの切替（root用UIから。期間外でも指定月を受付にできる）
       if (action === 'settest') {
         const nextTest = { open: !!body.open, period: String(body.period || '') };
-        await blobSet(THANKSGIFT_KEY, { votes, test: nextTest }, hasKV, hasSB, gas);
+        await blobSet(THANKSGIFT_KEY, { votes, log, test: nextTest }, hasKV, hasSB, gas);
         const st2 = (nextTest.open && /^\d{4}-\d{2}$/.test(nextTest.period))
           ? { ...base, open: true, targetMonth: nextTest.period, test: true }
           : { ...base, test: false };
@@ -230,7 +231,10 @@ export default async function handler(req, res) {
           createdAt: new Date().toISOString(),
         };
         const next = upsertVote(votes, rec);
-        await blobSet(THANKSGIFT_KEY, { votes: next, test }, hasKV, hasSB, gas);
+        // 送信履歴に追記（編集も1件ずつ残す）。上限3000件でリングバッファ。
+        const already = votes.some(x => x && x.id === `${rec.period}__${rec.fromStaffId}`);
+        const nextLog = [...log, { ...rec, action: already ? 'edit' : 'submit', id: `${rec.period}__${rec.fromStaffId}__${Date.now()}` }].slice(-3000);
+        await blobSet(THANKSGIFT_KEY, { votes: next, log: nextLog, test }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true, id: `${rec.period}__${rec.fromStaffId}` });
       }
       if (action === 'delete' && body.period && body.fromStaffId) {
@@ -238,7 +242,8 @@ export default async function handler(req, res) {
           return res.status(200).json({ ok: false, error: 'closed', votingState: state });
         }
         const next = removeVote(votes, String(body.period), String(body.fromStaffId));
-        await blobSet(THANKSGIFT_KEY, { votes: next, test }, hasKV, hasSB, gas);
+        const nextLog = [...log, { period: String(body.period), fromStaffId: String(body.fromStaffId), action: 'delete', createdAt: new Date().toISOString(), id: `${body.period}__${body.fromStaffId}__${Date.now()}` }].slice(-3000);
+        await blobSet(THANKSGIFT_KEY, { votes: next, log: nextLog, test }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true });
       }
       return res.status(400).json({ ok: false, error: 'invalid thanksgift action' });

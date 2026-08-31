@@ -20,6 +20,7 @@ import {
   buildUpstreamUrl,
   getEndpoint,
   listResources,
+  pickAuthBody,
   SalonOneValidationError,
 } from '../lib/salonone.js';
 
@@ -31,17 +32,22 @@ const HEADER_NAME = 'X-SalonOne-Api-Key';
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') return res.status(200).end();
-  // 上流も書き込みを拒否する。プロキシでも GET のみ許可する。
-  if (req.method !== 'GET') {
-    return res.status(405).json({ error: { code: 'method_not_allowed', message: 'GET only' } });
+  // データ取得は GET のみ。POST はサロンワン ユーザー認証(auth/*)に限り許可する。
+  if (req.method !== 'GET' && req.method !== 'POST') {
+    return res.status(405).json({ error: { code: 'method_not_allowed', message: 'GET or POST(auth) only' } });
   }
 
   const apiKey = process.env.SALONONE_API_KEY;
   const base = process.env.SALONONE_API_BASE || ANALYTICS_BASE;
+  // 連携先ユーザーのトークン（Bearer）。あれば上流へ透過し「誰として見るか」を伝える。
+  const bearer = (() => {
+    const h = req.headers['authorization'] || req.headers['Authorization'] || '';
+    return typeof h === 'string' && /^Bearer\s+/i.test(h) ? h : '';
+  })();
 
   if (!apiKey) {
     return res.status(500).json({
@@ -61,6 +67,31 @@ export default async function handler(req, res) {
 
   const { resource, diagnostic, ...rest } = req.query;
 
+  // ── サロンワン ユーザー認証(auth/*): POSTで本文を転送 ──
+  const ep = getEndpoint(resource);
+  if (ep && ep.kind === 'auth') {
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: { code: 'method_not_allowed', message: `${resource} requires POST` } });
+    }
+    const url = `${base.replace(/\/+$/, '')}${ep.path}`;
+    const payload = pickAuthBody(ep, req.body || {});
+    try {
+      // logout はトークンの破棄なので Bearer が必要。login/refresh は本文で完結。
+      const { status, headers, data } = await postSalonOne(url, apiKey, payload, resource === 'auth/logout' ? bearer : '');
+      for (const name of RATE_LIMIT_HEADERS) { const v = headers.get(name); if (v != null) res.setHeader(name, v); }
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(status).json(data);
+    } catch (err) {
+      console.error('[salonone] auth proxy error:', err);
+      return res.status(502).json({ error: { code: 'upstream_error', message: err.message } });
+    }
+  }
+
+  // データ取得は GET のみ。
+  if (req.method !== 'GET') {
+    return res.status(405).json({ error: { code: 'method_not_allowed', message: 'GET only for data resources' } });
+  }
+
   let upstream;
   try {
     upstream = buildUpstreamUrl(resource, rest, base);
@@ -74,7 +105,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { status, headers, data } = await fetchSalonOne(upstream.url, apiKey);
+    const { status, headers, data } = await fetchSalonOne(upstream.url, apiKey, bearer);
 
     // レート制限ヘッダを透過（フロントが残数を把握できる）
     for (const name of RATE_LIMIT_HEADERS) {
@@ -100,21 +131,47 @@ export default async function handler(req, res) {
   }
 }
 
-// ── 上流へGETリクエスト（55秒タイムアウト） ──
-async function fetchSalonOne(url, apiKey) {
+// ── 上流へGETリクエスト（55秒タイムアウト。bearerがあればユーザー認証を透過） ──
+async function fetchSalonOne(url, apiKey, bearer = '') {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 55000);
   try {
+    const headers = { [HEADER_NAME]: apiKey, Accept: 'application/json' };
+    if (bearer) headers.Authorization = bearer;
     const response = await fetch(url, {
       method: 'GET',
-      headers: {
-        [HEADER_NAME]: apiKey,
-        Accept: 'application/json',
-      },
+      headers,
       redirect: 'follow',
       signal: controller.signal,
     });
     // 上流は常にJSONを返す想定。JSONでなければ生テキストを包む。
+    let data;
+    const text = await response.text();
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch (_) {
+      data = { error: { code: 'invalid_upstream_response', message: text.slice(0, 500) } };
+    }
+    return { status: response.status, headers: response.headers, data };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ── 上流へPOST（サロンワン ユーザー認証 auth/* 専用・20秒タイムアウト） ──
+async function postSalonOne(url, apiKey, payload, bearer = '') {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 20000);
+  try {
+    const headers = { [HEADER_NAME]: apiKey, Accept: 'application/json', 'Content-Type': 'application/json' };
+    if (bearer) headers.Authorization = bearer;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload || {}),
+      redirect: 'follow',
+      signal: controller.signal,
+    });
     let data;
     const text = await response.text();
     try {

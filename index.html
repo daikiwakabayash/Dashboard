@@ -772,6 +772,97 @@
           const qs = new URLSearchParams({ resource, ...params }).toString();
           return fetch(`${SALONONE_API_URL}?${qs}`).then(r => r.json());
         };
+
+        // ── サロンワン ユーザー認証(SSO)トークン管理 ──────────────────
+        // 連携先ユーザーのトークンを保持し、/api/salonone への全リクエストに
+        // 自動で Authorization: Bearer を付与する（下の fetch インターセプタ）。
+        // アクセストークンは60分・リフレッシュは14日。401時は自動更新して1回だけ再試行。
+        const soAuth = { at: '', rt: '', atExp: 0 };
+        try {
+          soAuth.at = localStorage.getItem('naoru_so_at') || '';
+          soAuth.rt = localStorage.getItem('naoru_so_rt') || '';
+          soAuth.atExp = Number(localStorage.getItem('naoru_so_atexp') || 0) || 0;
+        } catch {}
+        const soSetTokens = (d) => {
+          if (!d) return;
+          if (d.access_token) soAuth.at = d.access_token;
+          if (d.refresh_token) soAuth.rt = d.refresh_token;
+          if (d.access_expires_at) soAuth.atExp = Date.parse(d.access_expires_at) || 0;
+          try {
+            localStorage.setItem('naoru_so_at', soAuth.at);
+            if (soAuth.rt) localStorage.setItem('naoru_so_rt', soAuth.rt);
+            localStorage.setItem('naoru_so_atexp', String(soAuth.atExp || 0));
+          } catch {}
+        };
+        const soClearTokens = () => {
+          soAuth.at = ''; soAuth.rt = ''; soAuth.atExp = 0;
+          try { ['naoru_so_at', 'naoru_so_rt', 'naoru_so_atexp', 'naoru_so_user'].forEach(k => localStorage.removeItem(k)); } catch {}
+        };
+        const soHasSession = () => !!(soAuth.at || soAuth.rt);
+        // サロンワンのロール → NAORUロール（root/owner/staff）へ写像
+        const mapSalonOneRole = (role) => role === 'brand_admin' ? 'root' : (role === 'shop_admin' ? 'owner' : 'staff');
+
+        const _origFetch = window.fetch.bind(window);
+        let _soRefreshPromise = null;
+        const soDoRefresh = async () => {
+          if (!soAuth.rt) return false;
+          if (!_soRefreshPromise) {
+            _soRefreshPromise = (async () => {
+              try {
+                const r = await _origFetch(`${SALONONE_API_URL}?resource=auth/refresh`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ refresh_token: soAuth.rt }),
+                });
+                const j = await r.json().catch(() => ({}));
+                const d = j && j.data;
+                if (r.ok && d && d.access_token) { soSetTokens(d); return true; }
+              } catch {}
+              soClearTokens();
+              return false;
+            })();
+          }
+          const ok = await _soRefreshPromise; _soRefreshPromise = null; return ok;
+        };
+        window.fetch = async (input, init) => {
+          const url = typeof input === 'string' ? input : (input && input.url) || '';
+          const isSo = typeof url === 'string' && url.indexOf(SALONONE_API_URL) === 0;
+          if (!isSo) return _origFetch(input, init);
+          const isAuthEp = url.indexOf('resource=auth/') !== -1;
+          const withAuth = (opts) => (soAuth.at ? { ...(opts || {}), headers: { ...((opts || {}).headers || {}), Authorization: `Bearer ${soAuth.at}` } } : (opts || {}));
+          let resp = await _origFetch(input, withAuth(init));
+          // トークン期限切れ等は1回だけ更新→再試行（auth/* 自身は除く）
+          if (resp.status === 401 && !isAuthEp && soAuth.rt) {
+            let code = '';
+            try { code = (await resp.clone().json())?.error?.code || ''; } catch {}
+            if (code === 'invalid_token' || code === 'user_auth_required' || code === 'unauthorized') {
+              if (await soDoRefresh()) resp = await _origFetch(input, withAuth(init));
+            }
+          }
+          return resp;
+        };
+
+        // サロンワン ログイン/ログアウト（プロキシ経由）
+        const soLogin = async (loginId, password) => {
+          const r = await _origFetch(`${SALONONE_API_URL}?resource=auth/login`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ login_id: loginId, password }),
+          });
+          const j = await r.json().catch(() => ({}));
+          if (r.ok && j && j.data && j.data.access_token) { soSetTokens(j.data); return { ok: true, user: j.data.user || {} }; }
+          return { ok: false, status: r.status, code: (j && j.error && j.error.code) || '', };
+        };
+        const soLogout = async () => {
+          try {
+            if (soAuth.at) await _origFetch(`${SALONONE_API_URL}?resource=auth/logout`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${soAuth.at}` }, body: '{}',
+            });
+          } catch {}
+          soClearTokens();
+        };
+        const soFetchMe = async () => {
+          try { const r = await fetch(`${SALONONE_API_URL}?resource=me`); const j = await r.json().catch(() => ({})); return r.ok ? (j.data || j.user || j) : null; } catch { return null; }
+        };
+
         const CACHE_KEY = 'dashboard_data_cache';
         const MARKETING_CACHE_KEY = 'marketing_data_cache';
         const SQUARE_CACHE_KEY = 'square_data_cache_v6'; // v6: locationIdデータ整合性修正
@@ -1142,17 +1233,18 @@
                     const role = localStorage.getItem('naoru_auth_role') || (root ? 'root' : 'owner');
                     const staffId = localStorage.getItem('naoru_auth_staffid') || '';
                     const staffName = localStorage.getItem('naoru_auth_staffname') || '';
+                    const provider = localStorage.getItem('naoru_auth_provider') || 'settlement';
                     // 保存トークンがあれば即ログイン状態で表示（楽観的表示）。検証はバックグラウンドで行い、無効なら後でログイン画面に戻す。
-                    return token ? { checking: false, authenticated: true, token, owner, root, shops, role, staffId, staffName }
-                                 : { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '' };
-                } catch { return { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '' }; }
+                    return token ? { checking: false, authenticated: true, token, owner, root, shops, role, staffId, staffName, provider }
+                                 : { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '', provider: 'settlement' };
+                } catch { return { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '', provider: 'settlement' }; }
             });
             const [authId, setAuthId] = useState('');
             const [authPassword, setAuthPassword] = useState('');
             const [authError, setAuthError] = useState('');
             const [authLoading, setAuthLoading] = useState(false);
 
-            const persistAuth = (owner, token, root, shops, role, staffId, staffName) => {
+            const persistAuth = (owner, token, root, shops, role, staffId, staffName, provider = 'settlement') => {
                 try {
                     localStorage.setItem('naoru_auth_token', token);
                     localStorage.setItem('naoru_auth_owner', owner || '');
@@ -1161,9 +1253,19 @@
                     localStorage.setItem('naoru_auth_role', role || (root ? 'root' : 'owner'));
                     localStorage.setItem('naoru_auth_staffid', staffId || '');
                     localStorage.setItem('naoru_auth_staffname', staffName || '');
+                    localStorage.setItem('naoru_auth_provider', provider || 'settlement');
                 } catch {}
             };
-            const clearAuth = () => { ['naoru_auth_token', 'naoru_auth_owner', 'naoru_auth_root', 'naoru_auth_shops', 'naoru_auth_role', 'naoru_auth_staffid', 'naoru_auth_staffname'].forEach(k => { try { localStorage.removeItem(k); } catch {} }); };
+            const clearAuth = () => { ['naoru_auth_token', 'naoru_auth_owner', 'naoru_auth_root', 'naoru_auth_shops', 'naoru_auth_role', 'naoru_auth_staffid', 'naoru_auth_staffname', 'naoru_auth_provider'].forEach(k => { try { localStorage.removeItem(k); } catch {} }); soClearTokens(); };
+            // サロンワンのログインユーザー → NAORU authState へ写像
+            const authStateFromSo = (u) => {
+                const role = mapSalonOneRole(u && u.role);
+                const shops = role === 'root' ? null : (Array.isArray(u && u.accessible_shops) ? u.accessible_shops.map(s => s && s.name).filter(Boolean) : []);
+                return {
+                    checking: false, authenticated: true, token: 'salonone', owner: (u && (u.login_id || String(u.user_id || ''))) || '',
+                    root: role === 'root', shops, role, staffId: String((u && (u.staff_id ?? u.user_id)) || ''), staffName: (u && (u.staff_name || u.login_id)) || '', provider: 'salonone',
+                };
+            };
             // アカウント拡張情報（role/staffId/staffName）はKV(plan-store)に保持（GAS列に依存しない）
             const loadAcctMeta = async () => { try { const r = await fetch('/api/plan-store?type=accountmeta'); const j = await r.json().catch(() => ({})); return (j && j.meta && typeof j.meta === 'object') ? j.meta : {}; } catch { return {}; } };
             const saveAcctMeta = async (owner, role, staffId, staffName) => { try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'accountmeta', action: 'set', owner, role, staffId, staffName }) }); } catch {} };
@@ -1171,6 +1273,23 @@
             // 起動時: 保存トークンをバックグラウンド検証（＋店舗アクセスを最新化）。画面は先に表示済み。無効なら後でログインへ。
             useEffect(() => {
                 if (!authState.token) return;
+                // サロンワンSSOセッションは /me で検証（ロール・アクセス店舗を最新化。トークンは fetch インターセプタが自動更新）
+                if (authState.provider === 'salonone') {
+                    if (!soHasSession()) { clearAuth(); setAuthState({ checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '', provider: 'settlement' }); return; }
+                    (async () => {
+                        const me = await soFetchMe();
+                        if (me && (me.user_id || me.role)) {
+                            const ns = authStateFromSo(me);
+                            persistAuth(ns.owner, ns.token, ns.root, ns.shops, ns.role, ns.staffId, ns.staffName, 'salonone');
+                            setAuthState(ns);
+                        } else {
+                            // ネットワーク不通と失効を区別できないため、トークンが残っていれば楽観維持
+                            if (soHasSession()) setAuthState(s => ({ ...s, checking: false, authenticated: true }));
+                            else { clearAuth(); setAuthState({ checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '', provider: 'settlement' }); }
+                        }
+                    })();
+                    return;
+                }
                 fetch('/api/settlement-auth', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1237,9 +1356,23 @@
                         const shops = data.root ? null : (Array.isArray(data.shops) ? data.shops : []);
                         let role = data.role || (data.root ? 'root' : 'owner'), staffId = data.staffId || '', staffName = data.staffName || '';
                         if (!data.root) { const meta = await loadAcctMeta(); const m = meta[data.owner]; if (m) { role = m.role || role; staffId = m.staffId || staffId; staffName = m.staffName || staffName; } }
-                        persistAuth(data.owner || '', data.token, !!data.root, shops, role, staffId, staffName);
-                        setAuthState({ checking: false, authenticated: true, token: data.token, owner: data.owner || '', root: !!data.root, shops, role, staffId, staffName });
+                        persistAuth(data.owner || '', data.token, !!data.root, shops, role, staffId, staffName, 'settlement');
+                        setAuthState({ checking: false, authenticated: true, token: data.token, owner: data.owner || '', root: !!data.root, shops, role, staffId, staffName, provider: 'settlement' });
                         setAuthPassword(''); setAuthId('');
+                    } else if (authId.trim()) {
+                        // 本社/オーナー(settlement)で不一致 → サロンワンのアカウントでログインを試行(SSO)
+                        const so = await soLogin(authId.trim(), authPassword);
+                        if (so.ok) {
+                            const ns = authStateFromSo(so.user);
+                            try { localStorage.setItem('naoru_so_user', JSON.stringify(so.user || {})); } catch {}
+                            persistAuth(ns.owner, ns.token, ns.root, ns.shops, ns.role, ns.staffId, ns.staffName, 'salonone');
+                            setAuthState(ns);
+                            setAuthPassword(''); setAuthId('');
+                        } else if (so.code === 'too_many_login_attempts') {
+                            setAuthError('ログイン試行が多すぎます。しばらくしてからお試しください');
+                        } else {
+                            setAuthError(data.error || 'IDまたはパスワードが正しくありません');
+                        }
                     } else {
                         setAuthError(data.error || 'ログインに失敗しました');
                     }
@@ -1250,8 +1383,9 @@
             };
 
             const handleLogout = () => {
+                if (authState.provider === 'salonone') { soLogout(); }
                 clearAuth();
-                setAuthState({ checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '' });
+                setAuthState({ checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '', provider: 'settlement' });
             };
             // ロール判定ヘルパー
             const authRole = authState.root ? 'root' : (authState.role || 'owner');
@@ -8947,7 +9081,7 @@
                                         data-lpignore="true"
                                         value={authId}
                                         onChange={e => setAuthId(e.target.value)}
-                                        placeholder="ID（氏名／管理者は空欄でOK）"
+                                        placeholder="ID（氏名 / サロンワンのログインID）"
                                         className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-transparent"
                                         disabled={authLoading}
                                     />
@@ -8979,6 +9113,9 @@
                                 >
                                     {authLoading ? 'ログイン中...' : 'ログイン'}
                                 </button>
+                                <p className="text-[10px] text-slate-400 text-center leading-relaxed pt-1">
+                                    サロンワンのログインID・パスワードでもログインできます。<br />所属店舗・権限はサロンワンの設定に自動で連動します。
+                                </p>
                             </form>
                         </div>
                     </div>

@@ -8,6 +8,7 @@ import {
   getEndpoint,
   validateQuery,
   buildUpstreamUrl,
+  pickAuthBody,
   utcToJstIso,
   SalonOneValidationError,
 } from '../lib/salonone.js';
@@ -16,7 +17,8 @@ import {
 describe('ENDPOINTS registry', () => {
   it('仕様の全エンドポイントを網羅している', () => {
     const expected = [
-      'meta', 'sales/summary',
+      'meta', 'me', 'sales/summary',
+      'auth/login', 'auth/refresh', 'auth/logout',
       'marketing/by-channel', 'marketing/by-staff', 'marketing/retention',
       'shops', 'staffs', 'menus', 'menu-categories',
       'visit-sources', 'customer-tags', 'customers', 'appointments', 'appointment-menus',
@@ -27,12 +29,46 @@ describe('ENDPOINTS registry', () => {
   it('全エンドポイントが path と kind を持つ', () => {
     for (const [key, def] of Object.entries(ENDPOINTS)) {
       expect(def.path, key).toMatch(/^\//);
-      expect(['meta', 'summary', 'detail']).toContain(def.kind);
+      expect(['meta', 'summary', 'detail', 'auth']).toContain(def.kind);
     }
+  });
+
+  it('auth/* は POST・bodyFields を持つ', () => {
+    for (const key of ['auth/login', 'auth/refresh', 'auth/logout']) {
+      expect(ENDPOINTS[key].kind).toBe('auth');
+      expect(ENDPOINTS[key].method).toBe('POST');
+      expect(Array.isArray(ENDPOINTS[key].bodyFields)).toBe(true);
+    }
+    expect(ENDPOINTS['auth/login'].bodyFields).toEqual(['login_id', 'password', 'brand_code']);
   });
 
   it('sales/summary は from/to を必須にする', () => {
     expect(ENDPOINTS['sales/summary'].required).toEqual(['from', 'to']);
+  });
+});
+
+// ── pickAuthBody（認証POSTの本文フィルタ）─────────────────────────
+describe('pickAuthBody', () => {
+  it('許可フィールドのみ抽出し、未知キーは捨てる', () => {
+    const ep = getEndpoint('auth/login');
+    const out = pickAuthBody(ep, { login_id: 'yamada', password: 'pw', evil: 'x', role: 'brand_admin' });
+    expect(out).toEqual({ login_id: 'yamada', password: 'pw' });
+  });
+  it('空文字・null・undefined は除外する', () => {
+    const ep = getEndpoint('auth/refresh');
+    expect(pickAuthBody(ep, { refresh_token: '' })).toEqual({});
+    expect(pickAuthBody(ep, { refresh_token: null })).toEqual({});
+    expect(pickAuthBody(ep, {})).toEqual({});
+    expect(pickAuthBody(ep, { refresh_token: 'rt_1' })).toEqual({ refresh_token: 'rt_1' });
+  });
+  it('bodyFields が空(logout)なら常に空オブジェクト', () => {
+    const ep = getEndpoint('auth/logout');
+    expect(pickAuthBody(ep, { anything: 1 })).toEqual({});
+  });
+  it('brand_code は任意で通す', () => {
+    const ep = getEndpoint('auth/login');
+    const out = pickAuthBody(ep, { login_id: 'a', password: 'b', brand_code: 'NAORU' });
+    expect(out).toEqual({ login_id: 'a', password: 'b', brand_code: 'NAORU' });
   });
 });
 

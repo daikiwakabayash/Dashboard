@@ -105,8 +105,17 @@ SalonOne（`https://salonone.net`）の**読み取り専用**分析APIと連携�
 - **疎通確認**: `GET /api/salonone?diagnostic=1`（`/meta` への到達性を段階検査）
 - **利用可能リソース**: `meta` / `sales/summary` / `marketing/by-channel` / `marketing/by-staff` / `marketing/retention` / `shops` / `staffs` / `menus` / `menu-categories` / `visit-sources` / `customer-tags` / `customers` / `appointments` / `appointment-menus`
 - **マーケ集計**: 「その期間に初めて予約した新規客」が母集団。`by-channel`（媒体別 予約/来店/入会/入会率/売上）・`by-staff`（担当者別 新規予約/来店/購入/購入率）・`retention`（継続）。入会率 `join_rate` は分母=来店数で100%超あり（媒体比較は `join_rate_by_booking`）、`join_count` は遡及増加あり（月次推移は `join_in_period_count`）
-- **制約**: GETのみ・ブランド単位でスコープ・レート制限60/分（`X-RateLimit-*`透過）・明細の日時はUTC（JST表示は+9h、`utcToJstIso`）
+- **制約**: データ取得はGETのみ・ブランド単位でスコープ・レート制限60/分（`X-RateLimit-*`透過）・明細の日時はUTC（JST表示は+9h、`utcToJstIso`）
 - ロジックは `lib/salonone.js` に分離し `tests/salonone.test.js` でカバー
+
+### SalonOne ユーザー認証（SSO・サロンワンのIDでダッシュボードにログイン）
+運営が「ユーザー認証を必須にする」でキーを発行した場合、**サロンワンのログインID・パスワードでNAORUダッシュボードにログイン**でき、そのスタッフの**ロール・所属/アクセス店舗**に自動連動する。
+- **プロキシ拡張（`api/salonone.js`）**: `auth/login`・`auth/refresh`・`auth/logout` は **POST**（本文は `pickAuthBody` で許可フィールドのみ転送）、`me` は GET。データ取得GETも含め、クライアントの `Authorization: Bearer <access_token>` を上流へ透過（「誰として見るか」）。POSTは auth/* のホワイトリストのみ許可（データ書き込みは従来通り拒否）
+- **フロント（`index.html`）**: `window.fetch` を `/api/salonone` 向けにラップし、全リクエストへ自動で Bearer 付与＋401(`invalid_token`/`user_auth_required`)時に `auth/refresh` で1回だけ自動更新→再試行。トークンは `naoru_so_at`/`naoru_so_rt`/`naoru_so_atexp`（access=60分・refresh=14日）
+- **ログイン**: ログイン画面のID/PASSは、まず `settlement-auth`（本社root=`DASHBOARD_PASSWORD`／既存オーナーアカウント）を試し、不一致なら **サロンワン `auth/login`** にフォールバック。`authState.provider='salonone'` で記録
+- **ロール写像（`mapSalonOneRole`）**: `brand_admin`→`root`（全店）／`shop_admin`→`owner`（管轄店舗・返金明細書可・全タブ）／`shop_staff`→`staff`（所属店舗・サンクスギフト）。`accessible_shops[].name` を `authState.shops` に採用。セラピストオーナー＝`shop_admin`（owner）はサンクスギフトも閲覧可（既存のowner表示ゲート）
+- **セッション復元**: 起動時、`provider==='salonone'` は `settlement-auth/verify` ではなく `/me` で検証しロール・店舗を最新化（トークンはインターセプタが自動更新）。ログアウトで `auth/logout`＋ローカルトークン破棄
+- ⚠️ 店舗スコープはサロンワン側がトークンで強制（`shop_forbidden`）。`SALONONE_API_KEY` を「ログイン必須」キーにすると、トークン無し（本社rootの`DASHBOARD_PASSWORD`ログイン等）ではSalonOneデータが `user_auth_required` になる。全店をキーだけで見たい本社運用を残すなら「ログイン必須を解除」キーを環境変数に設定（SSOは追加のUI絞り込みとして併用可）
 
 ## 返金明細書（FC精算）とオーナー共有
 FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売上内訳）＋ Square API（総決済/実手数料/返金）から自動生成し、オーナーに共有・確認してもらう仕組み。

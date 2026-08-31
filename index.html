@@ -1562,9 +1562,19 @@
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'thanksgift', action: 'settest', open, period }) }); await tgLoad(); }
                 catch {}
             };
-            // 選択店舗の「対象月に売上>0」スタッフを取得（=感謝を送れる相手。店舗ごとに1回のSalonOne呼び出し）
+            // 選択店舗の「対象月に売上>0」スタッフを取得（=感謝を送れる相手。店舗ごとに1回のSalonOne呼び出し）。
+            // 店舗×対象月でキャッシュ（メモリ＋localStorage）し、2回目以降は即時表示（体感速度改善）。
+            const tgRosterCacheRef = useRef(null);
+            const tgRosterCache = () => {
+                if (tgRosterCacheRef.current) return tgRosterCacheRef.current;
+                let c = {}; try { c = JSON.parse(localStorage.getItem('tg_roster_v1') || '{}') || {}; } catch {}
+                tgRosterCacheRef.current = c; return c;
+            };
             const tgLoadRoster = async (shopId, targetMonth) => {
                 if (!shopId || !targetMonth) { setTgRoster({ shopId: '', loading: false, list: [] }); return; }
+                const cacheKey = `${shopId}__${targetMonth}`;
+                const cache = tgRosterCache();
+                if (Array.isArray(cache[cacheKey])) { setTgRoster({ shopId, loading: false, list: cache[cacheKey] }); return; } // キャッシュ即時表示
                 setTgRoster({ shopId, loading: true, list: [] });
                 try {
                     const [y, m] = targetMonth.split('-').map(Number);
@@ -1583,6 +1593,11 @@
                     const list = bs.map(s => ({ id: String(s.staff_id ?? s.id ?? ''), name: s.staff_name || s.name || '', gross: Number(s.gross_sales ?? s.gross ?? 0) }))
                         .filter(s => s.id && s.gross > 0)
                         .sort((a, b) => b.gross - a.gross);
+                    // 成功時のみキャッシュ（空応答=レート制限失敗は保存しない）
+                    if (list.length || (data && (data.by_staff || data.byStaff))) {
+                        cache[cacheKey] = list;
+                        try { localStorage.setItem('tg_roster_v1', JSON.stringify(cache)); } catch {}
+                    }
                     setTgRoster({ shopId, loading: false, list });
                 } catch { setTgRoster({ shopId, loading: false, list: [] }); }
             };

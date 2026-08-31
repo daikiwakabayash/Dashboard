@@ -1678,7 +1678,7 @@
             };
 
             // ── サンクスギフト（感謝の投票）── スタッフが月1票、前月(対象月)にお世話になった1人へ感謝コメントを送る
-            const [tgData, setTgData] = useState({ votes: [], log: [], votingState: null, test: { open: false, period: '' }, configured: true, loaded: false });
+            const [tgData, setTgData] = useState({ votes: [], log: [], votingState: null, test: { open: false, period: '' }, published: [], configured: true, loaded: false });
             const [tgForm, setTgForm] = useState({ shopId: '', toStaffId: '', comment: '' });
             const [tgRoster, setTgRoster] = useState({ shopId: '', loading: false, list: [] }); // 選択店舗の対象月「売上>0」スタッフ
             const [tgMsg, setTgMsg] = useState('');
@@ -1688,12 +1688,17 @@
             const [tgShopQuery, setTgShopQuery] = useState(''); // サンクスギフト相手店舗の検索
             const tgMonthLabel = (ym) => { if (!ym) return ''; const [y, m] = String(ym).split('-'); return `${y}年${Number(m)}月`; };
             const tgLoad = async () => {
-                try { const r = await fetch('/api/plan-store?type=thanksgift'); const j = await r.json().catch(() => ({})); setTgData({ votes: Array.isArray(j.votes) ? j.votes : [], log: Array.isArray(j.log) ? j.log : [], votingState: j.votingState || null, test: j.test || { open: false, period: '' }, configured: j.configured !== false, loaded: true }); }
+                try { const r = await fetch('/api/plan-store?type=thanksgift'); const j = await r.json().catch(() => ({})); setTgData({ votes: Array.isArray(j.votes) ? j.votes : [], log: Array.isArray(j.log) ? j.log : [], votingState: j.votingState || null, test: j.test || { open: false, period: '' }, published: Array.isArray(j.published) ? j.published : [], configured: j.configured !== false, loaded: true }); }
                 catch { setTgData(d => ({ ...d, loaded: true })); }
             };
             // テストモード切替（root専用・期間外でも指定月を受付にできる）
             const tgSetTest = async (open, period) => {
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'thanksgift', action: 'settest', open, period }) }); await tgLoad(); }
+                catch {}
+            };
+            // 公開/非公開の切替（root専用・指定月の感謝を受け取った側へ表示するか）
+            const tgSetPublish = async (period, publish) => {
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'thanksgift', action: 'publish', period, publish }) }); await tgLoad(); }
                 catch {}
             };
             // 選択店舗の「対象月に売上>0」スタッフを取得（=感謝を送れる相手。店舗ごとに1回のSalonOne呼び出し）。
@@ -14790,7 +14795,9 @@
                         // 一次キーはSalonOne staffId（投票時の宛先=SalonOne id）。紐付け未設定の場合の保険として
                         // 表示名(本名)の完全一致でも拾う（例: 表示名「岡田健斗」＝SalonOne名と一致していれば届く）。
                         const myNameKey = String(authState.staffName || '').replace(/\s/g, '');
-                        const received = votes.filter(v => String(v.toStaffId) === myStaffId || (myNameKey && String(v.toStaffName || '').replace(/\s/g, '') === myNameKey))
+                        const publishedSet = new Set(Array.isArray(tgData.published) ? tgData.published : []);
+                        // 受け取った感謝は「管理者が【公開】した対象月」のみ表示。未公開は本人にも見せない。
+                        const received = votes.filter(v => (String(v.toStaffId) === myStaffId || (myNameKey && String(v.toStaffName || '').replace(/\s/g, '') === myNameKey)) && publishedSet.has(v.period))
                             .sort((a, b) => (b.period || '').localeCompare(a.period || '') || (b.createdAt || '').localeCompare(a.createdAt || ''));
                         const receivedPeriods = [...new Set(received.map(v => v.period))];
                         // root集計
@@ -14924,8 +14931,8 @@
                                 {tgData.loaded && !isRoot && myStaffId && (
                                     <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6">
                                         <h2 className="text-base font-black flex items-center gap-2 mb-1"><Heart size={18} className="text-rose-500" />あなたがもらった感謝 <span className="text-xs text-slate-400">（合計 {received.length} 票）</span></h2>
-                                        <p className="text-[11px] text-slate-400 font-bold mb-3">匿名です（誰から・どの店舗かは表示されません）。届いた件数と内容のみ確認できます。</p>
-                                        {received.length === 0 && <div className="text-sm font-bold text-slate-400 py-4 text-center">まだ感謝は届いていません。</div>}
+                                        <p className="text-[11px] text-slate-400 font-bold mb-3">匿名です（誰から・どの店舗かは表示されません）。<span className="text-rose-500">管理者が【公開】した月分のみ表示されます</span>。</p>
+                                        {received.length === 0 && <div className="text-sm font-bold text-slate-400 py-4 text-center">公開済みの感謝はまだありません。<span className="block text-[11px] text-slate-400 mt-1">（投票後、管理者が公開すると表示されます）</span></div>}
                                         <div className="space-y-4">
                                             {receivedPeriods.map(p => (
                                                 <div key={p}>
@@ -14976,6 +14983,34 @@
                                     </div>
                                     );
                                 })()}
+
+                                {/* ── 本部/root：公開管理（対象月ごとに感謝を受け取った側へ公開） ── */}
+                                {tgData.loaded && isRoot && (
+                                    <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6 space-y-3">
+                                        <div className="flex items-center gap-2">
+                                            <h2 className="text-base font-black flex items-center gap-2"><Megaphone size={18} className="text-rose-500" />公開管理</h2>
+                                        </div>
+                                        <p className="text-[11px] text-slate-500 font-bold leading-relaxed">投票内容を確認し、準備ができたら対象月を<b className="text-rose-600">【公開】</b>してください。公開すると、その月に感謝を<b>受け取った本人</b>にコメントが表示されます（未公開の間は本人にも表示されません）。ランキング（本部）は公開に関わらず常に確認できます。</p>
+                                        {allPeriods.length === 0 && <div className="text-sm font-bold text-slate-400 py-3 text-center">まだ投票データがありません。</div>}
+                                        <div className="space-y-2">
+                                            {allPeriods.map(p => {
+                                                const isPub = publishedSet.has(p);
+                                                const cnt = votes.filter(v => v.period === p).length;
+                                                return (
+                                                    <div key={p} className={`flex items-center gap-3 p-2.5 rounded-xl border ${isPub ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'}`}>
+                                                        <span className="font-black text-slate-700 text-sm">{tgMonthLabel(p)}分</span>
+                                                        <span className="text-[11px] font-bold text-slate-400">{cnt}票</span>
+                                                        <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${isPub ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-500'}`}>{isPub ? '公開中' : '非公開'}</span>
+                                                        <button onClick={() => tgSetPublish(p, !isPub)}
+                                                            className={`ml-auto px-3 py-1.5 rounded-lg text-xs font-black ${isPub ? 'bg-white text-slate-600 border border-slate-300 hover:bg-slate-50' : 'bg-rose-600 text-white hover:bg-rose-700'}`}>
+                                                            {isPub ? '非公開に戻す' : '公開する'}
+                                                        </button>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                )}
 
                                 {/* ── 本部/root：全体集計・ランキング ── */}
                                 {tgData.loaded && isRoot && (

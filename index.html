@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NAORU 総合ダッシュボード</title>
 
     <!-- Preconnect for faster loading -->
@@ -2363,6 +2363,7 @@
             const [zkCountry, setZkCountry] = useState('jp');    // 'jp' | 'au' | 'my'
             const [zkMobileEnt, setZkMobileEnt] = useState('__group__'); // モバイル全体管理シートで表示する店舗（既定=グループ全体）
             const [zkZoom, setZkZoom] = useState(1); // 全体管理シート(PC表)の表示倍率（縮小して一覧性UP）
+            const [zkMobileView, setZkMobileView] = useState('table'); // スマホ表示: 'table'(指ピンチで縮小可) or 'card'
             const [soStoreMenuOpen, setSoStoreMenuOpen] = useState(false);
             const [soStoreSearch, setSoStoreSearch] = useState('');
             const [soStaffMenuOpen, setSoStaffMenuOpen] = useState(false);
@@ -14092,8 +14093,13 @@
                                 ) : shops.length === 0 ? (
                                     <div className="bg-white border border-slate-200 rounded-2xl p-10 text-center text-slate-400 font-bold text-sm">{CUR.flag} {CUR.label} の店舗はまだSalonOneに登録がありません{zkLoading ? '（読み込み中…）' : ''}。</div>
                                 ) : (<>
-                                    {/* ── モバイル: 店舗を選んで月別カードで縦に見る（横スクロール不要・見やすさ優先） ── */}
-                                    <div className="sm:hidden space-y-2.5">
+                                    {/* ── モバイル: 表示切替（表＝指ピンチで縮小可 / カード＝縦積みで見やすい） ── */}
+                                    <div className="sm:hidden flex items-center gap-1.5 mb-2">
+                                        <button onClick={() => setZkMobileView('table')} className={`px-3 py-1.5 rounded-lg text-xs font-black ${zkMobileView === 'table' ? 'bg-indigo-600 text-white' : 'bg-white text-slate-500 border border-slate-200'}`}>📊 表（指で拡大縮小）</button>
+                                        <button onClick={() => setZkMobileView('card')} className={`px-3 py-1.5 rounded-lg text-xs font-black ${zkMobileView === 'card' ? 'bg-indigo-600 text-white' : 'bg-white text-slate-500 border border-slate-200'}`}>🗂 カード</button>
+                                    </div>
+                                    {/* ── モバイル(カード): 店舗を選んで月別カードで縦に見る（横スクロール不要） ── */}
+                                    <div className={`${zkMobileView === 'card' ? 'block' : 'hidden'} sm:hidden space-y-2.5`}>
                                         <div className="bg-white rounded-2xl border border-slate-200 p-2.5 shadow-sm sticky top-0 z-20">
                                             <div className="flex items-center gap-2">
                                                 <span className="text-[11px] font-black text-slate-400 shrink-0">店舗</span>
@@ -14134,15 +14140,15 @@
                                             });
                                         })()}
                                     </div>
-                                    {/* ── PC: マトリクス表（横スクロール） ── */}
-                                    {/* PC: ズーム操作（縮小して一覧性を上げる） */}
-                                    <div className="hidden sm:flex items-center justify-end gap-1.5 mb-2">
+                                    {/* ── マトリクス表（PCは常時／スマホは「表」選択時。スマホは指ピンチでも拡大縮小可） ── */}
+                                    {/* ズーム操作（縮小して一覧性を上げる。スマホは指ピンチでも可） */}
+                                    <div className={`${zkMobileView === 'table' ? 'flex' : 'hidden'} sm:flex items-center justify-end gap-1.5 mb-2`}>
                                         <span className="text-[11px] font-bold text-slate-400 mr-1">表示倍率</span>
                                         <button onClick={() => setZkZoom(z => Math.max(0.5, Math.round((z - 0.1) * 10) / 10))} disabled={zkZoom <= 0.5} className="w-7 h-7 flex items-center justify-center bg-white border border-slate-200 rounded-lg text-slate-600 font-black hover:bg-slate-50 disabled:opacity-40">−</button>
                                         <span className="text-xs font-black text-slate-600 w-10 text-center">{Math.round(zkZoom * 100)}%</span>
                                         <button onClick={() => setZkZoom(z => Math.min(1, Math.round((z + 0.1) * 10) / 10))} disabled={zkZoom >= 1} className="w-7 h-7 flex items-center justify-center bg-white border border-slate-200 rounded-lg text-slate-600 font-black hover:bg-slate-50 disabled:opacity-40">＋</button>
                                     </div>
-                                    <div className="hidden sm:block overflow-auto rounded-2xl border border-slate-200 bg-white shadow-sm" style={{ maxHeight: '90vh' }}>
+                                    <div className={`${zkMobileView === 'table' ? 'block' : 'hidden'} sm:block overflow-auto rounded-2xl border border-slate-200 bg-white shadow-sm`} style={{ maxHeight: '90vh', WebkitOverflowScrolling: 'touch' }}>
                                         <table className="border-collapse" style={{ minWidth: 'max-content', fontSize: '13px', zoom: zkZoom }}>
                                             <tbody>
                                                 {months.map((ym, mi) => {

@@ -14853,10 +14853,13 @@
                                         {ranking.length === 0 && <div className="text-sm font-bold text-slate-400 py-6 text-center">まだ投票データがありません。</div>}
                                         {ranking.length > 0 && (
                                             <div className="space-y-2">
-                                                {ranking.map((r, i) => (
+                                                {ranking.map((r, i) => {
+                                                    // 同率順位（標準競技順位法）: 同ポイントは同じ順位、次はその人数分飛ばす
+                                                    const rank = 1 + ranking.filter(x => x.points > r.points).length;
+                                                    return (
                                                     <details key={r.id} className="bg-slate-50 border border-slate-200 rounded-xl overflow-hidden">
                                                         <summary className="flex items-center gap-3 p-3 cursor-pointer list-none">
-                                                            <span className={`w-7 h-7 shrink-0 flex items-center justify-center rounded-full font-black text-sm ${i === 0 ? 'bg-amber-400 text-white' : i === 1 ? 'bg-slate-300 text-white' : i === 2 ? 'bg-orange-400 text-white' : 'bg-white text-slate-500 border border-slate-200'}`}>{i + 1}</span>
+                                                            <span className={`w-7 h-7 shrink-0 flex items-center justify-center rounded-full font-black text-sm ${rank === 1 ? 'bg-amber-400 text-white' : rank === 2 ? 'bg-slate-300 text-white' : rank === 3 ? 'bg-orange-400 text-white' : 'bg-white text-slate-500 border border-slate-200'}`}>{rank}</span>
                                                             <span className="flex-1 font-black text-slate-800">{r.name}<span className="text-[11px] text-slate-400 font-bold ml-2">{r.shop}</span></span>
                                                             <span className="font-black text-rose-600">{r.points} <span className="text-[11px] text-slate-400">pt</span></span>
                                                         </summary>
@@ -14870,7 +14873,8 @@
                                                             ))}
                                                         </div>
                                                     </details>
-                                                ))}
+                                                    );
+                                                })}
                                             </div>
                                         )}
                                     </div>
@@ -15048,55 +15052,91 @@
                                             </div>
                                         </div>
 
-                                        {/* 媒体別CPA */}
-                                        <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
-                                            <h3 className="text-sm font-black text-slate-700 mb-3 flex items-center gap-1.5">
-                                                <Megaphone size={15} className="text-brand-400" /> 媒体別パフォーマンス
-                                                <span className="text-xs font-bold text-slate-400 ml-auto">{a.latestMonth}</span>
-                                            </h3>
-                                            {a.mediaBreakdown.length > 0 ? (
-                                                <div className="space-y-2">
-                                                    {a.mediaBreakdown.map((m, i) => {
-                                                        const prev = a.prevMediaMap[m.media];
-                                                        const prevCpa = prev && prev.newCount > 0 ? Math.round(prev.adSpend / prev.newCount) : null;
-                                                        const cpaTrend = prevCpa ? (m.cpa < prevCpa ? 'down' : m.cpa > prevCpa ? 'up' : 'flat') : null;
-                                                        return (
-                                                            <div key={i} className="bg-slate-50 rounded-lg p-2.5">
-                                                                <div className="flex items-center justify-between mb-1">
-                                                                    <span className="text-xs font-black text-slate-700">{m.media}</span>
-                                                                    <span className="text-xs font-bold text-slate-400">新規 {m.newCount}名</span>
-                                                                </div>
-                                                                <div className="grid grid-cols-3 gap-2 text-xs">
-                                                                    <div>
-                                                                        <span className="text-slate-400">CPA</span>
-                                                                        <div className="font-black text-slate-800 flex items-center gap-1">
-                                                                            ¥{m.cpa.toLocaleString()}
-                                                                            {cpaTrend === 'down' && <TrendingDown size={11} className="text-emerald-500" />}
-                                                                            {cpaTrend === 'up' && <TrendingUp size={11} className="text-red-500" />}
-                                                                        </div>
-                                                                        {prevCpa && <div className="text-slate-400">前月 ¥{prevCpa.toLocaleString()}</div>}
-                                                                    </div>
-                                                                    <div>
-                                                                        <span className="text-slate-400">入会率</span>
-                                                                        <div className={`font-black ${m.enrollRate >= 40 ? 'text-emerald-600' : m.enrollRate >= 25 ? 'text-blue-600' : 'text-red-500'}`}>{m.enrollRate}%</div>
-                                                                    </div>
-                                                                    <div>
-                                                                        <span className="text-slate-400">ROAS</span>
-                                                                        <div className={`font-black ${m.roas >= 300 ? 'text-emerald-600' : m.roas >= 150 ? 'text-blue-600' : 'text-red-500'}`}>{m.roas}%</div>
-                                                                    </div>
-                                                                </div>
-                                                            </div>
-                                                        );
-                                                    })}
-                                                    <div className="flex justify-between text-xs pt-1 border-t border-slate-100">
-                                                        <span className="font-bold text-slate-500">広告費合計</span>
-                                                        <span className="font-black text-slate-700">¥{a.totalAdSpend.toLocaleString()}</span>
+                                        {/* ── ユニットエコノミクス（採算指標） ── */}
+                                        {(() => {
+                                            const norm = (n) => String(n || '').replace(/NAORU整骨院|NAORU整体|NAORU/g, '').replace(/[院店]\s*$/, '').replace(/\s+/g, '').trim();
+                                            // 広告経由売上 = 媒体別売上の合計
+                                            const adRevenue = a.mediaBreakdown.reduce((s, m) => s + (m.revenue || 0), 0);
+                                            const cpaV = a.cpa;                                                   // CPA = 広告費 ÷ 新規来店数
+                                            const cac = a.totalNewEnroll > 0 ? Math.round(a.totalAdSpend / a.totalNewEnroll) : 0; // CAC = 広告費 ÷ 入会者数
+                                            const roas = a.totalAdSpend > 0 ? Math.round((adRevenue / a.totalAdSpend) * 100) : 0;   // ROAS = 広告経由売上 ÷ 広告費 × 100
+                                            const churn = a.churnRate;                                            // Churn = 解約率(%)
+                                            const retentionMonths = churn > 0 ? Math.round(100 / churn) : 0;      // 平均継続月数 ≒ 100 ÷ 月次解約率
+                                            // 1人あたり月平均売上（ARPU）: Square サブスクの該当店舗 → 全店 の順に採用
+                                            let arpu = 0, arpuScope = '';
+                                            if (sqMetrics) {
+                                                const core = norm(planSelectedBranch);
+                                                let matched = null;
+                                                if (core && sqMetrics.byStore) {
+                                                    matched = Object.values(sqMetrics.byStore).find(s => { const nm = norm(s.name); return nm && (nm.includes(core) || core.includes(nm)); });
+                                                }
+                                                if (matched && matched.arpu > 0) { arpu = Math.round(matched.arpu); arpuScope = '当店'; }
+                                                else if (sqMetrics.arpu > 0) { arpu = Math.round(sqMetrics.arpu); arpuScope = '全店'; }
+                                            }
+                                            // LTV = 1人あたり月平均売上 × 平均継続月数
+                                            let ltv = 0, ltvEst = false;
+                                            if (arpu > 0 && retentionMonths > 0) { ltv = arpu * retentionMonths; }
+                                            else if (sqMetrics && sqMetrics.ltv > 0) { ltv = Math.round(sqMetrics.ltv); ltvEst = true; }
+                                            const unitEcon = (cac > 0 && ltv > 0) ? Math.round((ltv / cac) * 10) / 10 : 0; // Unit Economics = LTV ÷ CAC
+                                            const man = (v) => '¥' + (Math.round(v / 10000)).toLocaleString() + '万';
+                                            const tiles = [
+                                                { key: 'cpa', label: 'CPA', full: '新規来店獲得単価',
+                                                  value: cpaV > 0 ? '¥' + cpaV.toLocaleString() : '—',
+                                                  tone: cpaV === 0 ? 'na' : cpaV <= (planGoals.cpaTarget || 5000) ? 'good' : cpaV <= (planGoals.cpaTarget || 5000) * 1.5 ? 'ok' : 'bad',
+                                                  note: '広告費 ÷ 新規来店数。1人を来店させるのにかかった広告コスト。' },
+                                                { key: 'cac', label: 'CAC', full: '入会獲得単価',
+                                                  value: cac > 0 ? '¥' + cac.toLocaleString() : '—',
+                                                  tone: cac === 0 ? 'na' : 'neutral',
+                                                  note: '広告費 ÷ 入会者数。1人を「入会」まで導くのにかかったコスト。' },
+                                                { key: 'ltv', label: 'LTV', full: '顧客生涯価値',
+                                                  value: ltv > 0 ? man(ltv) : '—',
+                                                  tone: ltv === 0 ? 'na' : 'neutral',
+                                                  note: '1人あたり月平均売上 × 平均継続月数。1顧客が生涯にもたらす売上。'
+                                                        + (ltv > 0 ? (ltvEst ? '（Square全店の推定LTV）' : `（${arpuScope}ARPU ¥${arpu.toLocaleString()} × 継続${retentionMonths}ヶ月）`) : '（Squareサブスクデータが必要）') },
+                                                { key: 'ue', label: 'Unit Economics', full: '顧客単位の採算性',
+                                                  value: unitEcon > 0 ? unitEcon.toFixed(1) + '倍' : '—',
+                                                  tone: unitEcon === 0 ? 'na' : unitEcon >= 3 ? 'good' : unitEcon >= 1 ? 'ok' : 'bad',
+                                                  note: 'LTV ÷ CAC。獲得コストの何倍を1顧客から回収できるか（目安 3倍以上）。' },
+                                                { key: 'roas', label: 'ROAS', full: '広告費用対効果',
+                                                  value: roas > 0 ? roas + '%' : '—',
+                                                  tone: roas === 0 ? 'na' : roas >= 300 ? 'good' : roas >= 150 ? 'ok' : 'bad',
+                                                  note: '広告経由売上 ÷ 広告費 × 100。広告費1円が生んだ売上（目安 300%以上）。' },
+                                                { key: 'churn', label: 'Churn', full: '解約率',
+                                                  value: churn > 0 ? churn + '%' : (a.churnRate === 0 ? '0%' : '—'),
+                                                  tone: churn === 0 ? 'good' : churn <= 5 ? 'good' : churn <= 10 ? 'ok' : 'bad',
+                                                  note: '会員のうち一定期間内に解約した割合。平均継続 ≒ 約' + (retentionMonths || '—') + 'ヶ月。' },
+                                            ];
+                                            const toneCls = { good: 'text-emerald-600', ok: 'text-blue-600', bad: 'text-red-500', neutral: 'text-slate-800', na: 'text-slate-300' };
+                                            return (
+                                                <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+                                                    <div className="flex items-center gap-1.5 mb-1">
+                                                        <Activity size={15} className="text-brand-400" />
+                                                        <h3 className="text-sm font-black text-slate-700">ユニットエコノミクス（採算指標）</h3>
+                                                        <span className="ml-auto text-[10px] font-bold text-slate-400">{a.latestMonth}</span>
                                                     </div>
+                                                    <p className="text-[11px] text-slate-400 font-bold mb-3 leading-relaxed">
+                                                        獲得コスト（CPA/CAC）と回収（LTV/ROAS/継続）から<span className="text-brand-500">1顧客あたりの採算</span>を可視化。概念は各項目の補足を参照。
+                                                    </p>
+                                                    <div className="grid grid-cols-2 gap-2">
+                                                        {tiles.map((t) => (
+                                                            <div key={t.key} className="bg-slate-50 rounded-lg px-2.5 py-2">
+                                                                <div className="flex items-baseline gap-1 mb-0.5">
+                                                                    <span className="text-[11px] font-black text-slate-600">{t.label}</span>
+                                                                    <span className="text-[9px] font-bold text-slate-400 truncate">{t.full}</span>
+                                                                </div>
+                                                                <div className={`text-base font-black ${toneCls[t.tone] || 'text-slate-800'}`}>{t.value}</div>
+                                                                <div className="text-[9.5px] text-slate-400 font-bold leading-snug mt-1">{t.note}</div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                    {!sqMetrics && (
+                                                        <p className="text-[10px] text-amber-500 font-bold mt-2 leading-relaxed">
+                                                            ※ LTV・Unit Economics は「サブスク分析（Square）」の読み込み後に表示されます。
+                                                        </p>
+                                                    )}
                                                 </div>
-                                            ) : (
-                                                <div className="text-xs text-slate-400 text-center py-4">マーケティングデータなし</div>
-                                            )}
-                                        </div>
+                                            );
+                                        })()}
 
                                         {/* ── ユニットエコノミクス（採算指標） ── */}
                                         {(() => {
@@ -15220,11 +15260,13 @@
                                             </h3>
                                             {planSoLoading ? (
                                                 <div className="text-xs text-slate-400 text-center py-4">SalonOne実績を集計中…</div>
-                                            ) : a.monthlyTrend.length === 0 ? (
-                                                <div className="text-xs text-slate-400 text-center py-4">実績データがありません</div>
-                                            ) : (
+                                            ) : (() => {
+                                                // 売上0の月（データ未反映月）は非表示
+                                                const rows = a.monthlyTrend.filter(m => m.sales > 0).slice(-6);
+                                                if (rows.length === 0) return <div className="text-xs text-slate-400 text-center py-4">実績データがありません</div>;
+                                                return (
                                                 <div className="space-y-1.5">
-                                                    {a.monthlyTrend.slice(-6).map((m, i) => (
+                                                    {rows.map((m, i) => (
                                                         <div key={i} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs bg-slate-50">
                                                             <span className="w-14 font-bold text-slate-600">{m.month}</span>
                                                             <span className="flex-1 font-black text-slate-800 text-right">¥{(m.sales / 10000).toFixed(0)}万</span>
@@ -15234,7 +15276,8 @@
                                                         </div>
                                                     ))}
                                                 </div>
-                                            )}
+                                                );
+                                            })()}
                                             </>)}
                                         </div>
 

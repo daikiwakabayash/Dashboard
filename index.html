@@ -853,14 +853,27 @@
         };
 
         // サロンワン ログイン/ログアウト（プロキシ経由）
+        // 共有キーのレート制限(60/分)で 429 rate_limited になることがあるため、
+        // Retry-After を尊重しつつ数回リトライする（invalid_credentials等は即返す）。
         const soLogin = async (loginId, password) => {
-          const r = await _origFetch(`${SALONONE_API_URL}?resource=auth/login`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ login_id: loginId, password }),
-          });
-          const j = await r.json().catch(() => ({}));
-          if (r.ok && j && j.data && j.data.access_token) { soSetTokens(j.data); return { ok: true, user: j.data.user || {} }; }
-          return { ok: false, status: r.status, code: (j && j.error && j.error.code) || '', };
+          let last = { ok: false, code: '' };
+          for (let a = 0; a < 5; a++) {
+            const r = await _origFetch(`${SALONONE_API_URL}?resource=auth/login`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ login_id: loginId, password }),
+            });
+            const j = await r.json().catch(() => ({}));
+            if (r.ok && j && j.data && j.data.access_token) { soSetTokens(j.data); return { ok: true, user: j.data.user || {} }; }
+            const code = (j && j.error && j.error.code) || '';
+            last = { ok: false, status: r.status, code };
+            if ((r.status === 429 || code === 'rate_limited') && a < 4) {
+              const ra = Number(r.headers.get('retry-after')) || 0;
+              await new Promise(res => setTimeout(res, (ra > 0 ? Math.min(ra, 10) : 1.5 * Math.pow(1.7, a)) * 1000));
+              continue;
+            }
+            break; // 認証エラー等はリトライせず即返す
+          }
+          return last;
         };
         const soLogout = async () => {
           try {
@@ -4385,7 +4398,7 @@
                         if (done % 6 === 0) setZkData({ year, months, shops: shops.map(s => ({ ...s })) }); // 逐次反映
                     }
                 };
-                await Promise.all(Array.from({ length: Math.min(4, tasks.length) }, () => worker())); // レート制限に配慮し並列4
+                await Promise.all(Array.from({ length: Math.min(2, tasks.length) }, () => worker())); // レート制限(60/分)配慮: 全店取得は並列2に抑える（ログイン等の他リクエストを枯渇させない）
                 try { localStorage.setItem(ZK_CACHE_KEY, JSON.stringify(cacheAll)); } catch (e) { /* 容量超過等は無視 */ }
                 setZkData({ year, months, shops });
                 setZkLoading(false);

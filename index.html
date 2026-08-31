@@ -2361,9 +2361,7 @@
             const [zkError, setZkError] = useState(null);
             const [zkYear, setZkYear] = useState(new Date().getFullYear());
             const [zkCountry, setZkCountry] = useState('jp');    // 'jp' | 'au' | 'my'
-            const [zkMobileEnt, setZkMobileEnt] = useState('__group__'); // モバイル全体管理シートで表示する店舗（既定=グループ全体）
-            const [zkZoom, setZkZoom] = useState(1); // 全体管理シート(PC表)の表示倍率（縮小して一覧性UP）
-            const [zkMobileView, setZkMobileView] = useState('table'); // スマホ表示: 'table'(指ピンチで縮小可) or 'card'
+            const [zkZoom, setZkZoom] = useState(0.5); // 全体管理シートの表示倍率（既定50%＝一覧性UP。スマホは指ピンチでも拡大縮小可）
             const [soStoreMenuOpen, setSoStoreMenuOpen] = useState(false);
             const [soStoreSearch, setSoStoreSearch] = useState('');
             const [soStaffMenuOpen, setSoStaffMenuOpen] = useState(false);
@@ -14093,62 +14091,15 @@
                                 ) : shops.length === 0 ? (
                                     <div className="bg-white border border-slate-200 rounded-2xl p-10 text-center text-slate-400 font-bold text-sm">{CUR.flag} {CUR.label} の店舗はまだSalonOneに登録がありません{zkLoading ? '（読み込み中…）' : ''}。</div>
                                 ) : (<>
-                                    {/* ── モバイル: 表示切替（表＝指ピンチで縮小可 / カード＝縦積みで見やすい） ── */}
-                                    <div className="sm:hidden flex items-center gap-1.5 mb-2">
-                                        <button onClick={() => setZkMobileView('table')} className={`px-3 py-1.5 rounded-lg text-xs font-black ${zkMobileView === 'table' ? 'bg-indigo-600 text-white' : 'bg-white text-slate-500 border border-slate-200'}`}>📊 表（指で拡大縮小）</button>
-                                        <button onClick={() => setZkMobileView('card')} className={`px-3 py-1.5 rounded-lg text-xs font-black ${zkMobileView === 'card' ? 'bg-indigo-600 text-white' : 'bg-white text-slate-500 border border-slate-200'}`}>🗂 カード</button>
-                                    </div>
-                                    {/* ── モバイル(カード): 店舗を選んで月別カードで縦に見る（横スクロール不要） ── */}
-                                    <div className={`${zkMobileView === 'card' ? 'block' : 'hidden'} sm:hidden space-y-2.5`}>
-                                        <div className="bg-white rounded-2xl border border-slate-200 p-2.5 shadow-sm sticky top-0 z-20">
-                                            <div className="flex items-center gap-2">
-                                                <span className="text-[11px] font-black text-slate-400 shrink-0">店舗</span>
-                                                <select value={zkMobileEnt} onChange={e => setZkMobileEnt(e.target.value)}
-                                                    className="flex-1 min-w-0 px-3 py-2 border border-slate-200 rounded-xl text-sm font-black bg-white">
-                                                    {entities.map(ent => <option key={ent.id} value={ent.id}>{ent.name}</option>)}
-                                                </select>
-                                            </div>
-                                        </div>
-                                        {(() => {
-                                            const ent = entities.find(e => e.id === zkMobileEnt) || entities[0];
-                                            return [...months].reverse().map((ym) => {
-                                                const mi = months.indexOf(ym);
-                                                const prevYm = mi > 0 ? months[mi - 1] : null;
-                                                const mm = Number(ym.split('-')[1]);
-                                                return (
-                                                    <div key={ym} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-                                                        <div className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white">
-                                                            <span className="text-xl font-black leading-none">{mm}<span className="text-[11px] font-bold text-slate-300 ml-0.5">月</span></span>
-                                                            <span className="ml-auto text-[11px] font-bold text-slate-300 truncate">{ent.name}・セラピスト{therOf(ent, ym)}名</span>
-                                                        </div>
-                                                        <div className="divide-y divide-slate-100">
-                                                            {METRICS.filter(mt => mt.k !== 'karte').map((mt) => {
-                                                                const cur = val(ent, ym, mt.k);
-                                                                const prev = prevYm ? val(ent, prevYm, mt.k) : null;
-                                                                const c = mt.k === 'ther' ? null : cmp(cur, prev);
-                                                                return (
-                                                                    <div key={mt.k} className="flex items-center px-4 py-2.5">
-                                                                        <span className="text-xs font-black text-slate-500 w-24 shrink-0">{mt.label}</span>
-                                                                        <span className="ml-auto text-lg font-black text-slate-800 whitespace-nowrap">{fmt(mt.k, cur)}</span>
-                                                                        {c && <span className={`ml-3 text-xs font-black w-14 text-right shrink-0 ${c.cls}`}>{c.t}</span>}
-                                                                    </div>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                    </div>
-                                                );
-                                            });
-                                        })()}
-                                    </div>
-                                    {/* ── マトリクス表（PCは常時／スマホは「表」選択時。スマホは指ピンチでも拡大縮小可） ── */}
+                                    {/* ── マトリクス表（PC/スマホ共通。スマホは指ピンチでも拡大縮小可） ── */}
                                     {/* ズーム操作（縮小して一覧性を上げる。スマホは指ピンチでも可） */}
-                                    <div className={`${zkMobileView === 'table' ? 'flex' : 'hidden'} sm:flex items-center justify-end gap-1.5 mb-2`}>
+                                    <div className="flex items-center justify-end gap-1.5 mb-2">
                                         <span className="text-[11px] font-bold text-slate-400 mr-1">表示倍率</span>
                                         <button onClick={() => setZkZoom(z => Math.max(0.5, Math.round((z - 0.1) * 10) / 10))} disabled={zkZoom <= 0.5} className="w-7 h-7 flex items-center justify-center bg-white border border-slate-200 rounded-lg text-slate-600 font-black hover:bg-slate-50 disabled:opacity-40">−</button>
                                         <span className="text-xs font-black text-slate-600 w-10 text-center">{Math.round(zkZoom * 100)}%</span>
                                         <button onClick={() => setZkZoom(z => Math.min(1, Math.round((z + 0.1) * 10) / 10))} disabled={zkZoom >= 1} className="w-7 h-7 flex items-center justify-center bg-white border border-slate-200 rounded-lg text-slate-600 font-black hover:bg-slate-50 disabled:opacity-40">＋</button>
                                     </div>
-                                    <div className={`${zkMobileView === 'table' ? 'block' : 'hidden'} sm:block overflow-auto rounded-2xl border border-slate-200 bg-white shadow-sm`} style={{ maxHeight: '90vh', WebkitOverflowScrolling: 'touch' }}>
+                                    <div className="block overflow-auto rounded-2xl border border-slate-200 bg-white shadow-sm" style={{ maxHeight: '90vh', WebkitOverflowScrolling: 'touch' }}>
                                         <table className="border-collapse" style={{ minWidth: 'max-content', fontSize: '13px', zoom: zkZoom }}>
                                             <tbody>
                                                 {months.map((ym, mi) => {

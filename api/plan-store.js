@@ -197,24 +197,35 @@ export default async function handler(req, res) {
       const votes = Array.isArray(cur.votes) ? cur.votes : [];
       const log = Array.isArray(cur.log) ? cur.log : []; // 送信履歴（追記のみ・編集履歴を残す）
       const test = (cur.test && typeof cur.test === 'object') ? cur.test : { open: false, period: '' };
+      // 公開済みの対象月（root が【公開】した月のみ、受け取った側に感謝内容が表示される）
+      const published = Array.isArray(cur.published) ? cur.published.filter(p => /^\d{4}-\d{2}$/.test(String(p))).map(String) : [];
       // テストモード: root が任意の対象月を「受付中」にできる（期間外テスト用）。通常は期間ロジックに従う。
       const base = getVotingState();
       const state = (test.open && /^\d{4}-\d{2}$/.test(String(test.period || '')))
         ? { ...base, open: true, targetMonth: String(test.period), test: true }
         : { ...base, test: false };
       if (req.method === 'GET') {
-        return res.status(200).json({ votes, log, votingState: state, test, configured: true });
+        return res.status(200).json({ votes, log, votingState: state, test, published, configured: true });
       }
       const body = req.body || {};
       const action = body.action;
       // テストモードの切替（root用UIから。期間外でも指定月を受付にできる）
       if (action === 'settest') {
         const nextTest = { open: !!body.open, period: String(body.period || '') };
-        await blobSet(THANKSGIFT_KEY, { votes, log, test: nextTest }, hasKV, hasSB, gas);
+        await blobSet(THANKSGIFT_KEY, { votes, log, test: nextTest, published }, hasKV, hasSB, gas);
         const st2 = (nextTest.open && /^\d{4}-\d{2}$/.test(nextTest.period))
           ? { ...base, open: true, targetMonth: nextTest.period, test: true }
           : { ...base, test: false };
         return res.status(200).json({ ok: true, test: nextTest, votingState: st2 });
+      }
+      // 公開/非公開の切替（root用UIから。指定した対象月の感謝を受け取った側に表示するか）
+      if (action === 'publish' && /^\d{4}-\d{2}$/.test(String(body.period || ''))) {
+        const p = String(body.period);
+        const set = new Set(published);
+        if (body.publish === false) set.delete(p); else set.add(p);
+        const nextPublished = [...set];
+        await blobSet(THANKSGIFT_KEY, { votes, log, test, published: nextPublished }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, published: nextPublished });
       }
       if (action === 'vote' && body.vote) {
         const v = body.vote;
@@ -234,7 +245,7 @@ export default async function handler(req, res) {
         // 送信履歴に追記（編集も1件ずつ残す）。上限3000件でリングバッファ。
         const already = votes.some(x => x && x.id === `${rec.period}__${rec.fromStaffId}`);
         const nextLog = [...log, { ...rec, action: already ? 'edit' : 'submit', id: `${rec.period}__${rec.fromStaffId}__${Date.now()}` }].slice(-3000);
-        await blobSet(THANKSGIFT_KEY, { votes: next, log: nextLog, test }, hasKV, hasSB, gas);
+        await blobSet(THANKSGIFT_KEY, { votes: next, log: nextLog, test, published }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true, id: `${rec.period}__${rec.fromStaffId}` });
       }
       if (action === 'delete' && body.period && body.fromStaffId) {
@@ -243,7 +254,7 @@ export default async function handler(req, res) {
         }
         const next = removeVote(votes, String(body.period), String(body.fromStaffId));
         const nextLog = [...log, { period: String(body.period), fromStaffId: String(body.fromStaffId), action: 'delete', createdAt: new Date().toISOString(), id: `${body.period}__${body.fromStaffId}__${Date.now()}` }].slice(-3000);
-        await blobSet(THANKSGIFT_KEY, { votes: next, log: nextLog, test }, hasKV, hasSB, gas);
+        await blobSet(THANKSGIFT_KEY, { votes: next, log: nextLog, test, published }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true });
       }
       return res.status(400).json({ ok: false, error: 'invalid thanksgift action' });

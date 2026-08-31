@@ -141,7 +141,8 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
 - **匿名性**: 受け取った側は**匿名**で表示（誰から・どの店舗かは出さない／件数と内容のみ）。root（本部）は集計・ランキングで送信者も見える（特典付与のため）。送った本人は**送信履歴（誰に・いつ・内容・編集/取消履歴）**を確認できる（`log` 追記のみ）。
 - **投票期間**: 毎月**1日00:01〜2日23:59（JST）**の2日間のみ。この期間の投票は**前月（対象月）**への感謝として記録（例: 9/1〜2の投票＝8月分）。UIとサーバー（`api/plan-store` の `type=thanksgift`）の両方で期間・対象月・自分不可を強制。
 - **相手の候補**: 「店舗を選択→その店舗の対象月に**売上>0**のスタッフ」を表示（SalonOne `sales/summary?shop_id=…` の `by_staff` を店舗選択時に1回取得）。自分は除外。
-- **保存**: 共有ストア（`/api/plan-store?type=thanksgift`・KV/Supabase/GAS）に `{votes:[...], log:[...]}` を保存。`votes` は現状（`id=対象月__投票者ID` で1人1票upsert）、`log` は送信/編集/取消の追記のみ履歴（送信履歴表示用・上限3000件）。
+- **公開制（root管理）**: 受け取った側の感謝コメントは、**rootが対象月を【公開】したときだけ**本人に表示される（未公開の間は本人にも非表示）。root専用「公開管理」で対象月ごとに公開/非公開を切替（`/api/plan-store?type=thanksgift` の `action=publish`・`{period,publish}`→`published:[...]`）。フロントは `tgData.published` で受け取り側をゲート（`publishedSet.has(v.period)`）。ランキング（本部集計）は公開に関わらずrootは常に閲覧可。
+- **保存**: 共有ストア（`/api/plan-store?type=thanksgift`・KV/Supabase/GAS）に `{votes:[...], log:[...], published:[...], test:{...}}` を保存。`votes` は現状（`id=対象月__投票者ID` で1人1票upsert）、`log` は送信/編集/取消の追記のみ履歴（送信履歴表示用・上限3000件）、`published` は公開済み対象月の配列。
 - ロジックは `lib/thanksgift.js`（`getVotingState`/`validateVote`/`upsertVote`/`tallyRanking`/`receivedFor`）に分離しテスト済み。フロントは投票状態をサーバーGETの `votingState` から受け取る。
 
 ## 開発ルール

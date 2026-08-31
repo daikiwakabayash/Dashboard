@@ -116,6 +116,7 @@ SalonOne（`https://salonone.net`）の**読み取り専用**分析APIと連携�
 - **ロール写像（`mapSalonOneRole`）**: `brand_admin`→`root`（全店）／`shop_admin`→`owner`（管轄店舗・返金明細書可・全タブ）／`shop_staff`→`staff`（所属店舗・サンクスギフト）。`accessible_shops[].name` を `authState.shops` に採用。セラピストオーナー＝`shop_admin`（owner）はサンクスギフトも閲覧可（既存のowner表示ゲート）
 - **セッション復元**: 起動時、`provider==='salonone'` は `settlement-auth/verify` ではなく `/me` で検証しロール・店舗を最新化（トークンはインターセプタが自動更新）。ログアウトで `auth/logout`＋ローカルトークン破棄
 - ⚠️ 店舗スコープはサロンワン側がトークンで強制（`shop_forbidden`）。`SALONONE_API_KEY` を「ログイン必須」キーにすると、トークン無し（本社rootの`DASHBOARD_PASSWORD`ログイン等）ではSalonOneデータが `user_auth_required` になる。全店をキーだけで見たい本社運用を残すなら「ログイン必須を解除」キーを環境変数に設定（SSOは追加のUI絞り込みとして併用可）
+- **返金明細書へのSSOブリッジ**: `lib/salonone-auth.js` の `verifySalonOneBearer(bearer)` がサーバー側で `/me` を叩きトークンを検証（`{root,role,shopIds,shopNames,userId,loginId}`）。`settlement-store`/`settlement-owners` は従来のオーナーPASSトークンに加え、この **Bearer** も認可に使う（`brand_admin`=本社相当で公開/全件、`shop_admin`/`shop_staff`=アクセス店舗のみ閲覧/確認/修正依頼）。フロントは `window.fetch` インターセプタを `/api/settlement-store`・`/api/settlement-owners` にも拡張し、SSOセッション時に自動でBearerを付与（＋期限切れ間近は事前リフレッシュ）。→ **サロンワンのログインだけで返金明細書まで完結**（GASのオーナーPASS＝「オーナー設定」タブはサロンワンに居ない社外FCオーナー等の特例用に縮小）
 
 ## 返金明細書（FC精算）とオーナー共有
 FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売上内訳）＋ Square API（総決済/実手数料/返金）から自動生成し、オーナーに共有・確認してもらう仕組み。

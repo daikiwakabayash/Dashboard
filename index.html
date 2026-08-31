@@ -823,18 +823,29 @@
           }
           const ok = await _soRefreshPromise; _soRefreshPromise = null; return ok;
         };
+        // Bearer を付ける対象: サロンワンプロキシ＋（SSO認可を橋渡しする）返金明細書系API
+        const soBearerUrl = (url) => typeof url === 'string' && (
+          url.indexOf(SALONONE_API_URL) === 0 ||
+          url.indexOf('/api/settlement-store') === 0 ||
+          url.indexOf('/api/settlement-owners') === 0
+        );
         window.fetch = async (input, init) => {
           const url = typeof input === 'string' ? input : (input && input.url) || '';
-          const isSo = typeof url === 'string' && url.indexOf(SALONONE_API_URL) === 0;
-          if (!isSo) return _origFetch(input, init);
+          if (!soBearerUrl(url)) return _origFetch(input, init);
           const isAuthEp = url.indexOf('resource=auth/') !== -1;
           const withAuth = (opts) => (soAuth.at ? { ...(opts || {}), headers: { ...((opts || {}).headers || {}), Authorization: `Bearer ${soAuth.at}` } } : (opts || {}));
+          // 事前更新: アクセストークンが期限切れ間近ならリクエスト前に更新（返金明細書等の401回避）
+          if (!isAuthEp && soAuth.at && soAuth.rt && soAuth.atExp && Date.now() > soAuth.atExp - 60000) {
+            await soDoRefresh();
+          }
           let resp = await _origFetch(input, withAuth(init));
-          // トークン期限切れ等は1回だけ更新→再試行（auth/* 自身は除く）
+          // 401時は1回だけ更新→再試行（auth/* 自身は除く）
           if (resp.status === 401 && !isAuthEp && soAuth.rt) {
             let code = '';
             try { code = (await resp.clone().json())?.error?.code || ''; } catch {}
-            if (code === 'invalid_token' || code === 'user_auth_required' || code === 'unauthorized') {
+            const isSoEp = url.indexOf(SALONONE_API_URL) === 0;
+            // サロンワンはエラーコードで、返金明細書系はトークン失効の可能性として一律に再試行
+            if (!isSoEp || code === 'invalid_token' || code === 'user_auth_required' || code === 'unauthorized') {
               if (await soDoRefresh()) resp = await _origFetch(input, withAuth(init));
             }
           }
@@ -14409,6 +14420,9 @@
 
                                 <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 text-xs font-bold text-emerald-800 leading-relaxed">
                                     アカウントの<span className="font-black">ID（氏名）</span>・<span className="font-black">ログインPASS</span>・<span className="font-black">アクセス店舗</span>を設定します。ここで作成したアカウントは<span className="font-black">ダッシュボード本体のログイン</span>に使え、ログイン後は<span className="font-black">許可した店舗のみ</span>表示されます（SalonOne売上・サブスク・返金明細書すべてに反映）。管理者は <span className="font-black">DASHBOARD_PASSWORD</span> で全店舗にログインできます。GASに保存・再デプロイ不要。
+                                </div>
+                                <div className="bg-blue-50 border border-blue-100 rounded-2xl p-4 text-xs font-bold text-blue-800 leading-relaxed">
+                                    ℹ️ <span className="font-black">通常はこの設定は不要です。</span>スタッフ・オーナーは<span className="font-black">サロンワンのログインID・パスワード</span>でそのままログインでき、ロール（brand_admin=管理者／shop_admin=オーナー／shop_staff=スタッフ）とアクセス店舗が自動連動します。返金明細書の閲覧・確認・修正依頼もサロンワンのログインで行えます。ここでの手動作成は<span className="font-black">サロンワンにアカウントが無い方（社外FCオーナー等）や特例</span>のときだけご利用ください。
                                 </div>
 
                                 {/* 店舗一覧からまとめて作成（土台） */}

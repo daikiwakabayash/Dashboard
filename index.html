@@ -1379,10 +1379,13 @@
                             persistAuth(ns.owner, ns.token, ns.root, ns.shops, ns.role, ns.staffId, ns.staffName, 'salonone');
                             setAuthState(ns);
                             setAuthPassword(''); setAuthId('');
-                        } else if (so.code === 'too_many_login_attempts') {
-                            setAuthError('ログイン試行が多すぎます。しばらくしてからお試しください');
                         } else {
-                            setAuthError(data.error || 'IDまたはパスワードが正しくありません');
+                            // サロンワン側の失敗理由を明示（settlementの誤メッセージで隠さない）
+                            const msg = so.code === 'too_many_login_attempts' ? 'ログイン試行が多すぎます。数分おいてお試しください'
+                                : so.code === 'invalid_credentials' ? 'IDまたはパスワードが正しくありません（サロンワンの最新のPASSでお試しください）'
+                                : so.code === 'user_auth_required' ? 'このキーではログインできません。管理者にご連絡ください'
+                                : (so.code ? `ログインに失敗しました（${so.code}）` : (data.error || 'IDまたはパスワードが正しくありません'));
+                            setAuthError(msg);
                         }
                     } else {
                         setAuthError(data.error || 'ログインに失敗しました');

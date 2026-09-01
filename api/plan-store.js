@@ -282,6 +282,15 @@ export default async function handler(req, res) {
         await blobSet(THANKSGIFT_KEY, { votes: next, log: nextLog, test, published, dir }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true });
       }
+      // 管理者用: 指定(period+fromStaffId)の票を votes と log の両方から完全削除（テストデータ整理）。
+      // items: [{period, fromStaffId}, ...]。送信履歴(log)からも消えるため送信者/受信者どちらの画面にも残らない。
+      if (action === 'purge' && Array.isArray(body.items) && body.items.length) {
+        const keyset = new Set(body.items.map(it => `${String(it.period)}__${String(it.fromStaffId)}`));
+        const nextVotes = votes.filter(v => !keyset.has(`${String(v.period)}__${String(v.fromStaffId)}`));
+        const nextLog = log.filter(l => !keyset.has(`${String(l.period)}__${String(l.fromStaffId)}`));
+        await blobSet(THANKSGIFT_KEY, { votes: nextVotes, log: nextLog, test, published, dir }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, removedVotes: votes.length - nextVotes.length, removedLog: log.length - nextLog.length });
+      }
       return res.status(400).json({ ok: false, error: 'invalid thanksgift action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });

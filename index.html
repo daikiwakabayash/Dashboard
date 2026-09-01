@@ -14889,8 +14889,9 @@
                         const isOpen = !!vs.open;
                         // 投票者ID: SalonOne紐付けがあればそれを、無ければログインID（owner）を使う
                         const myStaffId = String(authState.staffId || authState.owner || '');
-                        const myName = authState.staffName || authState.owner || '';
                         const meInRoster = (soStaffs || []).find(s => String(s.id) === myStaffId);
+                        // 表示名は SalonOneロスターの本名を優先（staffNameが空でログインIDに化けるのを防ぐ）
+                        const myName = authState.staffName || (meInRoster && meInRoster.name) || authState.owner || '';
                         const myShopId = meInRoster ? meInRoster.shop_id : '';
                         // 自分の店舗（＝送信元店舗）: SalonOne紐付けがあればそこから、無ければアカウントのアクセス店舗を使う
                         const myShop = (() => {
@@ -14922,6 +14923,15 @@
                         const isRoot = !!authState.root;
                         const allPeriods = [...new Set(votes.map(v => v.period).filter(Boolean))].sort((a, b) => b.localeCompare(a));
                         const rankPeriod = tgRootPeriod || '';
+                        // 送信者の本名解決（root集計のみ）: staffId→本名 をSalonOneロスター＋共有ディレクトリから引く。
+                        // 過去票で fromStaffName がログインID（例: staff022）に化けているものも本名で表示する。
+                        const staffNameById = (() => {
+                            const m = new Map();
+                            for (const s of (soStaffs || [])) { if (s && s.id != null) m.set(String(s.id), s.name); }
+                            for (const s of ((tgDir.staff) || [])) { if (s && s.id != null && !m.has(String(s.id))) m.set(String(s.id), s.name); }
+                            return m;
+                        })();
+                        const resolveVoterName = (v) => staffNameById.get(String(v.fromStaffId)) || v.fromStaffName || '';
                         const ranking = (() => {
                             const list = votes.filter(v => !rankPeriod || v.period === rankPeriod);
                             const map = {};
@@ -14931,7 +14941,7 @@
                                 map[k].points += 1;
                                 if (v.toStaffName) map[k].name = v.toStaffName;
                                 if (v.toShop) map[k].shop = v.toShop;
-                                map[k].voters.push({ name: v.fromStaffName || '', shop: v.fromShop || '', comment: v.comment || '', period: v.period });
+                                map[k].voters.push({ name: resolveVoterName(v), shop: v.fromShop || '', comment: v.comment || '', period: v.period });
                             }
                             return Object.values(map).sort((a, b) => b.points - a.points || String(a.name).localeCompare(String(b.name), 'ja'));
                         })();

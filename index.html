@@ -4503,9 +4503,9 @@
                         return { status: 0, json: {} };
                     };
                     // 同時実行数を絞ったmap（全店フォールバックのper-shop取得でレート制限を避ける）
-                    const mapPool = async (items, fn, poolSize) => {
+                    const mapPool = async (items, fn, poolSize, onEach) => {
                         const out = new Array(items.length); let k = 0;
-                        const worker = async () => { while (k < items.length) { const i = k++; out[i] = await fn(items[i]); } };
+                        const worker = async () => { while (k < items.length) { const i = k++; out[i] = await fn(items[i]); if (onEach) { try { onEach(out[i], i); } catch (e) {} } } };
                         await Promise.all(Array.from({ length: Math.min(poolSize, items.length || 1) }, worker));
                         return out;
                     };
@@ -4514,19 +4514,30 @@
                         return soFetchRetry(`${SALONONE_API_URL}?${p.toString()}`);
                     };
                     const allShopIds = (soShops || []).map(s => String(s.id)).filter(Boolean);
-                    const fetchResource = async (resource, extra = {}) => {
+                    const fetchResource = async (resource, extra = {}, onShop = null) => {
                         if (ids.length) {
-                            return mapPool(ids, id => soDoOne(resource, id, extra), 6);
+                            return mapPool(ids, id => soDoOne(resource, id, extra), 6, onShop);
                         }
                         // 全店: まずブランド全店(shop_id無し)で試す。SalonOneが invalid_request 等で拒否する場合は
                         // 全店をper-shopで取得してマージ（soMergeSummary/正規化が複数店を合算）。
                         const brand = await soDoOne(resource, '', extra);
                         const brandOk = brand && brand.status === 200 && brand.json && brand.json.data && !brand.json.error;
                         if (brandOk || !allShopIds.length) return [brand];
-                        return mapPool(allShopIds, id => soDoOne(resource, id, extra), 6);
+                        return mapPool(allShopIds, id => soDoOne(resource, id, extra), 6, onShop);
                     };
 
-                    const salesRes = await fetchResource('sales/summary');
+                    // 売上サマリはブランド一括取得不可(422)のため全店はper-shop(最大90店)。全店完了を待つと
+                    // 「待っても開けない」ため、取得できた店舗から逐次マージして表示する（4店ごと）。
+                    const salesAcc = []; let salesRendered = 0;
+                    const onSalesShop = (res) => {
+                        if (res && res.status === 200 && res.json && res.json.data) salesAcc.push(res.json.data);
+                        if (!stale() && salesAcc.length - salesRendered >= 4) {
+                            salesRendered = salesAcc.length;
+                            setSoSetupRequired(false); setSoDemo(false); setSoError(null);
+                            setSoSummary(normalizeSalonSummary({ data: soMergeSummary(salesAcc) }));
+                        }
+                    };
+                    const salesRes = await fetchResource('sales/summary', {}, onSalesShop);
                     const first = salesRes[0] || {};
 
                     // キー未設定 → デモデータで UI を確認できるようにする

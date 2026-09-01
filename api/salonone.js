@@ -140,12 +140,14 @@ export default async function handler(req, res) {
     // 全店ビューはまず【キーのみ】で取得＝全店。ログイン必須キーで user_auth_required の
     // ときのみ Bearer を付けて再取得（そのスタッフのスコープ）。me は常に Bearer。
     let usedFallback = false; // Bearerフォールバック＝ユーザー個別スコープ（＝共有キャッシュに載せない）
-    let { status, headers, data } = await fetchSalonOne(upstream.url, apiKey, alwaysBearer ? bearer : '');
+    // 429（レート制限）は Retry-After を待って再試行。ただし古いキャッシュがあれば待たず即STALE配信。
+    const resilientOpts = { budgetMs: cachedStale ? 0 : 50000 };
+    let { status, headers, data } = await fetchSalonOneResilient(upstream.url, apiKey, alwaysBearer ? bearer : '', resilientOpts);
     if (!alwaysBearer && bearer && status === 401) {
       const code = data && data.error && data.error.code;
       if (code === 'user_auth_required' || code === 'invalid_token' || code === 'unauthorized') {
         usedFallback = true;
-        ({ status, headers, data } = await fetchSalonOne(upstream.url, apiKey, bearer));
+        ({ status, headers, data } = await fetchSalonOneResilient(upstream.url, apiKey, bearer, resilientOpts));
       }
     }
     // レート制限/エラー時は、古いキャッシュがあればそれを返す（エラー連鎖・再試行の嵐を防ぐ）。
@@ -183,6 +185,26 @@ export default async function handler(req, res) {
       : err.message;
     return res.status(502).json({ error: { code: 'upstream_error', message } });
   }
+}
+
+// ── 上流へGET（レート制限429は Retry-After を尊重してサーバー側で待って再試行） ──
+// SalonOne は 60/分。全店コールドロード時などに一時的に429になるが、
+// Retry-After（例: 14〜43秒）を待てば枠がリセットされ200になる。クライアントに429を
+// そのまま返すと「エラー」になるため、関数の実行予算(≦60秒)内で1〜数回待って再試行する。
+// KVキャッシュが温まれば以降は全ユーザーがHITするので、この待機は真にコールドな初回のみ。
+async function fetchSalonOneResilient(url, apiKey, bearer = '', { budgetMs = 50000, maxWaitMs = 46000 } = {}) {
+  const start = Date.now();
+  let last;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    last = await fetchSalonOne(url, apiKey, bearer);
+    if (last.status !== 429) return last;
+    const raRaw = last.headers && last.headers.get ? Number(last.headers.get('retry-after')) : NaN;
+    const waitMs = Math.min((Number.isFinite(raRaw) && raRaw > 0 ? raRaw : 3) * 1000 + 500, maxWaitMs);
+    // 予算超過なら429のまま返す（呼び出し側が古いキャッシュ等でフォールバック）
+    if (Date.now() - start + waitMs > budgetMs) return last;
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+  return last;
 }
 
 // ── 上流へGETリクエスト（55秒タイムアウト。bearerがあればユーザー認証を透過） ──
@@ -248,7 +270,8 @@ async function runDiagnostic(res, base, apiKey) {
   const endpoint = getEndpoint('meta');
   try {
     const { url } = buildUpstreamUrl('meta', {}, base);
-    const { status, headers, data } = await fetchSalonOne(url, apiKey);
+    // 429は一時的なので Retry-After を待って再試行し、真の到達性を報告する
+    const { status, headers, data } = await fetchSalonOneResilient(url, apiKey);
     const rate = {};
     for (const name of RATE_LIMIT_HEADERS) {
       const v = headers.get(name);

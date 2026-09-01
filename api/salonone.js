@@ -141,7 +141,7 @@ export default async function handler(req, res) {
     // ときのみ Bearer を付けて再取得（そのスタッフのスコープ）。me は常に Bearer。
     let usedFallback = false; // Bearerフォールバック＝ユーザー個別スコープ（＝共有キャッシュに載せない）
     // 429（レート制限）は Retry-After を待って再試行。ただし古いキャッシュがあれば待たず即STALE配信。
-    const resilientOpts = { budgetMs: cachedStale ? 0 : 50000 };
+    const resilientOpts = { budgetMs: cachedStale ? 0 : 55000 };
     let { status, headers, data } = await fetchSalonOneResilient(upstream.url, apiKey, alwaysBearer ? bearer : '', resilientOpts);
     if (!alwaysBearer && bearer && status === 401) {
       const code = data && data.error && data.error.code;
@@ -192,7 +192,7 @@ export default async function handler(req, res) {
 // Retry-After（例: 14〜43秒）を待てば枠がリセットされ200になる。クライアントに429を
 // そのまま返すと「エラー」になるため、関数の実行予算(≦60秒)内で1〜数回待って再試行する。
 // KVキャッシュが温まれば以降は全ユーザーがHITするので、この待機は真にコールドな初回のみ。
-async function fetchSalonOneResilient(url, apiKey, bearer = '', { budgetMs = 50000, maxWaitMs = 46000 } = {}) {
+async function fetchSalonOneResilient(url, apiKey, bearer = '', { budgetMs = 55000, maxWaitMs = 52000 } = {}) {
   const start = Date.now();
   let last;
   for (let attempt = 0; attempt < 4; attempt++) {

@@ -24,6 +24,7 @@ import {
   SalonOneValidationError,
 } from '../lib/salonone.js';
 import { kvConfigured, kvBlobGet, kvBlobSet } from '../lib/kvblob.js';
+import { createHash } from 'crypto';
 
 // ── サーバー側 応答キャッシュ（KV）──────────────────────────────
 // 全店取得(最大90店)を全ユーザーで共有キャッシュし、SalonOneのレート制限(60/分)
@@ -87,7 +88,13 @@ export default async function handler(req, res) {
     const payload = pickAuthBody(ep, req.body || {});
     try {
       // logout はトークンの破棄なので Bearer が必要。login/refresh は本文で完結。
-      const { status, headers, data } = await postSalonOne(url, apiKey, payload, resource === 'auth/logout' ? bearer : '');
+      // ローンチ時の大量ログインで auth/login が 60/分 を超過し429になるため、Retry-After を
+      // 尊重してサーバー側で待機・再試行（logoutは待たない）。認証エラー(4xx)は即返す。
+      const isLogout = resource === 'auth/logout';
+      const { status, headers, data } = await postSalonOneResilient(
+        url, apiKey, payload, isLogout ? bearer : '',
+        { budgetMs: isLogout ? 0 : 52000, maxWaitMs: 50000 }
+      );
       for (const name of RATE_LIMIT_HEADERS) { const v = headers.get(name); if (v != null) res.setHeader(name, v); }
       res.setHeader('Cache-Control', 'no-store');
       return res.status(status).json(data);
@@ -116,6 +123,41 @@ export default async function handler(req, res) {
 
   try {
     const alwaysBearer = resource === 'me';
+    // ── /me はBearer単位で短期キャッシュ（60秒）──────────────────────
+    // /me は起動/セッション復元のたびに毎回呼ばれ、ユーザー個別(Bearer)なので共有不可。
+    // ローンチ時に200名が同時ログイン→復元すると /me が 60/分 を圧迫するため、同一トークンの
+    // 連続 /me を短期キャッシュで吸収する。429時は期限切れでも古い値を返してセッション復元を継続。
+    // （返金明細書の認可 verifySalonOneBearer は別経路＝上流を直接叩くのでキャッシュ影響なし）
+    if (alwaysBearer && bearer && kvConfigured()) {
+      const meKey = `naoru:so:me:${createHash('sha256').update(bearer).digest('hex').slice(0, 24)}`;
+      let meStale = null;
+      try {
+        const c = await kvBlobGet(meKey);
+        if (c && c.ts && c.data) {
+          meStale = c.data;
+          if ((Date.now() - c.ts) < 60000) {
+            res.setHeader('X-SO-Cache', 'HIT');
+            res.setHeader('Cache-Control', 'no-store');
+            return res.status(200).json(c.data);
+          }
+        }
+      } catch (_) { /* キャッシュ不通は素通り */ }
+      // 復元をブロックしすぎないよう待機は短め（stale があれば待たない）
+      const { status, headers, data } = await fetchSalonOneResilient(upstream.url, apiKey, bearer, { budgetMs: meStale ? 0 : 26000, maxWaitMs: 24000 });
+      const isErr = status !== 200 || (data && data.error);
+      if (isErr && meStale) {
+        res.setHeader('X-SO-Cache', 'STALE');
+        res.setHeader('Cache-Control', 'no-store');
+        return res.status(200).json(meStale);
+      }
+      if (status === 200 && data && !data.error) {
+        kvBlobSet(meKey, { ts: Date.now(), data }).catch(() => {});
+        res.setHeader('X-SO-Cache', 'MISS');
+      }
+      for (const name of RATE_LIMIT_HEADERS) { const v = headers.get(name); if (v != null) res.setHeader(name, v); }
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(status).json(data);
+    }
     // データGETはKVで全ユーザー共有キャッシュ（レート制限対策）。ブランド全体（キーのみ）で
     // 取得した結果は誰にとっても同じなので、クライアントがBearerを送っていてもキャッシュを配信・
     // 蓄積してよい（旧フロントの全店取得もキャッシュに乗せて上流負荷を即座に下げるため）。
@@ -232,6 +274,24 @@ async function fetchSalonOne(url, apiKey, bearer = '') {
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+// ── 上流へPOST（429は Retry-After を尊重してサーバー側で待機・再試行） ──
+// auth/login の大量同時実行(ローンチ)でレート制限になっても、枠リセットを待って成功させる。
+// 認証エラー(400/401/422等)は待たず即返す。budgetMs=0 なら再試行しない（logout用）。
+async function postSalonOneResilient(url, apiKey, payload, bearer = '', { budgetMs = 52000, maxWaitMs = 50000 } = {}) {
+  const start = Date.now();
+  let last;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    last = await postSalonOne(url, apiKey, payload, bearer);
+    if (last.status !== 429) return last;
+    if (budgetMs <= 0) return last;
+    const raRaw = last.headers && last.headers.get ? Number(last.headers.get('retry-after')) : NaN;
+    const waitMs = Math.min((Number.isFinite(raRaw) && raRaw > 0 ? raRaw : 3) * 1000 + 500, maxWaitMs);
+    if (Date.now() - start + waitMs > budgetMs) return last;
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+  return last;
 }
 
 // ── 上流へPOST（サロンワン ユーザー認証 auth/* 専用・20秒タイムアウト） ──

@@ -125,6 +125,13 @@ describe('validateQuery', () => {
       .toThrowError(/Invalid parameter/);
   });
 
+  it('group_by=shop は許可、それ以外の group_by は弾く', () => {
+    const ep = getEndpoint('sales/summary');
+    expect(validateQuery(ep, { from: '2026-08-01', to: '2026-08-31', group_by: 'shop' }).params.group_by).toBe('shop');
+    expect(() => validateQuery(ep, { from: '2026-08-01', to: '2026-08-31', group_by: 'staff' }))
+      .toThrow(SalonOneValidationError);
+  });
+
   it('存在しない日付を弾く', () => {
     const ep = getEndpoint('sales/summary');
     expect(() => validateQuery(ep, { from: '2026-02-30', to: '2026-07-31' }))

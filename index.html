@@ -4488,14 +4488,14 @@
                     const allShopIds = (soShops || []).map(s => String(s.id)).filter(Boolean);
                     const fetchResource = async (resource, extra = {}) => {
                         if (ids.length) {
-                            return mapPool(ids, id => soDoOne(resource, id, extra), 3);
+                            return mapPool(ids, id => soDoOne(resource, id, extra), 6);
                         }
                         // 全店: まずブランド全店(shop_id無し)で試す。SalonOneが invalid_request 等で拒否する場合は
                         // 全店をper-shopで取得してマージ（soMergeSummary/正規化が複数店を合算）。
                         const brand = await soDoOne(resource, '', extra);
                         const brandOk = brand && brand.status === 200 && brand.json && brand.json.data && !brand.json.error;
                         if (brandOk || !allShopIds.length) return [brand];
-                        return mapPool(allShopIds, id => soDoOne(resource, id, extra), 3);
+                        return mapPool(allShopIds, id => soDoOne(resource, id, extra), 6);
                     };
 
                     const salesRes = await fetchResource('sales/summary');
@@ -4659,6 +4659,18 @@
                 soInitialized.current = true;
                 fetchSalonOneData();
             }, [currentPage, soFrom, soTo, soShopSel]);
+
+            // 全店表示の売上サマリ(sales/summary)は SalonOne がブランド一括取得を許可せず(422)、
+            // per-shop合算が必要。初回に店舗一覧(soShops)が未取得のままfetchが走ると soSummary が
+            // null のままになる（＝スタッフ/日報タブで「取得できていません」）。店舗一覧が揃ったら再取得する。
+            useEffect(() => {
+                if (currentPage !== 'salonone') return;
+                if (soShopSel.length) return;   // 特定店選択時は店舗一覧に依存しないので対象外
+                if (!soShops.length) return;    // まだ揃っていない
+                if (soSummary) return;          // 既に取得済みなら不要
+                if (soLoading) return;           // 取得中の二重発火を防止
+                fetchSalonOneData();
+            }, [currentPage, soShops.length, soShopSel.length, soSummary, soLoading, soFrom, soTo]);
 
             // 店舗選択が変わったらスタッフ選択をリセット
             useEffect(() => { setSoStaffSel([]); }, [soShopSel]);

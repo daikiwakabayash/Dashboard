@@ -1442,8 +1442,9 @@
 
             const [currentPage, setCurrentPage] = useState(() => {
                 const p = savedUIState?.currentPage;
-                // 非表示中のページ(経営指標/ダッシュボード/マーケティング)はSalonOne売上に寄せる
-                return (p && !['dashboard', 'charts', 'marketing'].includes(p)) ? p : 'salonone';
+                // 既定の入口は「全体管理シート」。非表示ページ(経営指標/ダッシュボード/マーケティング)と
+                // 旧既定(salonone)は全体管理シートに寄せる（他ページは前回の続きを復元）。
+                return (p && !['dashboard', 'charts', 'marketing', 'salonone'].includes(p)) ? p : 'zenkanri';
             });
             // サイドバー折りたたみ（画面を広く使う。localStorageで記憶）
             const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
@@ -3962,7 +3963,9 @@
                         done++; setSoShopProgress({ done, total: targets.length });
                     }
                 };
-                await Promise.all(Array.from({ length: 2 }, worker));   // 並列度2（レート制限60/分に配慮・Retry-After尊重で取りこぼしゼロ）
+                // 並列度6。サーバー側KVキャッシュのHITは上流(60/分)を消費しないため、温まった後は
+                // 高並列で高速。コールド時もサーバーがRetry-Afterを待って取りこぼしゼロ。
+                await Promise.all(Array.from({ length: 6 }, worker));
                 if (soShopReqRef.current !== reqId) return;             // 途中で新しい取得が始まったら保存しない
                 // キャッシュ永続化（古い期間は最新8件に間引き）
                 try {
@@ -4433,7 +4436,8 @@
                         if (done % 6 === 0) setZkData({ year, months, shops: shops.map(s => ({ ...s })) }); // 逐次反映
                     }
                 };
-                await Promise.all(Array.from({ length: Math.min(2, tasks.length) }, () => worker())); // レート制限(60/分)配慮: 全店取得は並列2に抑える（ログイン等の他リクエストを枯渇させない）
+                // 並列度6。KVキャッシュHITは上流(60/分)を消費しないので温まれば高速。コールドはサーバーがRetry-Afterを待つ。
+                await Promise.all(Array.from({ length: Math.min(6, tasks.length) }, () => worker()));
                 cacheAll._stamp = cacheAll._stamp || {}; cacheAll._stamp[year] = Date.now(); // 取得完了時刻（10分以内は再取得しない）
                 try { localStorage.setItem(ZK_CACHE_KEY, JSON.stringify(cacheAll)); } catch (e) { /* 容量超過等は無視 */ }
                 setZkData({ year, months, shops });

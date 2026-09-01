@@ -4326,7 +4326,7 @@
             //   総売上=gross_sales（消化ではなく総額）／カルテ枚数=来店数／新規数=新規来店数／
             //   セラピスト数=その月に売上(gross)が1円でも発生した担当者（ヘルプ/楽トレ等は除外）。
             //   金額はSalonOneの最小通貨単位（JPYは円、AUD/MYRはセント）で保持し、表示時に通貨係数で割る。
-            const ZK_CACHE_KEY = 'naoru_zk_cache_v2_digest';
+            const ZK_CACHE_KEY = 'naoru_zk_cache_v3_groupby';
             const loadZenkanri = async (year = zkYear, opts = {}) => {
                 const forceAll = !!opts.force; // 「再取得」ボタン＝全月取り直し
                 const shopList = (soShops && soShops.length) ? soShops : [];
@@ -4385,59 +4385,87 @@
                     if (ym === nowYM && !stampFresh) tasks.push({ sh, ym });
                 }));
                 setZkProgress({ done: 0, total: tasks.length });
-                // レート制限(60/分)対策: 429/5xx はバックオフして再試行（取りこぼしで0になるのを防ぐ）
-                const zkGet = async (shopId, from, to) => {
+                const p2b = p2;
+                // 月の期間（from/to。当月は当日まで）
+                const monthRange = (ym) => {
+                    const [yy, mm] = ym.split('-').map(Number);
+                    const from = `${ym}-01`;
+                    let to = `${ym}-${p2b(new Date(yy, mm, 0).getDate())}`;
+                    if (to > ystr) to = ystr;
+                    return { from, to };
+                };
+                // 応答1店ぶんを {gross,karte,newc,ther} に整形して格納。
+                // gross＝会計済み売上(digest・入金ベース)。group_by=shop は多通貨のため amounts_jpy(JPY換算)を優先。
+                // by_staff は group_by=shop では返らないため、セラピスト数は在籍ロスターで算出（店舗別売上と一致）。
+                const zkApply = (sh, ym, raw) => {
+                    if (!raw) return;
+                    const aj = raw.amounts_jpy || null;
+                    const gross = Number(
+                        (aj && aj.digest_sales != null) ? aj.digest_sales
+                        : (raw.digest_sales != null ? raw.digest_sales : raw.gross_sales)
+                    ) || 0;
+                    const karte = Number(raw.gross_count) || 0;                                        // カルテ枚数＝会計数
+                    const newc = Number(raw.new_visit_count != null ? raw.new_visit_count : raw.new_count) || 0; // 新規来店
+                    const ther = stTherapistRoster(sh.id).length;                                      // 在籍セラピスト数
+                    const data = { gross, karte, newc, ther };
+                    sh.months[ym] = data;
+                    (ycache[sh.id] = ycache[sh.id] || {})[ym] = data;                                  // キャッシュにも保存
+                };
+                // レート制限(60/分)対策: 429/5xx はRetry-Afterを尊重して再試行
+                const zkFetch = async (url) => {
                     for (let a = 0; a < 8; a++) {
                         try {
-                            const res = await fetch(`${SALONONE_API_URL}?resource=sales/summary&from=${from}&to=${to}&shop_id=${shopId}`);
+                            const res = await fetch(url);
                             if (res.status === 429 || res.status >= 500) {
                                 const ra = Number(res.headers.get('retry-after')) || 0;
                                 await new Promise(r => setTimeout(r, ra > 0 ? Math.min(ra, 30) * 1000 + 300 : Math.min(1000 * Math.pow(1.8, a), 8000))); continue;
                             }
-                            if (!res.ok) return null;
-                            return await res.json().catch(() => null);
+                            if (!res.ok) return { ok: false, json: null };
+                            return { ok: true, json: await res.json().catch(() => null) };
                         } catch (e) { await new Promise(r => setTimeout(r, 1000 * Math.pow(1.8, a))); }
                     }
-                    return null;
+                    return { ok: false, json: null };
                 };
-                let idx = 0, done = 0;
-                const worker = async () => {
-                    while (idx < tasks.length) {
-                        const { sh, ym } = tasks[idx++];
-                        try {
-                            const [yy, mm] = ym.split('-').map(Number);
-                            const from = `${ym}-01`;
-                            let to = `${ym}-${p2(new Date(yy, mm, 0).getDate())}`;
-                            if (to > ystr) to = ystr; // 当月は前日まで
-                            if (to >= from) {
-                                const r = await zkGet(sh.id, from, to);
-                                const raw = (r && r.data && !Array.isArray(r.data)) ? r.data : ((r && r.data && r.data[0]) || null);
-                                if (raw) {
-                                    const gross = Number(raw.digest_sales != null ? raw.digest_sales : raw.gross_sales) || 0; // 総売上＝会計済み売上(digest＝入金ベース)。無ければgross
-                                    const karte = Number(raw.gross_count) || 0;                       // カルテ枚数＝会計数（来店未計上でも計上される）
-                                    const newc = Number(raw.new_visit_count != null ? raw.new_visit_count : raw.new_count) || 0; // 新規来店
-                                    const bs = raw.by_staff || raw.byStaff || [];
-                                    // 当月に稼働した担当者（売上/会計/施術のいずれかがある人）。ヘルプ/楽トレ/未割当等は除外。
-                                    // ※サブスク店は売上がSquare側でSalonOne上gross=0のため、会計/施術数でも稼働判定する。
-                                    const ther = bs.filter(st => {
-                                        const nm = String(st.staff_name || st.name || '').trim();
-                                        const g = Number(st.gross_sales) || 0;
-                                        const it = Number(st.item_count) || 0;
-                                        const tr = Number(st.treatment_count) || 0;
-                                        return (g > 0 || it > 0 || tr > 0) && !ST_NON_THERAPIST.has(nm);
-                                    }).length;
-                                    const data = { gross, karte, newc, ther };
-                                    sh.months[ym] = data;
-                                    (ycache[sh.id] = ycache[sh.id] || {})[ym] = data; // キャッシュにも保存
+                let done = 0; const total = tasks.length;
+                // 対象月ごとの店舗リスト（その月にタスクがある店舗）
+                const shopsByMonth = {};
+                tasks.forEach(t => { (shopsByMonth[t.ym] = shopsByMonth[t.ym] || []).push(t.sh); });
+                const monthsNeeded = Object.keys(shopsByMonth).sort();
+                // ── 高速化の核: 月ごとに group_by=shop で「1リクエストで全店」取得（従来は店舗×月＝最大90回/月）──
+                const failedMonths = [];
+                const fetchMonthGrouped = async (ym) => {
+                    const { from, to } = monthRange(ym);
+                    if (to < from) return true;
+                    const { ok, json } = await zkFetch(`${SALONONE_API_URL}?resource=sales/summary&from=${from}&to=${to}&group_by=shop`);
+                    if (!ok || !json || !Array.isArray(json.data)) return false; // 422等→フォールバックへ
+                    const byId = new Map(json.data.map(x => [String(x.shop_id), x]));
+                    for (const sh of shopsByMonth[ym]) { zkApply(sh, ym, byId.get(String(sh.id)) || null); done++; }
+                    setZkProgress({ done, total });
+                    setZkData({ year, months, shops: shops.map(s => ({ ...s })) }); // 逐次反映
+                    return true;
+                };
+                await Promise.all(monthsNeeded.map(async ym => { if (!(await fetchMonthGrouped(ym))) failedMonths.push(ym); }));
+                // group_by=shop が使えない月のみ、従来の per-shop 取得でフォールバック（並列6）
+                if (failedMonths.length) {
+                    const fb = tasks.filter(t => failedMonths.includes(t.ym));
+                    let idx = 0;
+                    const worker = async () => {
+                        while (idx < fb.length) {
+                            const { sh, ym } = fb[idx++];
+                            try {
+                                const { from, to } = monthRange(ym);
+                                if (to >= from) {
+                                    const { json } = await zkFetch(`${SALONONE_API_URL}?resource=sales/summary&from=${from}&to=${to}&shop_id=${sh.id}`);
+                                    const raw = (json && json.data && !Array.isArray(json.data)) ? json.data : ((json && json.data && json.data[0]) || null);
+                                    zkApply(sh, ym, raw);
                                 }
-                            }
-                        } catch (e) { /* この月は空のまま */ }
-                        done++; setZkProgress({ done, total: tasks.length });
-                        if (done % 6 === 0) setZkData({ year, months, shops: shops.map(s => ({ ...s })) }); // 逐次反映
-                    }
-                };
-                // 並列度6。KVキャッシュHITは上流(60/分)を消費しないので温まれば高速。コールドはサーバーがRetry-Afterを待つ。
-                await Promise.all(Array.from({ length: Math.min(6, tasks.length) }, () => worker()));
+                            } catch (e) { /* この月は空のまま */ }
+                            done++; setZkProgress({ done, total });
+                            if (done % 6 === 0) setZkData({ year, months, shops: shops.map(s => ({ ...s })) });
+                        }
+                    };
+                    await Promise.all(Array.from({ length: 6 }, () => worker()));
+                }
                 cacheAll._stamp = cacheAll._stamp || {}; cacheAll._stamp[year] = Date.now(); // 取得完了時刻（10分以内は再取得しない）
                 try { localStorage.setItem(ZK_CACHE_KEY, JSON.stringify(cacheAll)); } catch (e) { /* 容量超過等は無視 */ }
                 setZkData({ year, months, shops });

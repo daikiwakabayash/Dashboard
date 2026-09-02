@@ -14,6 +14,7 @@
 // POST /api/plan-store {goals,actions} → { ok:true }
 
 import { getVotingState, validateVote, upsertVote, removeVote } from '../lib/thanksgift.js';
+import { ensureBaseRooms, extractLinks, toggleReaction, genId } from '../lib/chat.js';
 
 // Vercel KV / Upstash Redis / Vercel Redis いずれの環境変数名でも動くよう両対応（REST APIは共通）
 const KV_URL = () => process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_REST_API_URL || '';
@@ -27,6 +28,9 @@ const ALLOWANCE_KEY = 'naoru:allowance:v1'; // { submissions:[...], productivity
 const ACCTMETA_KEY = 'naoru:accountmeta:v1'; // { owner: { role, staffId, staffName } }
 const ZKTHERAPIST_KEY = 'naoru:zktherapist:v1'; // { 'shopName|YYYY-MM': count } 全体管理シートのセラピスト数 手動上書き
 const THANKSGIFT_KEY = 'naoru:thanksgift:v1'; // { votes:[{id,period,fromStaffId,fromStaffName,fromShop,toStaffId,toStaffName,toShop,comment,createdAt}] } サンクスギフト投票
+const CHAT_KEY = 'naoru:chat:v1';             // { rooms:[...], messages:{roomId:[...]}, reads:{staffId:{roomId:ms}}, dir:{staff:[...]} } 社内チャット
+const CHAT_IMG_PREFIX = 'naoru:chat:img:';    // 画像は1枚1キーで別保存（blob肥大化を避ける）
+const CHAT_MSG_CAP = 400;                     // 1ルームあたり保持する最大メッセージ数（古いものから破棄）
 
 // ── Vercel KV (Upstash REST) ──
 async function kvGet(key) {
@@ -182,6 +186,147 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
       return res.status(400).json({ ok: false, error: 'invalid zktherapist action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── 社内チャット ストア: ?type=chat ──
+  // rooms / messages / reads / dir を1つのblobで共有。画像は別キー(CHAT_IMG_PREFIX+id)。
+  const isChat = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'chat';
+  if (isChat) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ rooms: [], messages: {}, reads: {}, dir: { staff: [] }, configured: false });
+    try {
+      // 画像1枚取得: GET ?type=chat&img=<id> → { dataUrl }
+      if (req.method === 'GET' && req.query.img) {
+        const dataUrl = await blobGet(CHAT_IMG_PREFIX + String(req.query.img), hasKV, hasSB, gas);
+        if (!dataUrl) return res.status(404).json({ ok: false, error: 'not_found' });
+        return res.status(200).json({ ok: true, dataUrl });
+      }
+      const cur = (await blobGet(CHAT_KEY, hasKV, hasSB, gas)) || {};
+      const rooms = Array.isArray(cur.rooms) ? cur.rooms : [];
+      const messages = (cur.messages && typeof cur.messages === 'object') ? cur.messages : {};
+      const reads = (cur.reads && typeof cur.reads === 'object') ? cur.reads : {};
+      const dir = (cur.dir && typeof cur.dir === 'object') ? { staff: Array.isArray(cur.dir.staff) ? cur.dir.staff : [], updatedAt: cur.dir.updatedAt || '' } : { staff: [], updatedAt: '' };
+      const save = (patch) => blobSet(CHAT_KEY, { rooms, messages, reads, dir, ...patch }, hasKV, hasSB, gas);
+
+      if (req.method === 'GET') {
+        return res.status(200).json({ rooms, messages, reads, dir, configured: true });
+      }
+
+      const body = req.body || {};
+      const action = body.action;
+
+      // 全社アナウンス＋店舗ルーム＋スタッフディレクトリを用意（広い権限のセッションが呼ぶ）
+      if (action === 'ensureRooms') {
+        const nextRooms = ensureBaseRooms(rooms, Array.isArray(body.shops) ? body.shops : []);
+        let nextDir = dir;
+        if (Array.isArray(body.staff) && body.staff.length) {
+          const map = new Map((dir.staff || []).map(s => [String(s.id), s]));
+          for (const s of body.staff) {
+            const id = String((s && s.id) || ''); if (!id) continue;
+            map.set(id, { id, name: String(s.name || ''), shop: String(s.shop || '') });
+          }
+          nextDir = { staff: [...map.values()].slice(0, 8000), updatedAt: new Date().toISOString() };
+        }
+        await save({ rooms: nextRooms, dir: nextDir });
+        return res.status(200).json({ ok: true, rooms: nextRooms, dir: nextDir });
+      }
+
+      // ルーム作成（group/dm）。members・name・kind をそのまま採用。
+      if (action === 'createRoom' && body.room) {
+        const r = body.room;
+        const room = {
+          id: r.id ? String(r.id) : genId('room'),
+          kind: (r.kind === 'dm' || r.kind === 'group') ? r.kind : 'group',
+          name: String(r.name || '').slice(0, 60),
+          shop: String(r.shop || ''),
+          members: (Array.isArray(r.members) ? r.members : []).map(String).slice(0, 500),
+          createdBy: String(r.createdBy || ''),
+          createdAt: new Date().toISOString(),
+        };
+        const nextRooms = rooms.filter(x => x && x.id !== room.id).concat(room);
+        await save({ rooms: nextRooms });
+        return res.status(200).json({ ok: true, room });
+      }
+
+      // メッセージ送信（画像は先に uploadImage で入れて imgIds を渡す）
+      if (action === 'send' && body.roomId && body.msg) {
+        const rid = String(body.roomId);
+        const m = body.msg;
+        const text = String(m.text || '').slice(0, 4000);
+        const rec = {
+          id: genId('m'),
+          roomId: rid,
+          fromStaffId: String(m.fromStaffId || ''),
+          fromName: String(m.fromName || '').slice(0, 80),
+          fromShop: String(m.fromShop || '').slice(0, 80),
+          text,
+          imgIds: (Array.isArray(m.imgIds) ? m.imgIds : []).map(String).slice(0, 6),
+          links: extractLinks(text),
+          reactions: {},
+          createdAt: new Date().toISOString(),
+        };
+        const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).concat(rec).slice(-CHAT_MSG_CAP);
+        const nextMessages = { ...messages, [rid]: arr };
+        const nextReads = { ...reads, [rec.fromStaffId]: { ...(reads[rec.fromStaffId] || {}), [rid]: Date.parse(rec.createdAt) } };
+        await save({ messages: nextMessages, reads: nextReads });
+        return res.status(200).json({ ok: true, message: rec });
+      }
+
+      // 画像アップロード（1枚1キー）。dataUrl（data:image/...;base64,） を保存し id を返す。
+      if (action === 'uploadImage' && body.dataUrl) {
+        const dataUrl = String(body.dataUrl);
+        if (!/^data:image\/(png|jpe?g|gif|webp);base64,/.test(dataUrl)) return res.status(400).json({ ok: false, error: 'bad_image' });
+        if (dataUrl.length > 3_500_000) return res.status(413).json({ ok: false, error: 'too_large' }); // ~2.6MB相当
+        const id = genId('img');
+        await blobSet(CHAT_IMG_PREFIX + id, dataUrl, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, id });
+      }
+
+      // リアクション トグル
+      if (action === 'react' && body.roomId && body.msgId && body.emoji && body.staffId) {
+        const rid = String(body.roomId);
+        const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).map(msg =>
+          msg && msg.id === String(body.msgId) ? { ...msg, reactions: toggleReaction(msg.reactions, String(body.emoji), String(body.staffId)) } : msg
+        );
+        await save({ messages: { ...messages, [rid]: arr } });
+        return res.status(200).json({ ok: true });
+      }
+
+      // 既読ポインタ更新
+      if (action === 'read' && body.roomId && body.staffId) {
+        const sid = String(body.staffId), rid = String(body.roomId);
+        const ts = Number(body.ts) || Date.now();
+        const nextReads = { ...reads, [sid]: { ...(reads[sid] || {}), [rid]: ts } };
+        await save({ reads: nextReads });
+        return res.status(200).json({ ok: true });
+      }
+
+      // メッセージ削除（本人 or root）
+      if (action === 'deleteMsg' && body.roomId && body.msgId) {
+        const rid = String(body.roomId);
+        const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).filter(msg => {
+          if (!msg || msg.id !== String(body.msgId)) return true;
+          return !(body.root || String(msg.fromStaffId) === String(body.staffId)); // 本人/rootのみ削除可
+        });
+        await save({ messages: { ...messages, [rid]: arr } });
+        return res.status(200).json({ ok: true });
+      }
+
+      // ルーム削除（group/dm のみ・作成者 or root）。announce/store は消せない。
+      if (action === 'deleteRoom' && body.roomId) {
+        const rid = String(body.roomId);
+        const target = rooms.find(r => r && r.id === rid);
+        if (!target || target.kind === 'announce' || target.kind === 'store') return res.status(400).json({ ok: false, error: 'not_deletable' });
+        if (!(body.root || String(target.createdBy) === String(body.staffId))) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const nextRooms = rooms.filter(r => r && r.id !== rid);
+        const nextMessages = { ...messages }; delete nextMessages[rid];
+        await save({ rooms: nextRooms, messages: nextMessages });
+        return res.status(200).json({ ok: true });
+      }
+
+      return res.status(400).json({ ok: false, error: 'invalid chat action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
     }

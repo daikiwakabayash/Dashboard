@@ -1783,8 +1783,9 @@
                     }
                     const data = j.data || j;
                     const bs = (data.by_staff || data.byStaff || []);
+                    // 売上0でも在籍者は感謝の相手候補にできるよう、売上フィルタはしない（当月稼働=by_staffの全員）。
                     const list = bs.map(s => ({ id: String(s.staff_id ?? s.id ?? ''), name: s.staff_name || s.name || '', gross: Number(s.digest_sales ?? s.gross_sales ?? s.gross ?? 0) }))
-                        .filter(s => s.id && s.gross > 0)
+                        .filter(s => s.id)
                         .sort((a, b) => b.gross - a.gross);
                     // 成功時のみキャッシュ（空応答=レート制限失敗は保存しない）
                     if (list.length || (data && (data.by_staff || data.byStaff))) {
@@ -15000,10 +15001,22 @@
                             }
                             return Object.values(map).sort((a, b) => b.points - a.points || String(a.name).localeCompare(String(b.name), 'ja'));
                         })();
-                        // 相手候補: ライブのSalonOne実績（自店＝売上>0）を優先。取得不可/空（他店＝SSOスコープ外）は共有ディレクトリの在籍スタッフで補完。
+                        // 相手候補: その店舗の【在籍セラピスト全員】。売上0でも感謝は送れるべきなので売上フィルタはしない。
+                        // ソース＝在籍ロスター(soStaffs) ＋ 共有ディレクトリ(他店/SSOスコープ外の補完) ＋ 当月稼働(by_staff) をマージ。
+                        const shopStaffRoster = stTherapistRoster(tgForm.shopId).map(s => ({ id: String(s.id), name: s.name }));
                         const liveRoster = (tgRoster.shopId === tgForm.shopId ? tgRoster.list : []);
                         const dirRoster = (tgDir.staff || []).filter(s => s && String(s.shopId) === String(tgForm.shopId) && !s.deleted).map(s => ({ id: String(s.id), name: s.name }));
-                        const rosterList = (liveRoster.length ? liveRoster : dirRoster).filter(s => String(s.id) !== myStaffId).sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
+                        const rosterList = (() => {
+                            const m = new Map();
+                            [...shopStaffRoster, ...dirRoster, ...liveRoster].forEach(s => {
+                                if (!s || !s.id) return;
+                                const nm = String(s.name || '').trim();
+                                if (ST_NON_THERAPIST.has(nm)) return;            // 楽トレ/ヘルプ/未割当等は除外
+                                if (String(s.id) === myStaffId) return;          // 自分は除外
+                                if (!m.has(String(s.id))) m.set(String(s.id), { id: String(s.id), name: s.name });
+                            });
+                            return [...m.values()].sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
+                        })();
                         const selectedShopName = (() => { const sh = (soShopsRaw || []).find(s => String(s.id) === String(tgForm.shopId)); return sh ? sh.name : ''; })();
                         const canSubmit = !!(myStaffId && tgForm.shopId && tgForm.toStaffId && tgForm.comment.trim() && isOpen && !tgBusy);
                         const doSubmit = async () => {

@@ -327,6 +327,23 @@
         .animate-loading-bar {
             animation: loadingBar 2s ease-in-out infinite;
         }
+        /* ── サンクスギフト 開封演出 ── */
+        @keyframes tgOverlayIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes tgRise { from { opacity: 0; transform: translateY(24px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+        @keyframes tgPop { 0% { opacity: 0; transform: scale(0.6); } 60% { opacity: 1; transform: scale(1.08); } 100% { opacity: 1; transform: scale(1); } }
+        @keyframes tgGlow { 0%,100% { filter: drop-shadow(0 0 12px rgba(244,114,182,0.55)); } 50% { filter: drop-shadow(0 0 26px rgba(244,114,182,0.9)); } }
+        @keyframes tgFloatUp { 0% { transform: translateY(0) scale(1); opacity: 0; } 15% { opacity: 0.9; } 100% { transform: translateY(-120vh) scale(1.15); opacity: 0; } }
+        @keyframes tgLidOff { 0% { transform: translateY(0) rotate(0); } 100% { transform: translateY(-60px) rotate(-14deg); opacity: 0; } }
+        @keyframes tgBoxShake { 0%,100% { transform: rotate(0); } 20% { transform: rotate(-6deg); } 40% { transform: rotate(6deg); } 60% { transform: rotate(-4deg); } 80% { transform: rotate(4deg); } }
+        @keyframes tgSweep { 0% { transform: translateX(-120%) skewX(-18deg); } 100% { transform: translateX(220%) skewX(-18deg); } }
+        .tg-anim-overlay { animation: tgOverlayIn .35s ease both; }
+        .tg-anim-rise { animation: tgRise .7s cubic-bezier(.22,1,.36,1) both; }
+        .tg-anim-pop { animation: tgPop .6s cubic-bezier(.34,1.56,.64,1) both; }
+        .tg-anim-glow { animation: tgGlow 2.4s ease-in-out infinite; }
+        .tg-anim-shake { animation: tgBoxShake 1.1s ease-in-out infinite; }
+        .tg-anim-lid { animation: tgLidOff .6s cubic-bezier(.5,-0.4,.7,.5) both; }
+        .tg-float { position: absolute; bottom: -20px; animation: tgFloatUp linear infinite; will-change: transform, opacity; }
+        .tg-sweep::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.55), transparent); transform: translateX(-120%) skewX(-18deg); animation: tgSweep 2.6s ease-in-out infinite; }
         .splash-screen {
             position: fixed;
             inset: 0;
@@ -1727,6 +1744,14 @@
             const [tgRootPeriod, setTgRootPeriod] = useState(''); // root集計の対象月フィルタ（''=全期間）
             const [tgTestMonth, setTgTestMonth] = useState('2026-07'); // テストモードの対象月（root）
             const [tgShopQuery, setTgShopQuery] = useState(''); // サンクスギフト相手店舗の検索
+            // 感謝の開封演出: reveal={period} で開封オーバーレイ表示、phase 1=代表メッセージ / 2=個別メッセージ
+            const [tgReveal, setTgReveal] = useState(null);
+            const [tgRevealPhase, setTgRevealPhase] = useState(1);
+            const [tgOpened, setTgOpened] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_tg_opened_v1') || '[]') || []; } catch { return []; } });
+            const tgMarkOpened = (p) => setTgOpened(prev => { const n = prev.includes(p) ? prev : [...prev, p]; try { localStorage.setItem('naoru_tg_opened_v1', JSON.stringify(n)); } catch {} return n; });
+            // 代表からのメッセージ（開封時に最初に表示）
+            const TG_REP_MESSAGE = 'いつもナオルグループ全体のために動いてくれて本当にありがとうございます。';
+            const TG_REP_NAME = '代表 若林';
             const tgMonthLabel = (ym) => { if (!ym) return ''; const [y, m] = String(ym).split('-'); return `${y}年${Number(m)}月`; };
             const tgLoad = async () => {
                 try { const r = await fetch('/api/plan-store?type=thanksgift'); const j = await r.json().catch(() => ({})); setTgData({ votes: Array.isArray(j.votes) ? j.votes : [], log: Array.isArray(j.log) ? j.log : [], votingState: j.votingState || null, test: j.test || { open: false, period: '' }, published: Array.isArray(j.published) ? j.published : [], dir: (j.dir && typeof j.dir === 'object') ? { shops: Array.isArray(j.dir.shops) ? j.dir.shops : [], staff: Array.isArray(j.dir.staff) ? j.dir.staff : [] } : { shops: [], staff: [] }, configured: j.configured !== false, loaded: true }); }
@@ -15154,28 +15179,86 @@
                                                     <div className="text-[11px] text-slate-400 font-bold mt-1.5 leading-relaxed">投票のあと、管理者が公開すると<br className="sm:hidden" />ここに届きます</div>
                                                 </div>
                                             )}
-                                            <div className="space-y-5">
-                                                {receivedPeriods.map(p => (
-                                                    <div key={p}>
-                                                        <div className="flex items-center gap-2 mb-2.5">
-                                                            <span className="text-[11px] font-black text-rose-700 bg-rose-100 px-2.5 py-1 rounded-full">🎀 {tgMonthLabel(p)}分</span>
-                                                            <span className="text-[11px] font-black text-slate-400">{received.filter(v => v.period === p).length}件の感謝</span>
-                                                        </div>
-                                                        <div className="space-y-2.5">
-                                                            {received.filter(v => v.period === p).map((v, i) => (
-                                                                <div key={i} className="relative bg-white rounded-2xl border border-rose-100 p-4 pl-11 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all">
-                                                                    <span className="absolute top-2.5 left-3.5 text-3xl leading-none text-rose-200 font-black">“</span>
-                                                                    <div className="text-sm font-bold text-slate-700 whitespace-pre-wrap leading-relaxed">{v.comment}</div>
-                                                                    <div className="flex items-center gap-1 mt-2 text-rose-400"><Heart size={11} /><span className="text-[10px] font-black tracking-wide">匿名の仲間より</span></div>
+                                            {/* 対象月ごとに「ギフト箱」を表示。タップで開封演出（代表メッセージ→匿名メッセージ）へ。 */}
+                                            <div className="space-y-3">
+                                                {receivedPeriods.map(p => {
+                                                    const cnt = received.filter(v => v.period === p).length;
+                                                    const opened = tgOpened.includes(p);
+                                                    return (
+                                                        <button key={p} onClick={() => { setTgRevealPhase(1); setTgReveal(p); }}
+                                                            className="tg-sweep group relative w-full overflow-hidden text-left bg-gradient-to-br from-rose-500 via-pink-500 to-fuchsia-500 rounded-2xl p-4 shadow-lg shadow-rose-200/60 active:scale-[0.99] transition-transform">
+                                                            <div className="relative flex items-center gap-3">
+                                                                <div className={`text-4xl ${opened ? '' : 'tg-anim-shake'}`}>🎁</div>
+                                                                <div className="min-w-0">
+                                                                    <div className="text-white font-black text-base leading-tight">{tgMonthLabel(p)}分のサンクス <span className="text-white">{cnt}件</span></div>
+                                                                    <div className="text-white/85 text-[11px] font-bold mt-0.5">{opened ? 'もう一度開いて読む 💌' : 'タップして開く 🎉'}</div>
                                                                 </div>
-                                                            ))}
-                                                        </div>
-                                                    </div>
-                                                ))}
+                                                                <div className="ml-auto shrink-0 bg-white/25 text-white font-black text-xs px-3 py-2 rounded-full backdrop-blur">{opened ? '見る →' : '開く →'}</div>
+                                                            </div>
+                                                        </button>
+                                                    );
+                                                })}
                                             </div>
                                         </div>
                                     </div>
                                 )}
+
+                                {/* ── 感謝の開封演出（フルスクリーン）: 1=代表メッセージ → 2=匿名メッセージ ── */}
+                                {tgReveal && (() => {
+                                    const TG_SAMPLE = [
+                                        { comment: '忙しい時に予約を代わりに取ってくれて本当に助かりました。いつも周りをよく見てくれてありがとうございます！' },
+                                        { comment: '新人の相談にいつも丁寧に乗ってくれて、チーム全体が安心して働けています。感謝しかないです。' },
+                                        { comment: '売上が伸び悩んでいた時、一緒に施策を考えてくれてありがとうございました。おかげで目標達成できました🎉' },
+                                    ];
+                                    const isPreview = tgReveal === '__preview__';
+                                    const items = isPreview ? TG_SAMPLE : received.filter(v => v.period === tgReveal);
+                                    const periodLabel = isPreview ? 'プレビュー' : `${tgMonthLabel(tgReveal)}分`;
+                                    const close = () => setTgReveal(null);
+                                    const goMessages = () => { if (!isPreview) tgMarkOpened(tgReveal); setTgRevealPhase(2); };
+                                    return (
+                                        <div className="fixed inset-0 z-[100] tg-anim-overlay flex items-center justify-center p-4" style={{ background: 'radial-gradient(1200px 600px at 50% -10%, #fb7185 0%, #db2777 45%, #7e22ce 100%)' }}>
+                                            <div className="pointer-events-none absolute inset-0 overflow-hidden">
+                                                {Array.from({ length: 14 }).map((_, i) => (
+                                                    <span key={i} className="tg-float" style={{ left: `${(i * 7 + 4) % 100}%`, fontSize: `${16 + (i % 4) * 10}px`, animationDuration: `${7 + (i % 5) * 2}s`, animationDelay: `${(i % 6) * 0.8}s` }}>{['💗', '🎁', '✨', '💛', '🌸'][i % 5]}</span>
+                                                ))}
+                                            </div>
+                                            <button onClick={close} className="absolute top-4 right-4 z-10 w-10 h-10 rounded-full bg-white/20 text-white text-2xl font-black leading-none backdrop-blur hover:bg-white/30 flex items-center justify-center">×</button>
+                                            {tgRevealPhase === 1 ? (
+                                                <div className="relative w-full max-w-lg text-center text-white">
+                                                    <div className="text-6xl md:text-7xl tg-anim-pop tg-anim-glow mb-6">🎁</div>
+                                                    <div className="tg-anim-rise" style={{ animationDelay: '.15s' }}>
+                                                        <div className="text-[11px] font-black tracking-[0.3em] text-white/70 mb-3">MESSAGE FROM NAORU</div>
+                                                        <p className="text-xl md:text-2xl font-black leading-relaxed mb-5" style={{ textShadow: '0 2px 20px rgba(0,0,0,.25)' }}>{TG_REP_MESSAGE}</p>
+                                                        <div className="text-sm font-black text-white/95 mb-1">{TG_REP_NAME}</div>
+                                                        <div className="text-[12px] font-bold text-white/70">{periodLabel}・あなたに {items.length}件の感謝が届いています</div>
+                                                    </div>
+                                                    <button onClick={goMessages} className="tg-anim-rise mt-8 inline-flex items-center gap-2 bg-white text-rose-600 font-black text-sm px-8 py-3.5 rounded-full shadow-2xl active:scale-95 hover:scale-[1.03] transition-transform" style={{ animationDelay: '.5s' }}>感謝のメッセージを見る →</button>
+                                                </div>
+                                            ) : (
+                                                <div className="relative w-full max-w-lg">
+                                                    <div className="text-center text-white mb-4 tg-anim-rise">
+                                                        <div className="text-4xl mb-1">💌</div>
+                                                        <div className="font-black text-lg">{periodLabel}の感謝</div>
+                                                        <div className="text-[12px] font-bold text-white/75">匿名で届いた {items.length}件のメッセージ</div>
+                                                    </div>
+                                                    <div className="max-h-[60vh] overflow-y-auto space-y-3 px-0.5 pb-2">
+                                                        {items.map((v, i) => (
+                                                            <div key={i} className="tg-anim-rise relative bg-white rounded-2xl p-4 pl-11 shadow-xl" style={{ animationDelay: `${0.12 * i + 0.05}s` }}>
+                                                                <span className="absolute top-2.5 left-3.5 text-3xl leading-none text-rose-200 font-black">“</span>
+                                                                <div className="text-sm font-bold text-slate-700 whitespace-pre-wrap leading-relaxed">{v.comment}</div>
+                                                                <div className="flex items-center gap-1 mt-2 text-rose-400"><Heart size={11} /><span className="text-[10px] font-black tracking-wide">匿名の仲間より</span></div>
+                                                            </div>
+                                                        ))}
+                                                        {items.length === 0 && <div className="text-center text-white/80 font-bold py-8">この月の感謝はまだありません</div>}
+                                                    </div>
+                                                    <div className="text-center mt-4">
+                                                        <button onClick={close} className="bg-white/20 text-white font-black text-sm px-8 py-3 rounded-full backdrop-blur hover:bg-white/30 active:scale-95 transition">閉じる</button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })()}
 
                                 {/* ── 自分が送った感謝（送信履歴・編集履歴つき）── staff/owner共通 */}
                                 {tgData.loaded && !isRoot && myStaffId && (() => {
@@ -15229,6 +15312,20 @@
                                     );
                                 })()}
 
+                                {/* ── 本部/root：開封演出プレビュー（デザイン確認用・サンプルメッセージで表示） ── */}
+                                {tgData.loaded && isRoot && (
+                                    <button onClick={() => { setTgRevealPhase(1); setTgReveal('__preview__'); }}
+                                        className="tg-sweep relative w-full overflow-hidden bg-gradient-to-br from-rose-500 via-pink-500 to-fuchsia-500 rounded-2xl p-4 shadow-lg shadow-rose-200/60 active:scale-[0.99] transition-transform text-left">
+                                        <div className="relative flex items-center gap-3">
+                                            <div className="text-4xl tg-anim-shake">🎁</div>
+                                            <div className="min-w-0">
+                                                <div className="text-white font-black text-base">開封演出をプレビュー</div>
+                                                <div className="text-white/85 text-[11px] font-bold mt-0.5">スタッフが感謝を開いた時の見え方（サンプル）を確認できます</div>
+                                            </div>
+                                            <div className="ml-auto shrink-0 bg-white/25 text-white font-black text-xs px-3 py-2 rounded-full backdrop-blur">開く →</div>
+                                        </div>
+                                    </button>
+                                )}
                                 {/* ── 本部/root：公開管理（対象月ごとに感謝を受け取った側へ公開） ── */}
                                 {tgData.loaded && isRoot && (
                                     <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6 space-y-3">

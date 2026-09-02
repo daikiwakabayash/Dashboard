@@ -1887,8 +1887,17 @@
             };
             // 店舗の在籍セラピスト（soStaffs を shop_id で絞り、削除済み・非セラピストを除外）
             const ST_NON_THERAPIST = new Set(['ヘルプ', '楽トレ', '未割当', '(不明)', '不明', '受付']);
+            // セラピスト以外（オーナー/ヘルプ枠/受付/楽トレ等）を名前で判定して除外
+            const isNonTherapistName = (name) => {
+                const n = String(name || '').trim();
+                if (!n) return true;
+                if (ST_NON_THERAPIST.has(n)) return true;
+                return /^ヘルプ/.test(n) || /^受付/.test(n) || /オーナー/.test(n) || /^楽トレ/.test(n);
+            };
+            // セラピスト＝在籍・非セラピスト名でない・かつ「予約を受け付ける」スタッフ（accepts_reservations=false＝
+            // オーナー/店長/バックオフィス等の非施術者を除外）。これでグループ合計にオーナー等が混ざらない。
             const stTherapistRoster = (shopId) => (soStaffs || [])
-                .filter(st => String(st.shop_id || '') === String(shopId) && !st.deleted && !ST_NON_THERAPIST.has(String(st.name || '').trim()))
+                .filter(st => String(st.shop_id || '') === String(shopId) && !st.deleted && !isNonTherapistName(st.name) && st.acceptsRes !== false)
                 .map(st => ({ id: String(st.id), name: st.name }));
             // salon.byStaff（当月の個人別 gross）から生産性を引く
             const stProductivityOf = (salon, staffId, staffName) => {
@@ -2092,7 +2101,7 @@
             // 返金明細書・手当タブでは在籍スタッフ一覧（諸経費/手当のセラピスト表示用）を取得
             useEffect(() => {
                 if (!['settlement', 'allowance', 'settings', 'zenkanri', 'thanksgift'].includes(currentPage) || soStaffs.length > 0) return;
-                (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at })); if (arr.length) setSoStaffs(arr); } catch {} })();
+                (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at, acceptsRes: s.accepts_reservations !== false })); if (arr.length) setSoStaffs(arr); } catch {} })();
             }, [currentPage]);
             // サンクスギフト: 広い権限のセッション（全店が見える）が全店ディレクトリを共有ストアへ土台保存
             useEffect(() => {
@@ -4327,7 +4336,7 @@
             //   総売上=gross_sales（消化ではなく総額）／カルテ枚数=来店数／新規数=新規来店数／
             //   セラピスト数=その月に売上(gross)が1円でも発生した担当者（ヘルプ/楽トレ等は除外）。
             //   金額はSalonOneの最小通貨単位（JPYは円、AUD/MYRはセント）で保持し、表示時に通貨係数で割る。
-            const ZK_CACHE_KEY = 'naoru_zk_cache_v4_native';
+            const ZK_CACHE_KEY = 'naoru_zk_cache_v5_ther';
             const loadZenkanri = async (year = zkYear, opts = {}) => {
                 const forceAll = !!opts.force; // 「再取得」ボタン＝全月取り直し
                 const shopList = (soShops && soShops.length) ? soShops : [];
@@ -4611,7 +4620,7 @@
                             const stJson = await stRes.json().catch(() => ({}));
                             // 削除済みスタッフも所属店舗の判定に使うため保持（deletedフラグ付き）。選択肢では除外する
                             const stArr = (stJson.data || stJson || [])
-                                .map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at }));
+                                .map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at, acceptsRes: s.accepts_reservations !== false }));
                             if (stArr.length) setSoStaffs(stArr);
                         } catch {}
                     }
@@ -4682,7 +4691,7 @@
                     (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`); const j = await r.json().catch(() => ({})); const arr = soShopsFromResp(j); if (arr.length) setSoShops(arr); } catch {} })();
                 }
                 if (soStaffs.length === 0) {
-                    (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at })); if (arr.length) setSoStaffs(arr); } catch {} })();
+                    (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at, acceptsRes: s.accepts_reservations !== false })); if (arr.length) setSoStaffs(arr); } catch {} })();
                 }
             }, [chatOpen]);
             // 事業計画相談タブを開いた/店舗を変えたらSalonOne実績を取得
@@ -14077,7 +14086,8 @@
                                 const g = ZK_FIXED.months[ym] && ZK_FIXED.months[ym]['__group__'];
                                 // セラピスト数(人数)はCSV公式合計を優先。総売上/新規は、当月をSalonOneで穴埋めした月のみ
                                 // 表示中の店舗合計に切替（公式CSVが未入力店舗を含み過少になるのを防ぐ）。確定月は公式合計。
-                                if (metric === 'ther') return g ? (g[2] || 0) : shops.reduce((a, s) => a + get(s, ym, metric), 0);
+                                // セラピスト数(グループ)＝その月の横一列（各店舗）の合計。手動上書きも反映（zkTherResolved）。
+                                if (metric === 'ther') return Math.round(shops.reduce((a, s) => a + zkTherResolved(s.name, ym, get(s, ym, 'ther')), 0));
                                 if (!jpFilled.has(ym) && g) { const map = { gross: g[0], newc: g[1], karte: 0 }; return map[metric] || 0; }
                                 return shops.reduce((a, s) => a + get(s, ym, metric), 0);
                             }
@@ -15011,7 +15021,7 @@
                             [...shopStaffRoster, ...dirRoster, ...liveRoster].forEach(s => {
                                 if (!s || !s.id) return;
                                 const nm = String(s.name || '').trim();
-                                if (ST_NON_THERAPIST.has(nm)) return;            // 楽トレ/ヘルプ/未割当等は除外
+                                if (isNonTherapistName(nm)) return;              // 楽トレ/ヘルプ/オーナー/受付等は除外
                                 if (String(s.id) === myStaffId) return;          // 自分は除外
                                 if (!m.has(String(s.id))) m.set(String(s.id), { id: String(s.id), name: s.name });
                             });

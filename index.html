@@ -14081,13 +14081,33 @@
                         // すべての指標（総売上/カルテ/新規/セラピスト数）を月次データから取得。
                         // セラピスト数＝その月に売上>0だった担当者数（ヘルプ/楽トレ除外）を店舗ごとに保持。
                         const get = (s, ym, metric) => { const m = s.months && s.months[ym]; return m ? (m[metric] || 0) : 0; };
+                        // セラピスト数の基準値: CSV確定月は公式人数、それ以外(9月+)はライブの在籍セラピスト数
+                        // （オーナー/受付/ヘルプ等は除外済み）で補完。取得タイミングでsoStaffs未ロードでも0にならないよう
+                        // 描画時に算出する。JP行はfx_IDでSalonOne shop_idを持たないため店舗名で照合してロスターを引く。
+                        const soIdByName = new Map();
+                        (soShops || []).forEach(sh => { const nn = soShopNorm(sh.name); if (nn && !soIdByName.has(nn)) soIdByName.set(nn, String(sh.id)); });
+                        const resolveSoId = (s) => {
+                            if (s.id && !String(s.id).startsWith('fx_')) return String(s.id);
+                            const nn = soShopNorm(s.name);
+                            if (soIdByName.has(nn)) return soIdByName.get(nn);
+                            for (const [k, v] of soIdByName) { if (nn.length >= 2 && (k.includes(nn) || nn.includes(k))) return v; }
+                            return null;
+                        };
+                        const therBase = (s, ym) => {
+                            const csv = zkCsvTherapist(s.name, ym);
+                            if (csv != null) return csv;                          // CSV確定月＝公式人数
+                            const stored = Number(get(s, ym, 'ther')) || 0;
+                            if (stored) return stored;                            // 取得済みの在籍数
+                            const sid = resolveSoId(s);                           // 未取得(0)ならライブ在籍で補完
+                            return sid ? stTherapistRoster(sid).length : 0;
+                        };
                         const val = (ent, ym, metric) => {
                             if (ent.group && useFixedJp) {
                                 const g = ZK_FIXED.months[ym] && ZK_FIXED.months[ym]['__group__'];
                                 // セラピスト数(人数)はCSV公式合計を優先。総売上/新規は、当月をSalonOneで穴埋めした月のみ
                                 // 表示中の店舗合計に切替（公式CSVが未入力店舗を含み過少になるのを防ぐ）。確定月は公式合計。
                                 // セラピスト数(グループ)＝その月の横一列（各店舗）の合計。手動上書きも反映（zkTherResolved）。
-                                if (metric === 'ther') return Math.round(shops.reduce((a, s) => a + zkTherResolved(s.name, ym, get(s, ym, 'ther')), 0));
+                                if (metric === 'ther') return Math.round(shops.reduce((a, s) => a + zkTherResolved(s.name, ym, therBase(s, ym)), 0));
                                 if (!jpFilled.has(ym) && g) { const map = { gross: g[0], newc: g[1], karte: 0 }; return map[metric] || 0; }
                                 return shops.reduce((a, s) => a + get(s, ym, metric), 0);
                             }
@@ -14095,8 +14115,8 @@
                         };
                         // セラピスト数（手動上書き優先）。店舗=個別値／グループ=表示店舗の合計。SalonOne売上分析と共通ロジック。
                         const therOf = (ent, ym) => ent.group
-                            ? Math.round(shops.reduce((a, s) => a + zkTherResolved(s.name, ym, get(s, ym, 'ther')), 0))
-                            : zkTherResolved(ent.shop.name, ym, get(ent.shop, ym, 'ther'));
+                            ? Math.round(shops.reduce((a, s) => a + zkTherResolved(s.name, ym, therBase(s, ym)), 0))
+                            : zkTherResolved(ent.shop.name, ym, therBase(ent.shop, ym));
                         const therOverridden = (ent, ym) => !ent.group && zkTherOverrides[zkTherKey(ent.shop.name, ym)] != null;
                         // 前月比: 100%以上=緑／未満=赤／前月0=新規・前月なし=—
                         const cmp = (cur, prev) => {

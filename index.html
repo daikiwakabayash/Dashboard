@@ -4326,7 +4326,7 @@
             //   総売上=gross_sales（消化ではなく総額）／カルテ枚数=来店数／新規数=新規来店数／
             //   セラピスト数=その月に売上(gross)が1円でも発生した担当者（ヘルプ/楽トレ等は除外）。
             //   金額はSalonOneの最小通貨単位（JPYは円、AUD/MYRはセント）で保持し、表示時に通貨係数で割る。
-            const ZK_CACHE_KEY = 'naoru_zk_cache_v3_groupby';
+            const ZK_CACHE_KEY = 'naoru_zk_cache_v4_native';
             const loadZenkanri = async (year = zkYear, opts = {}) => {
                 const forceAll = !!opts.force; // 「再取得」ボタン＝全月取り直し
                 const shopList = (soShops && soShops.length) ? soShops : [];
@@ -4399,11 +4399,9 @@
                 // by_staff は group_by=shop では返らないため、セラピスト数は在籍ロスターで算出（店舗別売上と一致）。
                 const zkApply = (sh, ym, raw) => {
                     if (!raw) return;
-                    const aj = raw.amounts_jpy || null;
-                    const gross = Number(
-                        (aj && aj.digest_sales != null) ? aj.digest_sales
-                        : (raw.digest_sales != null ? raw.digest_sales : raw.gross_sales)
-                    ) || 0;
+                    // 総売上＝会計済み売上(digest・入金ベース)。各国タブは店舗のSalonOne通貨(現地通貨)で表示するため、
+                    // JPY換算(amounts_jpy)ではなくネイティブ通貨の digest_sales を採用（表示側 money() が国別の最小通貨単位で換算）。
+                    const gross = Number(raw.digest_sales != null ? raw.digest_sales : raw.gross_sales) || 0;
                     const karte = Number(raw.gross_count) || 0;                                        // カルテ枚数＝会計数
                     const newc = Number(raw.new_visit_count != null ? raw.new_visit_count : raw.new_count) || 0; // 新規来店
                     const ther = stTherapistRoster(sh.id).length;                                      // 在籍セラピスト数
@@ -14063,7 +14061,9 @@
                                 };
                             });
                         } else {
-                            months = (zkData && zkData.months) || Array.from({ length: 12 }, (_, i) => `${zkYear}-${p2(i + 1)}`);
+                            // 海外(AU/MY)も当月まで（翌月以降＝10月以降は表示しない）
+                            const _nowYMov = `${new Date().getFullYear()}-${p2(new Date().getMonth() + 1)}`;
+                            months = ((zkData && zkData.months) || Array.from({ length: 12 }, (_, i) => `${zkYear}-${p2(i + 1)}`)).filter(ym => ym <= _nowYMov);
                             shops = ((zkData && zkData.shops) || []).filter(s => zkCountryOf(s) === zkCountry);
                         }
                         const stripName = (n) => String(n || '').replace(/^NAORU\s*/, '').trim();
@@ -14090,7 +14090,7 @@
                         // 前月比: 100%以上=緑／未満=赤／前月0=新規・前月なし=—
                         const cmp = (cur, prev) => {
                             if (prev == null) return { t: '—', cls: 'text-slate-300' };
-                            if (!prev) return { t: cur ? '新規' : '—', cls: cur ? 'text-emerald-600' : 'text-slate-300' };
+                            if (!prev) return { t: '—', cls: 'text-slate-300' };
                             const r = Math.round(cur / prev * 100);
                             return { t: r + '%', cls: r >= 100 ? 'text-emerald-600' : 'text-rose-500' };
                         };

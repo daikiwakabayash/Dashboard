@@ -2037,8 +2037,10 @@
                 const sqGross = square && !square.error ? square.squareGrossSales : null;
                 const sqFees = square && !square.error ? square.squareFees : 0;
                 const sqRefunds = square && !square.error ? square.refunds : 0;
-                const squareSales = sqGross != null ? sqGross : soSquare;
+                // スクエア売上（ロイヤリティ対象）は「総決済−返金＝実売上」。SalonOne売上分析と一致させる。
+                // 返金分は顧客へ返却済み＝本部の手元に残らないため、ロイヤリティ対象・返金原資の双方から控除する。
                 const sqNet = sqGross != null ? (sqGross - sqRefunds) : null;
+                const squareSales = sqNet != null ? sqNet : soSquare;
                 const mismatch = sqNet != null && Math.abs(sqNet - soSquare) > 1;
                 const feeRate = sqGross != null && sqGross > 0 ? Math.round(sqFees / sqGross * 10000) / 100 : null;
                 const royaltyBase = cash + squareSales + hpb;
@@ -2197,7 +2199,7 @@
                 const shk = (s.shokei || []).map(it => row(it.label || '諸経費', it.note ? `内訳: ${it.note}` : '', it.amount)).join('');
                 return `<div class="doc"><div class="head"><div><div class="ttl">請求書 兼 支払明細書</div><div class="sub">${stEsc(s.owner)} 様</div><div class="sub2">（${stEsc(s.shopName || '')}）</div><div class="mon">${ml}分</div></div><div class="co"><div class="b">株式会社NAORUテクノロジー</div><div>NAORU FC本部</div><div>登録番号：T9010701040194</div><div>〒140-0014 東京都品川区大井6-4-4</div><div>電話：03-6822-8474</div></div></div>`
                     + `<div class="refund"><span>ご返金金額</span><span class="amt">${y(s.refundAmount)}</span></div>`
-                    + `<div class="sec">売上（ロイヤリティ対象）</div><table>${row('現金売上', 'SalonOne', s.cash)}${row('スクエア売上', s.mismatch ? '⚠Square不一致' : 'Square', s.squareSales)}${row('ホットペッパーポイント', 'SalonOne', s.hpb)}${row('ロイヤリティー対象額合計（税込）', '', s.royaltyBase, true)}</table>`
+                    + `<div class="sec">売上（ロイヤリティ対象）</div><table>${row('現金売上', 'SalonOne', s.cash)}${row('スクエア売上', s.mismatch ? '⚠Square不一致' : (s.sqRefunds > 0 ? 'Square 総決済−返金' : 'Square'), s.squareSales)}${row('ホットペッパーポイント', 'SalonOne', s.hpb)}${row('ロイヤリティー対象額合計（税込）', '', s.royaltyBase, true)}</table>`
                     + `<div class="sec">請求内容</div><table>${row('FCロイヤリティ', `対象額の${s.royaltyRate}%`, s.royalty)}${row('スクエア手数料', s.feeRate != null ? `売上比 ${s.feeRate}%` : '', s.sqFees)}${s.spotip ? row('Spotip利用料', 'AI姿勢分析', s.spotip) : ''}${meta}${adj}${shk}${row('税込請求合計', `内税 ${y(s.tax)}`, s.billTotal, true)}</table>`
                     + `<div class="note">備考：スクエア売上 ${y(s.squareSales)} より請求額 ${y(s.billTotal)} を差し引いた ${y(s.refundAmount)} をご返金いたします。</div></div>`;
             };
@@ -14280,9 +14282,10 @@
                             const sqGross = square && !square.error ? square.squareGrossSales : null;
                             const sqFees = square && !square.error ? square.squareFees : 0;
                             const sqRefunds = square && !square.error ? square.refunds : 0;
-                            const squareSales = sqGross != null ? sqGross : soSquare;
-                            const sqFeeRate = sqGross != null && sqGross > 0 ? (sqFees / sqGross * 100) : null;
+                            // スクエア売上（ロイヤリティ対象）は「総決済−返金＝実売上」。SalonOne売上分析と一致させる。
                             const sqNet = sqGross != null ? (sqGross - sqRefunds) : null;
+                            const squareSales = sqNet != null ? sqNet : soSquare;
+                            const sqFeeRate = sqGross != null && sqGross > 0 ? (sqFees / sqGross * 100) : null;
                             const mismatch = sqNet != null && Math.abs(sqNet - soSquare) > 1;
                             const royaltyBase = cash + squareSales + hpb;
                             const royalty = Math.round(royaltyBase * (Number(m.royaltyRate) || 0) / 100);
@@ -14332,7 +14335,7 @@
                                         <div className="bg-slate-100 px-3 py-1.5 font-black text-sm text-slate-700 rounded">売上（ロイヤリティ対象）</div>
                                         <table className="w-full text-sm"><tbody>
                                             <tr className="border-b border-slate-100"><td className="py-2 pl-3">現金売上 <span className="text-[10px] text-slate-400">SalonOne</span></td><td className="py-2 pr-3 text-right font-bold">{yen(cash)}</td></tr>
-                                            <tr className="border-b border-slate-100"><td className="py-2 pl-3">スクエア売上 <span className="text-[10px] text-slate-400">{sqGross != null ? 'Square API' : 'SalonOne'}</span></td><td className="py-2 pr-3 text-right font-bold">{yen(squareSales)}</td></tr>
+                                            <tr className="border-b border-slate-100"><td className="py-2 pl-3">スクエア売上 <span className="text-[10px] text-slate-400">{sqGross != null ? (sqRefunds > 0 ? 'Square 総決済−返金' : 'Square API') : 'SalonOne'}</span></td><td className="py-2 pr-3 text-right font-bold">{yen(squareSales)}</td></tr>
                                             <tr className="border-b border-slate-100"><td className="py-2 pl-3">ホットペッパーポイント <span className="text-[10px] text-slate-400">SalonOne</span></td><td className="py-2 pr-3 text-right font-bold">{yen(hpb)}</td></tr>
                                             <tr className="bg-slate-50 font-black"><td className="py-2 pl-3">ロイヤリティー対象額合計（税込）</td><td className="py-2 pr-3 text-right">{yen(royaltyBase)}</td></tr>
                                         </tbody></table>

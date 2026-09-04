@@ -2125,9 +2125,16 @@
             const [boardFiles, setBoardFiles] = useState([]);    // [{id,name,type,size}]
             const [boardVideo, setBoardVideo] = useState('');
             const [boardPosting, setBoardPosting] = useState(false);
-            const [boardFilter, setBoardFilter] = useState('all'); // all | hq | staff（受け手の絞り込み）
+            const [boardFilter, setBoardFilter] = useState('all'); // all | hq | staff | important
             const [boardTitle, setBoardTitle] = useState('');
+            const [boardLink, setBoardLink] = useState('');
             const [boardImportant, setBoardImportant] = useState(false);
+            const [boardSort, setBoardSort] = useState('new');    // new | old
+            const [boardView, setBoardView] = useState('list');   // list | grid
+            const [boardMenuId, setBoardMenuId] = useState('');   // 「…」メニュー展開中の投稿id
+            const [boardDrag, setBoardDrag] = useState(false);    // ドラッグ&ドロップ中ハイライト
+            const [boardBm, setBoardBm] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_board_bm') || '[]') || []; } catch { return []; } });
+            const boardToggleBm = (id) => setBoardBm(prev => { const n = prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]; try { localStorage.setItem('naoru_board_bm', JSON.stringify(n)); } catch {} return n; });
             const boardLastSeen = ((boardData.reads || {})[chatMyId]) || 0;
             const boardIsUnread = (p) => (Date.parse(p.createdAt || '') || 0) > boardLastSeen && String(p.authorId) !== chatMyId;
             const boardUnreadTotal = useMemo(() => (boardData.posts || []).reduce((n, p) => boardIsUnread(p) ? n + 1 : n, 0), [boardData, boardLastSeen, chatMyId]);
@@ -2159,13 +2166,21 @@
             });
             const boardPost = async () => {
                 const t = boardText.trim(); const ti = boardTitle.trim();
-                if (!t && !ti && boardImgs.length === 0 && boardFiles.length === 0 && !boardVideo.trim()) return;
+                if (!t && !ti && boardImgs.length === 0 && boardFiles.length === 0 && !boardVideo.trim() && !boardLink.trim()) return;
                 setBoardPosting(true);
                 try {
-                    await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'post', post: { authorId: chatMyId, authorName: chatMyName, authorShop: chatMyShop, authorRoot: chatIsRoot, title: ti, important: boardImportant, text: t, imgIds: boardImgs.map(i => i.id), files: boardFiles, videoUrl: boardVideo.trim() } }) });
-                    setBoardText(''); setBoardTitle(''); setBoardImportant(false); setBoardImgs([]); setBoardFiles([]); setBoardVideo('');
+                    await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'post', post: { authorId: chatMyId, authorName: chatMyName, authorShop: chatMyShop, authorRoot: chatIsRoot, title: ti, important: boardImportant, text: t, link: boardLink.trim(), imgIds: boardImgs.map(i => i.id), files: boardFiles, videoUrl: boardVideo.trim() } }) });
+                    setBoardText(''); setBoardTitle(''); setBoardLink(''); setBoardImportant(false); setBoardImgs([]); setBoardFiles([]); setBoardVideo('');
                     await boardLoad();
                 } catch {} finally { setBoardPosting(false); }
+            };
+            // ドラッグ&ドロップ／選択で画像orファイルを取り込む共通処理
+            const boardTakeFiles = async (fileList) => {
+                const files = [...(fileList || [])].slice(0, 8);
+                for (const f of files) {
+                    if (/^image\//.test(f.type)) { const up = await boardUploadImage(f); if (up) { chatImgCache[up.id] = up.dataUrl; setBoardImgs(p => [...p, up]); } }
+                    else { const up = await boardUploadFile(f); if (up) setBoardFiles(p => [...p, up]); }
+                }
             };
             const boardDelete = async (id) => {
                 if (!window.confirm('この掲示を削除しますか？')) return;
@@ -10039,142 +10054,161 @@
                         })()}
                         {currentPage === 'board' && (() => {
                             const WD = ['日', '月', '火', '水', '木', '金', '土'];
-                            const sorted = (boardData.posts || []).slice().sort((a, b) => (Date.parse(b.createdAt || '') || 0) - (Date.parse(a.createdAt || '') || 0));
-                            const allPosts = sorted.filter(p => boardFilter === 'all' ? true : boardFilter === 'hq' ? p.authorRoot : !p.authorRoot);
-                            const pinned = allPosts.filter(p => p.pinned);
-                            const rest = allPosts.filter(p => !p.pinned);
-                            // 月ごとにグルーピング（新しい月が上）
-                            const monthGroups = (() => {
-                                const m = new Map();
-                                for (const p of rest) { const d = new Date(p.createdAt); const k = `${d.getFullYear()}-${d.getMonth() + 1}`; if (!m.has(k)) m.set(k, []); m.get(k).push(p); }
-                                return [...m.entries()].map(([k, list]) => ({ key: k, label: (() => { const [y, mo] = k.split('-'); return `${y}年${mo}月`; })(), posts: list }));
-                            })();
-                            const dBig = (iso) => { const d = new Date(iso); return `${d.getMonth() + 1}月${d.getDate()}日`; };
-                            const dSub = (iso) => { const d = new Date(iso); return `(${WD[d.getDay()]}) ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; };
+                            const filtered = (boardData.posts || []).filter(p => boardFilter === 'all' ? true : boardFilter === 'hq' ? p.authorRoot : boardFilter === 'staff' ? !p.authorRoot : p.important);
+                            const posts = filtered.slice().sort((a, b) => {
+                                if (!!b.pinned !== !!a.pinned) return b.pinned ? 1 : -1;
+                                const da = Date.parse(a.createdAt || '') || 0, db = Date.parse(b.createdAt || '') || 0;
+                                return boardSort === 'old' ? da - db : db - da;
+                            });
+                            const dFull = (iso) => { const d = new Date(iso); return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日(${WD[d.getDay()]}) ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; };
                             const rel = (iso) => { const d = new Date(iso), now = new Date(); const s = (now - d) / 1000; if (s < 60) return 'たった今'; if (s < 3600) return `${Math.floor(s / 60)}分前`; if (s < 86400) return `${Math.floor(s / 3600)}時間前`; const days = Math.floor(s / 86400); return days <= 30 ? `${days}日前` : ''; };
                             const canPost = !!chatMyId;
-                            const pushBtn = () => {
-                                if (!pushState.supported) return <span className="text-[12px] text-[#98A2B3]">通知はこの端末では非対応</span>;
-                                if (!pushState.enabled) return <span className="text-[12px] text-[#98A2B3]" title="管理者がVAPIDキーを設定すると有効になります">通知：設定待ち</span>;
-                                if (pushState.subscribed) return <button onClick={pushUnsubscribe} disabled={pushState.busy} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-[13px] font-semibold text-brand-700 bg-brand-50 hover:bg-brand-100 transition"><Bell size={15} />通知オン</button>;
-                                return <button onClick={pushSubscribe} disabled={pushState.busy} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-[13px] font-semibold text-[#667085] hover:bg-[#EFF1F5] transition"><Bell size={15} />通知をオンにする</button>;
-                            };
+                            const composerEmpty = !boardText.trim() && !boardTitle.trim() && !boardLink.trim() && !boardVideo.trim() && !boardImgs.length && !boardFiles.length;
+                            const Label = ({ children, opt }) => <div className="text-[12px] font-semibold text-[#344054] mb-1.5 mt-3.5">{children}{opt && <span className="ml-1 text-[11px] font-normal text-[#98A2B3]">{opt}</span>}</div>;
+                            const inputCls = 'w-full h-10 rounded-lg border border-[#EAECF0] bg-white px-3.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition';
+                            const BmIcon = ({ on }) => <svg width="16" height="16" viewBox="0 0 24 24" fill={on ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" /></svg>;
+                            const MoreIcon = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" /></svg>;
                             const PostCard = (p) => {
                                 const unread = boardIsUnread(p);
                                 const vid = p.videoUrl ? boardVideoEmbed(p.videoUrl) : null;
                                 const canManage = chatIsRoot || String(p.authorId) === chatMyId;
                                 const authorName = chatResolveName(p.authorId, p.authorName || '不明');
+                                const bm = boardBm.includes(p.id);
                                 return (
-                                    <article key={p.id} onClick={() => unread && boardMarkReadUpTo(p)} className={`relative bg-white rounded-xl border transition-shadow ${p.important ? 'border-l-[3px] border-l-rose-400 border-y-[#EAECF0] border-r-[#EAECF0]' : p.authorRoot ? 'border-l-[3px] border-l-brand-400 border-y-[#EAECF0] border-r-[#EAECF0]' : 'border-[#EAECF0]'} ${unread ? 'ring-1 ring-brand-200 shadow-[0_1px_3px_rgba(243,112,33,0.12)]' : ''}`}>
+                                    <article key={p.id} onClick={() => unread && boardMarkReadUpTo(p)} className={`relative bg-white rounded-2xl border p-4 md:p-5 transition-shadow ${p.important ? 'border-rose-200 border-l-[4px] border-l-rose-400' : p.authorRoot ? 'border-[#EAECF0] border-l-[4px] border-l-brand-300' : 'border-[#EAECF0]'} ${unread ? 'ring-1 ring-brand-200 shadow-[0_1px_6px_rgba(243,112,33,0.10)]' : 'shadow-[0_1px_2px_rgba(16,24,40,0.03)]'}`}>
                                         {unread && <span className="absolute -top-2 -left-2 min-w-[20px] h-5 px-1.5 flex items-center justify-center bg-brand-500 text-white text-[11px] font-bold rounded-full shadow z-10">1</span>}
-                                        <div className="flex gap-4 p-4 md:p-5">
+                                        <div className="flex items-start gap-2.5">
+                                            <ChatAvatar name={authorName} size="sm" />
                                             <div className="min-w-0 flex-1">
                                                 <div className="flex items-center gap-2 flex-wrap">
-                                                    <ChatAvatar name={authorName} size="sm" />
                                                     <span className="text-[14px] font-semibold text-[#111827]">{authorName}</span>
-                                                    {p.authorRoot ? <span className="text-[10px] font-bold text-brand-700 bg-brand-50 px-1.5 py-0.5 rounded">本部</span> : (p.authorShop && <span className="text-[11px] text-[#98A2B3]">{p.authorShop}</span>)}
-                                                    {p.important && <span className="text-[10px] font-bold text-rose-700 bg-rose-50 px-1.5 py-0.5 rounded">❗重要</span>}
+                                                    {p.authorRoot ? <span className="text-[10px] font-bold text-brand-700 bg-brand-50 px-1.5 py-0.5 rounded">本部</span> : (p.authorShop && <span className="text-[10px] font-bold text-[#475467] bg-[#F2F4F7] px-1.5 py-0.5 rounded">{p.authorShop}</span>)}
                                                     {p.pinned && <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">📌 固定</span>}
                                                     {unread && <span className="text-[10px] font-bold text-white bg-brand-500 px-1.5 py-0.5 rounded">未読</span>}
-                                                    {/* モバイル用の受信日 */}
-                                                    <span className="sm:hidden text-[11px] text-[#98A2B3] ml-auto">{dBig(p.createdAt)} {dSub(p.createdAt)}</span>
                                                 </div>
-                                                {p.title && <div className="text-[16px] font-bold text-[#111827] mt-2 leading-snug break-words" style={{ wordBreak: 'break-word' }}>{p.title}</div>}
-                                                {p.text && <div className={`text-[14px] text-[#344054] leading-relaxed whitespace-pre-wrap break-words ${p.title ? 'mt-1' : 'mt-2'}`} style={{ wordBreak: 'break-word' }}>{chatLinkify(p.text)}</div>}
-                                                {Array.isArray(p.imgIds) && p.imgIds.length > 0 && <div className="mt-2.5 flex flex-wrap gap-2">{p.imgIds.map(id => <ChatImage key={id} imgId={id} onClick={() => setChatLightbox(id)} />)}</div>}
-                                                {vid && (vid.kind === 'youtube' || vid.kind === 'vimeo') && <div className="mt-2.5 rounded-lg overflow-hidden border border-[#EAECF0]" style={{ aspectRatio: '16 / 9' }}><iframe src={vid.embedUrl} className="w-full h-full" frameBorder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen title="video" /></div>}
-                                                {vid && vid.kind === 'file' && <video src={vid.src} controls className="mt-2.5 w-full max-h-[360px] rounded-lg border border-[#EAECF0] bg-black" />}
-                                                {vid && vid.kind === 'link' && <a href={vid.src} target="_blank" rel="noopener noreferrer" className="mt-2.5 inline-block text-[13px] text-brand-600 hover:underline break-all">🔗 {vid.src}</a>}
-                                                {Array.isArray(p.files) && p.files.length > 0 && <div className="mt-2.5 flex flex-wrap gap-2">{p.files.map(f => <BoardFile key={f.id} file={f} />)}</div>}
+                                            </div>
+                                            <div className="text-right shrink-0">
+                                                <div className="text-[11px] md:text-[12px] text-[#98A2B3] whitespace-nowrap">{dFull(p.createdAt)}</div>
+                                                {rel(p.createdAt) && <div className="text-[11px] text-[#B0B7C3]">{rel(p.createdAt)}</div>}
+                                            </div>
+                                        </div>
+                                        {p.title && <div className="text-[16px] font-bold text-[#111827] mt-2.5 leading-snug break-words" style={{ wordBreak: 'break-word' }}>{p.title}</div>}
+                                        {p.text && <div className={`text-[14px] text-[#475467] leading-relaxed whitespace-pre-wrap break-words ${p.title ? 'mt-1.5' : 'mt-2.5'}`} style={{ wordBreak: 'break-word' }}>{chatLinkify(p.text)}</div>}
+                                        {p.link && <a href={p.link} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="mt-2.5 inline-flex items-center gap-1.5 text-[13px] text-brand-600 hover:underline break-all">🔗 {p.link}</a>}
+                                        {Array.isArray(p.imgIds) && p.imgIds.length > 0 && <div className="mt-2.5 flex flex-wrap gap-2">{p.imgIds.map(id => <ChatImage key={id} imgId={id} onClick={() => setChatLightbox(id)} />)}</div>}
+                                        {vid && (vid.kind === 'youtube' || vid.kind === 'vimeo') && <div className="mt-2.5 rounded-lg overflow-hidden border border-[#EAECF0]" style={{ aspectRatio: '16 / 9' }}><iframe src={vid.embedUrl} className="w-full h-full" frameBorder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen title="video" /></div>}
+                                        {vid && vid.kind === 'file' && <video src={vid.src} controls className="mt-2.5 w-full max-h-[360px] rounded-lg border border-[#EAECF0] bg-black" />}
+                                        {vid && vid.kind === 'link' && <a href={vid.src} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="mt-2.5 inline-block text-[13px] text-brand-600 hover:underline break-all">🔗 {vid.src}</a>}
+                                        {Array.isArray(p.files) && p.files.length > 0 && <div className="mt-2.5 flex flex-wrap gap-2">{p.files.map(f => <BoardFile key={f.id} file={f} />)}</div>}
+                                        <div className="flex items-center gap-2 mt-3 pt-2.5 border-t border-[#F2F4F7]">
+                                            {p.important && <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-full">⭐ 重要</span>}
+                                            <div className="ml-auto flex items-center gap-0.5">
+                                                <button onClick={e => { e.stopPropagation(); boardToggleBm(p.id); }} title={bm ? 'ブックマーク解除' : 'ブックマーク'} className={`w-8 h-8 flex items-center justify-center rounded-lg transition ${bm ? 'text-brand-600 bg-brand-50' : 'text-[#98A2B3] hover:bg-[#F2F4F7]'}`}><BmIcon on={bm} /></button>
                                                 {canManage && (
-                                                    <div className="flex items-center gap-3 mt-3">
-                                                        {chatIsRoot && <button onClick={() => boardPin(p.id, !p.pinned)} className="text-[12px] font-semibold text-[#667085] hover:text-brand-600">{p.pinned ? '固定を解除' : '📌 固定する'}</button>}
-                                                        <button onClick={() => boardDelete(p.id)} className="text-[12px] font-semibold text-[#98A2B3] hover:text-rose-600">削除</button>
+                                                    <div className="relative">
+                                                        <button onClick={e => { e.stopPropagation(); setBoardMenuId(boardMenuId === p.id ? '' : p.id); }} className="w-8 h-8 flex items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F2F4F7] transition"><MoreIcon /></button>
+                                                        {boardMenuId === p.id && (
+                                                            <div className="absolute right-0 top-9 z-20 w-36 bg-white border border-[#EAECF0] rounded-xl shadow-lg py-1" onClick={e => e.stopPropagation()}>
+                                                                {chatIsRoot && <button onClick={() => { boardPin(p.id, !p.pinned); setBoardMenuId(''); }} className="w-full text-left px-3 py-2 text-[13px] font-medium text-[#344054] hover:bg-[#F8F9FB]">{p.pinned ? '固定を解除' : '📌 固定する'}</button>}
+                                                                <button onClick={() => { setBoardMenuId(''); boardDelete(p.id); }} className="w-full text-left px-3 py-2 text-[13px] font-medium text-rose-600 hover:bg-rose-50">削除する</button>
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 )}
-                                            </div>
-                                            {/* PC用の受信日（右側） */}
-                                            <div className="hidden sm:flex flex-col items-end shrink-0 w-[92px] text-right pt-0.5">
-                                                <div className="text-[13px] font-bold text-[#111827] leading-tight">{dBig(p.createdAt)}</div>
-                                                <div className="text-[11px] text-[#98A2B3] leading-tight mt-0.5">{dSub(p.createdAt)}</div>
-                                                {rel(p.createdAt) && <div className="text-[11px] text-[#B0B7C3] mt-1">{rel(p.createdAt)}</div>}
                                             </div>
                                         </div>
                                     </article>
                                 );
                             };
-                            const composerEmpty = !boardText.trim() && !boardTitle.trim() && !boardImgs.length && !boardFiles.length && !boardVideo.trim();
                             return (
-                                <div className="p-4 md:p-6 font-sans" style={{ background: '#F8F9FB', color: '#111827' }}>
+                                <div className="p-4 md:p-6 font-sans" style={{ background: '#F8F9FB', color: '#111827' }} onClick={() => boardMenuId && setBoardMenuId('')}>
                                     <div className="max-w-6xl mx-auto">
-                                        <div className="flex items-end justify-between gap-3 mb-4">
-                                            <div>
-                                                <h1 className="text-[20px] md:text-[22px] font-semibold tracking-tight text-[#111827]">掲示板</h1>
-                                                <p className="text-[13px] text-[#667085] mt-0.5">左で発信、右の受信ボックスで確認。全社への発信を1箇所に。</p>
+                                        <div className="flex items-start justify-between gap-3 mb-5">
+                                            <div className="flex items-start gap-2.5">
+                                                <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-50 to-[#FFF3EA] ring-1 ring-brand-100 flex items-center justify-center text-brand-600 shrink-0 mt-0.5"><Megaphone size={18} /></div>
+                                                <div>
+                                                    <h1 className="text-[20px] md:text-[22px] font-semibold tracking-tight text-[#111827]">お知らせハブ</h1>
+                                                    <p className="text-[13px] text-[#667085] mt-0.5">全社へのお知らせを投稿・確認できます。重要なお知らせは見逃さないようにしましょう。</p>
+                                                </div>
                                             </div>
-                                            {pushBtn()}
+                                            <div className="flex items-center gap-3 shrink-0">
+                                                <button onClick={pushState.subscribed ? pushUnsubscribe : pushSubscribe} disabled={!pushState.supported || !pushState.enabled || pushState.busy} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[#EAECF0] bg-white text-[13px] font-semibold text-[#344054] hover:bg-[#F8F9FB] disabled:opacity-50 transition"><Bell size={15} />通知設定</button>
+                                                <span className="hidden md:flex items-center gap-1.5 text-[12px] text-[#98A2B3]">通知：{!pushState.supported ? '非対応' : !pushState.enabled ? '設定待ち' : pushState.subscribed ? '設定済み' : 'オフ'}<span className={`w-2 h-2 rounded-full ${pushState.subscribed ? 'bg-emerald-500' : 'bg-[#D0D5DD]'}`} /></span>
+                                            </div>
                                         </div>
 
-                                        {!boardData.configured && <div className="mb-3 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[13px]">共有ストア（KV/Supabase/GAS）が未設定のため、掲示板は保存されません。管理者に有効化を依頼してください。</div>}
+                                        {!boardData.configured && <div className="mb-4 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[13px]">共有ストア（KV/Supabase/GAS）が未設定のため、お知らせは保存されません。管理者に有効化を依頼してください。</div>}
 
-                                        <div className={canPost ? 'lg:grid lg:grid-cols-[360px_minmax(0,1fr)] lg:gap-6 lg:items-start' : ''}>
-                                            {/* ── 左: 発信（作成） ── */}
+                                        <div className={canPost ? 'lg:grid lg:grid-cols-[400px_minmax(0,1fr)] lg:gap-6 lg:items-start' : ''}>
+                                            {/* ── 左: 作成 ── */}
                                             {canPost && (
                                             <div className="mb-6 lg:mb-0 lg:sticky lg:top-4">
-                                                <div className="bg-white rounded-xl border border-[#EAECF0] p-3 md:p-4 shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
-                                                    <div className="flex items-center gap-2 mb-2.5 text-[11px] font-bold uppercase tracking-[0.08em] text-[#98A2B3]"><Send size={13} className="text-brand-500" />全社へ発信</div>
-                                                    <div className="flex items-center gap-2.5 mb-2.5"><ChatAvatar name={chatMyName} /><div><div className="text-[14px] font-semibold text-[#111827] leading-tight">{chatMyName}{chatIsRoot && <span className="ml-1.5 text-[10px] font-bold text-brand-700 bg-brand-50 px-1.5 py-0.5 rounded">本部</span>}</div><div className="text-[11px] text-[#98A2B3] leading-tight">全社に公開されます</div></div></div>
-                                                    <input value={boardTitle} onChange={e => setBoardTitle(e.target.value)} placeholder="タイトル（任意・太字で表示されます）" className="w-full h-10 rounded-lg border border-[#EAECF0] bg-[#F8F9FB] px-3.5 text-[14px] font-semibold text-[#111827] placeholder:text-[#98A2B3] placeholder:font-normal focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
-                                                    <textarea value={boardText} onChange={e => setBoardText(e.target.value)} rows={4} placeholder="本文を入力…（リンクは自動でリンク化されます）" className="w-full mt-2 resize-none rounded-lg border border-[#EAECF0] bg-[#F8F9FB] px-3.5 py-2.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
-                                                    <input value={boardVideo} onChange={e => setBoardVideo(e.target.value)} placeholder="動画URL（YouTube / Vimeo / .mp4）（任意）" className="w-full mt-2 h-9 rounded-lg border border-[#EAECF0] bg-[#F8F9FB] px-3 text-[13px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
+                                                <div className="bg-white rounded-2xl border border-[#EAECF0] p-4 md:p-5 shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
+                                                    <div className="flex items-center gap-2 text-[15px] font-semibold text-[#111827]"><Send size={16} className="text-brand-500" />全社向けお知らせを作成</div>
+                                                    <Label>送信者</Label>
+                                                    <div className="flex items-center gap-2.5"><ChatAvatar name={chatMyName} /><div><div className="text-[14px] font-semibold text-[#111827] leading-tight">{chatMyName}{chatIsRoot && <span className="ml-1.5 text-[10px] font-bold text-brand-700 bg-brand-50 px-1.5 py-0.5 rounded">本部</span>}</div><div className="text-[11px] text-[#98A2B3] leading-tight">全社に公開されます</div></div></div>
+                                                    <Label opt="（任意・太字で表示されます）">タイトル</Label>
+                                                    <input value={boardTitle} onChange={e => setBoardTitle(e.target.value)} placeholder="例）9月の運営連絡" className={inputCls} />
+                                                    <Label>本文</Label>
+                                                    <textarea value={boardText} onChange={e => setBoardText(e.target.value)} rows={4} placeholder="お知らせの内容を入力してください…" className="w-full resize-none rounded-lg border border-[#EAECF0] bg-white px-3.5 py-2.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
+                                                    <Label opt="（任意）">関連リンク</Label>
+                                                    <div className="relative"><span className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]">🔗</span><input value={boardLink} onChange={e => setBoardLink(e.target.value)} placeholder="例）https://example.com" className={inputCls + ' pl-9'} /></div>
+                                                    <Label opt="（任意）">動画URL</Label>
+                                                    <div className="relative"><span className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]">▶</span><input value={boardVideo} onChange={e => setBoardVideo(e.target.value)} placeholder="例）YouTube / Vimeo のURLを入力" className={inputCls + ' pl-9'} /></div>
+                                                    <Label opt="（任意）">画像・ファイル</Label>
+                                                    <label onDragOver={e => { e.preventDefault(); setBoardDrag(true); }} onDragLeave={() => setBoardDrag(false)} onDrop={e => { e.preventDefault(); setBoardDrag(false); boardTakeFiles(e.dataTransfer.files); }} className={`block border-2 border-dashed rounded-xl px-4 py-6 text-center cursor-pointer transition ${boardDrag ? 'border-brand-400 bg-brand-50' : 'border-[#E4E7EC] hover:border-brand-300 hover:bg-[#FAFBFC]'}`}>
+                                                        <input type="file" multiple accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv" className="hidden" onChange={async e => { const fl = e.target.files; e.target.value = ''; await boardTakeFiles(fl); }} />
+                                                        <ImageIcon size={22} className="mx-auto text-[#98A2B3] mb-1.5" />
+                                                        <div className="text-[13px] font-semibold text-[#475467]">ドラッグ＆ドロップ または クリックして選択</div>
+                                                        <div className="text-[11px] text-[#98A2B3] mt-0.5">jpg / png / pdf（最大10MB）</div>
+                                                    </label>
                                                     {(boardImgs.length > 0 || boardFiles.length > 0) && (
                                                         <div className="mt-2 flex flex-wrap gap-2">
                                                             {boardImgs.map((s, i) => <div key={s.id || i} className="relative"><img src={s.dataUrl} className="w-16 h-16 rounded-lg object-cover border border-[#EAECF0]" alt="" /><button onClick={() => setBoardImgs(p => p.filter((_, j) => j !== i))} className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-[#111827] text-white rounded-full flex items-center justify-center"><X size={11} /></button></div>)}
-                                                            {boardFiles.map((f, i) => <div key={f.id || i} className="relative inline-flex items-center gap-1.5 pl-2.5 pr-6 py-2 rounded-lg border border-[#EAECF0] bg-[#F8F9FB] text-[12px] font-semibold text-[#111827] max-w-[180px]"><FileText size={14} className="text-[#667085] shrink-0" /><span className="truncate">{f.name}</span><button onClick={() => setBoardFiles(p => p.filter((_, j) => j !== i))} className="absolute top-1/2 -translate-y-1/2 right-1.5 w-4 h-4 text-[#98A2B3] hover:text-rose-500"><X size={12} /></button></div>)}
+                                                            {boardFiles.map((f, i) => <div key={f.id || i} className="relative inline-flex items-center gap-1.5 pl-2.5 pr-6 py-2 rounded-lg border border-[#EAECF0] bg-[#F8F9FB] text-[12px] font-semibold text-[#111827] max-w-[200px]"><FileText size={14} className="text-[#667085] shrink-0" /><span className="truncate">{f.name}</span><button onClick={() => setBoardFiles(p => p.filter((_, j) => j !== i))} className="absolute top-1/2 -translate-y-1/2 right-1.5 w-4 h-4 text-[#98A2B3] hover:text-rose-500"><X size={12} /></button></div>)}
                                                         </div>
                                                     )}
-                                                    <div className="flex items-center gap-1 mt-2.5">
-                                                        <label className="w-9 h-9 flex items-center justify-center rounded-lg text-[#667085] hover:bg-[#F2F4F7] cursor-pointer transition" title="画像を追加"><ImageIcon size={18} /><input type="file" accept="image/*" multiple className="hidden" onChange={async e => { const files = [...(e.target.files || [])].slice(0, 8); e.target.value = ''; for (const f of files) { const up = await boardUploadImage(f); if (up) { chatImgCache[up.id] = up.dataUrl; setBoardImgs(p => [...p, up]); } } }} /></label>
-                                                        <label className="w-9 h-9 flex items-center justify-center rounded-lg text-[#667085] hover:bg-[#F2F4F7] cursor-pointer transition" title="ファイルを添付"><Plus size={18} /><input type="file" className="hidden" onChange={async e => { const f = (e.target.files || [])[0]; e.target.value = ''; if (f) { const up = await boardUploadFile(f); if (up) setBoardFiles(p => [...p, up]); } }} /></label>
-                                                        <button onClick={() => setBoardImportant(v => !v)} title="重要マークを付ける" className={`inline-flex items-center gap-1 h-9 px-2.5 rounded-lg text-[12px] font-semibold transition ${boardImportant ? 'bg-rose-50 text-rose-700 ring-1 ring-rose-200' : 'text-[#667085] hover:bg-[#F2F4F7]'}`}>❗重要</button>
-                                                        <button onClick={boardPost} disabled={boardPosting || composerEmpty} className="ml-auto inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-brand-500 hover:bg-brand-600 text-white font-semibold text-[13px] disabled:bg-[#EAECF0] disabled:text-[#98A2B3] active:scale-95 transition"><Send size={15} />投稿する</button>
+                                                    <div className="flex items-center justify-between mt-4">
+                                                        <span className="text-[12px] font-semibold text-[#344054]">重要度</span>
+                                                        <label className="flex items-center gap-2 cursor-pointer select-none">
+                                                            <button type="button" onClick={() => setBoardImportant(v => !v)} className={`relative w-10 h-6 rounded-full transition ${boardImportant ? 'bg-rose-500' : 'bg-[#E4E7EC]'}`}><span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${boardImportant ? 'translate-x-4' : ''}`} /></button>
+                                                            <span className="text-[12px] text-[#667085]">重要<span className="text-[#98A2B3]">（赤枠で強調表示されます）</span></span>
+                                                        </label>
                                                     </div>
+                                                    <button onClick={boardPost} disabled={boardPosting || composerEmpty} className="w-full mt-4 inline-flex items-center justify-center gap-2 py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-semibold text-[14px] disabled:bg-[#EAECF0] disabled:text-[#98A2B3] active:scale-[0.99] transition shadow-lg shadow-brand-200/40"><Send size={16} />お知らせを投稿</button>
                                                 </div>
                                             </div>
                                             )}
 
-                                            {/* ── 右: 受信ボックス（確認） ── */}
+                                            {/* ── 右: 受信一覧 ── */}
                                             <div className="min-w-0">
-                                                <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
-                                                    <div className="flex items-center gap-2 text-[13px] font-bold text-[#111827]"><Megaphone size={15} className="text-brand-500" />受信ボックス{boardUnreadTotal > 0 && <span className="text-[11px] font-bold text-white bg-brand-500 rounded-full px-1.5 py-0.5">未読 {boardUnreadTotal}</span>}</div>
-                                                    <div className="flex items-center gap-2">
-                                                        {boardUnreadTotal > 0 && <button onClick={boardMarkAllRead} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-semibold text-[#667085] hover:bg-[#EFF1F5] transition"><CheckCircle size={14} />すべて既読</button>}
-                                                        <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg bg-[#F2F4F7]">
-                                                            {[['all', 'すべて'], ['hq', '本部'], ['staff', '店舗']].map(([k, label]) => (
-                                                                <button key={k} onClick={() => setBoardFilter(k)} className={`px-2.5 py-1 rounded-md text-[12px] font-semibold transition ${boardFilter === k ? 'bg-white text-[#111827] shadow-sm' : 'text-[#667085]'}`}>{label}</button>
+                                                <div className="bg-white rounded-2xl border border-[#EAECF0] p-4 md:p-5">
+                                                    <div className="flex items-center gap-2 text-[15px] font-semibold text-[#111827] mb-3"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-brand-500"><path d="M22 12h-6l-2 3h-4l-2-3H2" /><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" /></svg>受信一覧{boardUnreadTotal > 0 && <span className="text-[11px] font-bold text-white bg-brand-500 rounded-full px-1.5 py-0.5">未読 {boardUnreadTotal}</span>}</div>
+                                                    <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
+                                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                                            {[['all', 'すべて'], ['hq', '本部'], ['staff', '店舗'], ['important', '⭐ 重要']].map(([k, label]) => (
+                                                                <button key={k} onClick={() => setBoardFilter(k)} className={`px-2.5 py-1.5 rounded-full text-[12px] font-semibold border transition ${boardFilter === k ? 'bg-brand-500 border-brand-500 text-white' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{label}</button>
                                                             ))}
+                                                        </div>
+                                                        <div className="flex items-center gap-2">
+                                                            <select value={boardSort} onChange={e => setBoardSort(e.target.value)} className="h-8 px-2.5 rounded-lg border border-[#EAECF0] bg-white text-[12px] font-semibold text-[#344054] focus:outline-none focus:border-brand-400"><option value="new">新しい順</option><option value="old">古い順</option></select>
+                                                            <div className="inline-flex items-center p-0.5 rounded-lg bg-[#F2F4F7]">
+                                                                <button onClick={() => setBoardView('list')} title="リスト表示" className={`w-7 h-7 flex items-center justify-center rounded-md ${boardView === 'list' ? 'bg-white shadow-sm text-[#111827]' : 'text-[#98A2B3]'}`}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" /></svg></button>
+                                                                <button onClick={() => setBoardView('grid')} title="グリッド表示" className={`w-7 h-7 flex items-center justify-center rounded-md ${boardView === 'grid' ? 'bg-white shadow-sm text-[#111827]' : 'text-[#98A2B3]'}`}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg></button>
+                                                            </div>
                                                         </div>
                                                     </div>
                                                 </div>
+
                                                 {!boardData.loaded ? <div className="text-center text-[#98A2B3] text-[13px] py-10">読み込み中…</div>
-                                                 : allPosts.length === 0 ? <div className="bg-white border border-[#EAECF0] rounded-xl text-center text-[#98A2B3] text-[14px] py-16"><Megaphone size={40} className="mx-auto mb-3 opacity-50" />{boardFilter === 'all' ? <>まだ掲示はありません。<br />左の「全社へ発信」から投稿してみましょう。</> : '該当する掲示はありません。'}</div>
-                                                 : (
-                                                <div className="space-y-6">
-                                                    {pinned.length > 0 && (
-                                                        <div className="space-y-3">
-                                                            <div className="flex items-center gap-2 text-[12px] font-semibold text-amber-700"><span>📌 固定</span><div className="flex-1 h-px bg-[#EAECF0]" /></div>
-                                                            {pinned.map(p => PostCard(p))}
-                                                        </div>
-                                                    )}
-                                                    {monthGroups.map(g => (
-                                                        <div key={g.key} className="space-y-3">
-                                                            <div className="flex items-center gap-2.5"><span className="text-[13px] font-bold text-[#111827]">{g.label}</span><span className="text-[11px] font-semibold text-[#98A2B3] bg-white border border-[#EAECF0] rounded-full px-2 py-0.5">{g.posts.length}件</span><div className="flex-1 h-px bg-[#EAECF0]" /></div>
-                                                            {g.posts.map(p => PostCard(p))}
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                                )}
-                                                {!pushState.supported && <p className="text-[11px] text-[#98A2B3] mt-5 leading-relaxed">📱 スマホで通知を受け取るには、この画面をホーム画面に追加（PWAインストール）してから開いてください。iPhoneはSafariの共有→「ホーム画面に追加」。</p>}
+                                                 : posts.length === 0 ? <div className="mt-3 bg-white border border-[#EAECF0] rounded-2xl text-center text-[#98A2B3] text-[14px] py-16"><Megaphone size={40} className="mx-auto mb-3 opacity-50" />{boardFilter === 'all' ? <>まだお知らせはありません。<br />左の「全社向けお知らせを作成」から投稿してみましょう。</> : '該当するお知らせはありません。'}</div>
+                                                 : (<>
+                                                    <div className={`mt-3 ${boardView === 'grid' ? 'grid grid-cols-1 xl:grid-cols-2 gap-3' : 'space-y-3'}`}>
+                                                        {posts.map(p => PostCard(p))}
+                                                    </div>
+                                                    <div className="text-center text-[12px] text-[#B0B7C3] py-6">これ以上ありません</div>
+                                                 </>)}
+                                                {!pushState.supported && <p className="text-[11px] text-[#98A2B3] mt-2 leading-relaxed">📱 スマホで通知を受け取るには、この画面をホーム画面に追加（PWAインストール）してから開いてください。iPhoneはSafariの共有→「ホーム画面に追加」。</p>}
                                             </div>
                                         </div>
                                     </div>
@@ -19667,7 +19701,7 @@
                 ] },
                 { label: 'コミュニケーション', items: [
                     { id: 'chat', label: 'チャット', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, badge: chatUnread },
-                    { id: 'board', label: '掲示板', icon: <Megaphone size={18} />, mobileIcon: <Megaphone size={18} />, badge: boardUnread },
+                    { id: 'board', label: 'お知らせハブ', icon: <Megaphone size={18} />, mobileIcon: <Megaphone size={18} />, badge: boardUnread },
                     { id: 'events', label: '勉強会・イベント', icon: <Calendar size={18} />, mobileIcon: <Calendar size={18} /> },
                     { id: 'org', label: '組織図', icon: <Users size={18} />, mobileIcon: <Users size={18} /> },
                 ] },

@@ -165,7 +165,7 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
 - 「もらった感謝」に**これまでの感謝メッセージ**を対象月ごとに常時表示（公開済みは開封演出を待たずいつでも読み返せる＋開封演出の再生ボタン）。点数計算は votes（送信=全票／受信=公開分）から算出。
 
 ## 掲示板（全社発信）＋PWA＋Webプッシュ
-- **掲示板タブ**（サイドバー上から4番目）: 本部/スタッフ→全社への発信フィード。テキスト・URL自動リンク・画像（縮小して別キー保存）・ファイル添付（約4MBまで・`naoru:board:file:<id>`）・動画URL（YouTube/Vimeo埋め込み・.mp4直リンクは`<video>`）に対応。root/投稿者は削除、rootはピン留め可。新着バッジ（`boardUnread`）。保存=`/api/plan-store?type=board`、ロジックは`lib/board.js`。
+- **お知らせハブタブ**（旧「掲示板」・id=`board`）: 本部/スタッフ→全社への発信。左=作成（送信者/タイトル/本文/関連リンク/動画URL/画像・ファイルのドラッグ&ドロップ/重要度トグル）／右=受信一覧（フィルタ すべて/本部/店舗/⭐重要・並び替え 新しい/古い・リスト/グリッド表示）。投稿は title/important/link を保持。テキスト・URL自動リンク・画像（縮小して別キー保存）・ファイル添付（約4MB・`naoru:board:file:<id>`）・動画URL（YouTube/Vimeo埋め込み・.mp4は`<video>`）。root/投稿者は削除、rootはピン留め（各カードの「…」メニュー）。**未読は読むまで「1」＋未読バッジが残る**（開いただけでは既読化しない・カードクリック/「すべて既読」で既読）。ブックマークは端末ローカル（`naoru_board_bm`）。発信者名はSalonOneロスターで本名解決。保存=`/api/plan-store?type=board`、ロジックは`lib/board.js`。
 - **PWA**: `manifest.webmanifest`＋`sw.js`＋アイコン（`icon-192/512(-maskable)`・`apple-touch-icon`）で携帯にインストール可。SWは**キャッシュしない**（fetchはパススルー＝古いビルドが残らない）。用途はインストール可能化とプッシュ受信のみ。`scripts/precompile.mjs`がpublicへコピー。
 - **Webプッシュ**: `sw.js`のpush/notificationclickで受信・遷移（`/?tab=board|chat`）。購読は`/api/plan-store?type=push`（GETで公開鍵配布・subscribe/unsubscribe）。送信は掲示板投稿=全員、チャットはグループ/DM=メンバー・全社アナウンス=全員（店舗ルームは送らない）。`web-push`依存・VAPID環境変数が必要（上記）。フロントは掲示板ヘッダーの「通知をオンにする」で許可＋購読。
 

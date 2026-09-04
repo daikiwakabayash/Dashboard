@@ -300,6 +300,7 @@ export default async function handler(req, res) {
           title,
           important: !!p.important,
           text,
+          link: /^https?:\/\//.test(String(p.link || '')) ? String(p.link).slice(0, 500) : '',
           links: extractLinks(text),
           imgIds: (Array.isArray(p.imgIds) ? p.imgIds : []).map(String).slice(0, 8),
           files: (Array.isArray(p.files) ? p.files : []).slice(0, 8).map(f => ({ id: String(f.id || ''), name: String(f.name || 'file').slice(0, 120), type: String(f.type || ''), size: Number(f.size) || 0 })),

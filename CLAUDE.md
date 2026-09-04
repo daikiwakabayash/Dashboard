@@ -60,6 +60,7 @@ lib/
   thanksgift.js     # サンクスギフト（感謝の投票）ロジック（投票期間の判定=毎月1日00:01〜2日23:59 JST・対象=前月／1人1票upsert・自分不可・ランキング集計）。tests/thanksgift.test.js
   chat.js           # 社内チャット ロジック（ルーム可視判定・未読集計・リンク抽出・リアクショントグル・DM検索）。tests/chat.test.js
   board.js          # 掲示板（全社発信）ロジック（新着集計・並び替え・リンク抽出・動画URL埋め込み判定）。tests/board.test.js
+  events.js         # 勉強会・イベント日程 ロジック（日付解釈・過ぎた予定の判定＝グレーアウト・セクション定義）。tests/events.test.js
   settlement.js     # 返金明細書 共通ロジック（オーナー認証トークン・スナップショット・計算・期日/注意書き）
   handlers/         # api/ ディスパッチャから呼ばれる実ハンドラ群（Serverless Functionにカウントされない）
     settlement-auth.js / settlement-owners.js / settlement-store.js
@@ -166,6 +167,10 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
 - **掲示板タブ**（サイドバー上から4番目）: 本部/スタッフ→全社への発信フィード。テキスト・URL自動リンク・画像（縮小して別キー保存）・ファイル添付（約4MBまで・`naoru:board:file:<id>`）・動画URL（YouTube/Vimeo埋め込み・.mp4直リンクは`<video>`）に対応。root/投稿者は削除、rootはピン留め可。新着バッジ（`boardUnread`）。保存=`/api/plan-store?type=board`、ロジックは`lib/board.js`。
 - **PWA**: `manifest.webmanifest`＋`sw.js`＋アイコン（`icon-192/512(-maskable)`・`apple-touch-icon`）で携帯にインストール可。SWは**キャッシュしない**（fetchはパススルー＝古いビルドが残らない）。用途はインストール可能化とプッシュ受信のみ。`scripts/precompile.mjs`がpublicへコピー。
 - **Webプッシュ**: `sw.js`のpush/notificationclickで受信・遷移（`/?tab=board|chat`）。購読は`/api/plan-store?type=push`（GETで公開鍵配布・subscribe/unsubscribe）。送信は掲示板投稿=全員、チャットはグループ/DM=メンバー・全社アナウンス=全員（店舗ルームは送らない）。`web-push`依存・VAPID環境変数が必要（上記）。フロントは掲示板ヘッダーの「通知をオンにする」で許可＋購読。
+
+## 勉強会・イベント日程（共有編集グリッド）／組織図
+- **勉強会・イベントタブ**: スプレッドシート風の共有編集表。3セクション（勉強会／飲み会などのイベント／部活）。各セルはtextareaで直接編集→**自動保存**（デバウンス700ms・`upsertRow`）。行の追加/削除可。**日付が過ぎた行は自動グレーアウト**（`lib/events.js` の `parseEventDate`/`isPastEvent`・毎週/未定は対象外）。保存=`/api/plan-store?type=events`（sections別・行単位upsert/delete）。編集中(`evEditingRef`)はポーリング取り込みを止めて入力消失を防止。
+- **組織図タブ**: SalonOneの `shops`(area_id)・`staffs`(shop_id) から**エリア→店舗→オーナー/スタッフ**を自動生成。オーナーは「オーナー設定」の管轄店舗マッピング（`/api/settlement-auth` の `shops`）から店舗名部分一致で紐付け。店舗カードにオーナー(👑)・スタッフchipを表示。合計（店舗/スタッフ/オーナー数）ヘッダー付き。
 
 ## 開発ルール
 - `index.html` を編集したら `npm test` を実行して構造テストを通す

@@ -36,6 +36,7 @@ const BOARD_KEY = 'naoru:board:v1';           // { posts:[...], reads:{staffId:m
 const BOARD_FILE_PREFIX = 'naoru:board:file:';// 添付ファイルは1件1キーで別保存
 const BOARD_POST_CAP = 500;                   // 保持する最大投稿数
 const PUSH_KEY = 'naoru:push:v1';             // { subs:[{endpoint,keys,staffId,name,createdAt}] } Webプッシュ購読
+const EVENTS_KEY = 'naoru:events:v1';         // { sections:{study:[row],event:[row],bukatsu:[row]} } 勉強会・イベント日程（共有編集）
 
 // ── Webプッシュ送信（VAPID設定時のみ動作・未設定なら黙ってスキップ） ──
 const VAPID_PUBLIC = () => process.env.VAPID_PUBLIC_KEY || '';
@@ -221,6 +222,47 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
       return res.status(400).json({ ok: false, error: 'invalid zktherapist action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── 勉強会・イベント日程ストア（共有編集グリッド）: ?type=events ──
+  const isEvents = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'events';
+  if (isEvents) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ sections: {}, configured: false });
+    try {
+      const cur = (await blobGet(EVENTS_KEY, hasKV, hasSB, gas)) || {};
+      const sections = (cur.sections && typeof cur.sections === 'object') ? cur.sections : {};
+      if (req.method === 'GET') return res.status(200).json({ sections, configured: true });
+      const body = req.body || {};
+      const sk = String(body.section || '');
+      if (!['study', 'event', 'bukatsu'].includes(sk)) return res.status(400).json({ ok: false, error: 'bad_section' });
+      const rows = Array.isArray(sections[sk]) ? sections[sk] : [];
+      if (body.action === 'upsertRow' && body.row && body.row.id) {
+        const cells = (body.row.cells && typeof body.row.cells === 'object') ? body.row.cells : {};
+        const clean = {}; for (const k of Object.keys(cells)) clean[String(k)] = String(cells[k] ?? '').slice(0, 300);
+        const rec = { id: String(body.row.id), cells: clean, updatedBy: String(body.row.updatedBy || ''), updatedAt: new Date().toISOString() };
+        const exists = rows.some(r => r && r.id === rec.id);
+        const next = exists ? rows.map(r => r && r.id === rec.id ? rec : r) : rows.concat(rec);
+        const nextSections = { ...sections, [sk]: next.slice(0, 400) };
+        await blobSet(EVENTS_KEY, { sections: nextSections }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, row: rec });
+      }
+      if (body.action === 'deleteRow' && body.id) {
+        const next = rows.filter(r => r && r.id !== String(body.id));
+        await blobSet(EVENTS_KEY, { sections: { ...sections, [sk]: next } }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      if (body.action === 'reorder' && Array.isArray(body.order)) {
+        const map = new Map(rows.map(r => [String(r.id), r]));
+        const next = body.order.map(id => map.get(String(id))).filter(Boolean);
+        // 並べ替えに含まれない行は末尾に温存
+        for (const r of rows) if (!body.order.map(String).includes(String(r.id))) next.push(r);
+        await blobSet(EVENTS_KEY, { sections: { ...sections, [sk]: next } }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid events action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
     }

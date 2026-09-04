@@ -31,9 +31,10 @@ describe('index.html - 必須コンポーネント', () => {
     expect(html).toContain("'finance'");
   });
 
-  it('メニューアイテムが5つ定義されている', () => {
-    const menuMatches = html.match(/menuItems\s*=\s*\[/);
-    expect(menuMatches).not.toBeNull();
+  it('ナビゲーション（カテゴリー別）が定義されている', () => {
+    // サイドバーはカテゴリー別 navSections で構成し、モバイル用に menuItems へフラット化
+    expect(html.match(/navSections\s*=\s*\[/)).not.toBeNull();
+    expect(html).toContain('menuItems');
   });
 
   it('店舗選択セレクトボックスがplanningタブにある', () => {

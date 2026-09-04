@@ -12,6 +12,15 @@ describe('geo: shopGeoRank', () => {
     expect(shopGeoRank('NAORU 博多院')).toBe(40); // 福岡
     expect(shopGeoRank('NAORU 那覇院')).toBe(47);
   });
+  it('maps expanded real store locations correctly (no longer その他)', () => {
+    expect(shopGeoRank('NAORU 上溝院')).toBe(14);   // 相模原/神奈川
+    expect(shopGeoRank('NAORU 新馬場院')).toBe(13);  // 品川/東京
+    expect(shopGeoRank('NAORU 綱島院')).toBe(14);
+    expect(shopGeoRank('NAORU センター南院')).toBe(14);
+    expect(shopGeoRank('NAORU 浦添院')).toBe(47);   // 沖縄
+    expect(shopGeoRank('NAORU 諫早院')).toBe(42);   // 長崎
+    expect(shopGeoRank('NAORU Sunway Velocity')).toBe(1000); // 海外
+  });
   it('overseas → 1000, unknown → 950', () => {
     expect(shopGeoRank('NAORU シドニー院')).toBe(1000);
     expect(shopGeoRank('NAORU Perth')).toBe(1000);

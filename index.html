@@ -15237,6 +15237,12 @@
                         const mySubs = (stAllowance.submissions || [])
                             .filter(s => (!alwForm.staffId || String(s.staffId) === String(alwForm.staffId)))
                             .sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt)));
+                        // 表示名はSalonOneロスターの本名を優先（staffNameがログインID=staff079等に化けていても本名で表示）
+                        const alwResolveName = (s) => {
+                            const st = (soStaffs || []).find(x => String(x.id) === String(s.staffId));
+                            if (st && st.name) return st.name;
+                            return s.staffName || '';
+                        };
                         const monthOpts = (() => { const arr = []; const n = new Date(); for (let i = 0; i < 12; i++) { const d = new Date(n.getFullYear(), n.getMonth() - i, 1); arr.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); } return arr; })();
                         return (
                         <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
@@ -15360,7 +15366,7 @@
 
                                 {/* 提出履歴 */}
                                 <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6">
-                                    <div className="flex items-center gap-2 mb-3"><FileText size={16} className="text-slate-500" /><h3 className="text-sm font-black text-slate-800">提出履歴{alwForm.staffName ? `（${alwForm.staffName}）` : ''}</h3></div>
+                                    <div className="flex items-center gap-2 mb-3"><FileText size={16} className="text-slate-500" /><h3 className="text-sm font-black text-slate-800">提出履歴{(() => { const nm = alwResolveName({ staffId: alwForm.staffId, staffName: alwForm.staffName }); return nm ? `（${nm}）` : ''; })()}</h3></div>
                                     {!stAllowance.loaded ? <p className="text-center text-slate-400 font-bold py-6 text-sm">読み込み中...</p>
                                      : mySubs.length === 0 ? <p className="text-center text-slate-400 font-bold py-6 text-sm">まだ提出がありません。</p>
                                      : (<div className="divide-y divide-slate-100">
@@ -15368,7 +15374,7 @@
                                             const c = stAllowanceCat(s.category); const inTime = s.submittedAt && new Date(s.submittedAt) <= stAllowanceDeadline(s.month);
                                             return (<div key={s.id} className="flex items-center gap-3 py-2.5 text-sm">
                                                 <div className="flex-1 min-w-0">
-                                                    <div className="font-bold text-slate-800">{s.staffName} <span className="text-[11px] text-slate-400">{c ? c.label : s.category}</span></div>
+                                                    <div className="font-bold text-slate-800">{alwResolveName(s)} <span className="text-[11px] text-slate-400">{c ? c.label : s.category}</span></div>
                                                     <div className="text-[11px] text-slate-500 font-bold">{s.month.replace('-', '年')}月 分 ・ 提出 {String(s.submittedAt).slice(0, 10)} {inTime ? <span className="text-emerald-600">✓締切内</span> : <span className="text-rose-500">✗締切超過</span>}</div>
                                                 </div>
                                                 <div className="font-black text-slate-800">¥{(Number(s.amount) || 0).toLocaleString()}</div>

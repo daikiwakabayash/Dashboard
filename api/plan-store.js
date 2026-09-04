@@ -290,12 +290,15 @@ export default async function handler(req, res) {
       if (action === 'post' && body.post) {
         const p = body.post;
         const text = String(p.text || '').slice(0, 8000);
+        const title = String(p.title || '').slice(0, 200);
         const rec = {
           id: genId('post'),
           authorId: String(p.authorId || ''),
           authorName: String(p.authorName || '').slice(0, 80),
           authorShop: String(p.authorShop || '').slice(0, 80),
           authorRoot: !!p.authorRoot,
+          title,
+          important: !!p.important,
           text,
           links: extractLinks(text),
           imgIds: (Array.isArray(p.imgIds) ? p.imgIds : []).map(String).slice(0, 8),
@@ -307,7 +310,7 @@ export default async function handler(req, res) {
         const nextPosts = [rec, ...posts].slice(0, BOARD_POST_CAP);
         await blobSet(BOARD_KEY, { posts: nextPosts, reads: { ...reads, [rec.authorId]: Date.now() } }, hasKV, hasSB, gas);
         // 全員へプッシュ（購読者全員）
-        sendPush(hasKV, hasSB, gas, { kind: 'board', title: `📣 ${rec.authorName || 'お知らせ'}`, body: text.slice(0, 120) || '新しい掲示があります', url: '/?tab=board' });
+        sendPush(hasKV, hasSB, gas, { kind: 'board', title: `${rec.important ? '❗' : '📣'} ${title || rec.authorName || 'お知らせ'}`, body: (title ? text : text).slice(0, 120) || '新しい掲示があります', url: '/?tab=board' });
         return res.status(200).json({ ok: true, post: rec });
       }
       if (action === 'uploadImage' && body.dataUrl) {

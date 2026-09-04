@@ -15,6 +15,7 @@
 
 import { getVotingState, validateVote, upsertVote, removeVote } from '../lib/thanksgift.js';
 import { ensureBaseRooms, extractLinks, toggleReaction, genId } from '../lib/chat.js';
+import { videoEmbed } from '../lib/board.js';
 
 // Vercel KV / Upstash Redis / Vercel Redis いずれの環境変数名でも動くよう両対応（REST APIは共通）
 const KV_URL = () => process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_REST_API_URL || '';
@@ -31,6 +32,40 @@ const THANKSGIFT_KEY = 'naoru:thanksgift:v1'; // { votes:[{id,period,fromStaffId
 const CHAT_KEY = 'naoru:chat:v1';             // { rooms:[...], messages:{roomId:[...]}, reads:{staffId:{roomId:ms}}, dir:{staff:[...]} } 社内チャット
 const CHAT_IMG_PREFIX = 'naoru:chat:img:';    // 画像は1枚1キーで別保存（blob肥大化を避ける）
 const CHAT_MSG_CAP = 400;                     // 1ルームあたり保持する最大メッセージ数（古いものから破棄）
+const BOARD_KEY = 'naoru:board:v1';           // { posts:[...], reads:{staffId:ms} } 掲示板（全社発信）
+const BOARD_FILE_PREFIX = 'naoru:board:file:';// 添付ファイルは1件1キーで別保存
+const BOARD_POST_CAP = 500;                   // 保持する最大投稿数
+const PUSH_KEY = 'naoru:push:v1';             // { subs:[{endpoint,keys,staffId,name,createdAt}] } Webプッシュ購読
+
+// ── Webプッシュ送信（VAPID設定時のみ動作・未設定なら黙ってスキップ） ──
+const VAPID_PUBLIC = () => process.env.VAPID_PUBLIC_KEY || '';
+const VAPID_PRIVATE = () => process.env.VAPID_PRIVATE_KEY || '';
+const VAPID_SUBJECT = () => process.env.VAPID_SUBJECT || 'mailto:admin@naoru.example';
+// 対象購読へ通知を送る。web-push は動的import（未インストール環境でもハンドラは壊れない）。
+// filterStaffIds が配列なら、その staffId の購読のみへ送信（未指定＝全員）。
+async function sendPush(hasKV, hasSB, gas, payload, filterStaffIds) {
+  try {
+    if (!VAPID_PUBLIC() || !VAPID_PRIVATE()) return; // 未設定＝無効
+    const mod = await import('web-push').catch(() => null);
+    const webpush = mod && (mod.default || mod);
+    if (!webpush) return;
+    webpush.setVapidDetails(VAPID_SUBJECT(), VAPID_PUBLIC(), VAPID_PRIVATE());
+    const store = (await blobGet(PUSH_KEY, hasKV, hasSB, gas)) || {};
+    let subs = Array.isArray(store.subs) ? store.subs : [];
+    const only = Array.isArray(filterStaffIds) ? new Set(filterStaffIds.map(String)) : null;
+    const targets = only ? subs.filter(s => only.has(String(s.staffId))) : subs;
+    const body = JSON.stringify(payload);
+    const dead = [];
+    await Promise.all(targets.map(async (s) => {
+      try { await webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, body); }
+      catch (e) { if (e && (e.statusCode === 404 || e.statusCode === 410)) dead.push(s.endpoint); }
+    }));
+    if (dead.length) { // 失効した購読を掃除
+      const next = subs.filter(s => !dead.includes(s.endpoint));
+      await blobSet(PUSH_KEY, { subs: next }, hasKV, hasSB, gas);
+    }
+  } catch (_) { /* 送信失敗は投稿処理を止めない */ }
+}
 
 // ── Vercel KV (Upstash REST) ──
 async function kvGet(key) {
@@ -191,6 +226,117 @@ export default async function handler(req, res) {
     }
   }
 
+  // ── 掲示板（全社発信）ストア: ?type=board ──
+  const isBoard = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'board';
+  if (isBoard) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ posts: [], reads: {}, configured: false });
+    try {
+      // 添付ファイル取得: GET ?type=board&file=<id> → { name, dataUrl }
+      if (req.method === 'GET' && req.query.file) {
+        const f = await blobGet(BOARD_FILE_PREFIX + String(req.query.file), hasKV, hasSB, gas);
+        if (!f) return res.status(404).json({ ok: false, error: 'not_found' });
+        return res.status(200).json({ ok: true, ...f });
+      }
+      const cur = (await blobGet(BOARD_KEY, hasKV, hasSB, gas)) || {};
+      const posts = Array.isArray(cur.posts) ? cur.posts : [];
+      const reads = (cur.reads && typeof cur.reads === 'object') ? cur.reads : {};
+      if (req.method === 'GET') return res.status(200).json({ posts, reads, configured: true });
+
+      const body = req.body || {};
+      const action = body.action;
+
+      if (action === 'post' && body.post) {
+        const p = body.post;
+        const text = String(p.text || '').slice(0, 8000);
+        const rec = {
+          id: genId('post'),
+          authorId: String(p.authorId || ''),
+          authorName: String(p.authorName || '').slice(0, 80),
+          authorShop: String(p.authorShop || '').slice(0, 80),
+          authorRoot: !!p.authorRoot,
+          text,
+          links: extractLinks(text),
+          imgIds: (Array.isArray(p.imgIds) ? p.imgIds : []).map(String).slice(0, 8),
+          files: (Array.isArray(p.files) ? p.files : []).slice(0, 8).map(f => ({ id: String(f.id || ''), name: String(f.name || 'file').slice(0, 120), type: String(f.type || ''), size: Number(f.size) || 0 })),
+          videoUrl: (() => { const v = videoEmbed(p.videoUrl); return v ? String(p.videoUrl).slice(0, 500) : ''; })(),
+          pinned: false,
+          createdAt: new Date().toISOString(),
+        };
+        const nextPosts = [rec, ...posts].slice(0, BOARD_POST_CAP);
+        await blobSet(BOARD_KEY, { posts: nextPosts, reads: { ...reads, [rec.authorId]: Date.now() } }, hasKV, hasSB, gas);
+        // 全員へプッシュ（購読者全員）
+        sendPush(hasKV, hasSB, gas, { kind: 'board', title: `📣 ${rec.authorName || 'お知らせ'}`, body: text.slice(0, 120) || '新しい掲示があります', url: '/?tab=board' });
+        return res.status(200).json({ ok: true, post: rec });
+      }
+      if (action === 'uploadImage' && body.dataUrl) {
+        const dataUrl = String(body.dataUrl);
+        if (!/^data:image\/(png|jpe?g|gif|webp);base64,/.test(dataUrl)) return res.status(400).json({ ok: false, error: 'bad_image' });
+        if (dataUrl.length > 3_500_000) return res.status(413).json({ ok: false, error: 'too_large' });
+        const id = genId('img');
+        await blobSet(CHAT_IMG_PREFIX + id, dataUrl, hasKV, hasSB, gas); // 画像はチャットと同じ保存先を再利用
+        return res.status(200).json({ ok: true, id });
+      }
+      if (action === 'uploadFile' && body.dataUrl && body.name) {
+        const dataUrl = String(body.dataUrl);
+        if (!/^data:[^;]+;base64,/.test(dataUrl)) return res.status(400).json({ ok: false, error: 'bad_file' });
+        if (dataUrl.length > 6_000_000) return res.status(413).json({ ok: false, error: 'too_large' }); // ~4.4MBまで
+        const id = genId('file');
+        await blobSet(BOARD_FILE_PREFIX + id, { name: String(body.name).slice(0, 120), type: String(body.fileType || ''), dataUrl }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, id });
+      }
+      if (action === 'pin' && body.id) {
+        const nextPosts = posts.map(p => p && p.id === String(body.id) ? { ...p, pinned: !!body.pinned } : p);
+        await blobSet(BOARD_KEY, { posts: nextPosts, reads }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      if (action === 'delete' && body.id) {
+        const nextPosts = posts.filter(p => {
+          if (!p || p.id !== String(body.id)) return true;
+          return !(body.root || String(p.authorId) === String(body.staffId)); // 本人/rootのみ削除
+        });
+        await blobSet(BOARD_KEY, { posts: nextPosts, reads }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      if (action === 'read' && body.staffId) {
+        await blobSet(BOARD_KEY, { posts, reads: { ...reads, [String(body.staffId)]: Number(body.ts) || Date.now() } }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid board action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── Webプッシュ購読ストア: ?type=push ──
+  const isPush = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'push';
+  if (isPush) {
+    try {
+      // 公開鍵とプッシュ有効状態を返す（フロントが購読に使う）
+      if (req.method === 'GET') {
+        return res.status(200).json({ enabled: !!(VAPID_PUBLIC() && VAPID_PRIVATE()), publicKey: VAPID_PUBLIC(), configured: !!(hasKV || hasSB || gas) });
+      }
+      if (!hasKV && !hasSB && !gas) return res.status(200).json({ ok: false, configured: false });
+      const body = req.body || {};
+      const store = (await blobGet(PUSH_KEY, hasKV, hasSB, gas)) || {};
+      const subs = Array.isArray(store.subs) ? store.subs : [];
+      if (body.action === 'subscribe' && body.subscription && body.subscription.endpoint) {
+        const s = body.subscription;
+        const rec = { endpoint: String(s.endpoint), keys: s.keys || {}, staffId: String(body.staffId || ''), name: String(body.name || '').slice(0, 80), createdAt: new Date().toISOString() };
+        const next = subs.filter(x => x && x.endpoint !== rec.endpoint).concat(rec).slice(-5000);
+        await blobSet(PUSH_KEY, { subs: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      if (body.action === 'unsubscribe' && body.endpoint) {
+        const next = subs.filter(x => x && x.endpoint !== String(body.endpoint));
+        await blobSet(PUSH_KEY, { subs: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid push action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, error: String((err && err.message) || err) });
+    }
+  }
+
   // ── 社内チャット ストア: ?type=chat ──
   // rooms / messages / reads / dir を1つのblobで共有。画像は別キー(CHAT_IMG_PREFIX+id)。
   const isChat = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'chat';
@@ -271,6 +417,17 @@ export default async function handler(req, res) {
         const nextMessages = { ...messages, [rid]: arr };
         const nextReads = { ...reads, [rec.fromStaffId]: { ...(reads[rec.fromStaffId] || {}), [rid]: Date.parse(rec.createdAt) } };
         await save({ messages: nextMessages, reads: nextReads });
+        // プッシュ通知: グループ/DM/全社アナウンスの新着を対象者へ（店舗ルームはスパム回避のため送らない）
+        const room = rooms.find(r => r && r.id === rid);
+        if (room && (room.kind === 'group' || room.kind === 'dm' || room.kind === 'announce')) {
+          const title = room.kind === 'dm' ? `💬 ${rec.fromName}` : `💬 ${room.name}`;
+          const bodyText = (rec.text || (rec.imgIds.length ? '📷 画像' : '新着メッセージ')).slice(0, 120);
+          const targets = (room.kind === 'announce') ? null // 全員
+            : (room.members || []).map(String).filter(id => id !== rec.fromStaffId); // 送信者以外のメンバー
+          if (!(Array.isArray(targets) && targets.length === 0)) {
+            sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: rid, title, body: bodyText, url: '/?tab=chat' }, targets);
+          }
+        }
         return res.status(200).json({ ok: true, message: rec });
       }
 

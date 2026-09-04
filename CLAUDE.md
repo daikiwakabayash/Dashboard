@@ -46,7 +46,7 @@ api/                # ⚠️ Vercel Hobbyの関数数上限(12)対策で「1エ�
   feedback.js       # フィードバックAPI（GAS連携・取得/送信）
   health.js         # ヘルスチェック（env.planStore で保存先の有効状態も返す）
   salonone.js       # SalonOne 分析APIプロキシ（APIキー隠蔽・GET限定・許可リスト）
-  plan-store.js     # SalonOne計画の目標・アクション共有ストア（全デバイス同期）。保存先=Vercel KV(推奨) or Supabase or GAS。未設定時はlocalStorage継続。?type=allowance で手当（領収書）の提出・個人別生産性も同ストアに保存（submit/delete/recordProductivity）。?type=thanksgift でサンクスギフト投票を保存（vote/delete・投票期間と自分不可はサーバー側でも強制）。?type=chat で社内チャットを保存（rooms/messages/reads/dir・画像は別キー naoru:chat:img:<id>・ensureRooms/createRoom/send/react/read/uploadImage/deleteMsg/deleteRoom）
+  plan-store.js     # SalonOne計画の目標・アクション共有ストア（全デバイス同期）。保存先=Vercel KV(推奨) or Supabase or GAS。未設定時はlocalStorage継続。?type=allowance で手当（領収書）の提出・個人別生産性も同ストアに保存（submit/delete/recordProductivity）。?type=thanksgift でサンクスギフト投票を保存（vote/delete・投票期間と自分不可はサーバー側でも強制）。?type=chat で社内チャット（rooms/messages/reads/dir・画像別キー）。?type=board で掲示板（全社発信）を保存（post/uploadImage/uploadFile/pin/delete/read・画像はchatと同じ別キー、ファイルは naoru:board:file:<id>）。?type=push でWebプッシュ購読（config/subscribe/unsubscribe）。掲示板投稿・グループ/DM/全社アナウンスのチャット送信時に、購読者へ web-push で通知送信（VAPID未設定なら無効）。?type=chat で社内チャットを保存（rooms/messages/reads/dir・画像は別キー naoru:chat:img:<id>・ensureRooms/createRoom/send/react/read/uploadImage/deleteMsg/deleteRoom）
   tasks.js          # タスク系API
   settlement.js     # 返金明細書ディスパッチャ → /api/settlement-auth|owners|store（?fn=auth/owners/store・rewrite）
   square.js         # Squareディスパッチャ → /api/square/metrics|settlement|test（?fn=metrics/settlement/test・rewrite）
@@ -59,6 +59,7 @@ lib/
   allowances.js     # 手当（領収書）計算ロジック（毎月上限型/通算チャージ型・年末失効）。tests/allowances.test.js
   thanksgift.js     # サンクスギフト（感謝の投票）ロジック（投票期間の判定=毎月1日00:01〜2日23:59 JST・対象=前月／1人1票upsert・自分不可・ランキング集計）。tests/thanksgift.test.js
   chat.js           # 社内チャット ロジック（ルーム可視判定・未読集計・リンク抽出・リアクショントグル・DM検索）。tests/chat.test.js
+  board.js          # 掲示板（全社発信）ロジック（新着集計・並び替え・リンク抽出・動画URL埋め込み判定）。tests/board.test.js
   settlement.js     # 返金明細書 共通ロジック（オーナー認証トークン・スナップショット・計算・期日/注意書き）
   handlers/         # api/ ディスパッチャから呼ばれる実ハンドラ群（Serverless Functionにカウントされない）
     settlement-auth.js / settlement-owners.js / settlement-store.js
@@ -98,6 +99,7 @@ tests/              # Vitestテスト
   - `KV_REST_API_URL` / `KV_REST_API_TOKEN` — 計画の目標・アクション共有ストア（`api/plan-store.js`）用のVercel KV。VercelのStorageでKVを作成すると自動注入（GAS不要・推奨）
   - ⚠️ **共有ストアの有効化が必要**: `api/plan-store.js` のブロブ系ストア（手当`allowance`・`accountmeta`・`zktherapist`・サンクスギフト`thanksgift`）は **KV or Supabase or「KVStore対応のGAS」** のいずれかが必要。GASを使う場合は `gas/settlement-gas-sample.js` の最新版（`type=kv`/`action=saveKv` 実装済み）を再デプロイすること。未対応だと保存が無反応（`configured:true` でも永続化されない）
   - `AUTH_SALT` — トークン用ソルト（オプション・オーナー認証で使用）
+  - `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` — Webプッシュ通知用（掲示板投稿・グループ/DMチャットの新着通知）。`npx web-push generate-vapid-keys` で生成し、公開鍵/秘密鍵をVercel環境変数に設定（SUBJECTは `mailto:...`）。未設定なら通知機能は自動でオフ（本体は正常動作）。⚠️ iPhoneは「ホーム画面に追加」でPWAインストール後のみ通知可（iOS16.4+）
 
 ## SalonOne 分析API連携
 SalonOne（`https://salonone.net`）の**読み取り専用**分析APIと連携する。
@@ -159,6 +161,11 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
 サンクスギフトの送受信をポイント化して本人に可視化。`送る=+10pt / 受け取る(公開分)=+30pt`。
 - staff/owner のサンクスギフトタブ上部に「サンクスポイント」カード（累計pt・今月の獲得・今月送った/受け取った件数とpt・全社ランキング`N位/M名`）。
 - 「もらった感謝」に**これまでの感謝メッセージ**を対象月ごとに常時表示（公開済みは開封演出を待たずいつでも読み返せる＋開封演出の再生ボタン）。点数計算は votes（送信=全票／受信=公開分）から算出。
+
+## 掲示板（全社発信）＋PWA＋Webプッシュ
+- **掲示板タブ**（サイドバー上から4番目）: 本部/スタッフ→全社への発信フィード。テキスト・URL自動リンク・画像（縮小して別キー保存）・ファイル添付（約4MBまで・`naoru:board:file:<id>`）・動画URL（YouTube/Vimeo埋め込み・.mp4直リンクは`<video>`）に対応。root/投稿者は削除、rootはピン留め可。新着バッジ（`boardUnread`）。保存=`/api/plan-store?type=board`、ロジックは`lib/board.js`。
+- **PWA**: `manifest.webmanifest`＋`sw.js`＋アイコン（`icon-192/512(-maskable)`・`apple-touch-icon`）で携帯にインストール可。SWは**キャッシュしない**（fetchはパススルー＝古いビルドが残らない）。用途はインストール可能化とプッシュ受信のみ。`scripts/precompile.mjs`がpublicへコピー。
+- **Webプッシュ**: `sw.js`のpush/notificationclickで受信・遷移（`/?tab=board|chat`）。購読は`/api/plan-store?type=push`（GETで公開鍵配布・subscribe/unsubscribe）。送信は掲示板投稿=全員、チャットはグループ/DM=メンバー・全社アナウンス=全員（店舗ルームは送らない）。`web-push`依存・VAPID環境変数が必要（上記）。フロントは掲示板ヘッダーの「通知をオンにする」で許可＋購読。
 
 ## 開発ルール
 - `index.html` を編集したら `npm test` を実行して構造テストを通す

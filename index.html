@@ -2181,10 +2181,16 @@
             ];
             const [evData, setEvData] = useState({ sections: {}, configured: true, loaded: false });
             const [orgSearch, setOrgSearch] = useState('');
+            const [evShowPast, setEvShowPast] = useState(false);       // 終了した予定を表示するか
+            const [evCollapsed, setEvCollapsed] = useState({});        // セクション折りたたみ {key:true}
             const evEditingRef = useRef(false);       // セル編集中はポーリング上書きを止める
             const evSaveTimers = useRef({});
-            const evParseDate = (str) => { const s = String(str || '').trim(); if (!s) return null; if (/(毎週|毎月|毎日|隔週|未定|自由|随時|通年)/.test(s)) return { recurring: true }; const m = s.match(/(\d{1,2})\s*[\/月]\s*(\d{1,2})/); if (!m) return null; const mo = Number(m[1]), d = Number(m[2]); if (mo < 1 || mo > 12 || d < 1 || d > 31) return null; const now = new Date(); let date = new Date(now.getFullYear(), mo - 1, d); if ((date - now) / 86400000 > 183) date = new Date(now.getFullYear() - 1, mo - 1, d); return { recurring: false, date }; };
+            const EV_WD = ['日', '月', '火', '水', '木', '金', '土'];
+            const evParseDate = (str) => { const s = String(str || '').trim(); if (!s) return null; if (/(毎週|毎月|毎日|隔週|未定|自由|随時|通年)/.test(s)) return { recurring: true }; const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/); if (iso) return { recurring: false, date: new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])) }; const m = s.match(/(\d{1,2})\s*[\/月]\s*(\d{1,2})/); if (!m) return null; const mo = Number(m[1]), d = Number(m[2]); if (mo < 1 || mo > 12 || d < 1 || d > 31) return null; const now = new Date(); let date = new Date(now.getFullYear(), mo - 1, d); if ((date - now) / 86400000 > 183) date = new Date(now.getFullYear() - 1, mo - 1, d); return { recurring: false, date }; };
             const evIsPast = (str) => { const p = evParseDate(str); if (!p || p.recurring) return false; const n = new Date(); return p.date < new Date(n.getFullYear(), n.getMonth(), n.getDate()); };
+            // 日付セルの表示ラベル（ISO→「8/22(金)」／自由入力はそのまま）
+            const evDateLabel = (v) => { const s = String(v || ''); const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/); if (!iso) return s; const d = new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])); return `${d.getMonth() + 1}/${d.getDate()}(${EV_WD[d.getDay()]})`; };
+            const evFmtReg = (iso) => { if (!iso) return ''; const d = new Date(iso); if (isNaN(d)) return ''; return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; };
             const evLoad = async () => {
                 if (evEditingRef.current) return;   // 編集中は取り込まない（入力が飛ぶのを防ぐ）
                 try { const r = await fetch('/api/plan-store?type=events'); const j = await r.json().catch(() => ({})); setEvData({ sections: (j.sections && typeof j.sections === 'object') ? j.sections : {}, configured: j.configured !== false, loaded: true }); }
@@ -9959,14 +9965,65 @@
                             );
                         })()}
                         {currentPage === 'board' && (() => {
-                            const posts = (boardData.posts || []).slice().sort((a, b) => { if (!!b.pinned !== !!a.pinned) return b.pinned ? 1 : -1; return (Date.parse(b.createdAt || '') || 0) - (Date.parse(a.createdAt || '') || 0); });
-                            const fmt = (iso) => { const d = new Date(iso), now = new Date(); const diff = (now - d) / 1000; if (diff < 60) return 'たった今'; if (diff < 3600) return `${Math.floor(diff / 60)}分前`; const wd = ['日','月','火','水','木','金','土']; const hm = `${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`; return d.toDateString() === now.toDateString() ? hm : `${d.getMonth()+1}月${d.getDate()}日(${wd[d.getDay()]}) ${hm}`; };
+                            const WD = ['日', '月', '火', '水', '木', '金', '土'];
+                            const allPosts = (boardData.posts || []).slice().sort((a, b) => (Date.parse(b.createdAt || '') || 0) - (Date.parse(a.createdAt || '') || 0));
+                            const pinned = allPosts.filter(p => p.pinned);
+                            const rest = allPosts.filter(p => !p.pinned);
+                            // 月ごとにグルーピング（新しい月が上）
+                            const monthGroups = (() => {
+                                const m = new Map();
+                                for (const p of rest) { const d = new Date(p.createdAt); const k = `${d.getFullYear()}-${d.getMonth() + 1}`; if (!m.has(k)) m.set(k, []); m.get(k).push(p); }
+                                return [...m.entries()].map(([k, list]) => ({ key: k, label: (() => { const [y, mo] = k.split('-'); return `${y}年${mo}月`; })(), posts: list }));
+                            })();
+                            const dBig = (iso) => { const d = new Date(iso); return `${d.getMonth() + 1}月${d.getDate()}日`; };
+                            const dSub = (iso) => { const d = new Date(iso); return `(${WD[d.getDay()]}) ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; };
+                            const rel = (iso) => { const d = new Date(iso), now = new Date(); const s = (now - d) / 1000; if (s < 60) return 'たった今'; if (s < 3600) return `${Math.floor(s / 60)}分前`; if (s < 86400) return `${Math.floor(s / 3600)}時間前`; const days = Math.floor(s / 86400); return days <= 30 ? `${days}日前` : ''; };
                             const canPost = !!chatMyId;
                             const pushBtn = () => {
                                 if (!pushState.supported) return <span className="text-[12px] text-[#98A2B3]">通知はこの端末では非対応</span>;
                                 if (!pushState.enabled) return <span className="text-[12px] text-[#98A2B3]" title="管理者がVAPIDキーを設定すると有効になります">通知：設定待ち</span>;
                                 if (pushState.subscribed) return <button onClick={pushUnsubscribe} disabled={pushState.busy} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-[13px] font-semibold text-brand-700 bg-brand-50 hover:bg-brand-100 transition"><Bell size={15} />通知オン</button>;
                                 return <button onClick={pushSubscribe} disabled={pushState.busy} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-[13px] font-semibold text-[#667085] hover:bg-[#EFF1F5] transition"><Bell size={15} />通知をオンにする</button>;
+                            };
+                            const PostCard = (p) => {
+                                const isNew = (Date.parse(p.createdAt || '') || 0) > (boardOpenReadTs || 0) && String(p.authorId) !== chatMyId;
+                                const vid = p.videoUrl ? boardVideoEmbed(p.videoUrl) : null;
+                                const canManage = chatIsRoot || String(p.authorId) === chatMyId;
+                                return (
+                                    <article key={p.id} className={`relative bg-white rounded-xl border ${p.authorRoot ? 'border-l-[3px] border-l-brand-400 border-y-[#EAECF0] border-r-[#EAECF0]' : 'border-[#EAECF0]'} ${isNew ? 'ring-1 ring-brand-100' : ''}`}>
+                                        <div className="flex gap-4 p-4 md:p-5">
+                                            <div className="min-w-0 flex-1">
+                                                <div className="flex items-center gap-2 flex-wrap">
+                                                    <ChatAvatar name={p.authorName} size="sm" />
+                                                    <span className="text-[14px] font-semibold text-[#111827]">{p.authorName || '不明'}</span>
+                                                    {p.authorRoot ? <span className="text-[10px] font-bold text-brand-700 bg-brand-50 px-1.5 py-0.5 rounded">本部</span> : (p.authorShop && <span className="text-[11px] text-[#98A2B3]">{p.authorShop}</span>)}
+                                                    {p.pinned && <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">📌 固定</span>}
+                                                    {isNew && <span className="text-[10px] font-bold text-white bg-brand-500 px-1.5 py-0.5 rounded">新着</span>}
+                                                    {/* モバイル用の受信日 */}
+                                                    <span className="sm:hidden text-[11px] text-[#98A2B3] ml-auto">{dBig(p.createdAt)} {dSub(p.createdAt)}</span>
+                                                </div>
+                                                {p.text && <div className="text-[14px] text-[#111827] leading-relaxed whitespace-pre-wrap break-words mt-2" style={{ wordBreak: 'break-word' }}>{chatLinkify(p.text)}</div>}
+                                                {Array.isArray(p.imgIds) && p.imgIds.length > 0 && <div className="mt-2.5 flex flex-wrap gap-2">{p.imgIds.map(id => <ChatImage key={id} imgId={id} onClick={() => setChatLightbox(id)} />)}</div>}
+                                                {vid && (vid.kind === 'youtube' || vid.kind === 'vimeo') && <div className="mt-2.5 rounded-lg overflow-hidden border border-[#EAECF0]" style={{ aspectRatio: '16 / 9' }}><iframe src={vid.embedUrl} className="w-full h-full" frameBorder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen title="video" /></div>}
+                                                {vid && vid.kind === 'file' && <video src={vid.src} controls className="mt-2.5 w-full max-h-[360px] rounded-lg border border-[#EAECF0] bg-black" />}
+                                                {vid && vid.kind === 'link' && <a href={vid.src} target="_blank" rel="noopener noreferrer" className="mt-2.5 inline-block text-[13px] text-brand-600 hover:underline break-all">🔗 {vid.src}</a>}
+                                                {Array.isArray(p.files) && p.files.length > 0 && <div className="mt-2.5 flex flex-wrap gap-2">{p.files.map(f => <BoardFile key={f.id} file={f} />)}</div>}
+                                                {canManage && (
+                                                    <div className="flex items-center gap-3 mt-3">
+                                                        {chatIsRoot && <button onClick={() => boardPin(p.id, !p.pinned)} className="text-[12px] font-semibold text-[#667085] hover:text-brand-600">{p.pinned ? '固定を解除' : '📌 固定する'}</button>}
+                                                        <button onClick={() => boardDelete(p.id)} className="text-[12px] font-semibold text-[#98A2B3] hover:text-rose-600">削除</button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                            {/* PC用の受信日（右側） */}
+                                            <div className="hidden sm:flex flex-col items-end shrink-0 w-[92px] text-right pt-0.5">
+                                                <div className="text-[13px] font-bold text-[#111827] leading-tight">{dBig(p.createdAt)}</div>
+                                                <div className="text-[11px] text-[#98A2B3] leading-tight mt-0.5">{dSub(p.createdAt)}</div>
+                                                {rel(p.createdAt) && <div className="text-[11px] text-[#B0B7C3] mt-1">{rel(p.createdAt)}</div>}
+                                            </div>
+                                        </div>
+                                    </article>
+                                );
                             };
                             return (
                                 <div className="p-4 md:p-6 font-sans" style={{ background: '#F8F9FB', color: '#111827' }}>
@@ -10001,45 +10058,23 @@
                                         </div>
                                         )}
 
-                                        {/* フィード */}
+                                        {/* フィード（受け手側）: 固定 → 月ごとのタイムライン。右側に受信日を表示。 */}
                                         {!boardData.loaded ? <div className="text-center text-[#98A2B3] text-[13px] py-10">読み込み中…</div>
-                                         : posts.length === 0 ? <div className="text-center text-[#98A2B3] text-[14px] py-16"><Megaphone size={40} className="mx-auto mb-3 opacity-50" />まだ掲示はありません。<br />最初のお知らせを投稿してみましょう。</div>
+                                         : allPosts.length === 0 ? <div className="text-center text-[#98A2B3] text-[14px] py-16"><Megaphone size={40} className="mx-auto mb-3 opacity-50" />まだ掲示はありません。<br />最初のお知らせを投稿してみましょう。</div>
                                          : (
-                                        <div className="space-y-3">
-                                            {posts.map(p => {
-                                                const isNew = (Date.parse(p.createdAt || '') || 0) > (boardOpenReadTs || 0) && String(p.authorId) !== chatMyId;
-                                                const vid = p.videoUrl ? boardVideoEmbed(p.videoUrl) : null;
-                                                const canManage = chatIsRoot || String(p.authorId) === chatMyId;
-                                                return (
-                                                    <div key={p.id} className={`bg-white rounded-xl border p-4 md:p-5 ${p.pinned ? 'border-brand-200' : 'border-[#EAECF0]'}`}>
-                                                        <div className="flex items-start gap-3">
-                                                            <ChatAvatar name={p.authorName} />
-                                                            <div className="min-w-0 flex-1">
-                                                                <div className="flex items-center gap-2 flex-wrap">
-                                                                    <span className="text-[14px] font-semibold text-[#111827]">{p.authorName || '不明'}</span>
-                                                                    {p.authorRoot && <span className="text-[10px] font-bold text-brand-700 bg-brand-50 px-1.5 py-0.5 rounded">本部</span>}
-                                                                    {p.authorShop && <span className="text-[12px] text-[#98A2B3]">{p.authorShop}</span>}
-                                                                    {p.pinned && <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">📌 固定</span>}
-                                                                    {isNew && <span className="text-[10px] font-bold text-white bg-brand-500 px-1.5 py-0.5 rounded">新着</span>}
-                                                                    <span className="text-[11px] text-[#98A2B3] ml-auto">{fmt(p.createdAt)}</span>
-                                                                </div>
-                                                                {p.text && <div className="text-[14px] text-[#111827] leading-relaxed whitespace-pre-wrap break-words mt-1.5" style={{ wordBreak: 'break-word' }}>{chatLinkify(p.text)}</div>}
-                                                                {Array.isArray(p.imgIds) && p.imgIds.length > 0 && <div className="mt-2.5 flex flex-wrap gap-2">{p.imgIds.map(id => <ChatImage key={id} imgId={id} onClick={() => setChatLightbox(id)} />)}</div>}
-                                                                {vid && (vid.kind === 'youtube' || vid.kind === 'vimeo') && <div className="mt-2.5 rounded-lg overflow-hidden border border-[#EAECF0]" style={{ aspectRatio: '16 / 9' }}><iframe src={vid.embedUrl} className="w-full h-full" frameBorder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen title="video" /></div>}
-                                                                {vid && vid.kind === 'file' && <video src={vid.src} controls className="mt-2.5 w-full max-h-[360px] rounded-lg border border-[#EAECF0] bg-black" />}
-                                                                {vid && vid.kind === 'link' && <a href={vid.src} target="_blank" rel="noopener noreferrer" className="mt-2.5 inline-block text-[13px] text-brand-600 hover:underline break-all">🔗 {vid.src}</a>}
-                                                                {Array.isArray(p.files) && p.files.length > 0 && <div className="mt-2.5 flex flex-wrap gap-2">{p.files.map(f => <BoardFile key={f.id} file={f} />)}</div>}
-                                                                {canManage && (
-                                                                    <div className="flex items-center gap-3 mt-3">
-                                                                        {chatIsRoot && <button onClick={() => boardPin(p.id, !p.pinned)} className="text-[12px] font-semibold text-[#667085] hover:text-brand-600">{p.pinned ? '固定を解除' : '📌 固定する'}</button>}
-                                                                        <button onClick={() => boardDelete(p.id)} className="text-[12px] font-semibold text-[#98A2B3] hover:text-rose-600">削除</button>
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                );
-                                            })}
+                                        <div className="space-y-6">
+                                            {pinned.length > 0 && (
+                                                <div className="space-y-3">
+                                                    <div className="flex items-center gap-2 text-[12px] font-semibold text-amber-700"><span>📌 固定</span><div className="flex-1 h-px bg-[#EAECF0]" /></div>
+                                                    {pinned.map(p => PostCard(p))}
+                                                </div>
+                                            )}
+                                            {monthGroups.map(g => (
+                                                <div key={g.key} className="space-y-3">
+                                                    <div className="flex items-center gap-2.5"><span className="text-[13px] font-bold text-[#111827]">{g.label}</span><span className="text-[11px] font-semibold text-[#98A2B3] bg-white border border-[#EAECF0] rounded-full px-2 py-0.5">{g.posts.length}件</span><div className="flex-1 h-px bg-[#EAECF0]" /></div>
+                                                    {g.posts.map(p => PostCard(p))}
+                                                </div>
+                                            ))}
                                         </div>
                                         )}
                                         {!pushState.supported && <p className="text-[11px] text-[#98A2B3] mt-5 leading-relaxed">📱 スマホで通知を受け取るには、この画面をホーム画面に追加（PWAインストール）してから開いてください。iPhoneはSafariの共有→「ホーム画面に追加」。</p>}
@@ -10048,28 +10083,45 @@
                             );
                         })()}
                         {currentPage === 'events' && (() => {
+                            const dateInputCls = (past) => `w-full bg-transparent px-2.5 py-2 text-[13px] focus:outline-none focus:bg-brand-50/60 ${past ? 'text-[#98A2B3]' : 'text-[#111827]'}`;
+                            const isISO = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
                             return (
                                 <div className="p-4 md:p-6 font-sans" style={{ background: '#F8F9FB', color: '#111827' }}>
                                     <div className="max-w-[1400px] mx-auto">
-                                        <div className="flex items-end justify-between gap-3 mb-4">
+                                        <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
                                             <div>
                                                 <h1 className="text-[20px] md:text-[22px] font-semibold tracking-tight text-[#111827]">勉強会・イベント日程</h1>
-                                                <p className="text-[13px] text-[#667085] mt-0.5">みんなで編集できる共有表。更新は自動保存され、日程が過ぎた行は自動でグレーになります。</p>
+                                                <p className="text-[13px] text-[#667085] mt-0.5">みんなで編集できる共有表。更新は自動保存。終了した予定は自動で隠れます。</p>
                                             </div>
+                                            <label className="inline-flex items-center gap-2 text-[13px] font-medium text-[#667085] cursor-pointer select-none">
+                                                <input type="checkbox" checked={evShowPast} onChange={e => setEvShowPast(e.target.checked)} className="w-4 h-4 accent-[#F37021]" />
+                                                終了した予定も表示
+                                            </label>
                                         </div>
                                         {!evData.configured && <div className="mb-3 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[13px]">共有ストア（KV/Supabase/GAS）が未設定のため保存されません。管理者に有効化を依頼してください。</div>}
                                         {!evData.loaded ? <div className="text-center text-[#98A2B3] text-[13px] py-10">読み込み中…</div> : (
-                                        <div className="space-y-6">
+                                        <div className="space-y-4">
                                             {EV_SECTIONS.map(sec => {
-                                                const rows = Array.isArray(evData.sections[sec.key]) ? evData.sections[sec.key] : [];
+                                                const allRows = Array.isArray(evData.sections[sec.key]) ? evData.sections[sec.key] : [];
+                                                const pastCount = allRows.filter(r => evIsPast(r.cells && r.cells.date)).length;
+                                                const rows = evShowPast ? allRows : allRows.filter(r => !evIsPast(r.cells && r.cells.date));
+                                                const upcoming = allRows.length - pastCount;
+                                                const collapsed = !!evCollapsed[sec.key];
+                                                const minW = sec.cols.reduce((a, c) => a + c.w, 0) + 96 + 44;
                                                 return (
                                                     <div key={sec.key} className="bg-white rounded-xl border border-[#EAECF0] overflow-hidden">
-                                                        <div className="px-4 py-2.5 font-semibold text-white text-[15px]" style={{ background: sec.accent }}>{sec.title} <span className="opacity-80 text-[12px] font-medium">（{rows.length}件）</span></div>
+                                                        <button onClick={() => setEvCollapsed(c => ({ ...c, [sec.key]: !c[sec.key] }))} className="w-full flex items-center gap-2 px-4 py-2.5 text-left" style={{ background: sec.accent }}>
+                                                            <ChevronDown size={18} className={`text-white transition-transform ${collapsed ? '-rotate-90' : ''}`} />
+                                                            <span className="font-semibold text-white text-[15px]">{sec.title}</span>
+                                                            <span className="text-white/85 text-[12px] font-medium">開催予定 {upcoming}件{pastCount > 0 ? ` ・ 終了 ${pastCount}件` : ''}</span>
+                                                        </button>
+                                                        {!collapsed && (<>
                                                         <div className="overflow-x-auto">
-                                                            <table className="w-full border-collapse text-[13px]" style={{ minWidth: sec.cols.reduce((a, c) => a + c.w, 0) + 44 }}>
+                                                            <table className="w-full border-collapse text-[13px]" style={{ minWidth: minW }}>
                                                                 <thead>
                                                                     <tr style={{ background: sec.bg }}>
                                                                         {sec.cols.map(c => <th key={c.key} className="text-left font-semibold text-[#475467] px-2.5 py-2 border-b border-[#EAECF0]" style={{ width: c.w, minWidth: c.w }}>{c.label}</th>)}
+                                                                        <th className="text-left font-semibold text-[#98A2B3] px-2.5 py-2 border-b border-[#EAECF0]" style={{ width: 96, minWidth: 96 }}>登録日</th>
                                                                         <th className="w-11 border-b border-[#EAECF0]"></th>
                                                                     </tr>
                                                                 </thead>
@@ -10077,31 +10129,45 @@
                                                                     {rows.map(row => {
                                                                         const past = evIsPast(row.cells && row.cells.date);
                                                                         return (
-                                                                            <tr key={row.id} className={past ? 'opacity-55' : ''} style={{ background: past ? '#F2F4F7' : '#fff' }}>
+                                                                            <tr key={row.id} style={{ background: past ? '#F2F4F7' : '#fff' }}>
                                                                                 {sec.cols.map(c => (
                                                                                     <td key={c.key} className="border-b border-r border-[#F0F1F4] p-0 align-top" style={{ width: c.w, minWidth: c.w }}>
-                                                                                        <textarea
-                                                                                            value={(row.cells && row.cells[c.key]) || ''}
-                                                                                            onChange={e => evEditCell(sec.key, row.id, c.key, e.target.value)}
-                                                                                            onFocus={() => { evEditingRef.current = true; }}
-                                                                                            onBlur={() => { evEditingRef.current = false; const r = (evData.sections[sec.key] || []).find(x => x.id === row.id); if (r) evUpsertRow(sec.key, r); }}
-                                                                                            rows={1}
-                                                                                            className={`w-full resize-none bg-transparent px-2.5 py-2 text-[13px] leading-snug focus:outline-none focus:bg-brand-50/60 ${past ? 'text-[#98A2B3] line-through decoration-[#CBD2DC]' : 'text-[#111827]'}`}
-                                                                                            style={{ minHeight: '36px' }}
-                                                                                        />
+                                                                                        {c.key === 'date' ? (
+                                                                                            <div className="px-1 py-1">
+                                                                                                <input type="date" value={isISO(row.cells && row.cells.date) ? row.cells.date : ''}
+                                                                                                    onChange={e => evEditCell(sec.key, row.id, 'date', e.target.value)}
+                                                                                                    onFocus={() => { evEditingRef.current = true; }}
+                                                                                                    onBlur={() => { evEditingRef.current = false; const r = (evData.sections[sec.key] || []).find(x => x.id === row.id); if (r) evUpsertRow(sec.key, r); }}
+                                                                                                    className={dateInputCls(past)} />
+                                                                                                {isISO(row.cells && row.cells.date) ? <div className={`px-2.5 text-[11px] font-semibold ${past ? 'text-[#B0B7C3]' : 'text-brand-600'}`}>{evDateLabel(row.cells.date)}{past ? '・終了' : ''}</div>
+                                                                                                 : (row.cells && row.cells.date ? <div className="px-2.5 text-[11px] text-[#98A2B3] truncate">{row.cells.date}</div> : null)}
+                                                                                            </div>
+                                                                                        ) : (
+                                                                                            <textarea
+                                                                                                value={(row.cells && row.cells[c.key]) || ''}
+                                                                                                onChange={e => evEditCell(sec.key, row.id, c.key, e.target.value)}
+                                                                                                onFocus={() => { evEditingRef.current = true; }}
+                                                                                                onBlur={() => { evEditingRef.current = false; const r = (evData.sections[sec.key] || []).find(x => x.id === row.id); if (r) evUpsertRow(sec.key, r); }}
+                                                                                                rows={1}
+                                                                                                className={`w-full resize-none bg-transparent px-2.5 py-2 text-[13px] leading-snug focus:outline-none focus:bg-brand-50/60 ${past ? 'text-[#98A2B3]' : 'text-[#111827]'}`}
+                                                                                                style={{ minHeight: '36px' }}
+                                                                                            />
+                                                                                        )}
                                                                                     </td>
                                                                                 ))}
+                                                                                <td className="border-b border-r border-[#F0F1F4] px-2.5 py-2 align-middle text-[11px] text-[#98A2B3] whitespace-nowrap">{evFmtReg(row.updatedAt || row.createdAt)}</td>
                                                                                 <td className="border-b border-[#F0F1F4] text-center align-middle">
                                                                                     <button onClick={() => evDeleteRow(sec.key, row.id)} className="w-7 h-7 inline-flex items-center justify-center rounded-lg text-[#98A2B3] hover:text-rose-500 hover:bg-[#F2F4F7]" title="行を削除"><X size={14} /></button>
                                                                                 </td>
                                                                             </tr>
                                                                         );
                                                                     })}
-                                                                    {rows.length === 0 && <tr><td colSpan={sec.cols.length + 1} className="text-center text-[#98A2B3] py-6 text-[13px]">まだ予定がありません。「＋ 行を追加」から入力してください。</td></tr>}
+                                                                    {rows.length === 0 && <tr><td colSpan={sec.cols.length + 2} className="text-center text-[#98A2B3] py-6 text-[13px]">{allRows.length > 0 && !evShowPast ? `開催予定はありません（終了 ${pastCount}件は非表示）。上の「終了した予定も表示」で確認できます。` : 'まだ予定がありません。「＋ 行を追加」から入力してください。'}</td></tr>}
                                                                 </tbody>
                                                             </table>
                                                         </div>
                                                         <div className="px-3 py-2 border-t border-[#EAECF0]"><button onClick={() => evAddRow(sec.key)} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] font-semibold text-[#667085] hover:bg-[#F2F4F7] transition"><Plus size={15} />行を追加</button></div>
+                                                        </>)}
                                                     </div>
                                                 );
                                             })}

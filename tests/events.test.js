@@ -4,6 +4,14 @@ import { parseEventDate, isPastEvent, EVENT_SECTIONS, genId } from '../lib/event
 const NOW = new Date(2026, 7, 15); // 2026-08-15
 
 describe('events: parseEventDate', () => {
+  it('parses ISO YYYY-MM-DD with year', () => {
+    const p = parseEventDate('2025-12-20', NOW);
+    expect(p.date.getFullYear()).toBe(2025);
+    expect(p.date.getMonth()).toBe(11);
+    expect(p.date.getDate()).toBe(20);
+    expect(isPastEvent('2025-12-20', NOW)).toBe(true);
+    expect(isPastEvent('2026-12-20', NOW)).toBe(false);
+  });
   it('parses M/D and M月D日', () => {
     expect(parseEventDate('8/20', NOW).date.getMonth()).toBe(7);
     expect(parseEventDate('8月20日', NOW).date.getDate()).toBe(20);

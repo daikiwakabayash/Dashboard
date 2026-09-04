@@ -1559,11 +1559,20 @@
                     const data = await settlementP;
                     if (data.ok) {
                         const shops = data.root ? null : (Array.isArray(data.shops) ? data.shops : []);
-                        let role = data.role || (data.root ? 'root' : 'owner'), staffId = data.staffId || '', staffName = data.staffName || '';
-                        if (!data.root) { const meta = await loadAcctMeta(); const m = meta[data.owner]; if (m) { role = m.role || role; staffId = m.staffId || staffId; staffName = m.staffName || staffName; } }
+                        const role = data.role || (data.root ? 'root' : 'owner'), staffId = data.staffId || '', staffName = data.staffName || '';
+                        // まず即ログイン完了（体感速度）。role/staff の拡張情報(accountmeta)は後追いでマージ。
                         persistAuth(data.owner || '', data.token, !!data.root, shops, role, staffId, staffName, 'settlement');
                         setAuthState({ checking: false, authenticated: true, token: data.token, owner: data.owner || '', root: !!data.root, shops, role, staffId, staffName, provider: 'settlement' });
                         setAuthPassword(''); setAuthId('');
+                        if (!data.root) {
+                            loadAcctMeta().then(meta => {
+                                const m = meta[data.owner]; if (!m) return;
+                                const r = m.role || role, si = m.staffId || staffId, sn = m.staffName || staffName;
+                                if (r === role && si === staffId && sn === staffName) return;
+                                persistAuth(data.owner || '', data.token, false, shops, r, si, sn, 'settlement');
+                                setAuthState(s => ({ ...s, role: r, staffId: si, staffName: sn }));
+                            }).catch(() => {});
+                        }
                     } else if (id) {
                         // 本社/オーナー(settlement)で不一致 → 並列で走らせたサロンワンSSOの結果を使う
                         const so = await ssoP;

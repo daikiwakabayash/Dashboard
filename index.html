@@ -633,6 +633,16 @@
             const cls = size === 'sm' ? 'w-7 h-7 text-[11px]' : 'w-9 h-9 text-[13px]';
             return <div className={`${cls} ${chatAvatarColor(name)} rounded-full flex items-center justify-center font-semibold shrink-0`}>{String(name || '？').trim().charAt(0) || '？'}</div>;
         };
+        // 店舗マーク（# の代わりにNAORUハートロゴ。読み込み失敗時はハート絵文字にフォールバック）
+        const ShopMark = ({ size = 36 }) => {
+            const [err, setErr] = React.useState(false);
+            return (
+                <div className="rounded-xl bg-gradient-to-br from-brand-50 to-[#FFF3EA] ring-1 ring-brand-100 flex items-center justify-center shrink-0" style={{ width: size, height: size }}>
+                    {err ? <span style={{ fontSize: size * 0.5 }}>❤️</span>
+                         : <img src="/naoru_heart.png" alt="NAORU" onError={() => setErr(true)} className="object-contain" style={{ width: Math.round(size * 0.58), height: 'auto' }} />}
+                </div>
+            );
+        };
         const chatLinkify = (text) => String(text || '').split(/(https?:\/\/[^\s<>"']+)/g).map((p, i) => /^https?:\/\//.test(p)
             ? <a key={i} href={p} target="_blank" rel="noopener noreferrer" className="text-brand-600 hover:underline break-all">{p}</a>
             : <React.Fragment key={i}>{p}</React.Fragment>);
@@ -9845,8 +9855,9 @@
                             const dirStaff = (chatData.dir.staff || []).filter(s => String(s.id) !== chatMyId);
                             const roomIcon = (r, active) => {
                                 if (r.kind === 'dm') return <ChatAvatar name={roomTitle(r)} />;
-                                const Ico = r.kind === 'announce' ? Megaphone : r.kind === 'group' ? Users : Hash;
-                                return <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${active ? 'bg-brand-100 text-brand-600' : 'bg-[#F2F4F7] text-[#667085]'}`}><Ico size={17} /></div>;
+                                if (r.kind === 'store') return <ShopMark size={36} />;
+                                const Ico = r.kind === 'announce' ? Megaphone : Users;
+                                return <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${active ? 'bg-brand-100 text-brand-600' : 'bg-[#F2F4F7] text-[#667085]'}`}><Ico size={17} /></div>;
                             };
                             const RoomRow = ({ r }) => {
                                 const lm = lastMsg(r); const unread = chatUnreadOf(r); const active = chatRoomId === r.id;
@@ -10296,7 +10307,7 @@
                                                             return (
                                                                 <div key={shop.id} className="bg-white rounded-xl border border-[#EAECF0] p-4 hover:border-[#D6DAE1] transition-colors">
                                                                     <div className="flex items-center gap-2.5 mb-3">
-                                                                        <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-brand-50 to-[#F2F4F7] text-brand-600 flex items-center justify-center shrink-0"><Hash size={17} /></div>
+                                                                        <ShopMark size={36} />
                                                                         <div className="min-w-0 flex-1"><div className="text-[14px] font-semibold text-[#111827] truncate">{shop.name}</div><div className="text-[11px] text-[#98A2B3]">{staff == null ? '集計中…' : `スタッフ ${staff.length}名`}{owners.length ? ` ・ オーナー ${owners.length}名` : ''}</div></div>
                                                                     </div>
                                                                     {owners.length > 0 && <div className="flex flex-wrap gap-1.5 mb-2.5">{owners.map(o => <span key={o} className="inline-flex items-center gap-1 text-[12px] font-semibold text-brand-700 bg-brand-50 border border-brand-100 px-2 py-0.5 rounded-full">👑 {o}</span>)}</div>}

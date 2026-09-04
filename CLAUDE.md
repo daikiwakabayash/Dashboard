@@ -61,6 +61,7 @@ lib/
   chat.js           # 社内チャット ロジック（ルーム可視判定・未読集計・リンク抽出・リアクショントグル・DM検索）。tests/chat.test.js
   board.js          # 掲示板（全社発信）ロジック（新着集計・並び替え・リンク抽出・動画URL埋め込み判定）。tests/board.test.js
   events.js         # 勉強会・イベント日程 ロジック（日付解釈・過ぎた予定の判定＝グレーアウト・セクション定義）。tests/events.test.js
+  geo.js            # 組織図の地理順（店舗名→都道府県ランク北→南・海外最下部・地域グルーピング）。tests/geo.test.js
   settlement.js     # 返金明細書 共通ロジック（オーナー認証トークン・スナップショット・計算・期日/注意書き）
   handlers/         # api/ ディスパッチャから呼ばれる実ハンドラ群（Serverless Functionにカウントされない）
     settlement-auth.js / settlement-owners.js / settlement-store.js

@@ -637,6 +637,14 @@
             ? <a key={i} href={p} target="_blank" rel="noopener noreferrer" className="text-brand-600 hover:underline break-all">{p}</a>
             : <React.Fragment key={i}>{p}</React.Fragment>);
 
+        // 組織図: 店舗名から地理ランク(北→南)を推定（lib/geo.js と同仕様のフロント版）
+        const ORG_KW = { '北海道':1,'札幌':1,'旭川':1,'函館':1,'すすきの':1,'青森':2,'岩手':3,'盛岡':3,'宮城':4,'仙台':4,'秋田':5,'山形':6,'福島':7,'郡山':7,'いわき':7,'茨城':8,'水戸':8,'つくば':8,'栃木':9,'宇都宮':9,'群馬':10,'高崎':10,'前橋':10,'埼玉':11,'大宮':11,'浦和':11,'川越':11,'所沢':11,'越谷':11,'川口':11,'春日部':11,'千葉':12,'船橋':12,'柏':12,'松戸':12,'津田沼':12,'海浜幕張':12,'幕張':12,'東京':13,'銀座':13,'新宿':13,'渋谷':13,'恵比寿':13,'池袋':13,'品川':13,'五反田':13,'目黒':13,'中目黒':13,'池尻大橋':13,'三軒茶屋':13,'下北沢':13,'自由が丘':13,'二子玉川':13,'大森':13,'蒲田':13,'大井町':13,'中野':13,'荻窪':13,'高円寺':13,'阿佐ヶ谷':13,'吉祥寺':13,'錦糸町':13,'押上':13,'亀戸':13,'北千住':13,'上野':13,'浅草':13,'秋葉原':13,'日暮里':13,'人形町':13,'茅場町':13,'八重洲':13,'東京駅':13,'有楽町':13,'新橋':13,'田町':13,'浜松町':13,'赤坂':13,'六本木':13,'飯田橋':13,'神楽坂':13,'大塚':13,'巣鴨':13,'十条':13,'赤羽':13,'成増':13,'練馬':13,'光が丘':13,'笹塚':13,'中野坂上':13,'方南町':13,'三鷹':13,'武蔵境':13,'国分寺':13,'国立':13,'立川':13,'八王子':13,'町田':13,'府中':13,'調布':13,'西東京':13,'田無':13,'神奈川':14,'横浜':14,'川崎':14,'武蔵小杉':14,'溝の口':14,'鶴見':14,'関内':14,'桜木町':14,'藤沢':14,'大和':14,'海老名':14,'厚木':14,'相模':14,'新百合ヶ丘':14,'新潟':15,'富山':16,'石川':17,'金沢':17,'福井':18,'山梨':19,'甲府':19,'長野':20,'松本':20,'岐阜':21,'静岡':22,'浜松':22,'沼津':22,'愛知':23,'名古屋':23,'八事':23,'栄':23,'金山':23,'豊田':23,'岡崎':23,'三重':24,'志摩':24,'四日市':24,'滋賀':25,'大津':25,'草津':25,'京都':26,'四条烏丸':26,'烏丸':26,'河原町':26,'京都駅':26,'大阪':27,'梅田':27,'難波':27,'なんば':27,'天王寺':27,'本町':27,'心斎橋':27,'江坂':27,'天満':27,'天六':27,'中百舌鳥':27,'堺':27,'京橋':27,'淀屋橋':27,'兵庫':28,'神戸':28,'三宮':28,'西宮':28,'尼崎':28,'姫路':28,'奈良':29,'和歌山':30,'鳥取':31,'島根':32,'松江':32,'岡山':33,'広島':34,'山口':35,'徳島':36,'香川':37,'高松':37,'愛媛':38,'松山':38,'高知':39,'福岡':40,'博多':40,'天神':40,'小倉':40,'佐賀':41,'長崎':42,'熊本':43,'大分':44,'宮崎':45,'鹿児島':46,'沖縄':47,'那覇':47,'国際通り':47,'オーストラリア':1000,'シドニー':1000,'メルボルン':1000,'パース':1000,'ブリスベン':1000,'ゴールドコースト':1000,'アデレード':1000,'ケアンズ':1000,'マレーシア':1000,'クアラルンプール':1000,'ペナン':1000,'ジョホール':1000,'モントキアラ':1000,'Sydney':1000,'Melbourne':1000,'Perth':1000,'Brisbane':1000,'Malaysia':1000,'Australia':1000,'KL':1000 };
+        const ORG_KW_KEYS = Object.keys(ORG_KW).sort((a, b) => b.length - a.length);
+        const orgGeoRank = (name) => { const s = String(name || '').replace(/NAORU/gi, '').replace(/院/g, '').trim(); for (const k of ORG_KW_KEYS) { if (s.includes(k)) return ORG_KW[k]; } return 950; };
+        const orgRegionOf = (r) => r === 1 ? '北海道' : (r >= 2 && r <= 7) ? '東北' : (r >= 8 && r <= 14) ? '関東' : (r >= 15 && r <= 23) ? '中部' : (r >= 24 && r <= 30) ? '近畿' : (r >= 31 && r <= 35) ? '中国' : (r >= 36 && r <= 39) ? '四国' : (r >= 40 && r <= 46) ? '九州' : r === 47 ? '沖縄' : r >= 1000 ? '海外' : 'その他';
+        const ORG_REGION_RANK = { '北海道':1,'東北':2,'関東':8,'中部':15,'近畿':24,'中国':31,'四国':36,'九州':40,'沖縄':47,'その他':950,'海外':1000 };
+        const ORG_REGION_EMOJI = { '北海道':'🗻','東北':'🍎','関東':'🗼','中部':'🗻','近畿':'🏯','中国':'⛩️','四国':'🌉','九州':'🌋','沖縄':'🏝️','海外':'🌏','その他':'📍' };
+
         // 掲示板: 動画URL → 埋め込み情報（lib/board.js と同仕様のフロント版）
         const boardVideoEmbed = (url) => {
             const u = String(url || '').trim(); if (!u) return null; let m;
@@ -2172,6 +2180,7 @@
                 { key: 'bukatsu', title: '部活', accent: '#D64545', bg: '#FBECEC', cols: [ { key: 'date', label: '日付', w: 104 }, { key: 'time', label: '時間', w: 116 }, { key: 'place', label: '場所', w: 128 }, { key: 'club', label: '部活', w: 108 }, { key: 'content', label: '内容', w: 200 }, { key: 'charge', label: '担当', w: 84 } ] },
             ];
             const [evData, setEvData] = useState({ sections: {}, configured: true, loaded: false });
+            const [orgSearch, setOrgSearch] = useState('');
             const evEditingRef = useRef(false);       // セル編集中はポーリング上書きを止める
             const evSaveTimers = useRef({});
             const evParseDate = (str) => { const s = String(str || '').trim(); if (!s) return null; if (/(毎週|毎月|毎日|隔週|未定|自由|随時|通年)/.test(s)) return { recurring: true }; const m = s.match(/(\d{1,2})\s*[\/月]\s*(\d{1,2})/); if (!m) return null; const mo = Number(m[1]), d = Number(m[2]); if (mo < 1 || mo > 12 || d < 1 || d > 31) return null; const now = new Date(); let date = new Date(now.getFullYear(), mo - 1, d); if ((date - now) / 86400000 > 183) date = new Date(now.getFullYear() - 1, mo - 1, d); return { recurring: false, date }; };
@@ -10103,41 +10112,49 @@
                             );
                         })()}
                         {currentPage === 'org' && (() => {
-                            const shops = (soShopsRaw || []).filter(s => s && s.id);
+                            const allShops = (soShopsRaw || []).filter(s => s && s.id);
                             const ownerMap = stOwnerShops || {};
                             const ownersForShop = (name) => Object.entries(ownerMap).filter(([o, pats]) => Array.isArray(pats) && pats.some(p => p && String(name).includes(p))).map(([o]) => o);
                             const staffForShop = (id) => (soStaffs || []).filter(s => String(s.shop_id) === String(id) && !s.deleted);
-                            // エリア（area_id）でグルーピング。名称は不明なため通し番号で表示。
-                            const areaGroups = (() => {
-                                const g = {};
-                                for (const s of shops) { const a = String(s.area_id || 'その他'); (g[a] = g[a] || []).push(s); }
-                                const keys = Object.keys(g).sort((a, b) => (a === 'その他' ? 1 : b === 'その他' ? -1 : Number(a) - Number(b)));
-                                return keys.map((k, i) => ({ area: k, label: k === 'その他' ? 'その他' : `エリア ${i + 1}`, shops: g[k].sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja')) }));
+                            const q = orgSearch.trim();
+                            const shops = q ? allShops.filter(sh => String(sh.name).includes(q) || staffForShop(sh.id).some(s => String(s.name).includes(q)) || ownersForShop(sh.name).some(o => String(o).includes(q))) : allShops;
+                            // 地理順グルーピング（北海道→南→その他→海外）
+                            const regionGroups = (() => {
+                                const b = new Map();
+                                for (const sh of shops) { const reg = orgRegionOf(orgGeoRank(sh.name)); if (!b.has(reg)) b.set(reg, []); b.get(reg).push(sh); }
+                                return [...b.entries()].map(([region, list]) => ({ region, rank: ORG_REGION_RANK[region] ?? 900, shops: list.slice().sort((a, c) => { const ra = orgGeoRank(a.name), rc = orgGeoRank(c.name); return ra !== rc ? ra - rc : String(a.name).localeCompare(String(c.name), 'ja'); }) })).sort((a, c) => a.rank - c.rank);
                             })();
                             const totalStaff = (soStaffs || []).filter(s => !s.deleted).length;
-                            const ownerSet = new Set(); shops.forEach(s => ownersForShop(s.name).forEach(o => ownerSet.add(o)));
-                            const loading = shops.length === 0;
+                            const ownerSet = new Set(); allShops.forEach(s => ownersForShop(s.name).forEach(o => ownerSet.add(o)));
+                            const loading = allShops.length === 0;
                             return (
                                 <div className="p-4 md:p-6 font-sans" style={{ background: '#F8F9FB', color: '#111827' }}>
                                     <div className="max-w-[1400px] mx-auto">
-                                        <div className="flex items-end justify-between gap-3 mb-4">
+                                        <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
                                             <div>
                                                 <h1 className="text-[20px] md:text-[22px] font-semibold tracking-tight text-[#111827]">組織図</h1>
-                                                <p className="text-[13px] text-[#667085] mt-0.5">SalonOneから自動取得した エリア → 店舗 → オーナー・スタッフ の一覧です。</p>
+                                                <p className="text-[13px] text-[#667085] mt-0.5">北から南の順（海外は最下部）に、店舗ごとのオーナー・スタッフを表示します。</p>
                                             </div>
-                                            {!loading && <div className="flex items-center gap-4 text-right">
-                                                <div><div className="text-[18px] font-bold text-[#111827] leading-none">{shops.length}</div><div className="text-[11px] text-[#98A2B3] mt-0.5">店舗</div></div>
-                                                <div><div className="text-[18px] font-bold text-[#111827] leading-none">{totalStaff}</div><div className="text-[11px] text-[#98A2B3] mt-0.5">スタッフ</div></div>
-                                                <div><div className="text-[18px] font-bold text-brand-600 leading-none">{ownerSet.size}</div><div className="text-[11px] text-[#98A2B3] mt-0.5">オーナー</div></div>
+                                            {!loading && <div className="flex items-center gap-5">
+                                                <div className="text-center"><div className="text-[20px] font-bold text-[#111827] leading-none">{allShops.length}</div><div className="text-[11px] text-[#98A2B3] mt-1">店舗</div></div>
+                                                <div className="text-center"><div className="text-[20px] font-bold text-[#111827] leading-none">{totalStaff}</div><div className="text-[11px] text-[#98A2B3] mt-1">スタッフ</div></div>
+                                                <div className="text-center"><div className="text-[20px] font-bold text-brand-600 leading-none">{ownerSet.size}</div><div className="text-[11px] text-[#98A2B3] mt-1">オーナー</div></div>
                                             </div>}
                                         </div>
-                                        {loading ? <div className="text-center text-[#98A2B3] text-[13px] py-16">店舗・スタッフを取得中…</div> : (
-                                        <div className="space-y-7">
-                                            {areaGroups.map(grp => (
-                                                <div key={grp.area}>
-                                                    <div className="flex items-center gap-2 mb-3">
-                                                        <span className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-brand-700 bg-brand-50 px-2.5 py-1 rounded-lg">📍 {grp.label}</span>
-                                                        <span className="text-[12px] text-[#98A2B3]">{grp.shops.length}店舗</span>
+
+                                        {!loading && (
+                                            <div className="relative mb-5 max-w-sm"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]" /><input value={orgSearch} onChange={e => setOrgSearch(e.target.value)} placeholder="店舗・スタッフ・オーナーを検索" className="w-full h-9 pl-9 pr-3 rounded-lg bg-white border border-[#EAECF0] text-[13px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" /></div>
+                                        )}
+
+                                        {loading ? <div className="text-center text-[#98A2B3] text-[13px] py-16">店舗・スタッフを取得中…</div>
+                                         : regionGroups.length === 0 ? <div className="text-center text-[#98A2B3] text-[14px] py-16">該当する店舗がありません。</div>
+                                         : (
+                                        <div className="space-y-8">
+                                            {regionGroups.map(grp => (
+                                                <div key={grp.region}>
+                                                    <div className="flex items-center gap-2.5 mb-3">
+                                                        <span className="inline-flex items-center gap-1.5 text-[14px] font-bold text-[#111827]"><span className="text-[16px]">{ORG_REGION_EMOJI[grp.region] || '📍'}</span>{grp.region}</span>
+                                                        <span className="text-[12px] font-semibold text-[#98A2B3] bg-white border border-[#EAECF0] rounded-full px-2 py-0.5">{grp.shops.length}店舗</span>
                                                         <div className="flex-1 h-px bg-[#EAECF0]" />
                                                     </div>
                                                     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
@@ -10145,25 +10162,15 @@
                                                             const owners = ownersForShop(shop.name);
                                                             const staff = staffForShop(shop.id);
                                                             return (
-                                                                <div key={shop.id} className="bg-white rounded-xl border border-[#EAECF0] overflow-hidden">
-                                                                    <div className="px-4 py-3 border-b border-[#EAECF0] flex items-center gap-2">
-                                                                        <div className="w-8 h-8 rounded-lg bg-[#F2F4F7] text-[#667085] flex items-center justify-center shrink-0"><Hash size={16} /></div>
-                                                                        <div className="min-w-0"><div className="text-[14px] font-semibold text-[#111827] truncate">{shop.name}</div><div className="text-[11px] text-[#98A2B3]">スタッフ {staff.length}名</div></div>
+                                                                <div key={shop.id} className="bg-white rounded-xl border border-[#EAECF0] p-4 hover:border-[#D6DAE1] transition-colors">
+                                                                    <div className="flex items-center gap-2.5 mb-3">
+                                                                        <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-brand-50 to-[#F2F4F7] text-brand-600 flex items-center justify-center shrink-0"><Hash size={17} /></div>
+                                                                        <div className="min-w-0 flex-1"><div className="text-[14px] font-semibold text-[#111827] truncate">{shop.name}</div><div className="text-[11px] text-[#98A2B3]">スタッフ {staff.length}名{owners.length ? ` ・ オーナー ${owners.length}名` : ''}</div></div>
                                                                     </div>
-                                                                    <div className="p-3 space-y-2.5">
-                                                                        <div>
-                                                                            <div className="text-[11px] font-semibold text-[#98A2B3] mb-1">オーナー</div>
-                                                                            {owners.length === 0 ? <div className="text-[12px] text-[#CBD2DC]">未設定</div> : (
-                                                                                <div className="flex flex-wrap gap-1.5">{owners.map(o => <span key={o} className="inline-flex items-center gap-1 text-[12px] font-semibold text-brand-700 bg-brand-50 border border-brand-100 px-2 py-0.5 rounded-full">👑 {o}</span>)}</div>
-                                                                            )}
-                                                                        </div>
-                                                                        <div>
-                                                                            <div className="text-[11px] font-semibold text-[#98A2B3] mb-1">スタッフ</div>
-                                                                            {staff.length === 0 ? <div className="text-[12px] text-[#CBD2DC]">在籍情報なし</div> : (
-                                                                                <div className="flex flex-wrap gap-1.5">{staff.map(s => <span key={s.id} className="inline-flex items-center gap-1.5 text-[12px] text-[#344054] bg-[#F8F9FB] border border-[#EAECF0] pl-1 pr-2.5 py-0.5 rounded-full"><span className={`w-5 h-5 rounded-full ${chatAvatarColor(s.name)} inline-flex items-center justify-center text-[10px] font-semibold`}>{String(s.name || '？').charAt(0)}</span>{s.name}</span>)}</div>
-                                                                            )}
-                                                                        </div>
-                                                                    </div>
+                                                                    {owners.length > 0 && <div className="flex flex-wrap gap-1.5 mb-2.5">{owners.map(o => <span key={o} className="inline-flex items-center gap-1 text-[12px] font-semibold text-brand-700 bg-brand-50 border border-brand-100 px-2 py-0.5 rounded-full">👑 {o}</span>)}</div>}
+                                                                    {staff.length === 0 ? <div className="text-[12px] text-[#CBD2DC]">在籍情報なし</div> : (
+                                                                        <div className="flex flex-wrap gap-1.5">{staff.map(s => <span key={s.id} className="inline-flex items-center gap-1.5 text-[12px] text-[#344054] bg-[#F8F9FB] border border-[#EAECF0] pl-1 pr-2.5 py-1 rounded-full"><span className={`w-5 h-5 rounded-full ${chatAvatarColor(s.name)} inline-flex items-center justify-center text-[10px] font-semibold`}>{String(s.name || '？').charAt(0)}</span>{s.name}</span>)}</div>
+                                                                    )}
                                                                 </div>
                                                             );
                                                         })}
@@ -10172,7 +10179,7 @@
                                             ))}
                                         </div>
                                         )}
-                                        <p className="text-[11px] text-[#98A2B3] mt-6 leading-relaxed">※ オーナーは「オーナー設定」の管轄店舗マッピングから、スタッフはSalonOneの在籍情報から自動表示しています。エリアはSalonOneのエリア区分で分類しています。</p>
+                                        <p className="text-[11px] text-[#98A2B3] mt-6 leading-relaxed">※ 並び順は店舗名から地域を推定（北→南、海外は最下部）。オーナーは「オーナー設定」の管轄店舗、スタッフはSalonOneの在籍情報から自動表示。地域の判定が違う店舗があれば教えてください。</p>
                                     </div>
                                 </div>
                             );

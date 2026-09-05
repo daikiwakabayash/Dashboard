@@ -2124,6 +2124,15 @@
                     return j;
                 } catch { return { ok: false }; }
             };
+            // 個別DMを開始/再利用してチャットへ遷移（組織図プロフィールの「メッセージ」から）
+            const startDm = async (otherId, otherName) => {
+                const other = String(otherId || '');
+                if (!other || other === chatMyId) return;
+                setCurrentPage('chat');
+                const existing = (chatData.rooms || []).find(r => r.kind === 'dm' && (r.members || []).map(String).sort().join(',') === [chatMyId, other].sort().join(','));
+                if (existing) { setChatRoomId(existing.id); return; }
+                await chatCreateRoom({ kind: 'dm', name: '', members: [chatMyId, other] });
+            };
             const chatMarkAllRead = async () => {
                 const now = Date.now();
                 const vis = (chatData.rooms || []).filter(r => chatRoomVisible(r, chatMe));
@@ -2263,6 +2272,24 @@
             // 組織図: 月選択＋その月に売上のあるスタッフ（SalonOne売上と同じ考え方）
             const [orgMonth, setOrgMonth] = useState(() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}`; });
             const [orgSales, setOrgSales] = useState({});   // { `${shopId}__${YYYY-MM}`: [{id,name,gross}] }
+            // ── プロフィール（組織図のホバー表示・本人が編集・店舗割当の上書き） ──
+            const [profileData, setProfileData] = useState({ profiles: {}, loaded: false, configured: true });
+            const [profileEdit, setProfileEdit] = useState(null); // 編集中ドラフト or null
+            const [profileView, setProfileView] = useState(null); // モバイル等でタップ表示中の pid
+            const [profileSaving, setProfileSaving] = useState(false);
+            const [profileShopQ, setProfileShopQ] = useState(''); // 編集モーダルの担当店舗検索
+            // 本人の識別子: SSO/staffは staffId、オーナー(settlementアカウント)は owner:<名前>
+            const myPid = String(authState.staffId || '') || (authState.owner && authState.owner !== '__root__' ? `owner:${authState.owner}` : '');
+            const profileLoad = async () => {
+                try { const r = await fetch('/api/plan-store?type=profile'); const j = await r.json().catch(() => ({})); setProfileData({ profiles: (j.profiles && typeof j.profiles === 'object') ? j.profiles : {}, loaded: true, configured: j.configured !== false }); }
+                catch { setProfileData(d => ({ ...d, loaded: true })); }
+            };
+            const profileUploadImage = (file) => chatUploadImageTo('profile', file);
+            const profileSave = async (pid, profile) => {
+                setProfileSaving(true);
+                try { const r = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'save', pid, profile, staffId: myPid, root: !!authState.root }) }); const j = await r.json().catch(() => ({})); await profileLoad(); return j; }
+                catch { return { ok: false }; } finally { setProfileSaving(false); }
+            };
             const [orgProgress, setOrgProgress] = useState({ month: '', done: 0, total: 0, loading: false });
             const [orgSalesMode, setOrgSalesMode] = useState(false); // 既定は在籍ロスター（読み込みなし）。ONで当月売上>0に絞る（集計）
             const orgSalesRef = useRef(null);
@@ -2687,6 +2714,12 @@
                 const shops = (soShopsRaw || []).filter(s => s && s.id);
                 if (shops.length) orgLoadSales(orgMonth, shops);
             }, [currentPage, orgSalesMode, orgMonth, soShopsRaw.length]);
+            // 組織図: プロフィール（ホバー表示・店舗割当上書き）を表示時に取得。staffs/shops も無ければ確保。
+            useEffect(() => {
+                if (currentPage !== 'org') return;
+                profileLoad();
+                if (soStaffs.length === 0) { (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at, acceptsRes: s.accepts_reservations !== false })); if (arr.length) setSoStaffs(arr); } catch {} })(); }
+            }, [currentPage]);
             // チャット: 店舗ルーム/ディレクトリ生成に必要な shops/staffs をチャット表示時に確保
             useEffect(() => {
                 if (currentPage !== 'chat') return;
@@ -10508,38 +10541,117 @@
                         {currentPage === 'org' && (() => {
                             const allShops = (soShopsRaw || []).filter(s => s && s.id);
                             const ownerMap = stOwnerShops || {};
-                            const ownersForShop = (name) => Object.entries(ownerMap).filter(([o, pats]) => Array.isArray(pats) && pats.some(p => p && String(name).includes(p))).map(([o]) => o);
-                            // 既定＝在籍ロスター（読み込み不要・即表示）。楽トレ/ヘルプ/受付/役職は除外。
-                            const rosterStaff = (id) => (soStaffs || []).filter(s => String(s.shop_id) === String(id) && !s.deleted && !isNonTherapistName(s.name) && s.acceptsRes !== false).map(s => ({ id: String(s.id), name: s.name }));
+                            const isRoot = !!authState.root;
+                            const profiles = profileData.profiles || {};
+                            const profList = Object.values(profiles).filter(Boolean);
+                            // セラピストのプロフィール（staffId基準）。プロフィール名があれば表示名を優先。
+                            const profByStaffId = {}; profList.forEach(p => { if (p.kind !== 'owner') profByStaffId[String(p.pid)] = p; });
+                            const dispName = (id, fallback) => (profByStaffId[String(id)] && profByStaffId[String(id)].nameKanji) || fallback || '';
+                            // プロフィールで担当店舗を宣言している人は SalonOne 割当を上書き（本人/本部設定を優先）。
+                            const reassigned = new Set(Object.keys(profByStaffId).filter(id => (profByStaffId[id].shops || []).length > 0));
+                            const profStaffByShop = {}; Object.entries(profByStaffId).forEach(([id, p]) => { (p.shops || []).forEach(sn => { (profStaffByShop[sn] = profStaffByShop[sn] || []).push({ id, name: p.nameKanji || '' }); }); });
+                            // オーナーのプロフィール（owner:<名前> or staffId）。担当店舗を複数指定できる。
+                            const ownerProfList = profList.filter(p => p.kind === 'owner');
+                            const ownerProfNames = new Set(ownerProfList.map(p => String(p.pid).startsWith('owner:') ? String(p.pid).slice(6) : (p.nameKanji || p.pid)));
+                            const ownersForShop = (name) => {
+                                const out = new Map();
+                                Object.entries(ownerMap).forEach(([o, pats]) => { if (ownerProfNames.has(o)) return; if (Array.isArray(pats) && pats.some(p => p && String(name).includes(p))) out.set(o, { name: o, pid: `owner:${o}` }); });
+                                ownerProfList.forEach(p => { if ((p.shops || []).includes(name)) { const dn = p.nameKanji || (String(p.pid).startsWith('owner:') ? String(p.pid).slice(6) : p.pid); out.set(p.pid, { name: dn, pid: String(p.pid) }); } });
+                                return [...out.values()];
+                            };
+                            // 既定＝在籍ロスター（読み込み不要・即表示）。楽トレ/ヘルプ/受付/役職は除外。＋プロフィール上書き。
+                            const rosterStaff = (id, name) => {
+                                const base = (soStaffs || []).filter(s => String(s.shop_id) === String(id) && !s.deleted && !isNonTherapistName(s.name) && s.acceptsRes !== false && !reassigned.has(String(s.id))).map(s => ({ id: String(s.id), name: dispName(s.id, s.name) }));
+                                const added = (profStaffByShop[name] || []).map(x => ({ id: x.id, name: x.name || dispName(x.id) || (((soStaffs || []).find(s => String(s.id) === x.id) || {}).name) || 'スタッフ' }));
+                                const seen = new Set(); const out = [];
+                                for (const s of [...base, ...added]) { if (seen.has(s.id)) continue; seen.add(s.id); out.push(s); }
+                                return out;
+                            };
                             // 売上モード時：その月に売上>0のスタッフ。未取得はnull（集計中）。
-                            const salesStaff = (id) => { const s = orgSales[`${id}__${orgMonth}`]; if (!s) return null; return s.filter(x => x.gross > 0 && !isNonTherapistName(x.name)).sort((a, b) => b.gross - a.gross); };
-                            const staffFor = (id) => orgSalesMode ? salesStaff(id) : rosterStaff(id); // null=集計中(売上モードのみ)
+                            const salesStaff = (id) => { const s = orgSales[`${id}__${orgMonth}`]; if (!s) return null; return s.filter(x => x.gross > 0 && !isNonTherapistName(x.name)).sort((a, b) => b.gross - a.gross).map(x => ({ id: String(x.id), name: dispName(x.id, x.name) })); };
+                            const staffFor = (id, name) => orgSalesMode ? salesStaff(id) : rosterStaff(id, name); // null=集計中(売上モードのみ)
                             const q = orgSearch.trim();
-                            const nameMatch = (sh) => { if (String(sh.name).includes(q)) return true; if (ownersForShop(sh.name).some(o => String(o).includes(q))) return true; const ss = staffFor(sh.id) || []; return ss.some(s => String(s.name).includes(q)); };
+                            const nameMatch = (sh) => { if (String(sh.name).includes(q)) return true; if (ownersForShop(sh.name).some(o => String(o.name).includes(q))) return true; const ss = staffFor(sh.id, sh.name) || []; return ss.some(s => String(s.name).includes(q)); };
                             const shops = q ? allShops.filter(nameMatch) : allShops;
                             const regionGroups = (() => {
                                 const b = new Map();
                                 for (const sh of shops) { const reg = orgRegionOf(orgGeoRank(sh.name)); if (!b.has(reg)) b.set(reg, []); b.get(reg).push(sh); }
                                 return [...b.entries()].map(([region, list]) => ({ region, rank: ORG_REGION_RANK[region] ?? 900, shops: list.slice().sort((a, c) => { const ra = orgGeoRank(a.name), rc = orgGeoRank(c.name); return ra !== rc ? ra - rc : String(a.name).localeCompare(String(c.name), 'ja'); }) })).sort((a, c) => a.rank - c.rank);
                             })();
-                            const staffIdSet = new Set(); allShops.forEach(sh => { const ss = staffFor(sh.id); if (ss) ss.forEach(x => staffIdSet.add(x.id)); });
+                            const staffIdSet = new Set(); allShops.forEach(sh => { const ss = staffFor(sh.id, sh.name); if (ss) ss.forEach(x => staffIdSet.add(x.id)); });
                             const totalStaff = staffIdSet.size;
-                            const ownerSet = new Set(); allShops.forEach(s => ownersForShop(s.name).forEach(o => ownerSet.add(o)));
+                            const ownerSet = new Set(); allShops.forEach(s => ownersForShop(s.name).forEach(o => ownerSet.add(o.name)));
                             const loading = allShops.length === 0;
                             const busy = orgProgress.loading && orgProgress.month === orgMonth;
                             const monthOpts = (() => { const arr = []; const n = new Date(); for (let i = 0; i < 12; i++) { const d = new Date(n.getFullYear(), n.getMonth() - i, 1); arr.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); } return arr; })();
+                            // プロフィール編集を開く（本人は自分、rootは任意のpid）
+                            const openProfileEditor = (pid, fallbackName, fallbackKind) => {
+                                const p = profiles[pid] || {};
+                                setProfileView(null);
+                                setProfileEdit({
+                                    pid, kind: p.kind || fallbackKind || 'therapist',
+                                    nameKanji: p.nameKanji || fallbackName || '', nameKana: p.nameKana || '', bio: p.bio || '',
+                                    mainImg: p.mainImg || '', subImgs: Array.isArray(p.subImgs) ? [...p.subImgs] : [],
+                                    sns: { instagram: '', x: '', youtube: '', tiktok: '', ...(p.sns || {}) },
+                                    shops: Array.isArray(p.shops) ? [...p.shops] : [],
+                                });
+                            };
+                            // ホバー/タップで出るプロフィールカード（写真・名前・自己紹介・SNS・DM・編集）
+                            const snsMeta = { instagram: { label: 'Instagram', color: 'text-pink-600' }, x: { label: 'X', color: 'text-[#111827]' }, youtube: { label: 'YouTube', color: 'text-red-600' }, tiktok: { label: 'TikTok', color: 'text-[#111827]' }, facebook: { label: 'Facebook', color: 'text-blue-600' }, line: { label: 'LINE', color: 'text-green-600' }, website: { label: 'Web', color: 'text-brand-600' } };
+                            const ProfilePop = ({ pid, name, kind }) => {
+                                const prof = profiles[pid];
+                                const open = profileView === pid;
+                                const isMe = !!myPid && pid === myPid;
+                                const canEdit = isMe || isRoot;
+                                const numericId = /^\d+$/.test(String(pid)); // DMは staffId のみ
+                                const dispNm = (prof && prof.nameKanji) || name || 'スタッフ';
+                                const snsList = prof && prof.sns ? Object.entries(prof.sns).filter(([, v]) => v) : [];
+                                return (
+                                    <span key={pid} className="group relative inline-block">
+                                        <button onClick={() => setProfileView(open ? null : pid)} className={`inline-flex items-center gap-1.5 text-[12px] pl-1 pr-2.5 py-1 rounded-full border transition ${kind === 'owner' ? 'text-brand-700 bg-brand-50 border-brand-100 font-semibold hover:bg-brand-100/70' : 'text-[#344054] bg-[#F8F9FB] border-[#EAECF0] hover:bg-white hover:border-[#D6DAE1]'}`}>
+                                            {kind === 'owner' && <span className="text-[11px]">👑</span>}
+                                            {prof && prof.mainImg ? <span className="w-5 h-5 rounded-full overflow-hidden shrink-0"><ChatImage imgId={prof.mainImg} /></span> : <span className={`w-5 h-5 rounded-full ${chatAvatarColor(dispNm)} inline-flex items-center justify-center text-[10px] font-semibold`}>{String(dispNm || '？').charAt(0)}</span>}
+                                            {dispNm}
+                                            {prof && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" title="プロフィール登録済み" />}
+                                        </button>
+                                        <div className={`${open ? 'block' : 'hidden'} group-hover:block absolute left-0 top-full mt-2 z-40 w-64 bg-white rounded-2xl border border-[#EAECF0] shadow-xl p-4 text-left cursor-default`} onClick={e => e.stopPropagation()}>
+                                            {prof ? (<>
+                                                {prof.mainImg && <div className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-[#F2F4F7] mb-3"><ChatImage imgId={prof.mainImg} onClick={() => setChatLightbox(prof.mainImg)} /></div>}
+                                                {Array.isArray(prof.subImgs) && prof.subImgs.length > 0 && <div className="flex gap-1.5 mb-3">{prof.subImgs.map(id => <span key={id} className="w-12 h-12 rounded-lg overflow-hidden bg-[#F2F4F7] cursor-zoom-in" onClick={() => setChatLightbox(id)}><ChatImage imgId={id} /></span>)}</div>}
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-[15px] font-bold text-[#111827]">{dispNm}</span>
+                                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${prof.kind === 'owner' ? 'text-brand-700 bg-brand-50' : 'text-teal-700 bg-teal-50'}`}>{prof.kind === 'owner' ? 'オーナー' : 'セラピスト'}</span>
+                                                </div>
+                                                {prof.nameKana && <div className="text-[11px] text-[#98A2B3] mt-0.5">{prof.nameKana}</div>}
+                                                {prof.bio && <p className="text-[12px] text-[#475467] leading-relaxed mt-2 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">{prof.bio}</p>}
+                                                {snsList.length > 0 && <div className="flex flex-wrap gap-1.5 mt-2.5">{snsList.map(([k, v]) => { const m = snsMeta[k] || { label: k, color: 'text-brand-600' }; return <a key={k} href={/^https?:\/\//.test(v) ? v : `https://${v}`} target="_blank" rel="noopener noreferrer" className={`inline-flex items-center gap-1 text-[11px] font-semibold ${m.color} bg-[#F8F9FB] border border-[#EAECF0] rounded-full px-2 py-0.5 hover:bg-white transition`}>{m.label}<ExternalLink size={10} /></a>; })}</div>}
+                                            </>) : (
+                                                <div className="flex items-center gap-2.5">
+                                                    <span className={`w-10 h-10 rounded-full ${chatAvatarColor(dispNm)} inline-flex items-center justify-center text-[15px] font-semibold`}>{String(dispNm || '？').charAt(0)}</span>
+                                                    <div><div className="text-[14px] font-bold text-[#111827]">{dispNm}</div><div className="text-[11px] text-[#98A2B3]">プロフィール未登録</div></div>
+                                                </div>
+                                            )}
+                                            <div className="flex items-center gap-1.5 mt-3 pt-3 border-t border-[#F2F4F7]">
+                                                {numericId && !isMe && <button onClick={() => { setProfileView(null); startDm(pid, dispNm); }} className="flex-1 inline-flex items-center justify-center gap-1.5 h-8 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[12px] font-semibold transition"><MessageSquare size={13} />メッセージ</button>}
+                                                {canEdit && <button onClick={() => openProfileEditor(pid, dispNm, kind)} className={`${numericId && !isMe ? '' : 'flex-1'} inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-lg border border-[#EAECF0] text-[12px] font-semibold text-[#344054] hover:bg-[#F8F9FB] transition`}>{isMe ? '編集' : '本部編集'}</button>}
+                                            </div>
+                                        </div>
+                                    </span>
+                                );
+                            };
                             return (
-                                <div className="p-4 md:p-6 font-sans" style={{ background: '#F8F9FB', color: '#111827' }}>
+                                <div className="p-4 md:p-6 font-sans" style={{ background: '#F8F9FB', color: '#111827' }} onClick={() => profileView && setProfileView(null)}>
                                     <div className="max-w-[1400px] mx-auto">
                                         <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
                                             <div>
                                                 <h1 className="text-[20px] md:text-[22px] font-semibold tracking-tight text-[#111827]">組織図</h1>
-                                                <p className="text-[13px] text-[#667085] mt-0.5">北から南の順（海外は最下部）。在籍スタッフをすぐに表示します。</p>
+                                                <p className="text-[13px] text-[#667085] mt-0.5">北から南の順（海外は最下部）。名前にカーソルを合わせるとプロフィールが見られます。</p>
                                             </div>
-                                            {!loading && <div className="flex items-center gap-5">
+                                            {!loading && <div className="flex items-center gap-4 md:gap-5">
                                                 <div className="text-center"><div className="text-[20px] font-bold text-[#111827] leading-none">{allShops.length}</div><div className="text-[11px] text-[#98A2B3] mt-1">店舗</div></div>
                                                 <div className="text-center"><div className="text-[20px] font-bold text-[#111827] leading-none">{totalStaff}</div><div className="text-[11px] text-[#98A2B3] mt-1">{orgSalesMode ? '稼働スタッフ' : 'スタッフ'}</div></div>
                                                 <div className="text-center"><div className="text-[20px] font-bold text-brand-600 leading-none">{ownerSet.size}</div><div className="text-[11px] text-[#98A2B3] mt-1">オーナー</div></div>
+                                                {myPid && <button onClick={() => openProfileEditor(myPid, authState.staffName || (myPid.startsWith('owner:') ? myPid.slice(6) : ''), (authState.owner && authState.owner !== '__root__' && !authState.staffId) ? 'owner' : 'therapist')} className="inline-flex items-center gap-1.5 h-9 px-3.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-semibold transition"><UserPlus size={15} />マイプロフィール</button>}
                                             </div>}
                                         </div>
 
@@ -10568,17 +10680,17 @@
                                                     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                                                         {grp.shops.map(shop => {
                                                             const owners = ownersForShop(shop.name);
-                                                            const staff = staffFor(shop.id); // null=集計中(売上モードのみ)
+                                                            const staff = staffFor(shop.id, shop.name); // null=集計中(売上モードのみ)
                                                             return (
                                                                 <div key={shop.id} className="bg-white rounded-xl border border-[#EAECF0] p-4 hover:border-[#D6DAE1] transition-colors">
                                                                     <div className="flex items-center gap-2.5 mb-3">
                                                                         <ShopMark size={36} />
                                                                         <div className="min-w-0 flex-1"><div className="text-[14px] font-semibold text-[#111827] truncate">{shop.name}</div><div className="text-[11px] text-[#98A2B3]">{staff == null ? '集計中…' : `スタッフ ${staff.length}名`}{owners.length ? ` ・ オーナー ${owners.length}名` : ''}</div></div>
                                                                     </div>
-                                                                    {owners.length > 0 && <div className="flex flex-wrap gap-1.5 mb-2.5">{owners.map(o => <span key={o} className="inline-flex items-center gap-1 text-[12px] font-semibold text-brand-700 bg-brand-50 border border-brand-100 px-2 py-0.5 rounded-full">👑 {o}</span>)}</div>}
+                                                                    {owners.length > 0 && <div className="flex flex-wrap gap-1.5 mb-2.5">{owners.map(o => ProfilePop({ pid: o.pid, name: o.name, kind: 'owner' }))}</div>}
                                                                     {staff == null ? <div className="flex items-center gap-1.5 text-[12px] text-[#CBD2DC]"><Loader2 size={13} className="animate-spin" />集計中…</div>
                                                                      : staff.length === 0 ? <div className="text-[12px] text-[#CBD2DC]">{orgSalesMode ? 'この月の稼働スタッフはいません' : '在籍スタッフ情報なし'}</div>
-                                                                     : <div className="flex flex-wrap gap-1.5">{staff.map(s => <span key={s.id} className="inline-flex items-center gap-1.5 text-[12px] text-[#344054] bg-[#F8F9FB] border border-[#EAECF0] pl-1 pr-2.5 py-1 rounded-full"><span className={`w-5 h-5 rounded-full ${chatAvatarColor(s.name)} inline-flex items-center justify-center text-[10px] font-semibold`}>{String(s.name || '？').charAt(0)}</span>{s.name}</span>)}</div>}
+                                                                     : <div className="flex flex-wrap gap-1.5">{staff.map(s => ProfilePop({ pid: s.id, name: s.name, kind: 'therapist' }))}</div>}
                                                                 </div>
                                                             );
                                                         })}
@@ -10587,8 +10699,99 @@
                                             ))}
                                         </div>
                                         )}
-                                        <p className="text-[11px] text-[#98A2B3] mt-6 leading-relaxed">※ 既定は在籍スタッフを即表示（読み込みなし・楽トレ/ヘルプ/受付/役職は除外）。「当月売上で絞る」で、その月に売上のあった施術者だけに絞れます（月次を集計）。並び順は店舗名から地域を推定（北→南、海外は最下部）。地域の判定が違う店舗があれば教えてください。</p>
+                                        <p className="text-[11px] text-[#98A2B3] mt-6 leading-relaxed">※ 店舗割当は SalonOne をベースに、各自（本部rootは全員分）が設定したプロフィールの担当店舗を優先反映します。名前にカーソルを合わせる（スマホはタップ）とプロフィールを表示。「当月売上で絞る」で当月売上のあった施術者のみに絞れます。</p>
                                     </div>
+                                    {profileEdit && (() => {
+                                        const d = profileEdit;
+                                        const setD = (patch) => setProfileEdit(v => ({ ...v, ...patch }));
+                                        const setSns = (k, val) => setProfileEdit(v => ({ ...v, sns: { ...v.sns, [k]: val } }));
+                                        const pickMain = async (file) => { if (!file) return; const up = await profileUploadImage(file); if (up) { chatImgCache[up.id] = up.dataUrl; setD({ mainImg: up.id }); } };
+                                        const pickSub = async (fileList) => { const files = [...(fileList || [])].slice(0, 3 - d.subImgs.length); for (const f of files) { const up = await profileUploadImage(f); if (up) { chatImgCache[up.id] = up.dataUrl; setProfileEdit(v => ({ ...v, subImgs: [...v.subImgs, up.id].slice(0, 3) })); } } };
+                                        const toggleShop = (name) => setProfileEdit(v => ({ ...v, shops: v.shops.includes(name) ? v.shops.filter(x => x !== name) : [...v.shops, name] }));
+                                        const doSave = async () => { const r = await profileSave(d.pid, d); if (r && r.ok) { setProfileEdit(null); setProfileShopQ(''); } };
+                                        const shopList = allShops.filter(s => !profileShopQ || String(s.name).includes(profileShopQ));
+                                        const inputCls = 'w-full h-10 rounded-lg border border-[#EAECF0] bg-white px-3.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition';
+                                        const isMine = d.pid === myPid;
+                                        return (
+                                            <div className="fixed inset-0 z-[95] bg-[#111827]/45 backdrop-blur-sm flex items-end md:items-center justify-center p-0 md:p-4" onClick={() => setProfileEdit(null)}>
+                                                <div className="bg-white w-full md:max-w-lg md:rounded-2xl rounded-t-2xl shadow-2xl max-h-[92vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+                                                    <div className="px-5 py-3.5 border-b border-[#EAECF0] flex items-center justify-between shrink-0">
+                                                        <h3 className="font-semibold text-[15px] text-[#111827]">{isMine ? 'マイプロフィール' : `プロフィール編集（本部）`}</h3>
+                                                        <button onClick={() => setProfileEdit(null)} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3]"><X size={18} /></button>
+                                                    </div>
+                                                    <div className="overflow-y-auto px-5 py-4 space-y-4">
+                                                        {/* 種別 */}
+                                                        <div>
+                                                            <div className="text-[12px] font-bold text-[#344054] mb-1.5">種別</div>
+                                                            <div className="flex gap-2 p-1 bg-[#F2F4F7] rounded-lg">
+                                                                {[['therapist', 'セラピスト'], ['owner', 'オーナー']].map(([k, label]) => <button key={k} onClick={() => setD({ kind: k })} className={`flex-1 py-2 rounded-md font-semibold text-[13px] transition ${d.kind === k ? 'bg-white text-[#111827] shadow-sm' : 'text-[#667085]'}`}>{k === 'owner' ? '👑 ' : ''}{label}</button>)}
+                                                            </div>
+                                                        </div>
+                                                        {/* 写真 */}
+                                                        <div>
+                                                            <div className="text-[12px] font-bold text-[#344054] mb-1.5">写真 <span className="text-[#98A2B3] font-normal">メイン1枚・サブ最大3枚</span></div>
+                                                            <div className="flex items-start gap-3">
+                                                                <label className="relative w-24 h-24 rounded-xl overflow-hidden border-2 border-dashed border-[#E4E7EC] hover:border-brand-300 bg-[#FAFBFC] flex items-center justify-center cursor-pointer shrink-0">
+                                                                    {d.mainImg ? <><ChatImage imgId={d.mainImg} /><span className="absolute inset-0 bg-black/0 hover:bg-black/20 transition" /></> : <div className="text-center text-[#98A2B3]"><ImageIcon size={20} className="mx-auto mb-0.5" /><span className="text-[10px] font-semibold">メイン</span></div>}
+                                                                    <input type="file" accept="image/*" className="hidden" onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; pickMain(f); }} />
+                                                                </label>
+                                                                <div className="flex-1">
+                                                                    <div className="flex flex-wrap gap-2">
+                                                                        {d.subImgs.map((id, i) => <div key={id} className="relative w-16 h-16 rounded-lg overflow-hidden border border-[#EAECF0]"><ChatImage imgId={id} /><button onClick={() => setProfileEdit(v => ({ ...v, subImgs: v.subImgs.filter((_, j) => j !== i) }))} className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-[#111827] text-white rounded-full flex items-center justify-center"><X size={11} /></button></div>)}
+                                                                        {d.subImgs.length < 3 && <label className="w-16 h-16 rounded-lg border-2 border-dashed border-[#E4E7EC] hover:border-brand-300 bg-[#FAFBFC] flex items-center justify-center cursor-pointer text-[#98A2B3]"><Plus size={16} /><input type="file" accept="image/*" multiple className="hidden" onChange={e => { const fl = e.target.files; e.target.value = ''; pickSub(fl); }} /></label>}
+                                                                    </div>
+                                                                    <p className="text-[11px] text-[#98A2B3] mt-1.5">タップして画像を選択（自動で縮小されます）</p>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                        {/* 名前 */}
+                                                        <div className="grid grid-cols-2 gap-2">
+                                                            <div><div className="text-[12px] font-bold text-[#344054] mb-1.5">名前（漢字）</div><input value={d.nameKanji} onChange={e => setD({ nameKanji: e.target.value })} placeholder="山田 太郎" className={inputCls} /></div>
+                                                            <div><div className="text-[12px] font-bold text-[#344054] mb-1.5">名前（カナ）</div><input value={d.nameKana} onChange={e => setD({ nameKana: e.target.value })} placeholder="ヤマダ タロウ" className={inputCls} /></div>
+                                                        </div>
+                                                        {/* 自己紹介 */}
+                                                        <div>
+                                                            <div className="text-[12px] font-bold text-[#344054] mb-1.5">自己紹介</div>
+                                                            <textarea value={d.bio} onChange={e => setD({ bio: e.target.value })} rows={4} placeholder="得意な施術・資格・ひとことなど" className="w-full resize-none rounded-lg border border-[#EAECF0] bg-white px-3.5 py-2.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
+                                                        </div>
+                                                        {/* SNS */}
+                                                        <div>
+                                                            <div className="text-[12px] font-bold text-[#344054] mb-1.5">SNSリンク <span className="text-[#98A2B3] font-normal">URLまたはID</span></div>
+                                                            <div className="space-y-2">
+                                                                {[['instagram', 'Instagram', 'https://instagram.com/...'], ['x', 'X (Twitter)', 'https://x.com/...'], ['youtube', 'YouTube', 'https://youtube.com/@...'], ['tiktok', 'TikTok', 'https://tiktok.com/@...']].map(([k, label, ph]) => (
+                                                                    <div key={k} className="flex items-center gap-2">
+                                                                        <span className="w-20 shrink-0 text-[12px] font-semibold text-[#667085]">{label}</span>
+                                                                        <input value={d.sns[k] || ''} onChange={e => setSns(k, e.target.value)} placeholder={ph} className="flex-1 h-9 rounded-lg border border-[#EAECF0] bg-white px-3 text-[13px] text-[#111827] placeholder:text-[#CBD2DC] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                        {/* 担当店舗 */}
+                                                        <div>
+                                                            <div className="text-[12px] font-bold text-[#344054] mb-1.5">担当店舗 {d.shops.length > 0 && <span className="text-brand-600">{d.shops.length}店舗</span>}<span className="text-[#98A2B3] font-normal ml-1">{d.kind === 'owner' ? '（管轄店舗をすべて選択）' : '（所属店舗）'}</span></div>
+                                                            <div className="relative mb-2"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]" /><input value={profileShopQ} onChange={e => setProfileShopQ(e.target.value)} placeholder="店舗を検索" className="w-full h-9 pl-9 pr-3 rounded-lg bg-[#F8F9FB] border border-[#EAECF0] text-[13px] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" /></div>
+                                                            {d.shops.length > 0 && <div className="flex flex-wrap gap-1.5 mb-2">{d.shops.map(sn => <span key={sn} className="inline-flex items-center gap-1 text-[12px] font-semibold text-brand-700 bg-brand-50 border border-brand-100 rounded-full pl-2.5 pr-1.5 py-0.5">{sn}<button onClick={() => toggleShop(sn)} className="w-4 h-4 flex items-center justify-center text-brand-400 hover:text-brand-700"><X size={11} /></button></span>)}</div>}
+                                                            <div className="max-h-44 overflow-y-auto border border-[#EAECF0] rounded-lg p-1.5 space-y-0.5">
+                                                                {shopList.length === 0 && <div className="text-center text-[#98A2B3] text-[12px] py-4">該当する店舗がありません</div>}
+                                                                {shopList.slice(0, 300).map(s => { const on = d.shops.includes(s.name); return (
+                                                                    <button key={s.id} onClick={() => toggleShop(s.name)} className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-[13px] transition ${on ? 'bg-brand-50 text-brand-700 font-semibold' : 'hover:bg-[#F2F4F7] text-[#344054]'}`}>
+                                                                        <span className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${on ? 'bg-brand-500 border-brand-500 text-white' : 'border-[#CBD2DC]'}`}>{on && <Check size={11} />}</span>
+                                                                        {s.name}
+                                                                    </button>
+                                                                ); })}
+                                                            </div>
+                                                            <p className="text-[11px] text-[#98A2B3] mt-1.5">※ ここで選んだ店舗が組織図に反映されます（SalonOneより優先）。未選択ならSalonOneの配属をそのまま表示。</p>
+                                                        </div>
+                                                    </div>
+                                                    <div className="px-5 py-3.5 border-t border-[#EAECF0] flex items-center gap-2 shrink-0">
+                                                        {profiles[d.pid] && <button onClick={async () => { if (window.confirm('このプロフィールを削除しますか？')) { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'delete', pid: d.pid, staffId: myPid, root: isRoot }) }).catch(() => {}); await profileLoad(); setProfileEdit(null); } }} className="h-10 px-3 rounded-lg text-[13px] font-semibold text-rose-600 hover:bg-rose-50 transition">削除</button>}
+                                                        <button onClick={() => setProfileEdit(null)} className="ml-auto h-10 px-4 rounded-lg text-[13px] font-semibold text-[#667085] hover:bg-[#F2F4F7] transition">キャンセル</button>
+                                                        <button onClick={doSave} disabled={profileSaving} className="h-10 px-5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-semibold disabled:opacity-60 transition">{profileSaving ? '保存中…' : '保存する'}</button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
                                 </div>
                             );
                         })()}

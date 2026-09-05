@@ -37,6 +37,7 @@ const BOARD_FILE_PREFIX = 'naoru:board:file:';// 添付ファイルは1件1キ�
 const BOARD_POST_CAP = 500;                   // 保持する最大投稿数
 const PUSH_KEY = 'naoru:push:v1';             // { subs:[{endpoint,keys,staffId,name,createdAt}] } Webプッシュ購読
 const EVENTS_KEY = 'naoru:events:v1';         // { sections:{study:[row],event:[row],bukatsu:[row]} } 勉強会・イベント日程（共有編集）
+const PROFILE_KEY = 'naoru:profile:v1';       // { profiles:{pid:{kind,nameKanji,nameKana,bio,mainImg,subImgs,sns,shops,updatedAt}} } スタッフ/オーナーのプロフィール（組織図で表示・店舗割当の上書き）
 
 // ── Webプッシュ送信（VAPID設定時のみ動作・未設定なら黙ってスキップ） ──
 const VAPID_PUBLIC = () => process.env.VAPID_PUBLIC_KEY || '';
@@ -355,6 +356,77 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
       return res.status(400).json({ ok: false, error: 'invalid board action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── プロフィールストア: ?type=profile ──
+  // 各スタッフ/オーナーが自分のプロフィール（写真・名前・自己紹介・SNS・担当店舗）を編集。
+  // 組織図でホバー表示し、店舗割当はSalonOneをベースにしつつ本人の設定を優先する。
+  const isProfile = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'profile';
+  if (isProfile) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ profiles: {}, configured: false });
+    try {
+      // 画像1枚取得（チャットと同じ保存先を再利用）: GET ?type=profile&img=<id>
+      if (req.method === 'GET' && req.query.img) {
+        const dataUrl = await blobGet(CHAT_IMG_PREFIX + String(req.query.img), hasKV, hasSB, gas);
+        if (!dataUrl) return res.status(404).json({ ok: false, error: 'not_found' });
+        return res.status(200).json({ ok: true, dataUrl });
+      }
+      const cur = (await blobGet(PROFILE_KEY, hasKV, hasSB, gas)) || {};
+      const profiles = (cur.profiles && typeof cur.profiles === 'object') ? cur.profiles : {};
+      if (req.method === 'GET') return res.status(200).json({ profiles, configured: true });
+
+      const body = req.body || {};
+      const action = body.action;
+
+      // 画像アップロード（チャットと同じ 1枚1キー・別保存）
+      if (action === 'uploadImage' && body.dataUrl) {
+        const dataUrl = String(body.dataUrl);
+        if (!/^data:image\/(png|jpe?g|gif|webp);base64,/.test(dataUrl)) return res.status(400).json({ ok: false, error: 'bad_image' });
+        if (dataUrl.length > 3_500_000) return res.status(413).json({ ok: false, error: 'too_large' });
+        const id = genId('img');
+        await blobSet(CHAT_IMG_PREFIX + id, dataUrl, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, id });
+      }
+
+      // 保存（本人 or root）。pid＝本人の識別子（staffId or owner:<name>）。
+      if (action === 'save' && body.pid && body.profile) {
+        const pid = String(body.pid);
+        if (!(body.root || String(body.staffId) === pid)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const p = body.profile;
+        const clean = {
+          pid,
+          kind: p.kind === 'owner' ? 'owner' : 'therapist',
+          nameKanji: String(p.nameKanji || '').slice(0, 60),
+          nameKana: String(p.nameKana || '').slice(0, 60),
+          bio: String(p.bio || '').slice(0, 2000),
+          mainImg: String(p.mainImg || '').slice(0, 64),
+          subImgs: (Array.isArray(p.subImgs) ? p.subImgs : []).map(String).slice(0, 3),
+          sns: (() => {
+            const s = (p.sns && typeof p.sns === 'object') ? p.sns : {};
+            const pick = {}; for (const k of ['instagram', 'x', 'youtube', 'tiktok', 'facebook', 'line', 'website']) { if (s[k]) pick[k] = String(s[k]).slice(0, 300); }
+            return pick;
+          })(),
+          shops: (Array.isArray(p.shops) ? p.shops : []).map(x => String(x).slice(0, 80)).slice(0, 50),
+          updatedAt: new Date().toISOString(),
+        };
+        const next = { ...profiles, [pid]: clean };
+        await blobSet(PROFILE_KEY, { profiles: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, profile: clean });
+      }
+
+      // 削除（本人 or root）
+      if (action === 'delete' && body.pid) {
+        const pid = String(body.pid);
+        if (!(body.root || String(body.staffId) === pid)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const next = { ...profiles }; delete next[pid];
+        await blobSet(PROFILE_KEY, { profiles: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+
+      return res.status(400).json({ ok: false, error: 'invalid profile action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
     }

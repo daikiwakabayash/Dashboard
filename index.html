@@ -2186,6 +2186,7 @@
             const [boardMenuId, setBoardMenuId] = useState('');   // 「…」メニュー展開中の投稿id
             const [boardPickId, setBoardPickId] = useState('');   // スタンプピッカー展開中の投稿id
             const [boardStatusId, setBoardStatusId] = useState(''); // リアクション状況モーダルの投稿id
+            const [boardComposerOpen, setBoardComposerOpen] = useState(false); // 投稿作成モーダル（既定は閉＝一覧がメイン）
             const [boardDrag, setBoardDrag] = useState(false);    // ドラッグ&ドロップ中ハイライト
             const BOARD_STAMPS = ['👍', '🙏', '🎉', '🔥', '💛', '👏', '✅', '😊'];
             const [boardBm, setBoardBm] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_board_bm') || '[]') || []; } catch { return []; } });
@@ -2226,6 +2227,7 @@
                 try {
                     await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'post', post: { authorId: chatMyId, authorName: chatMyName, authorShop: chatMyShop, authorRoot: chatIsRoot, title: ti, important: boardImportant, text: t, link: boardLink.trim(), imgIds: boardImgs.map(i => i.id), files: boardFiles, videoUrl: boardVideo.trim() } }) });
                     setBoardText(''); setBoardTitle(''); setBoardLink(''); setBoardImportant(false); setBoardImgs([]); setBoardFiles([]); setBoardVideo('');
+                    setBoardComposerOpen(false);
                     await boardLoad();
                 } catch {} finally { setBoardPosting(false); }
             };
@@ -10332,20 +10334,24 @@
                                                     <p className="text-[13px] text-[#667085] mt-0.5">全社へのお知らせを投稿・確認できます。重要なお知らせは見逃さないようにしましょう。</p>
                                                 </div>
                                             </div>
-                                            <div className="flex items-center gap-3 shrink-0">
-                                                <button onClick={pushState.subscribed ? pushUnsubscribe : pushSubscribe} disabled={!pushState.supported || !pushState.enabled || pushState.busy} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[#EAECF0] bg-white text-[13px] font-semibold text-[#344054] hover:bg-[#F8F9FB] disabled:opacity-50 transition"><Bell size={15} />通知設定</button>
-                                                <span className="hidden md:flex items-center gap-1.5 text-[12px] text-[#98A2B3]">通知：{!pushState.supported ? '非対応' : !pushState.enabled ? '設定待ち' : pushState.subscribed ? '設定済み' : 'オフ'}<span className={`w-2 h-2 rounded-full ${pushState.subscribed ? 'bg-emerald-500' : 'bg-[#D0D5DD]'}`} /></span>
+                                            <div className="flex items-center gap-2 shrink-0">
+                                                <button onClick={pushState.subscribed ? pushUnsubscribe : pushSubscribe} disabled={!pushState.supported || !pushState.enabled || pushState.busy} title="通知設定" className="inline-flex items-center gap-1.5 px-2.5 md:px-3 py-2 rounded-lg border border-[#EAECF0] bg-white text-[13px] font-semibold text-[#344054] hover:bg-[#F8F9FB] disabled:opacity-50 transition"><Bell size={15} /><span className="hidden md:inline">通知設定</span></button>
+                                                {canPost && <button onClick={() => setBoardComposerOpen(true)} className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-semibold transition shadow-sm shadow-brand-200/50"><Send size={15} />投稿する</button>}
                                             </div>
                                         </div>
 
                                         {!boardData.configured && <div className="mb-4 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[13px]">共有ストア（KV/Supabase/GAS）が未設定のため、お知らせは保存されません。管理者に有効化を依頼してください。</div>}
 
-                                        <div className={canPost ? 'lg:grid lg:grid-cols-[400px_minmax(0,1fr)] lg:gap-6 lg:items-start' : ''}>
-                                            {/* ── 左: 作成 ── */}
-                                            {canPost && (
-                                            <div className="mb-6 lg:mb-0 lg:sticky lg:top-4">
-                                                <div className="bg-white rounded-2xl border border-[#EAECF0] p-4 md:p-5 shadow-[0_1px_2px_rgba(16,24,40,0.04)]">
-                                                    <div className="flex items-center gap-2 text-[15px] font-semibold text-[#111827]"><Send size={16} className="text-brand-500" />全社向けお知らせを作成</div>
+                                        <div>
+                                            {/* ── 投稿作成（ボタンで開くモーダル。投稿者は少数のため一覧をメインに） ── */}
+                                            {canPost && boardComposerOpen && (
+                                            <div className="fixed inset-0 z-[95] bg-[#111827]/45 backdrop-blur-sm flex items-end md:items-center justify-center p-0 md:p-4" onClick={() => setBoardComposerOpen(false)}>
+                                                <div className="bg-white w-full md:max-w-lg md:rounded-2xl rounded-t-2xl shadow-2xl max-h-[92vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+                                                    <div className="px-5 py-3.5 border-b border-[#EAECF0] flex items-center justify-between shrink-0">
+                                                        <div className="flex items-center gap-2 text-[15px] font-semibold text-[#111827]"><Send size={16} className="text-brand-500" />全社向けお知らせを作成</div>
+                                                        <button onClick={() => setBoardComposerOpen(false)} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3]"><X size={18} /></button>
+                                                    </div>
+                                                    <div className="overflow-y-auto px-5 py-4">
                                                     <Label>送信者</Label>
                                                     <div className="flex items-center gap-2.5"><ChatAvatar name={chatMyName} /><div><div className="text-[14px] font-semibold text-[#111827] leading-tight">{chatMyName}{chatIsRoot && <span className="ml-1.5 text-[10px] font-bold text-brand-700 bg-brand-50 px-1.5 py-0.5 rounded">本部</span>}</div><div className="text-[11px] text-[#98A2B3] leading-tight">全社に公開されます</div></div></div>
                                                     <Label opt="（任意・太字で表示されます）">タイトル</Label>
@@ -10376,12 +10382,15 @@
                                                             <span className="text-[12px] text-[#667085]">重要<span className="text-[#98A2B3]">（赤枠で強調表示されます）</span></span>
                                                         </label>
                                                     </div>
-                                                    <button onClick={boardPost} disabled={boardPosting || composerEmpty} className="w-full mt-4 inline-flex items-center justify-center gap-2 py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-semibold text-[14px] disabled:bg-[#EAECF0] disabled:text-[#98A2B3] active:scale-[0.99] transition shadow-lg shadow-brand-200/40"><Send size={16} />お知らせを投稿</button>
+                                                    </div>
+                                                    <div className="px-5 py-3.5 border-t border-[#EAECF0] shrink-0">
+                                                        <button onClick={boardPost} disabled={boardPosting || composerEmpty} className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-semibold text-[14px] disabled:bg-[#EAECF0] disabled:text-[#98A2B3] active:scale-[0.99] transition shadow-lg shadow-brand-200/40"><Send size={16} />お知らせを投稿</button>
+                                                    </div>
                                                 </div>
                                             </div>
                                             )}
 
-                                            {/* ── 右: 受信一覧 ── */}
+                                            {/* ── 受信一覧（メイン） ── */}
                                             <div className="min-w-0">
                                                 <div className="bg-white rounded-2xl border border-[#EAECF0] p-4 md:p-5">
                                                     <div className="flex items-center gap-2 text-[15px] font-semibold text-[#111827] mb-3"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-brand-500"><path d="M22 12h-6l-2 3h-4l-2-3H2" /><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" /></svg>受信一覧{boardUnreadTotal > 0 && <span className="text-[11px] font-bold text-white bg-brand-500 rounded-full px-1.5 py-0.5">未読 {boardUnreadTotal}</span>}</div>
@@ -10402,7 +10411,7 @@
                                                 </div>
 
                                                 {!boardData.loaded ? <div className="text-center text-[#98A2B3] text-[13px] py-10">読み込み中…</div>
-                                                 : posts.length === 0 ? <div className="mt-3 bg-white border border-[#EAECF0] rounded-2xl text-center text-[#98A2B3] text-[14px] py-16"><Megaphone size={40} className="mx-auto mb-3 opacity-50" />{boardFilter === 'all' ? <>まだお知らせはありません。<br />左の「全社向けお知らせを作成」から投稿してみましょう。</> : '該当するお知らせはありません。'}</div>
+                                                 : posts.length === 0 ? <div className="mt-3 bg-white border border-[#EAECF0] rounded-2xl text-center text-[#98A2B3] text-[14px] py-16"><Megaphone size={40} className="mx-auto mb-3 opacity-50" />{boardFilter === 'all' ? <>まだお知らせはありません。<br />右上の「投稿する」から発信してみましょう。</> : '該当するお知らせはありません。'}</div>
                                                  : (<>
                                                     <div className={`mt-3 ${boardView === 'grid' ? 'grid grid-cols-1 xl:grid-cols-2 gap-3' : 'space-y-3'}`}>
                                                         {posts.map(p => PostCard(p))}

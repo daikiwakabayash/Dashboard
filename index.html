@@ -5005,7 +5005,7 @@
             //   総売上=gross_sales（消化ではなく総額）／カルテ枚数=来店数／新規数=新規来店数／
             //   セラピスト数=その月に売上(gross)が1円でも発生した担当者（ヘルプ/楽トレ等は除外）。
             //   金額はSalonOneの最小通貨単位（JPYは円、AUD/MYRはセント）で保持し、表示時に通貨係数で割る。
-            const ZK_CACHE_KEY = 'naoru_zk_cache_v6_thersales';
+            const ZK_CACHE_KEY = 'naoru_zk_cache_v7_gross';
             const loadZenkanri = async (year = zkYear, opts = {}) => {
                 const forceAll = !!opts.force; // 「再取得」ボタン＝全月取り直し
                 const shopList = (soShops && soShops.length) ? soShops : [];
@@ -5084,7 +5084,8 @@
                 // gross＝会計済み売上(digest・ネイティブ通貨。表示側 money() が国別の最小通貨単位で換算)。ther＝売上>0の担当者数。
                 const zkApply = (sh, ym, raw) => {
                     if (!raw) return;
-                    const gross = Number(raw.digest_sales != null ? raw.digest_sales : raw.gross_sales) || 0;
+                    // 総売上（gross_sales・総額）を優先。消化売上(digest)は月初は0になりがちで、CSV(1〜8月=総売上)と不整合になるため。
+                    const gross = Number(raw.gross_sales != null ? raw.gross_sales : raw.digest_sales) || 0;
                     const karte = Number(raw.gross_count) || 0;                                        // カルテ枚数＝会計数
                     const newc = Number(raw.new_visit_count != null ? raw.new_visit_count : raw.new_count) || 0; // 新規来店
                     const ther = countTherapists(raw.by_staff || raw.byStaff || []);                   // 売上>0のセラピスト数

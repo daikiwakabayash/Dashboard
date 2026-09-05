@@ -2741,6 +2741,14 @@
                 if (soStaffs.length === 0) { (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at, acceptsRes: s.accepts_reservations !== false })); if (arr.length) setSoStaffs(arr); } catch {} })(); }
                 if (stOwnerShops === null) { fetch('/api/settlement-auth').then(r => r.json()).then(j => setStOwnerShops(j.shops || {})).catch(() => setStOwnerShops({})); }
             }, [currentPage]);
+            // モーダル/シート/ドロワー表示中は背景（body）のスクロールをロック（スクロール抜けを防止）
+            useEffect(() => {
+                const anyOverlay = !!(profileView || profileEdit || boardComposerOpen || boardStatusId || chatNewRoom || chatPanel || mobileNavOpen || mobileAcctOpen || chatLightbox);
+                if (!anyOverlay) return;
+                const prev = document.body.style.overflow;
+                document.body.style.overflow = 'hidden';
+                return () => { document.body.style.overflow = prev; };
+            }, [profileView, profileEdit, boardComposerOpen, boardStatusId, chatNewRoom, chatPanel, mobileNavOpen, mobileAcctOpen, chatLightbox]);
             // 組織図: 「売上で絞る」がONのときだけ、選択月の店舗別スタッフ売上（by_staff）を集計取得。
             // 既定はOFF＝在籍ロスターを即表示（読み込みなし）。
             useEffect(() => {
@@ -10833,7 +10841,7 @@
                                         const { pid, name, kind } = profileView;
                                         return (
                                             <div className="fixed inset-0 z-[70] flex items-end md:items-center justify-center bg-[#111827]/50 backdrop-blur-sm p-0 md:p-4" onClick={() => setProfileView(null)}>
-                                                <div className="bg-white w-full md:max-w-sm rounded-t-2xl md:rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto px-5 pt-3 pb-[max(env(safe-area-inset-bottom,0px),20px)] md:pb-5" onClick={e => e.stopPropagation()}>
+                                                <div className="bg-white w-full md:max-w-sm rounded-t-2xl md:rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto overscroll-contain px-5 pt-3 pb-[max(env(safe-area-inset-bottom,0px),20px)] md:pb-5" onClick={e => e.stopPropagation()}>
                                                     <div className="flex items-center justify-between mb-2 -mx-1">
                                                         <div className="w-9 md:hidden" />
                                                         <span className="md:hidden w-10 h-1 rounded-full bg-ink-100" />

@@ -483,10 +483,18 @@ export default async function handler(req, res) {
   if (isChat) {
     if (!hasKV && !hasSB && !gas) return res.status(200).json({ rooms: [], messages: {}, reads: {}, dir: { staff: [] }, configured: false });
     try {
-      // 画像1枚取得: GET ?type=chat&img=<id> → { dataUrl }
+      // 画像1枚取得: GET ?type=chat&img=<id>（&raw=1 で生バイナリ配信＝LINE風に高速・ブラウザキャッシュ可）
       if (req.method === 'GET' && req.query.img) {
         const dataUrl = await blobGet(CHAT_IMG_PREFIX + String(req.query.img), hasKV, hasSB, gas);
         if (!dataUrl) return res.status(404).json({ ok: false, error: 'not_found' });
+        if (req.query.raw) {
+          const m = /^data:([^;]+);base64,(.*)$/s.exec(String(dataUrl));
+          if (m) {
+            res.setHeader('Content-Type', m[1]);
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable'); // 画像はid固定=不変
+            return res.status(200).send(Buffer.from(m[2], 'base64'));
+          }
+        }
         return res.status(200).json({ ok: true, dataUrl });
       }
       const cur = (await blobGet(CHAT_KEY, hasKV, hasSB, gas)) || {};

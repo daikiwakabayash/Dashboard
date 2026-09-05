@@ -623,20 +623,19 @@
         const PieChart = (props) => <Icon {...props}><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></Icon>;
         const ArrowUpDown = (props) => <Icon {...props}><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></Icon>;
 
-        // ── チャット画像: idからdataUrlを遅延取得しモジュールキャッシュ（blob別キー保存に対応） ──
+        // ── チャット画像: LINE風に高速表示 ──
+        // 送信直後は dataUrl をメモリキャッシュから即描画。他は生バイナリを <img loading=lazy> で
+        // ネイティブ遅延読み込み＋ブラウザHTTPキャッシュ（不変）。base64/JSONのオーバーヘッドなし。
         const chatImgCache = {};
+        const chatImgSrc = (imgId) => chatImgCache[imgId] || `/api/plan-store?type=chat&img=${encodeURIComponent(imgId)}&raw=1`;
         const ChatImage = ({ imgId, onClick }) => {
-            const [src, setSrc] = React.useState(chatImgCache[imgId] || null);
-            React.useEffect(() => {
-                let alive = true;
-                if (chatImgCache[imgId]) { setSrc(chatImgCache[imgId]); return; }
-                fetch(`/api/plan-store?type=chat&img=${encodeURIComponent(imgId)}`).then(r => r.json()).then(j => {
-                    if (j && j.dataUrl) { chatImgCache[imgId] = j.dataUrl; if (alive) setSrc(j.dataUrl); }
-                }).catch(() => {});
-                return () => { alive = false; };
-            }, [imgId]);
-            if (!src) return <div className="w-40 h-28 rounded-lg bg-[#F2F4F7] animate-pulse" />;
-            return <img src={src} onClick={onClick} className="max-w-[260px] max-h-[260px] rounded-lg border border-[#EAECF0] object-cover cursor-zoom-in" alt="添付画像" />;
+            const [loaded, setLoaded] = React.useState(!!chatImgCache[imgId]);
+            return (
+                <img src={chatImgSrc(imgId)} loading="lazy" decoding="async" onClick={onClick}
+                    onLoad={() => setLoaded(true)}
+                    className={`max-w-[260px] max-h-[260px] rounded-lg border border-[#EAECF0] object-cover cursor-zoom-in bg-[#F2F4F7] ${loaded ? '' : 'min-w-[140px] min-h-[100px] animate-pulse'}`}
+                    alt="添付画像" />
+            );
         };
 
         // アバターの色（名前ハッシュで一定・落ち着いたトーン: 薄い背景＋濃い文字）
@@ -2098,11 +2097,11 @@
                 reader.onload = () => {
                     const img = new Image();
                     img.onload = async () => {
-                        const max = 1400; let { width: w, height: h } = img;
+                        const max = 1280; let { width: w, height: h } = img; // LINE同等の軽量化（送信/表示を高速化）
                         if (w > max || h > max) { const r = Math.min(max / w, max / h); w = Math.round(w * r); h = Math.round(h * r); }
                         const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
                         cv.getContext('2d').drawImage(img, 0, 0, w, h);
-                        const dataUrl = cv.toDataURL('image/jpeg', 0.82);
+                        const dataUrl = cv.toDataURL('image/jpeg', 0.75);
                         try {
                             const rr = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type, action: 'uploadImage', dataUrl }) });
                             const jj = await rr.json().catch(() => ({}));
@@ -10299,7 +10298,7 @@
                                     {chatLightbox && (
                                         <div className="fixed inset-0 z-[95] bg-[#111827]/85 flex items-center justify-center p-4" onClick={() => setChatLightbox(null)}>
                                             <button onClick={() => setChatLightbox(null)} className="absolute top-4 right-4 w-10 h-10 rounded-lg bg-white/15 hover:bg-white/25 text-white flex items-center justify-center transition"><X size={22} /></button>
-                                            <img src={chatImgCache[chatLightbox] || ''} className="max-w-full max-h-full rounded-lg object-contain" alt="拡大画像" onClick={e => e.stopPropagation()} />
+                                            <img src={chatImgSrc(chatLightbox)} className="max-w-full max-h-full rounded-lg object-contain" alt="拡大画像" onClick={e => e.stopPropagation()} />
                                         </div>
                                     )}
                                 </div>

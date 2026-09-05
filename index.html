@@ -2221,16 +2221,6 @@
                 setBoardData(d => ({ ...d, posts: (d.posts || []).map(p => { if (!p || p.id !== id) return p; const r = { ...(p.reactions && typeof p.reactions === 'object' ? p.reactions : {}) }; const cur = (r[emoji] || []).map(String); r[emoji] = cur.includes(chatMyId) ? cur.filter(x => x !== chatMyId) : [...cur, chatMyId]; if (r[emoji].length === 0) delete r[emoji]; return { ...p, reactions: r }; }), reads: { ...(d.reads || {}), [chatMyId]: Math.max((d.reads || {})[chatMyId] || 0, Date.now()) } }));
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'react', id, emoji, staffId: chatMyId }) }); await boardLoad(); } catch {}
             };
-            // お知らせの対象者（＝閲覧想定メンバー）: 全店スタッフ（施術者以外/退職除外）。未リアクション者の母集団に使う。
-            const boardAudience = useMemo(() => {
-                const seen = new Set(); const out = [];
-                for (const s of ((chatData.dir && chatData.dir.staff) || [])) {
-                    const id = String((s && s.id) || ''); const nm = chatResolveName(id, s && s.name);
-                    if (!id || seen.has(id) || isNonTherapistName(nm)) continue;
-                    seen.add(id); out.push({ id, name: nm, shop: (s && s.shop) || '' });
-                }
-                return out.sort((a, b) => a.name.localeCompare(b.name, 'ja'));
-            }, [chatData.dir, soStaffs]);
 
             // ── Webプッシュ通知（購読） ──────────────────────────────────
             const [pushState, setPushState] = useState({ supported: ('serviceWorker' in navigator && 'PushManager' in window), enabled: false, subscribed: false, publicKey: '', busy: false });
@@ -2428,6 +2418,17 @@
                 if (ST_NON_THERAPIST.has(n)) return true;
                 return /^ヘルプ/.test(n) || /^受付/.test(n) || /オーナー/.test(n) || /^楽トレ/.test(n);
             };
+            // お知らせの対象者（＝閲覧想定メンバー）: 全店スタッフ（施術者以外/退職除外）。未リアクション者の母集団に使う。
+            // ※ isNonTherapistName / ST_NON_THERAPIST 定義後に置く（useMemoは描画時に同期実行されるためTDZ回避）。
+            const boardAudience = useMemo(() => {
+                const seen = new Set(); const out = [];
+                for (const s of ((chatData.dir && chatData.dir.staff) || [])) {
+                    const id = String((s && s.id) || ''); const nm = chatResolveName(id, s && s.name);
+                    if (!id || seen.has(id) || isNonTherapistName(nm)) continue;
+                    seen.add(id); out.push({ id, name: nm, shop: (s && s.shop) || '' });
+                }
+                return out.sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+            }, [chatData.dir, soStaffs]);
             // セラピスト＝在籍・非セラピスト名でない・かつ「予約を受け付ける」スタッフ（accepts_reservations=false＝
             // オーナー/店長/バックオフィス等の非施術者を除外）。これでグループ合計にオーナー等が混ざらない。
             const stTherapistRoster = (shopId) => (soStaffs || [])

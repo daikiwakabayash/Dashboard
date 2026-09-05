@@ -4585,17 +4585,33 @@
                 const cached = (cacheFresh && pc.shops && typeof pc.shops === 'object') ? pc.shops : {};
                 // 保存先（既存キャッシュを引き継ぎつつ今回の取得分を追記）
                 const scache = (sbCacheAll[pkey] = { ts: Date.now(), shops: { ...cached } });
-                const rows = SO_SHOP_ORDER.map((name, i) => {
+                // ── 行の生成: 「SalonOneが返す全店舗＝導入済み」を実データ源にする（全体管理シートと同じ思想）。
+                //    以前は固定リスト(SO_SHOP_ORDER)側からSalonOneを引いていたため、固定名と表記が違う/新規開院の
+                //    導入店が「未導入」に落ちてデータが出ない不具合があった。→ shopList を主に、出店順は固定リストで採番。
+                const zeros = { gross: 0, newSales: 0, existSales: 0, refund: 0, newCount: 0, joinCount: 0, joinRate: 0, active_count: 0, churn: 0, churnRate: 0, rjoin: 0, gReview: 0, hReview: 0, therapist: 0, channels: [] };
+                // 店舗名 → 固定の出店順インデックス（完全一致→部分一致。無ければ末尾）
+                const orderIndexOf = (name) => {
                     const nn = soShopNorm(name);
-                    // 完全一致を優先、無ければ部分一致（例: SalonOne側が「横浜関内院」等でも「関内」で拾う）
-                    const sh = shopList.find(x => soShopNorm(x.name) === nn)
-                        || shopList.find(x => { const xn = soShopNorm(x.name); return nn.length >= 2 && (xn.includes(nn) || nn.includes(xn)); });
-                    const base = { order: i, name, id: sh ? sh.id : null, active: !!sh, loading: !!sh,
-                             gross: 0, newSales: 0, existSales: 0, refund: 0, newCount: 0, joinCount: 0, joinRate: 0, active_count: 0, churn: 0, churnRate: 0, rjoin: 0, gReview: 0, hReview: 0, therapist: 0, channels: [] };
-                    // キャッシュ命中: 即時反映（取得対象から除外）
-                    if (sh && cached[String(sh.id)]) return { ...base, ...cached[String(sh.id)], loading: false };
-                    return base;
-                });
+                    let i = SO_SHOP_ORDER.findIndex(o => soShopNorm(o) === nn);
+                    if (i < 0) i = SO_SHOP_ORDER.findIndex(o => { const on = soShopNorm(o); return nn.length >= 2 && (on.includes(nn) || nn.includes(on)); });
+                    return i < 0 ? 9999 : i;
+                };
+                const matchedFixed = new Set();
+                // 導入済み＝SalonOneが返す全店舗。固定リストに一致すれば正式名称を採用（表記揺れ吸収）。出店順で整列。
+                const activeRows = [...shopList].map((sh) => {
+                    const oi = orderIndexOf(sh.name);
+                    if (oi < 9999) matchedFixed.add(oi);
+                    const dispName = (oi < 9999) ? SO_SHOP_ORDER[oi] : sh.name;
+                    const base = { order: oi, name: dispName, id: sh.id, active: true, loading: true, ...zeros };
+                    return cached[String(sh.id)] ? { ...base, ...cached[String(sh.id)], loading: false } : base;
+                }).sort((a, b) => (a.order - b.order) || String(a.name).localeCompare(b.name));
+                activeRows.forEach((r, i) => { r.order = i; });   // 出店順に連番を採番（#列・並べ替え用）
+                // SalonOne未導入の固定店舗（データ源なし）＝末尾に「未導入」で表示（全店ロースターの可視化）
+                const inactiveRows = SO_SHOP_ORDER
+                    .map((name, i) => ({ i, name }))
+                    .filter((x) => !matchedFixed.has(x.i))
+                    .map((x, k) => ({ order: activeRows.length + k, name: x.name, id: null, active: false, loading: false, ...zeros }));
+                const rows = [...activeRows, ...inactiveRows];
                 setSoShopRows(rows);
                 const targets = rows.filter(r => r.active && !cached[String(r.id)]);
                 setSoShopProgress({ done: 0, total: targets.length });
@@ -14783,13 +14799,13 @@
                                                 {soShopRows.length === 0 ? (
                                                     <p className="text-center text-slate-400 font-bold py-8">店舗一覧を取得中…（SalonOne店舗の読み込み後に集計します）</p>
                                                 ) : (
-                                                    <div className="overflow-auto max-h-[70vh]">
+                                                    <div className="overflow-auto max-h-[70vh] overscroll-x-contain rounded-xl border border-slate-100 scroll-smooth" style={{ WebkitOverflowScrolling: 'touch' }}>
                                                         <table className="w-full text-sm whitespace-nowrap">
                                                             <thead className="sticky top-0 z-20">
                                                                 <tr className="text-left text-[11px] font-black text-slate-400 uppercase tracking-wider border-b border-slate-200 bg-white">
-                                                                    <SortTh sKey="order" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pr-2 sticky left-0 bg-white z-30 w-[34px]">#</SortTh>
-                                                                    <SortTh sKey="name" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pr-2 sticky left-[34px] bg-white z-30 w-[150px]">店舗</SortTh>
-                                                                    <SortTh sKey="therapist" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right sticky left-[184px] bg-white z-30">セラピスト数</SortTh>
+                                                                    <SortTh sKey="order" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pl-3 pr-2 sticky left-0 bg-white z-30 w-[34px] hidden md:table-cell">#</SortTh>
+                                                                    <SortTh sKey="name" sort={soShopSort} setSort={setSoShopSort} className="pb-2 pl-3 md:pl-2 pr-2 sticky left-0 md:left-[34px] bg-white z-30 w-[150px] shadow-[6px_0_12px_-8px_rgba(15,23,42,0.25)]">店舗</SortTh>
+                                                                    <SortTh sKey="therapist" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">セラピスト数</SortTh>
                                                                     <SortTh sKey="gross" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">売上</SortTh>
                                                                     <SortTh sKey="newSales" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">新規売上</SortTh>
                                                                     <SortTh sKey="existSales" sort={soShopSort} setSort={setSoShopSort} className="pb-2 px-2 text-right">既存売上</SortTh>
@@ -14807,9 +14823,9 @@
                                                             <tbody>
                                                                 {/* 合計/平均行（見出しのすぐ下・導入店のみ集計） */}
                                                                 <tr className="border-b-2 border-slate-200 bg-emerald-50/70 font-black whitespace-nowrap">
-                                                                    <td className="py-2 pr-2 text-slate-400 sticky left-0 bg-emerald-50 z-10 w-[34px]">—</td>
-                                                                    <td className="py-2 pr-2 text-slate-900 sticky left-[34px] bg-emerald-50 z-10 w-[150px]">合計（{activeCount}店舗）</td>
-                                                                    <td className="py-2 px-2 text-right text-emerald-700 sticky left-[184px] bg-emerald-50 z-10">{tTherapist}名</td>
+                                                                    <td className="py-2 pl-3 pr-2 text-slate-400 sticky left-0 bg-emerald-50 z-10 w-[34px] hidden md:table-cell">—</td>
+                                                                    <td className="py-2 pl-3 md:pl-2 pr-2 text-slate-900 sticky left-0 md:left-[34px] bg-emerald-50 z-10 w-[150px] shadow-[6px_0_12px_-8px_rgba(15,23,42,0.25)]">合計（{activeCount}店舗）</td>
+                                                                    <td className="py-2 px-2 text-right text-emerald-700">{tTherapist}名</td>
                                                                     <td className="py-2 px-2 text-right text-slate-900">{soYen(tGross)}</td>
                                                                     <td className="py-2 px-2 text-right text-emerald-600">{soYen(tNewSales)}</td>
                                                                     <td className="py-2 px-2 text-right text-slate-600">{soYen(tExist)}</td>
@@ -14825,9 +14841,9 @@
                                                                 </tr>
                                                                 {sortedShopRows.map((r) => (
                                                                     <tr key={r.order} className={`border-b border-slate-100 hover:bg-slate-50 transition-colors whitespace-nowrap ${!r.active ? 'opacity-50' : ''}`}>
-                                                                        <td className="py-2.5 pr-2 font-black text-slate-300 sticky left-0 bg-white z-10 w-[34px]">{r.order + 1}</td>
-                                                                        <td className="py-2.5 pr-2 font-bold text-slate-800 sticky left-[34px] bg-white z-10 w-[150px] truncate">{r.name}{!r.active && <span className="ml-1.5 px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded text-[9px] font-black align-middle">未導入</span>}{r.loading && <span className="ml-1.5 text-[10px] font-bold text-amber-500">…</span>}</td>
-                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-700 sticky left-[184px] bg-white z-10">{r.active ? therapistOf(r) + '名' : '—'}</td>
+                                                                        <td className="py-2.5 pl-3 pr-2 font-black text-slate-300 sticky left-0 bg-white z-10 w-[34px] hidden md:table-cell">{r.order + 1}</td>
+                                                                        <td className="py-2.5 pl-3 md:pl-2 pr-2 font-bold text-slate-800 sticky left-0 md:left-[34px] bg-white z-10 w-[150px] max-w-[150px] truncate shadow-[6px_0_12px_-8px_rgba(15,23,42,0.25)]">{r.name}{!r.active && <span className="ml-1.5 px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded text-[9px] font-black align-middle">未導入</span>}{r.loading && <span className="ml-1.5 text-[10px] font-bold text-amber-500">…</span>}</td>
+                                                                        <td className="py-2.5 px-2 text-right font-bold text-emerald-700">{r.active ? therapistOf(r) + '名' : '—'}</td>
                                                                         <td className="py-2.5 px-2 text-right font-black text-slate-900">{soYen(r.gross)}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-emerald-600">{soYen(r.newSales)}</td>
                                                                         <td className="py-2.5 px-2 text-right font-bold text-slate-500">{soYen(r.existSales)}</td>

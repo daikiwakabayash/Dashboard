@@ -10709,43 +10709,51 @@
                             };
                             // ホバー/タップで出るプロフィールカード（写真・名前・自己紹介・SNS・DM・編集）
                             const snsMeta = { instagram: { label: 'Instagram', color: 'text-pink-600' }, x: { label: 'X', color: 'text-[#111827]' }, youtube: { label: 'YouTube', color: 'text-red-600' }, tiktok: { label: 'TikTok', color: 'text-[#111827]' }, facebook: { label: 'Facebook', color: 'text-blue-600' }, line: { label: 'LINE', color: 'text-green-600' }, website: { label: 'Web', color: 'text-brand-600' } };
-                            const ProfilePop = ({ pid, name, kind }) => {
+                            // プロフィールカードの中身（デスクトップのホバー／スマホのモーダル共通）
+                            const renderProfileBody = (pid, fallbackName, fallbackKind, big) => {
                                 const prof = profiles[pid];
-                                const open = profileView === pid;
                                 const isMe = !!myPid && pid === myPid;
                                 const canEdit = isMe || isRoot;
-                                const numericId = /^\d+$/.test(String(pid)); // DMは staffId のみ
-                                const dispNm = (prof && prof.nameKanji) || name || 'スタッフ';
+                                const numericId = /^\d+$/.test(String(pid));
+                                const dispNm = (prof && prof.nameKanji) || fallbackName || 'スタッフ';
                                 const snsList = prof && prof.sns ? Object.entries(prof.sns).filter(([, v]) => v) : [];
+                                return (<>
+                                    {prof ? (<>
+                                        {prof.mainImg && <div className={`w-full ${big ? 'aspect-[4/3]' : 'aspect-[4/3]'} rounded-xl overflow-hidden bg-[#F2F4F7] mb-3 cursor-zoom-in`} onClick={() => setChatLightbox(prof.mainImg)}><img src={chatImgSrc(prof.mainImg)} className="w-full h-full object-cover" loading="lazy" alt="" /></div>}
+                                        {Array.isArray(prof.subImgs) && prof.subImgs.length > 0 && <div className="flex gap-1.5 mb-3">{prof.subImgs.map(id => <span key={id} className={`${big ? 'w-16 h-16' : 'w-12 h-12'} rounded-lg overflow-hidden bg-[#F2F4F7] cursor-zoom-in`} onClick={() => setChatLightbox(id)}><img src={chatImgSrc(id)} className="w-full h-full object-cover" loading="lazy" alt="" /></span>)}</div>}
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                            <span className={`${big ? 'text-[18px]' : 'text-[15px]'} font-bold text-[#111827]`}>{dispNm}</span>
+                                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${prof.kind === 'owner' ? 'text-brand-700 bg-brand-50' : 'text-teal-700 bg-teal-50'}`}>{prof.kind === 'owner' ? 'オーナー' : 'セラピスト'}</span>
+                                        </div>
+                                        {prof.nameKana && <div className="text-[12px] text-[#98A2B3] mt-0.5">{prof.nameKana}</div>}
+                                        {prof.bio && <p className={`${big ? 'text-[14px]' : 'text-[12px]'} text-[#475467] leading-relaxed mt-2.5 whitespace-pre-wrap break-words ${big ? '' : 'max-h-32 overflow-y-auto'}`}>{prof.bio}</p>}
+                                        {snsList.length > 0 && <div className="flex flex-wrap gap-1.5 mt-3">{snsList.map(([k, v]) => { const m = snsMeta[k] || { label: k, color: 'text-brand-600' }; return <a key={k} href={/^https?:\/\//.test(v) ? v : `https://${v}`} target="_blank" rel="noopener noreferrer" className={`inline-flex items-center gap-1 text-[12px] font-semibold ${m.color} bg-[#F8F9FB] border border-[#EAECF0] rounded-full px-2.5 py-1 hover:bg-white transition`}>{m.label}<ExternalLink size={11} /></a>; })}</div>}
+                                    </>) : (
+                                        <div className="flex items-center gap-2.5">
+                                            <span className={`${big ? 'w-14 h-14 text-[20px]' : 'w-10 h-10 text-[15px]'} rounded-full ${chatAvatarColor(dispNm)} inline-flex items-center justify-center font-semibold`}>{String(dispNm || '？').charAt(0)}</span>
+                                            <div><div className={`${big ? 'text-[16px]' : 'text-[14px]'} font-bold text-[#111827]`}>{dispNm}</div><div className="text-[12px] text-[#98A2B3]">プロフィール未登録</div>{isMe && <div className="text-[11px] text-brand-600 mt-0.5">「編集」から登録できます</div>}</div>
+                                        </div>
+                                    )}
+                                    <div className="flex items-center gap-1.5 mt-4 pt-3.5 border-t border-[#F2F4F7]">
+                                        {numericId && !isMe && <button onClick={() => { setProfileView(null); startDm(pid, dispNm); }} className="flex-1 inline-flex items-center justify-center gap-1.5 h-10 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-semibold transition"><MessageSquare size={14} />メッセージ</button>}
+                                        {canEdit && <button onClick={() => openProfileEditor(pid, dispNm, fallbackKind)} className="flex-1 inline-flex items-center justify-center gap-1.5 h-10 px-3 rounded-lg border border-[#EAECF0] text-[13px] font-semibold text-[#344054] hover:bg-[#F8F9FB] transition">{isMe ? '編集' : '本部編集'}</button>}
+                                        {isRoot && <button onClick={() => orgRemove(pid, dispNm)} title="組織図から削除" className="inline-flex items-center justify-center w-10 h-10 rounded-lg border border-[#EAECF0] text-[#98A2B3] hover:text-rose-600 hover:bg-rose-50 transition shrink-0"><Trash2 size={14} /></button>}
+                                    </div>
+                                </>);
+                            };
+                            const ProfilePop = ({ pid, name, kind }) => {
+                                const prof = profiles[pid];
+                                const dispNm = (prof && prof.nameKanji) || name || 'スタッフ';
                                 return (
-                                    <span key={pid} className="group relative inline-block">
-                                        <button onClick={() => setProfileView(open ? null : pid)} className={`inline-flex items-center gap-1.5 text-[12px] pl-1 pr-2.5 py-1 rounded-full border transition ${kind === 'owner' ? 'text-brand-700 bg-brand-50 border-brand-100 font-semibold hover:bg-brand-100/70' : 'text-[#344054] bg-[#F8F9FB] border-[#EAECF0] hover:bg-white hover:border-[#D6DAE1]'}`}>
+                                    <span key={pid} className="group relative inline-block align-top">
+                                        <button onClick={e => { e.stopPropagation(); setProfileView({ pid, name, kind }); }} className={`inline-flex items-center gap-1.5 text-[12px] pl-1 pr-2.5 py-1 rounded-full border transition ${kind === 'owner' ? 'text-brand-700 bg-brand-50 border-brand-100 font-semibold hover:bg-brand-100/70' : 'text-[#344054] bg-[#F8F9FB] border-[#EAECF0] hover:bg-white hover:border-[#D6DAE1]'}`}>
                                             {prof && prof.mainImg ? <span className="w-5 h-5 rounded-full overflow-hidden shrink-0 bg-[#F2F4F7]"><img src={chatImgSrc(prof.mainImg)} className="w-full h-full object-cover" loading="lazy" alt="" /></span> : <span className={`w-5 h-5 rounded-full ${chatAvatarColor(dispNm)} inline-flex items-center justify-center text-[10px] font-semibold`}>{String(dispNm || '？').charAt(0)}</span>}
                                             {dispNm}
                                             {prof && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" title="プロフィール登録済み" />}
                                         </button>
-                                        <div className={`${open ? 'block' : 'hidden'} group-hover:block absolute left-0 top-full mt-2 z-40 w-64 bg-white rounded-2xl border border-[#EAECF0] shadow-xl p-4 text-left cursor-default`} onClick={e => e.stopPropagation()}>
-                                            {prof ? (<>
-                                                {prof.mainImg && <div className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-[#F2F4F7] mb-3 cursor-zoom-in" onClick={() => setChatLightbox(prof.mainImg)}><img src={chatImgSrc(prof.mainImg)} className="w-full h-full object-cover" loading="lazy" alt="" /></div>}
-                                                {Array.isArray(prof.subImgs) && prof.subImgs.length > 0 && <div className="flex gap-1.5 mb-3">{prof.subImgs.map(id => <span key={id} className="w-12 h-12 rounded-lg overflow-hidden bg-[#F2F4F7] cursor-zoom-in" onClick={() => setChatLightbox(id)}><img src={chatImgSrc(id)} className="w-full h-full object-cover" loading="lazy" alt="" /></span>)}</div>}
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-[15px] font-bold text-[#111827]">{dispNm}</span>
-                                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${prof.kind === 'owner' ? 'text-brand-700 bg-brand-50' : 'text-teal-700 bg-teal-50'}`}>{prof.kind === 'owner' ? 'オーナー' : 'セラピスト'}</span>
-                                                </div>
-                                                {prof.nameKana && <div className="text-[11px] text-[#98A2B3] mt-0.5">{prof.nameKana}</div>}
-                                                {prof.bio && <p className="text-[12px] text-[#475467] leading-relaxed mt-2 whitespace-pre-wrap break-words max-h-32 overflow-y-auto">{prof.bio}</p>}
-                                                {snsList.length > 0 && <div className="flex flex-wrap gap-1.5 mt-2.5">{snsList.map(([k, v]) => { const m = snsMeta[k] || { label: k, color: 'text-brand-600' }; return <a key={k} href={/^https?:\/\//.test(v) ? v : `https://${v}`} target="_blank" rel="noopener noreferrer" className={`inline-flex items-center gap-1 text-[11px] font-semibold ${m.color} bg-[#F8F9FB] border border-[#EAECF0] rounded-full px-2 py-0.5 hover:bg-white transition`}>{m.label}<ExternalLink size={10} /></a>; })}</div>}
-                                            </>) : (
-                                                <div className="flex items-center gap-2.5">
-                                                    <span className={`w-10 h-10 rounded-full ${chatAvatarColor(dispNm)} inline-flex items-center justify-center text-[15px] font-semibold`}>{String(dispNm || '？').charAt(0)}</span>
-                                                    <div><div className="text-[14px] font-bold text-[#111827]">{dispNm}</div><div className="text-[11px] text-[#98A2B3]">プロフィール未登録</div></div>
-                                                </div>
-                                            )}
-                                            <div className="flex items-center gap-1.5 mt-3 pt-3 border-t border-[#F2F4F7]">
-                                                {numericId && !isMe && <button onClick={() => { setProfileView(null); startDm(pid, dispNm); }} className="flex-1 inline-flex items-center justify-center gap-1.5 h-8 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[12px] font-semibold transition"><MessageSquare size={13} />メッセージ</button>}
-                                                {canEdit && <button onClick={() => openProfileEditor(pid, dispNm, kind)} className="flex-1 inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-lg border border-[#EAECF0] text-[12px] font-semibold text-[#344054] hover:bg-[#F8F9FB] transition">{isMe ? '編集' : '本部編集'}</button>}
-                                                {isRoot && <button onClick={() => orgRemove(pid, dispNm)} title="組織図から削除" className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-[#EAECF0] text-[#98A2B3] hover:text-rose-600 hover:bg-rose-50 transition shrink-0"><Trash2 size={13} /></button>}
-                                            </div>
+                                        {/* デスクトップのみホバーで簡易表示（スマホはタップでモーダル） */}
+                                        <div className="hidden md:group-hover:block absolute left-0 top-full mt-2 z-40 w-64 bg-white rounded-2xl border border-[#EAECF0] shadow-xl p-4 text-left cursor-default" onClick={e => e.stopPropagation()}>
+                                            {renderProfileBody(pid, name, kind, false)}
                                         </div>
                                     </span>
                                 );
@@ -10819,6 +10827,22 @@
                                         )}
                                         <p className="text-[11px] text-[#98A2B3] mt-6 leading-relaxed">※ 店舗割当は SalonOne をベースに、各自（本部rootは全員分）が設定したプロフィールの担当店舗を優先反映します。名前にカーソルを合わせる（スマホはタップ）とプロフィールを表示。「当月売上で絞る」で当月売上のあった施術者のみに絞れます。</p>
                                     </div>
+                                    {/* プロフィール詳細モーダル（スマホはタップで開く・下からのシート／PCは中央） */}
+                                    {profileView && (() => {
+                                        const { pid, name, kind } = profileView;
+                                        return (
+                                            <div className="fixed inset-0 z-[70] flex items-end md:items-center justify-center bg-[#111827]/50 backdrop-blur-sm p-0 md:p-4" onClick={() => setProfileView(null)}>
+                                                <div className="bg-white w-full md:max-w-sm rounded-t-2xl md:rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto px-5 pt-3 pb-[max(env(safe-area-inset-bottom,0px),20px)] md:pb-5" onClick={e => e.stopPropagation()}>
+                                                    <div className="flex items-center justify-between mb-2 -mx-1">
+                                                        <div className="w-9 md:hidden" />
+                                                        <span className="md:hidden w-10 h-1 rounded-full bg-ink-100" />
+                                                        <button onClick={() => setProfileView(null)} className="w-9 h-9 flex items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F2F4F7]"><X size={18} /></button>
+                                                    </div>
+                                                    {renderProfileBody(pid, name, kind, true)}
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
                                     {profileEdit && (() => {
                                         const d = profileEdit;
                                         const setD = (patch) => setProfileEdit(v => ({ ...v, ...patch }));

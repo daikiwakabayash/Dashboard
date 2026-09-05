@@ -696,7 +696,7 @@
         };
 
         // 会話のメッセージ一覧（日付区切り・未読区切り・スタンプ・自動スクロール）
-        const ChatMessageList = ({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, stamps, onImageClick, readMembers, roomReads, resolveName }) => {
+        const ChatMessageList = ({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, stamps, onImageClick, readMembers, roomReads, resolveName, resolveShop }) => {
             const endRef = React.useRef(null);
             const lenRef = React.useRef(-1);
             const [pickFor, setPickFor] = React.useState(null);
@@ -730,7 +730,7 @@
                                     <div className="min-w-0 flex-1">
                                         <div className="flex items-baseline gap-2 flex-wrap">
                                             <span className="font-semibold text-[14px] text-[#111827]">{m.fromName || '不明'}</span>
-                                            {m.fromShop && <span className="text-[12px] text-[#98A2B3]">{m.fromShop}</span>}
+                                            {(() => { const sh = resolveShop ? resolveShop(m.fromStaffId, m.fromShop) : m.fromShop; return sh ? <span className="text-[12px] text-[#98A2B3]">{sh}</span> : null; })()}
                                             <span className="text-[11px] text-[#98A2B3]">{fmtTime(m.createdAt)}</span>
                                         </div>
                                         {m.text && <div className="text-[14px] text-[#111827] leading-relaxed whitespace-pre-wrap break-words mt-0.5" style={{ wordBreak: 'break-word' }}>{chatLinkify(m.text)}</div>}
@@ -2045,6 +2045,9 @@
             // 表示名は SalonOneロスターの本名（漢字フルネーム）を優先。staffName空/ログインID化け(staff691等)でも本名で表示。
             const chatResolveName = (id, fallback) => { const sid = String(id || ''); const s = (soStaffs || []).find(x => String(x.id) === sid); if (s && s.name) return s.name; const d = ((chatData.dir && chatData.dir.staff) || []).find(x => String(x.id) === sid); if (d && d.name) return d.name; return fallback || ''; };
             const chatMyName = authState.root ? '管理者' : (chatResolveName(chatMyId, authState.staffName || authState.owner) || 'スタッフ');
+            // 名前の横の店舗: 本人が設定したプロフィールの担当店舗（先頭）を優先。未設定はSalonOne所属。
+            // ※表示時に解決（profileData読み出し）。ここでは呼ばない＝profileData未宣言時のTDZ回避。
+            const chatResolveShop = (id, fallback) => { const p = (profileData.profiles || {})[String(id)]; return (p && Array.isArray(p.shops) && p.shops[0]) || fallback || ''; };
             const chatMyShop = (Array.isArray(authState.shops) && authState.shops[0]) || '';
             const chatIsRoot = !!authState.root;
             const CHAT_STAMPS = ['👍', '🙏', '🎉', '🔥', '💛', '😊', '😂', '👏', '✨', '🙌', '💪', '❤️'];
@@ -2720,9 +2723,11 @@
                 const iv = setInterval(boardLoad, currentPage === 'board' ? 8000 : 30000);
                 return () => clearInterval(iv);
             }, [authState.authenticated, currentPage]);
-            // 掲示板を開いたら soStaffs（本名解決用）を確保
+            // 掲示板を開いたら soStaffs（本名解決用）＋プロフィール（担当店舗解決用）を確保
             useEffect(() => {
-                if (currentPage !== 'board' || soStaffs.length) return;
+                if (currentPage !== 'board') return;
+                profileLoad();
+                if (soStaffs.length) return;
                 (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at, acceptsRes: s.accepts_reservations !== false })); if (arr.length) setSoStaffs(arr); } catch {} })();
             }, [currentPage]);
             // プッシュ: 有効状態・購読状態を確認（認証後）
@@ -2765,6 +2770,7 @@
             // チャット: 店舗ルーム/ディレクトリ生成に必要な shops/staffs をチャット表示時に確保
             useEffect(() => {
                 if (currentPage !== 'chat') return;
+                profileLoad(); // 名前横の店舗をプロフィールの担当店舗で解決するため
                 if (soShopsRaw.length === 0) { fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`).then(r => r.json()).then(j => { const arr = soShopsFromResp(j); if (arr.length) setSoShops(arr); }).catch(() => {}); }
                 if (soStaffs.length === 0) { (async () => { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const arr = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at, acceptsRes: s.accepts_reservations !== false })); if (arr.length) setSoStaffs(arr); } catch {} })(); }
             }, [currentPage]);
@@ -10147,7 +10153,7 @@
                                                             )}
                                                         </div>
 
-                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(id) => setChatLightbox(id)} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} />
+                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(id) => setChatLightbox(id)} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} resolveShop={chatResolveShop} />
 
                                                         {/* コンポーザー（ChatGPT/Slack風の一体型）。スマホは全画面なのでホームバー分の余白を確保 */}
                                                         <div className="px-3 md:px-4 pt-1 pb-[max(env(safe-area-inset-bottom,0px),12px)] shrink-0">
@@ -10357,7 +10363,7 @@
                                             <div className="min-w-0 flex-1">
                                                 <div className="flex items-center gap-2 flex-wrap">
                                                     <span className="text-[14px] font-semibold text-[#111827]">{authorName}</span>
-                                                    {p.authorRoot ? <span className="text-[10px] font-bold text-brand-700 bg-brand-50 px-1.5 py-0.5 rounded">本部</span> : (p.authorShop && <span className="text-[10px] font-bold text-[#475467] bg-[#F2F4F7] px-1.5 py-0.5 rounded">{p.authorShop}</span>)}
+                                                    {p.authorRoot ? <span className="text-[10px] font-bold text-brand-700 bg-brand-50 px-1.5 py-0.5 rounded">本部</span> : (() => { const sh = chatResolveShop(p.authorId, p.authorShop); return sh ? <span className="text-[10px] font-bold text-[#475467] bg-[#F2F4F7] px-1.5 py-0.5 rounded">{sh}</span> : null; })()}
                                                     {p.pinned && <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded">📌 固定</span>}
                                                     {unread && <span className="text-[10px] font-bold text-white bg-brand-500 px-1.5 py-0.5 rounded">未読</span>}
                                                 </div>

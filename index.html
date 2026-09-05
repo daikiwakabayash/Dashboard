@@ -1661,6 +1661,8 @@
             });
             useEffect(() => { try { localStorage.setItem('naoru_sidebar_collapsed', sidebarCollapsed ? '1' : '0'); } catch (e) {} }, [sidebarCollapsed]);
             const [mobileAcctOpen, setMobileAcctOpen] = useState(false); // スマホのアカウント/ログアウトメニュー
+            const [mobileNavOpen, setMobileNavOpen] = useState(false); // スマホのハンバーガーナビ（左ドロワー）
+            useEffect(() => { setMobileNavOpen(false); setMobileAcctOpen(false); }, [currentPage]); // ページ切替で閉じる
             // 権限外のページを開いていたらSalonOne売上へ退避（オーナー設定=root専用／返金明細書=staff不可）
             useEffect(() => {
                 if (!authState.authenticated) return;
@@ -9971,12 +9973,15 @@
             return (
                 <div className="min-h-screen bg-gradient-to-br from-ink-50 via-[#F8F9FB] to-brand-50/40 flex">
                     {/* Sidebar */}
-                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} authRoot={authState.root} authOwner={authState.owner} authRole={authRole} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} chatUnread={chatUnreadTotal} boardUnread={boardUnreadTotal} />
+                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} authRoot={authState.root} authOwner={authState.owner} authRole={authRole} authStaffName={authState.staffName} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} chatUnread={chatUnreadTotal} boardUnread={boardUnreadTotal} mobileNavOpen={mobileNavOpen} setMobileNavOpen={setMobileNavOpen} />
 
                     {/* Main Content */}
-                    <div className="flex-1 min-w-0 overflow-x-hidden pb-16 md:pb-0">
-                        {/* Mobile Top Logo Bar + アカウント */}
-                        <div className="md:hidden flex items-center gap-2 px-3 py-2.5 bg-white/90 backdrop-blur-md border-b border-ink-100">
+                    <div className="flex-1 min-w-0 overflow-x-hidden">
+                        {/* Mobile Top Logo Bar + ハンバーガー + アカウント */}
+                        <div className="md:hidden flex items-center gap-2 px-3 py-2.5 bg-white/90 backdrop-blur-md border-b border-ink-100 sticky top-0 z-40">
+                            <button onClick={() => setMobileNavOpen(true)} className="w-9 h-9 -ml-1 flex items-center justify-center rounded-lg text-ink-700 hover:bg-ink-50 active:scale-95 transition" title="メニュー">
+                                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
+                            </button>
                             <img src="/logo.png" alt="NAORU" className="h-8 w-auto object-contain" />
                             <button onClick={() => setMobileAcctOpen(true)} className="ml-auto flex items-center gap-2 pl-1 pr-2.5 py-1 rounded-full border border-ink-100 bg-white active:scale-95 transition">
                                 <span className="w-7 h-7 rounded-full bg-gradient-to-br from-ink-600 to-ink-800 text-white flex items-center justify-center font-semibold text-[12px] shrink-0">{(authState.root ? '管' : (authState.staffName || authState.owner || 'A')).trim().charAt(0)}</span>
@@ -10082,7 +10087,7 @@
                                         {!chatData.configured && <div className="mx-3 md:mx-0 mb-3 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[13px]">共有ストア（KV/Supabase/GAS）が未設定のため、チャットは保存されません。管理者に有効化を依頼してください。</div>}
 
                                         {/* 単一サーフェス（一覧｜会話）。スマホは端末いっぱいに（会話を開くと全画面・LINE風）。 */}
-                                        <div className={`flex bg-white border-0 md:border border-[#EAECF0] rounded-none md:rounded-xl overflow-hidden md:h-[calc(100vh-168px)] md:min-h-[540px] ${chatRoomId ? 'h-[calc(100dvh-117px)]' : 'h-[calc(100dvh-173px)]'}`}>
+                                        <div className={`flex bg-white border-0 md:border border-[#EAECF0] rounded-none md:rounded-xl overflow-hidden md:h-[calc(100vh-168px)] md:min-h-[540px] ${chatRoomId ? 'h-[calc(100dvh-54px)]' : 'h-[calc(100dvh-110px)]'}`}>
                                             {/* 左: トーク一覧 */}
                                             <div className={`${chatRoomId ? 'hidden md:flex' : 'flex'} md:flex flex-col w-full md:w-[288px] shrink-0 border-r border-[#EAECF0]`}>
                                                 <div className="p-3 border-b border-[#EAECF0]">
@@ -20201,7 +20206,7 @@
             );
         };
 
-        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authOwner = '', authRole = 'root', collapsed = false, setCollapsed = () => {}, chatUnread = 0, boardUnread = 0 }) => {
+        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authOwner = '', authRole = 'root', authStaffName = '', collapsed = false, setCollapsed = () => {}, chatUnread = 0, boardUnread = 0, mobileNavOpen = false, setMobileNavOpen = () => {} }) => {
             // カテゴリー別にグルーピング（見やすさ・高級感のため）
             const navSections = [
                 { label: '経営・分析', items: [
@@ -20394,33 +20399,43 @@
                         </div>
                     )}
 
-                    {/* Mobile Bottom Navigation */}
-                    <div className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/95 backdrop-blur-md border-t border-brand-100 shadow-lg">
-                        <nav className="flex items-center gap-0.5 px-1 py-1 safe-area-pb overflow-x-auto no-scrollbar">
-                            {menuItems.map(item => (
-                                <button
-                                    key={item.id}
-                                    onClick={() => setCurrentPage(item.id)}
-                                    className={`flex flex-col items-center justify-center py-1.5 px-1.5 rounded-xl transition-all duration-200 flex-shrink-0 min-w-[60px] active:scale-90 ${
-                                        currentPage === item.id
-                                            ? 'text-brand-500'
-                                            : 'text-slate-400'
-                                    }`}
-                                >
-                                    <div className={`relative p-1.5 rounded-xl transition-all duration-200 ${
-                                        currentPage === item.id ? 'bg-gradient-to-br from-brand-500 to-brand-600 text-white scale-110 shadow-md shadow-brand-500/30' : ''
-                                    }`}>
-                                        {item.mobileIcon}
-                                        {item.badge > 0 && <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] flex items-center justify-center bg-brand-500 text-white text-[8px] font-black rounded-full px-0.5 ring-2 ring-white">{item.badge > 99 ? '99+' : item.badge}</span>}
-                                    </div>
-                                    <span className={`text-[10px] mt-0.5 font-bold leading-tight ${
-                                        currentPage === item.id ? 'text-brand-500' : 'text-slate-400'
-                                    }`}>{item.label}</span>
-                                    {currentPage === item.id && <span className="w-1 h-1 bg-brand-500 rounded-full mt-0.5" />}
-                                </button>
-                            ))}
-                        </nav>
-                    </div>
+                    {/* Mobile Nav Drawer（ハンバーガー：PC同様のカテゴリ別メニュー） */}
+                    {mobileNavOpen && (
+                        <div className="md:hidden fixed inset-0 z-[96] bg-[#111827]/45 backdrop-blur-sm" onClick={() => setMobileNavOpen(false)}>
+                            <div className="absolute left-0 top-0 bottom-0 w-[84%] max-w-[320px] bg-gradient-to-b from-white to-ink-50/60 shadow-2xl flex flex-col" onClick={e => e.stopPropagation()}>
+                                <div className="flex items-center justify-between px-4 py-3.5 border-b border-ink-100">
+                                    <img src="/Naoru_landscape.png" alt="NAORU" className="h-8 w-auto object-contain" />
+                                    <button onClick={() => setMobileNavOpen(false)} className="w-9 h-9 flex items-center justify-center rounded-lg text-ink-400 hover:bg-ink-50"><X size={20} /></button>
+                                </div>
+                                <div className="flex items-center gap-2.5 px-4 py-3 border-b border-ink-100">
+                                    <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-ink-600 to-ink-800 text-white flex items-center justify-center font-semibold text-[14px] shrink-0 shadow-sm">{(authRoot ? '管' : (authStaffName || authOwner || 'A')).trim().charAt(0)}</div>
+                                    <div className="min-w-0"><div className="text-[14px] font-bold text-ink-900 truncate leading-tight">{authRoot ? '管理者' : (authStaffName || authOwner || 'アカウント')}</div><div className="text-[11px] text-[#98A2B3] leading-tight">{authRoot ? '本部・全店舗' : authRole === 'owner' ? 'オーナー' : authRole === 'staff' ? 'スタッフ' : 'ログイン中'}</div></div>
+                                </div>
+                                <nav className="flex-1 overflow-y-auto px-3 py-3">
+                                    {visSections.map((sec, si) => (
+                                        <div key={sec.label} className={si === 0 ? '' : 'mt-4'}>
+                                            <div className="px-2 pb-1.5 text-[10px] font-bold uppercase tracking-[0.09em] text-ink-400">{sec.label}</div>
+                                            <div className="space-y-0.5">
+                                                {sec.items.map(item => (
+                                                    <button key={item.id} onClick={() => { setCurrentPage(item.id); setMobileNavOpen(false); }} className={`w-full flex items-center gap-3 rounded-xl text-[14px] px-3 py-2.5 transition ${currentPage === item.id ? 'bg-gradient-to-r from-brand-500 to-brand-600 text-white font-semibold shadow-md shadow-brand-500/30' : 'text-ink-700 font-medium hover:bg-ink-50 active:bg-ink-50'}`}>
+                                                        <span className={`shrink-0 ${currentPage === item.id ? 'text-white' : 'text-ink-400'}`}>{item.icon}</span>
+                                                        <span className="truncate">{item.label}</span>
+                                                        {item.badge > 0 && <span className={`ml-auto min-w-[18px] h-[18px] flex items-center justify-center text-[10px] font-bold rounded-full px-1 ${currentPage === item.id ? 'bg-white/25 text-white' : 'bg-brand-500 text-white'}`}>{item.badge > 99 ? '99+' : item.badge}</span>}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </nav>
+                                <div className="px-3 py-3 border-t border-ink-100">
+                                    <button onClick={() => { setMobileNavOpen(false); handleLogout(); }} className="w-full flex items-center gap-3 rounded-xl text-[14px] font-semibold text-rose-600 px-3 py-2.5 hover:bg-rose-50 active:bg-rose-50 transition">
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" /></svg>
+                                        ログアウト
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </>
             );
         };

@@ -10023,15 +10023,13 @@
                             const relTime = (iso) => { if (!iso) return ''; const d = new Date(iso), now = new Date(); const diff = (now - d) / 1000; if (diff < 60) return 'たった今'; if (diff < 3600) return `${Math.floor(diff / 60)}分前`; if (d.toDateString() === now.toDateString()) return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; const y = new Date(now); y.setDate(now.getDate() - 1); if (d.toDateString() === y.toDateString()) return '昨日'; return `${d.getMonth() + 1}/${d.getDate()}`; };
                             const q = chatListSearch.trim();
                             const matchRoom = (r) => !q || roomTitle(r).includes(q) || (r.name || '').includes(q) || ((lastMsg(r) || {}).text || '').includes(q);
-                            const sortRooms = (arr) => arr.slice().sort((a, b) => chatLastMsgAt(b) - chatLastMsgAt(a));
+                            // メッセージのある最新のルームを上に（LINE風）。未使用ルーム（メッセージ無し）は下へ・名前順。
+                            const lastMsgTs = (r) => { const arr = chatData.messages[r.id] || []; const m = arr[arr.length - 1]; return m ? (Date.parse(m.createdAt || '') || 0) : 0; };
+                            const sortByActivity = (arr) => arr.slice().sort((a, b) => { const ta = lastMsgTs(a), tb = lastMsgTs(b); if ((tb > 0) !== (ta > 0)) return tb > 0 ? 1 : -1; if (tb !== ta) return tb - ta; return String(roomTitle(a) || '').localeCompare(String(roomTitle(b) || ''), 'ja'); });
                             const pinSet = new Set((chatPins || []).map(String));
                             const isPinned = (r) => pinSet.has(String(r.id));
-                            const pinnedRooms = sortRooms(allRooms.filter(r => isPinned(r) && matchRoom(r)));
-                            const groups = {
-                                group: sortRooms(allRooms.filter(r => !isPinned(r) && (r.kind === 'announce' || r.kind === 'group') && matchRoom(r))),
-                                store: sortRooms(allRooms.filter(r => !isPinned(r) && r.kind === 'store' && matchRoom(r))),
-                                dm: sortRooms(allRooms.filter(r => !isPinned(r) && r.kind === 'dm' && matchRoom(r))),
-                            };
+                            const pinnedRooms = sortByActivity(allRooms.filter(r => isPinned(r) && matchRoom(r)));
+                            const otherRooms = sortByActivity(allRooms.filter(r => !isPinned(r) && matchRoom(r)));
                             const activeRoom = allRooms.find(r => r.id === chatRoomId) || null;
                             const activeMsgs = activeRoom ? (chatData.messages[activeRoom.id] || []) : [];
                             const dirStaff = (chatData.dir.staff || []).filter(s => String(s.id) !== chatMyId);
@@ -10098,12 +10096,12 @@
                                                             <div className="space-y-0.5">{pinnedRooms.map(r => <RoomRow key={r.id} r={r} />)}</div>
                                                         </div>
                                                     )}
-                                                    {[['group', 'グループ'], ['dm', 'ダイレクト'], ['store', '店舗']].map(([k, label]) => groups[k].length > 0 && (
-                                                        <div key={k} className="mb-2">
-                                                            <div className="px-2 pt-2 pb-1 text-[11px] font-semibold text-[#98A2B3] tracking-wide">{label}</div>
-                                                            <div className="space-y-0.5">{groups[k].map(r => <RoomRow key={r.id} r={r} />)}</div>
+                                                    {otherRooms.length > 0 && (
+                                                        <div className="mb-2">
+                                                            {pinnedRooms.length > 0 && <div className="px-2 pt-2 pb-1 text-[11px] font-semibold text-[#98A2B3] tracking-wide">トーク</div>}
+                                                            <div className="space-y-0.5">{otherRooms.map(r => <RoomRow key={r.id} r={r} />)}</div>
                                                         </div>
-                                                    ))}
+                                                    )}
                                                     {chatData.loaded && allRooms.length === 0 && <div className="text-center text-[#98A2B3] text-[13px] py-10">ルームがありません。<br />「新しいルーム」から作成できます。</div>}
                                                 </div>
                                             </div>

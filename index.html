@@ -684,7 +684,7 @@
         };
 
         // 会話のメッセージ一覧（日付区切り・未読区切り・スタンプ・自動スクロール）
-        const ChatMessageList = ({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, stamps, onImageClick }) => {
+        const ChatMessageList = ({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, stamps, onImageClick, readMembers, roomReads, resolveName }) => {
             const endRef = React.useRef(null);
             const lenRef = React.useRef(-1);
             const [pickFor, setPickFor] = React.useState(null);
@@ -704,6 +704,11 @@
                         if (showUnread) unreadShown = true;
                         const mine = String(m.fromStaffId) === String(myId);
                         const reactions = m.reactions && typeof m.reactions === 'object' ? m.reactions : {};
+                        // 既読者（送信者以外で、この投稿以降にルームを開いた＝既読ポインタが投稿時刻以上）
+                        const readers = (mine && Array.isArray(readMembers))
+                            ? readMembers.filter(id => String(id) !== String(m.fromStaffId) && ((roomReads || {})[String(id)] || 0) >= t)
+                            : [];
+                        const readNames = readers.map(id => (resolveName ? resolveName(id, '') : '') || (staffName ? staffName(id) : '') || 'スタッフ');
                         return (
                             <React.Fragment key={m.id}>
                                 {showDay && <div className="flex items-center gap-3 my-3 px-1"><div className="flex-1 h-px bg-[#EAECF0]" /><span className="text-[11px] font-medium text-[#98A2B3]">{fmtDay(m.createdAt)}</span><div className="flex-1 h-px bg-[#EAECF0]" /></div>}
@@ -725,6 +730,11 @@
                                                     return <button key={emo} onClick={() => onReact(m.id, emo)} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[12px] font-semibold border transition ${on ? 'bg-brand-50 border-brand-200 text-brand-700' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{emo} {(ids || []).length}</button>;
                                                 })}
                                                 {pickFor === m.id && <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-[#F8F9FB] border border-[#EAECF0]">{stamps.map(s => <button key={s} onClick={() => { onReact(m.id, s); setPickFor(null); }} className="text-base hover:scale-125 transition-transform leading-none">{s}</button>)}</span>}
+                                            </div>
+                                        )}
+                                        {mine && Array.isArray(readMembers) && readers.length > 0 && (
+                                            <div className="mt-1 text-[11px] text-[#98A2B3] font-medium" title={readNames.join('、')}>
+                                                <span className="text-brand-500">✓✓</span> 既読 {readers.length}{readMembers.length > 1 && `/${readMembers.length - 1}`}
                                             </div>
                                         )}
                                     </div>
@@ -2117,6 +2127,19 @@
                 await Promise.all(vis.map(r => fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'read', roomId: r.id, staffId: chatMyId, ts: now }) }).catch(() => {})));
                 await chatLoad();
             };
+            // グループのメンバー変更（招待/退会）。楽観更新→サーバー反映。
+            const chatSetMembers = async (roomId, members) => {
+                setChatData(d => ({ ...d, rooms: (d.rooms || []).map(r => r && r.id === roomId ? { ...r, members: [...new Set(members.map(String))] } : r) }));
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'setMembers', roomId, members, staffId: chatMyId, root: chatIsRoot }) }); await chatLoad(); } catch {}
+            };
+            // グループ名・アイコン変更。楽観更新→サーバー反映。
+            const chatSetRoom = async (roomId, patch) => {
+                setChatData(d => ({ ...d, rooms: (d.rooms || []).map(r => r && r.id === roomId ? { ...r, ...patch } : r) }));
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'setRoom', roomId, ...patch, staffId: chatMyId, root: chatIsRoot }) }); await chatLoad(); } catch {}
+            };
+            const [chatPanel, setChatPanel] = useState('');       // '' | 'members' | 'settings'（会話ヘッダーのパネル）
+            const [chatMemberQ, setChatMemberQ] = useState('');   // メンバー招待の検索
+            const [chatRenameVal, setChatRenameVal] = useState(null); // 名前編集中の値（nullで非編集）
 
             // ── 掲示板（全社発信） ────────────────────────────────────────
             const [boardData, setBoardData] = useState({ posts: [], reads: {}, configured: true, loaded: false });
@@ -2132,7 +2155,10 @@
             const [boardSort, setBoardSort] = useState('new');    // new | old
             const [boardView, setBoardView] = useState('list');   // list | grid
             const [boardMenuId, setBoardMenuId] = useState('');   // 「…」メニュー展開中の投稿id
+            const [boardPickId, setBoardPickId] = useState('');   // スタンプピッカー展開中の投稿id
+            const [boardStatusId, setBoardStatusId] = useState(''); // リアクション状況モーダルの投稿id
             const [boardDrag, setBoardDrag] = useState(false);    // ドラッグ&ドロップ中ハイライト
+            const BOARD_STAMPS = ['👍', '🙏', '🎉', '🔥', '💛', '👏', '✅', '😊'];
             const [boardBm, setBoardBm] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_board_bm') || '[]') || []; } catch { return []; } });
             const boardToggleBm = (id) => setBoardBm(prev => { const n = prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]; try { localStorage.setItem('naoru_board_bm', JSON.stringify(n)); } catch {} return n; });
             const boardLastSeen = ((boardData.reads || {})[chatMyId]) || 0;
@@ -2187,6 +2213,21 @@
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'delete', id, staffId: chatMyId, root: chatIsRoot }) }); await boardLoad(); } catch {}
             };
             const boardPin = async (id, pinned) => { try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'pin', id, pinned }) }); await boardLoad(); } catch {} };
+            const boardReact = async (id, emoji) => {
+                // 楽観更新（即トグル）→ サーバー反映
+                setBoardData(d => ({ ...d, posts: (d.posts || []).map(p => { if (!p || p.id !== id) return p; const r = { ...(p.reactions && typeof p.reactions === 'object' ? p.reactions : {}) }; const cur = (r[emoji] || []).map(String); r[emoji] = cur.includes(chatMyId) ? cur.filter(x => x !== chatMyId) : [...cur, chatMyId]; if (r[emoji].length === 0) delete r[emoji]; return { ...p, reactions: r }; }), reads: { ...(d.reads || {}), [chatMyId]: Math.max((d.reads || {})[chatMyId] || 0, Date.now()) } }));
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'react', id, emoji, staffId: chatMyId }) }); await boardLoad(); } catch {}
+            };
+            // お知らせの対象者（＝閲覧想定メンバー）: 全店スタッフ（施術者以外/退職除外）。未リアクション者の母集団に使う。
+            const boardAudience = useMemo(() => {
+                const seen = new Set(); const out = [];
+                for (const s of ((chatData.dir && chatData.dir.staff) || [])) {
+                    const id = String((s && s.id) || ''); const nm = chatResolveName(id, s && s.name);
+                    if (!id || seen.has(id) || isNonTherapistName(nm)) continue;
+                    seen.add(id); out.push({ id, name: nm, shop: (s && s.shop) || '' });
+                }
+                return out.sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+            }, [chatData.dir, soStaffs]);
 
             // ── Webプッシュ通知（購読） ──────────────────────────────────
             const [pushState, setPushState] = useState({ supported: ('serviceWorker' in navigator && 'PushManager' in window), enabled: false, subscribed: false, publicKey: '', busy: false });
@@ -9888,12 +9929,18 @@
                             const activeRoom = allRooms.find(r => r.id === chatRoomId) || null;
                             const activeMsgs = activeRoom ? (chatData.messages[activeRoom.id] || []) : [];
                             const dirStaff = (chatData.dir.staff || []).filter(s => String(s.id) !== chatMyId);
+                            // 既読集計: このルームの各メンバーの既読ポインタ（reads[staffId][roomId]）
+                            const activeMemberIds = activeRoom ? (Array.isArray(activeRoom.members) ? activeRoom.members.map(String) : []) : [];
+                            const activeReadsMap = activeRoom ? Object.fromEntries(Object.entries(chatData.reads || {}).map(([sid, m]) => [sid, (m && typeof m === 'object') ? (Number(m[activeRoom.id]) || 0) : 0])) : {};
+                            const canShowReads = !!activeRoom && (activeRoom.kind === 'group' || activeRoom.kind === 'dm') && activeMemberIds.length > 0;
                             const roomIcon = (r, active) => {
                                 if (r.kind === 'dm') return <ChatAvatar name={roomTitle(r)} />;
                                 if (r.kind === 'store') return <ShopMark size={36} />;
+                                if (r.kind === 'group' && r.icon) return <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 text-[19px] leading-none ${active ? 'bg-brand-100' : 'bg-[#F2F4F7]'}`}>{r.icon}</div>;
                                 const Ico = r.kind === 'announce' ? Megaphone : Users;
                                 return <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${active ? 'bg-brand-100 text-brand-600' : 'bg-[#F2F4F7] text-[#667085]'}`}><Ico size={17} /></div>;
                             };
+                            const CHAT_ROOM_ICONS = ['👥', '💬', '📣', '🏢', '💼', '📊', '🎯', '🚀', '💡', '🔥', '⭐', '🎉', '🩺', '💪', '📝', '📌'];
                             const RoomRow = ({ r }) => {
                                 const lm = lastMsg(r); const unread = chatUnreadOf(r); const active = chatRoomId === r.id;
                                 return (
@@ -9953,12 +10000,21 @@
                                                             <button onClick={() => setChatRoomId(null)} className="md:hidden w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#667085]"><ChevronRight size={18} className="rotate-180" /></button>
                                                             {roomIcon(activeRoom, false)}
                                                             <div className="min-w-0"><div className="font-semibold text-[15px] text-[#111827] truncate leading-tight">{roomTitle(activeRoom)}</div><div className="text-[12px] text-[#667085] leading-tight">{roomSub(activeRoom)}</div></div>
+                                                            {activeRoom.kind === 'group' && (
+                                                                <button onClick={() => { setChatMemberQ(''); setChatRenameVal(null); setChatPanel('members'); }} className="ml-auto flex items-center gap-1.5 pl-1 pr-2.5 h-9 rounded-full border border-[#EAECF0] hover:bg-[#F8F9FB] transition" title="メンバーを表示・管理">
+                                                                    <div className="flex -space-x-2">
+                                                                        {activeMemberIds.slice(0, 4).map(id => { const nm = chatResolveName(id, ''); return <span key={id} className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-semibold ring-2 ring-white ${chatAvatarColor(nm)}`}>{(nm || '？').trim().charAt(0)}</span>; })}
+                                                                        {activeMemberIds.length > 4 && <span className="w-6 h-6 rounded-full bg-[#F2F4F7] text-[#667085] flex items-center justify-center text-[10px] font-semibold ring-2 ring-white">+{activeMemberIds.length - 4}</span>}
+                                                                    </div>
+                                                                    <span className="text-[12px] font-semibold text-[#344054] hidden sm:inline">{activeMemberIds.length}名</span>
+                                                                </button>
+                                                            )}
                                                             {(activeRoom.kind === 'group' || activeRoom.kind === 'dm') && (chatIsRoot || String(activeRoom.createdBy) === chatMyId) && (
-                                                                <button onClick={async () => { if (window.confirm('このルームを削除しますか？')) { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'deleteRoom', roomId: activeRoom.id, staffId: chatMyId, root: chatIsRoot }) }).catch(() => {}); setChatRoomId(null); await chatLoad(); } }} className="ml-auto w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3] hover:text-rose-500" title="ルーム削除"><Trash2 size={15} /></button>
+                                                                <button onClick={async () => { if (window.confirm('このルームを削除しますか？')) { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'deleteRoom', roomId: activeRoom.id, staffId: chatMyId, root: chatIsRoot }) }).catch(() => {}); setChatRoomId(null); await chatLoad(); } }} className={`${activeRoom.kind === 'dm' ? 'ml-auto' : ''} w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3] hover:text-rose-500`} title="ルーム削除"><Trash2 size={15} /></button>
                                                             )}
                                                         </div>
 
-                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(id) => setChatLightbox(id)} />
+                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(id) => setChatLightbox(id)} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} />
 
                                                         {/* コンポーザー（ChatGPT/Slack風の一体型） */}
                                                         <div className="px-3 md:px-4 pb-3 pt-1">
@@ -9987,6 +10043,80 @@
                                             </div>
                                         </div>
                                     </div>
+
+                                    {/* グループ メンバー管理・設定パネル */}
+                                    {chatPanel === 'members' && activeRoom && activeRoom.kind === 'group' && (() => {
+                                        const memberIds = Array.isArray(activeRoom.members) ? activeRoom.members.map(String) : [];
+                                        const memberSet = new Set(memberIds);
+                                        const memberList = memberIds.map(id => ({ id, name: chatResolveName(id, 'スタッフ'), shop: ((chatData.dir.staff || []).find(s => String(s.id) === id) || {}).shop || '' })).sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+                                        const addable = dirStaff.filter(s => !memberSet.has(String(s.id))).filter(s => !chatMemberQ || s.name.includes(chatMemberQ) || (s.shop || '').includes(chatMemberQ));
+                                        const removeMember = (id) => { if (memberIds.length <= 1) { alert('最後の1名は退会できません。ルームを削除してください。'); return; } chatSetMembers(activeRoom.id, memberIds.filter(x => x !== String(id))); };
+                                        const addMember = (id) => chatSetMembers(activeRoom.id, [...memberIds, String(id)]);
+                                        return (
+                                            <div className="fixed inset-0 z-[90] bg-[#111827]/40 backdrop-blur-sm flex items-stretch md:items-center justify-end md:justify-center p-0 md:p-4" onClick={() => setChatPanel('')}>
+                                                <div className="bg-white w-full md:max-w-md md:rounded-2xl shadow-xl max-h-full md:max-h-[88vh] flex flex-col overflow-hidden border-l md:border border-[#EAECF0]" onClick={e => e.stopPropagation()}>
+                                                    <div className="px-5 py-3.5 border-b border-[#EAECF0] flex items-center justify-between">
+                                                        <h3 className="font-semibold text-[15px] text-[#111827]">グループ設定</h3>
+                                                        <button onClick={() => setChatPanel('')} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3]"><X size={18} /></button>
+                                                    </div>
+                                                    <div className="overflow-y-auto px-5 py-4 space-y-5">
+                                                        {/* アイコン + 名前 */}
+                                                        <div>
+                                                            <div className="text-[12px] font-bold text-[#344054] mb-2">アイコン</div>
+                                                            <div className="flex flex-wrap gap-1.5">
+                                                                {CHAT_ROOM_ICONS.map(ic => <button key={ic} onClick={() => chatSetRoom(activeRoom.id, { icon: activeRoom.icon === ic ? '' : ic })} className={`w-9 h-9 rounded-lg flex items-center justify-center text-[18px] border transition ${activeRoom.icon === ic ? 'border-brand-400 bg-brand-50 ring-2 ring-brand-100' : 'border-[#EAECF0] hover:bg-[#F8F9FB]'}`}>{ic}</button>)}
+                                                                <button onClick={() => chatSetRoom(activeRoom.id, { icon: '' })} className={`w-9 h-9 rounded-lg flex items-center justify-center border transition ${!activeRoom.icon ? 'border-brand-400 bg-brand-50 text-brand-600' : 'border-[#EAECF0] text-[#98A2B3] hover:bg-[#F8F9FB]'}`} title="アイコンなし（既定）"><Users size={16} /></button>
+                                                            </div>
+                                                        </div>
+                                                        <div>
+                                                            <div className="text-[12px] font-bold text-[#344054] mb-2">グループ名</div>
+                                                            {chatRenameVal === null ? (
+                                                                <div className="flex items-center gap-2">
+                                                                    <div className="flex-1 h-10 px-3.5 flex items-center rounded-lg bg-[#F8F9FB] border border-[#EAECF0] text-[14px] text-[#111827] truncate">{activeRoom.name || '（無題）'}</div>
+                                                                    <button onClick={() => setChatRenameVal(activeRoom.name || '')} className="px-3 h-10 rounded-lg border border-[#EAECF0] text-[13px] font-semibold text-[#344054] hover:bg-[#F8F9FB] transition">変更</button>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="flex items-center gap-2">
+                                                                    <input autoFocus value={chatRenameVal} onChange={e => setChatRenameVal(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && chatRenameVal.trim()) { chatSetRoom(activeRoom.id, { name: chatRenameVal.trim() }); setChatRenameVal(null); } }} className="flex-1 h-10 px-3.5 rounded-lg bg-white border border-brand-400 ring-2 ring-brand-100 text-[14px] text-[#111827] focus:outline-none" />
+                                                                    <button onClick={() => { if (chatRenameVal.trim()) { chatSetRoom(activeRoom.id, { name: chatRenameVal.trim() }); } setChatRenameVal(null); }} className="px-3 h-10 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-semibold transition">保存</button>
+                                                                    <button onClick={() => setChatRenameVal(null)} className="px-2 h-10 rounded-lg text-[13px] text-[#98A2B3] hover:bg-[#F2F4F7] transition">取消</button>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                        {/* 現在のメンバー */}
+                                                        <div>
+                                                            <div className="text-[12px] font-bold text-[#344054] mb-2">メンバー <span className="text-[#98A2B3] font-semibold">{memberList.length}名</span></div>
+                                                            <div className="space-y-0.5">
+                                                                {memberList.map(m => (
+                                                                    <div key={m.id} className="flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-[#F8F9FB]">
+                                                                        <ChatAvatar name={m.name} size="sm" />
+                                                                        <div className="min-w-0 flex-1"><div className="font-medium text-[14px] text-[#111827] truncate">{m.name}{m.id === chatMyId && <span className="ml-1 text-[11px] text-[#98A2B3]">(自分)</span>}{m.id === String(activeRoom.createdBy) && <span className="ml-1 text-[10px] font-bold text-brand-700 bg-brand-50 px-1.5 py-0.5 rounded">作成者</span>}</div>{m.shop && <div className="text-[11px] text-[#98A2B3] truncate">{m.shop}</div>}</div>
+                                                                        <button onClick={() => removeMember(m.id)} className="w-7 h-7 flex items-center justify-center rounded-lg text-[#98A2B3] hover:text-rose-500 hover:bg-rose-50 transition" title="このメンバーを退会させる"><X size={15} /></button>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                        {/* 招待 */}
+                                                        <div>
+                                                            <div className="text-[12px] font-bold text-[#344054] mb-2">メンバーを招待</div>
+                                                            <div className="relative mb-2"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]" /><input value={chatMemberQ} onChange={e => setChatMemberQ(e.target.value)} placeholder="スタッフを検索" className="w-full h-9 pl-9 pr-3 rounded-lg bg-[#F8F9FB] border border-[#EAECF0] text-[13px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" /></div>
+                                                            <div className="max-h-52 overflow-y-auto space-y-0.5 border border-[#EAECF0] rounded-lg p-1.5">
+                                                                {dirStaff.length === 0 && <div className="text-center text-[#98A2B3] text-[12px] py-6">スタッフ一覧を読み込み中…</div>}
+                                                                {dirStaff.length > 0 && addable.length === 0 && <div className="text-center text-[#98A2B3] text-[12px] py-6">追加できるスタッフがいません。</div>}
+                                                                {addable.slice(0, 200).map(s => (
+                                                                    <button key={s.id} onClick={() => addMember(s.id)} className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-left hover:bg-[#F2F4F7] transition">
+                                                                        <ChatAvatar name={s.name} size="sm" />
+                                                                        <div className="min-w-0 flex-1"><div className="font-medium text-[14px] text-[#111827] truncate">{s.name}</div>{s.shop && <div className="text-[11px] text-[#98A2B3] truncate">{s.shop}</div>}</div>
+                                                                        <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-brand-600"><Plus size={14} />追加</span>
+                                                                    </button>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
 
                                     {/* 新しいルーム モーダル */}
                                     {chatNewRoom && (
@@ -10074,6 +10204,11 @@
                                 const canManage = chatIsRoot || String(p.authorId) === chatMyId;
                                 const authorName = chatResolveName(p.authorId, p.authorName || '不明');
                                 const bm = boardBm.includes(p.id);
+                                const reactions = p.reactions && typeof p.reactions === 'object' ? p.reactions : {};
+                                const reactEntries = Object.entries(reactions).filter(([, ids]) => (ids || []).length > 0);
+                                const reactedIds = new Set(reactEntries.flatMap(([, ids]) => (ids || []).map(String)));
+                                const myReacted = reactedIds.has(chatMyId);
+                                const reactorCount = reactedIds.size;
                                 return (
                                     <article key={p.id} onClick={() => unread && boardMarkReadUpTo(p)} className={`relative bg-white rounded-2xl border p-4 md:p-5 transition-shadow ${p.important ? 'border-rose-200 border-l-[4px] border-l-rose-400' : p.authorRoot ? 'border-[#EAECF0] border-l-[4px] border-l-brand-300' : 'border-[#EAECF0]'} ${unread ? 'ring-1 ring-brand-200 shadow-[0_1px_6px_rgba(243,112,33,0.10)]' : 'shadow-[0_1px_2px_rgba(16,24,40,0.03)]'}`}>
                                         {unread && <span className="absolute -top-2 -left-2 min-w-[20px] h-5 px-1.5 flex items-center justify-center bg-brand-500 text-white text-[11px] font-bold rounded-full shadow z-10">1</span>}
@@ -10100,8 +10235,20 @@
                                         {vid && vid.kind === 'file' && <video src={vid.src} controls className="mt-2.5 w-full max-h-[360px] rounded-lg border border-[#EAECF0] bg-black" />}
                                         {vid && vid.kind === 'link' && <a href={vid.src} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="mt-2.5 inline-block text-[13px] text-brand-600 hover:underline break-all">🔗 {vid.src}</a>}
                                         {Array.isArray(p.files) && p.files.length > 0 && <div className="mt-2.5 flex flex-wrap gap-2">{p.files.map(f => <BoardFile key={f.id} file={f} />)}</div>}
-                                        <div className="flex items-center gap-2 mt-3 pt-2.5 border-t border-[#F2F4F7]">
+                                        {/* リアクション（既読の代わりに「読んだらスタンプ」） */}
+                                        {(reactEntries.length > 0 || boardPickId === p.id) && (
+                                            <div className="flex items-center gap-1.5 mt-3 flex-wrap">
+                                                {reactEntries.map(([emo, ids]) => {
+                                                    const on = (ids || []).map(String).includes(chatMyId);
+                                                    return <button key={emo} onClick={e => { e.stopPropagation(); boardReact(p.id, emo); }} className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[13px] font-semibold border transition ${on ? 'bg-brand-50 border-brand-200 text-brand-700' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{emo} {(ids || []).length}</button>;
+                                                })}
+                                                {boardPickId === p.id && <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-[#F8F9FB] border border-[#EAECF0]" onClick={e => e.stopPropagation()}>{BOARD_STAMPS.map(s => <button key={s} onClick={() => { boardReact(p.id, s); setBoardPickId(''); }} className="text-[17px] leading-none hover:scale-125 transition-transform">{s}</button>)}</span>}
+                                            </div>
+                                        )}
+                                        <div className="flex items-center gap-1.5 mt-3 pt-2.5 border-t border-[#F2F4F7]">
                                             {p.important && <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-full">⭐ 重要</span>}
+                                            <button onClick={e => { e.stopPropagation(); setBoardPickId(boardPickId === p.id ? '' : p.id); }} className={`inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg text-[12px] font-semibold border transition ${myReacted ? 'text-brand-700 bg-brand-50 border-brand-200' : 'text-[#667085] border-[#EAECF0] hover:bg-[#F8F9FB]'}`}><span className="text-[15px] leading-none">👍</span>{myReacted ? 'リアクション済み' : 'いいね'}</button>
+                                            <button onClick={e => { e.stopPropagation(); setBoardStatusId(p.id); }} title="リアクション状況を確認" className="inline-flex items-center gap-1.5 px-2.5 h-8 rounded-lg text-[12px] font-semibold text-[#667085] border border-[#EAECF0] hover:bg-[#F8F9FB] transition"><Users size={14} />{reactorCount}人{boardAudience.length ? <span className="text-[#98A2B3] font-normal">/{boardAudience.length}</span> : null}</button>
                                             <div className="ml-auto flex items-center gap-0.5">
                                                 <button onClick={e => { e.stopPropagation(); boardToggleBm(p.id); }} title={bm ? 'ブックマーク解除' : 'ブックマーク'} className={`w-8 h-8 flex items-center justify-center rounded-lg transition ${bm ? 'text-brand-600 bg-brand-50' : 'text-[#98A2B3] hover:bg-[#F2F4F7]'}`}><BmIcon on={bm} /></button>
                                                 {canManage && (
@@ -10212,6 +10359,50 @@
                                             </div>
                                         </div>
                                     </div>
+                                    {/* リアクション状況モーダル: 押した人（スタンプ別）／まだ押していない人 */}
+                                    {boardStatusId && (() => {
+                                        const sp = (boardData.posts || []).find(p => p.id === boardStatusId);
+                                        if (!sp) return null;
+                                        const reactions = sp.reactions && typeof sp.reactions === 'object' ? sp.reactions : {};
+                                        const entries = Object.entries(reactions).filter(([, ids]) => (ids || []).length > 0);
+                                        const reactedIds = new Set(entries.flatMap(([, ids]) => (ids || []).map(String)));
+                                        const nameFor = (id) => chatResolveName(id, (boardAudience.find(a => a.id === String(id)) || {}).name || 'スタッフ');
+                                        const notYet = boardAudience.filter(a => !reactedIds.has(a.id));
+                                        return (
+                                            <div className="fixed inset-0 z-[60] flex items-end md:items-center justify-center bg-black/40 p-0 md:p-4" onClick={() => setBoardStatusId('')}>
+                                                <div className="bg-white w-full md:max-w-lg md:rounded-2xl rounded-t-2xl shadow-2xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                                                    <div className="flex items-center justify-between px-5 py-4 border-b border-[#EAECF0]">
+                                                        <div>
+                                                            <div className="text-[15px] font-semibold text-[#111827]">リアクション状況</div>
+                                                            <div className="text-[12px] text-[#98A2B3] mt-0.5 truncate max-w-[260px]">{sp.title || sp.text || 'お知らせ'}</div>
+                                                        </div>
+                                                        <button onClick={() => setBoardStatusId('')} className="w-8 h-8 flex items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F2F4F7]"><X size={18} /></button>
+                                                    </div>
+                                                    <div className="overflow-y-auto px-5 py-4 space-y-5">
+                                                        <div className="flex items-center gap-4 text-[13px]">
+                                                            <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500" />押した {reactedIds.size}人</span>
+                                                            <span className="inline-flex items-center gap-1.5 font-semibold text-[#98A2B3]"><span className="w-2 h-2 rounded-full bg-[#D0D5DD]" />未リアクション {notYet.length}人</span>
+                                                        </div>
+                                                        <div>
+                                                            <div className="text-[12px] font-bold text-[#344054] mb-2">スタンプ別</div>
+                                                            {entries.length === 0 ? <div className="text-[13px] text-[#98A2B3]">まだ誰も押していません。</div>
+                                                             : <div className="space-y-2.5">{entries.map(([emo, ids]) => (
+                                                                <div key={emo} className="flex items-start gap-2.5">
+                                                                    <span className="text-[18px] leading-none mt-0.5 shrink-0">{emo}</span>
+                                                                    <div className="flex flex-wrap gap-1.5">{(ids || []).map(id => <span key={id} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#F2F4F7] text-[12px] font-medium text-[#344054]">{nameFor(id)}</span>)}</div>
+                                                                </div>))}</div>}
+                                                        </div>
+                                                        <div>
+                                                            <div className="text-[12px] font-bold text-[#344054] mb-2">まだ押していない人（{notYet.length}）</div>
+                                                            {boardAudience.length === 0 ? <div className="text-[13px] text-[#98A2B3]">スタッフ一覧が未取得です（管理者が一度ログインすると全社の一覧が同期されます）。</div>
+                                                             : notYet.length === 0 ? <div className="text-[13px] text-emerald-700 font-semibold">全員がリアクション済みです 🎉</div>
+                                                             : <div className="flex flex-wrap gap-1.5">{notYet.map(a => <span key={a.id} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white border border-[#EAECF0] text-[12px] font-medium text-[#667085]">{a.name}{a.shop && <span className="text-[#B0B7C3]">・{a.shop}</span>}</span>)}</div>}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
                                 </div>
                             );
                         })()}

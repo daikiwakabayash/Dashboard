@@ -335,6 +335,13 @@ export default async function handler(req, res) {
         await blobSet(BOARD_KEY, { posts: nextPosts, reads }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true });
       }
+      if (action === 'react' && body.id && body.emoji && body.staffId) {
+        const nextPosts = posts.map(p => p && p.id === String(body.id) ? { ...p, reactions: toggleReaction(p.reactions, String(body.emoji), String(body.staffId)) } : p);
+        // リアクション＝閲覧とみなし、その人の既読も進める
+        const nextReads = { ...reads, [String(body.staffId)]: Math.max(Number(reads[String(body.staffId)]) || 0, Date.now()) };
+        await blobSet(BOARD_KEY, { posts: nextPosts, reads: nextReads }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
       if (action === 'delete' && body.id) {
         const nextPosts = posts.filter(p => {
           if (!p || p.id !== String(body.id)) return true;
@@ -432,6 +439,7 @@ export default async function handler(req, res) {
           id: r.id ? String(r.id) : genId('room'),
           kind: (r.kind === 'dm' || r.kind === 'group') ? r.kind : 'group',
           name: String(r.name || '').slice(0, 60),
+          icon: String(r.icon || '').slice(0, 16),
           shop: String(r.shop || ''),
           members: (Array.isArray(r.members) ? r.members : []).map(String).slice(0, 500),
           createdBy: String(r.createdBy || ''),
@@ -440,6 +448,34 @@ export default async function handler(req, res) {
         const nextRooms = rooms.filter(x => x && x.id !== room.id).concat(room);
         await save({ rooms: nextRooms });
         return res.status(200).json({ ok: true, room });
+      }
+
+      // グループのメンバー変更（招待/退会）。group のみ・メンバー or root。
+      if (action === 'setMembers' && body.roomId && Array.isArray(body.members)) {
+        const rid = String(body.roomId);
+        const room = rooms.find(r => r && r.id === rid);
+        if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
+        const isMember = (room.members || []).map(String).includes(String(body.staffId));
+        if (!(body.root || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const members = [...new Set(body.members.map(String))].slice(0, 500);
+        const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, members } : r);
+        await save({ rooms: nextRooms });
+        return res.status(200).json({ ok: true, members });
+      }
+
+      // グループ名・アイコン変更。group のみ・メンバー or root。
+      if (action === 'setRoom' && body.roomId) {
+        const rid = String(body.roomId);
+        const room = rooms.find(r => r && r.id === rid);
+        if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
+        const isMember = (room.members || []).map(String).includes(String(body.staffId));
+        if (!(body.root || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const patch = {};
+        if (typeof body.name === 'string') patch.name = body.name.slice(0, 60);
+        if (typeof body.icon === 'string') patch.icon = body.icon.slice(0, 16);
+        const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, ...patch } : r);
+        await save({ rooms: nextRooms });
+        return res.status(200).json({ ok: true, room: { ...room, ...patch } });
       }
 
       // メッセージ送信（画像は先に uploadImage で入れて imgIds を渡す）

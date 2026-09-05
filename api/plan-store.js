@@ -376,7 +376,8 @@ export default async function handler(req, res) {
       }
       const cur = (await blobGet(PROFILE_KEY, hasKV, hasSB, gas)) || {};
       const profiles = (cur.profiles && typeof cur.profiles === 'object') ? cur.profiles : {};
-      if (req.method === 'GET') return res.status(200).json({ profiles, configured: true });
+      const hidden = Array.isArray(cur.hidden) ? cur.hidden.map(String) : []; // 組織図から非表示にした人（root操作）
+      if (req.method === 'GET') return res.status(200).json({ profiles, hidden, configured: true });
 
       const body = req.body || {};
       const action = body.action;
@@ -413,7 +414,7 @@ export default async function handler(req, res) {
           updatedAt: new Date().toISOString(),
         };
         const next = { ...profiles, [pid]: clean };
-        await blobSet(PROFILE_KEY, { profiles: next }, hasKV, hasSB, gas);
+        await blobSet(PROFILE_KEY, { profiles: next, hidden }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true, profile: clean });
       }
 
@@ -422,8 +423,22 @@ export default async function handler(req, res) {
         const pid = String(body.pid);
         if (!(body.root || String(body.staffId) === pid)) return res.status(403).json({ ok: false, error: 'forbidden' });
         const next = { ...profiles }; delete next[pid];
-        await blobSet(PROFILE_KEY, { profiles: next }, hasKV, hasSB, gas);
+        await blobSet(PROFILE_KEY, { profiles: next, hidden }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true });
+      }
+
+      // 組織図から非表示/再表示（root専用）。SalonOne由来の人はこのリストで隠す。
+      if (action === 'hide' && body.id) {
+        if (!body.root) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const nextHidden = [...new Set([...hidden, String(body.id)])].slice(0, 5000);
+        await blobSet(PROFILE_KEY, { profiles, hidden: nextHidden }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, hidden: nextHidden });
+      }
+      if (action === 'unhide' && body.id) {
+        if (!body.root) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const nextHidden = hidden.filter(x => x !== String(body.id));
+        await blobSet(PROFILE_KEY, { profiles, hidden: nextHidden }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, hidden: nextHidden });
       }
 
       return res.status(400).json({ ok: false, error: 'invalid profile action' });

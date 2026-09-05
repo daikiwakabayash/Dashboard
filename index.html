@@ -2292,7 +2292,7 @@
             const [orgMonth, setOrgMonth] = useState(() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}`; });
             const [orgSales, setOrgSales] = useState({});   // { `${shopId}__${YYYY-MM}`: [{id,name,gross}] }
             // ── プロフィール（組織図のホバー表示・本人が編集・店舗割当の上書き） ──
-            const [profileData, setProfileData] = useState({ profiles: {}, loaded: false, configured: true });
+            const [profileData, setProfileData] = useState({ profiles: {}, hidden: [], loaded: false, configured: true });
             const [profileEdit, setProfileEdit] = useState(null); // 編集中ドラフト or null
             const [profileView, setProfileView] = useState(null); // モバイル等でタップ表示中の pid
             const [profileSaving, setProfileSaving] = useState(false);
@@ -2300,8 +2300,17 @@
             // 本人の識別子: SSO/staffは staffId、オーナー(settlementアカウント)は owner:<名前>
             const myPid = String(authState.staffId || '') || (authState.owner && authState.owner !== '__root__' ? `owner:${authState.owner}` : '');
             const profileLoad = async () => {
-                try { const r = await fetch('/api/plan-store?type=profile'); const j = await r.json().catch(() => ({})); setProfileData({ profiles: (j.profiles && typeof j.profiles === 'object') ? j.profiles : {}, loaded: true, configured: j.configured !== false }); }
+                try { const r = await fetch('/api/plan-store?type=profile'); const j = await r.json().catch(() => ({})); setProfileData({ profiles: (j.profiles && typeof j.profiles === 'object') ? j.profiles : {}, hidden: Array.isArray(j.hidden) ? j.hidden.map(String) : [], loaded: true, configured: j.configured !== false }); }
                 catch { setProfileData(d => ({ ...d, loaded: true })); }
+            };
+            // 組織図から非表示/再表示（root専用）。楽観更新→サーバー反映。
+            const orgHide = async (id) => {
+                setProfileData(d => ({ ...d, hidden: [...new Set([...(d.hidden || []), String(id)])] }));
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'hide', id: String(id), root: !!authState.root }) }); await profileLoad(); } catch {}
+            };
+            const orgUnhide = async (id) => {
+                setProfileData(d => ({ ...d, hidden: (d.hidden || []).filter(x => x !== String(id)) }));
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'unhide', id: String(id), root: !!authState.root }) }); await profileLoad(); } catch {}
             };
             const profileUploadImage = (file) => chatUploadImageTo('profile', file);
             const profileSave = async (pid, profile) => {
@@ -10569,6 +10578,7 @@
                             const ownerMap = stOwnerShops || {};
                             const isRoot = !!authState.root;
                             const profiles = profileData.profiles || {};
+                            const hidden = new Set((profileData.hidden || []).map(String)); // rootが組織図から非表示にした人
                             const profList = Object.values(profiles).filter(Boolean);
                             // セラピストのプロフィール（staffId基準）。プロフィール名があれば表示名を優先。
                             const profByStaffId = {}; profList.forEach(p => { if (p.kind !== 'owner') profByStaffId[String(p.pid)] = p; });
@@ -10583,18 +10593,18 @@
                                 const out = new Map();
                                 Object.entries(ownerMap).forEach(([o, pats]) => { if (ownerProfNames.has(o)) return; if (Array.isArray(pats) && pats.some(p => p && String(name).includes(p))) out.set(o, { name: o, pid: `owner:${o}` }); });
                                 ownerProfList.forEach(p => { if ((p.shops || []).includes(name)) { const dn = p.nameKanji || (String(p.pid).startsWith('owner:') ? String(p.pid).slice(6) : p.pid); out.set(p.pid, { name: dn, pid: String(p.pid) }); } });
-                                return [...out.values()];
+                                return [...out.values()].filter(o => !hidden.has(o.pid)); // root非表示を除外
                             };
-                            // 既定＝在籍ロスター（読み込み不要・即表示）。楽トレ/ヘルプ/受付/役職は除外。＋プロフィール上書き。
+                            // 既定＝在籍ロスター（読み込み不要・即表示）。楽トレ/ヘルプ/受付/役職は除外。＋プロフィール上書き。root非表示も除外。
                             const rosterStaff = (id, name) => {
-                                const base = (soStaffs || []).filter(s => String(s.shop_id) === String(id) && !s.deleted && !isNonTherapistName(s.name) && s.acceptsRes !== false && !reassigned.has(String(s.id))).map(s => ({ id: String(s.id), name: dispName(s.id, s.name) }));
-                                const added = (profStaffByShop[name] || []).map(x => ({ id: x.id, name: x.name || dispName(x.id) || (((soStaffs || []).find(s => String(s.id) === x.id) || {}).name) || 'スタッフ' }));
+                                const base = (soStaffs || []).filter(s => String(s.shop_id) === String(id) && !s.deleted && !isNonTherapistName(s.name) && s.acceptsRes !== false && !reassigned.has(String(s.id)) && !hidden.has(String(s.id))).map(s => ({ id: String(s.id), name: dispName(s.id, s.name) }));
+                                const added = (profStaffByShop[name] || []).filter(x => !hidden.has(String(x.id))).map(x => ({ id: x.id, name: x.name || dispName(x.id) || (((soStaffs || []).find(s => String(s.id) === x.id) || {}).name) || 'スタッフ' }));
                                 const seen = new Set(); const out = [];
                                 for (const s of [...base, ...added]) { if (seen.has(s.id)) continue; seen.add(s.id); out.push(s); }
                                 return out;
                             };
-                            // 売上モード時：その月に売上>0のスタッフ。未取得はnull（集計中）。
-                            const salesStaff = (id) => { const s = orgSales[`${id}__${orgMonth}`]; if (!s) return null; return s.filter(x => x.gross > 0 && !isNonTherapistName(x.name)).sort((a, b) => b.gross - a.gross).map(x => ({ id: String(x.id), name: dispName(x.id, x.name) })); };
+                            // 売上モード時：その月に売上>0のスタッフ。未取得はnull（集計中）。root非表示も除外。
+                            const salesStaff = (id) => { const s = orgSales[`${id}__${orgMonth}`]; if (!s) return null; return s.filter(x => x.gross > 0 && !isNonTherapistName(x.name) && !hidden.has(String(x.id))).sort((a, b) => b.gross - a.gross).map(x => ({ id: String(x.id), name: dispName(x.id, x.name) })); };
                             const staffFor = (id, name) => orgSalesMode ? salesStaff(id) : rosterStaff(id, name); // null=集計中(売上モードのみ)
                             const q = orgSearch.trim();
                             const nameMatch = (sh) => { if (String(sh.name).includes(q)) return true; if (ownersForShop(sh.name).some(o => String(o.name).includes(q))) return true; const ss = staffFor(sh.id, sh.name) || []; return ss.some(s => String(s.name).includes(q)); };
@@ -10621,6 +10631,19 @@
                                     sns: { instagram: '', x: '', youtube: '', tiktok: '', ...(p.sns || {}) },
                                     shops: Array.isArray(p.shops) ? [...p.shops] : [],
                                 });
+                            };
+                            // root: 新規に人を追加（SalonOneに居ない人・手動追加）。manual:のpidでプロフィール作成。
+                            const openAddPerson = (shopName, kind) => {
+                                setProfileView(null);
+                                setProfileEdit({ pid: `manual:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`, kind: kind || 'therapist', nameKanji: '', nameKana: '', bio: '', mainImg: '', subImgs: [], sns: { instagram: '', x: '', youtube: '', tiktok: '' }, shops: shopName ? [shopName] : [] });
+                            };
+                            // root: 組織図から人を削除。プロフィールがあれば削除、SalonOne由来/設定オーナーは非表示リストで隠す。
+                            const orgRemove = async (pid, name) => {
+                                if (!window.confirm(`「${name}」を組織図から削除しますか？`)) return;
+                                setProfileView(null);
+                                if (profiles[pid]) { try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'delete', pid, staffId: myPid, root: true }) }); } catch {} }
+                                if (/^\d+$/.test(String(pid)) || String(pid).startsWith('owner:')) await orgHide(pid);
+                                else await profileLoad();
                             };
                             // ホバー/タップで出るプロフィールカード（写真・名前・自己紹介・SNS・DM・編集）
                             const snsMeta = { instagram: { label: 'Instagram', color: 'text-pink-600' }, x: { label: 'X', color: 'text-[#111827]' }, youtube: { label: 'YouTube', color: 'text-red-600' }, tiktok: { label: 'TikTok', color: 'text-[#111827]' }, facebook: { label: 'Facebook', color: 'text-blue-600' }, line: { label: 'LINE', color: 'text-green-600' }, website: { label: 'Web', color: 'text-brand-600' } };
@@ -10659,7 +10682,8 @@
                                             )}
                                             <div className="flex items-center gap-1.5 mt-3 pt-3 border-t border-[#F2F4F7]">
                                                 {numericId && !isMe && <button onClick={() => { setProfileView(null); startDm(pid, dispNm); }} className="flex-1 inline-flex items-center justify-center gap-1.5 h-8 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[12px] font-semibold transition"><MessageSquare size={13} />メッセージ</button>}
-                                                {canEdit && <button onClick={() => openProfileEditor(pid, dispNm, kind)} className={`${numericId && !isMe ? '' : 'flex-1'} inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-lg border border-[#EAECF0] text-[12px] font-semibold text-[#344054] hover:bg-[#F8F9FB] transition`}>{isMe ? '編集' : '本部編集'}</button>}
+                                                {canEdit && <button onClick={() => openProfileEditor(pid, dispNm, kind)} className="flex-1 inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-lg border border-[#EAECF0] text-[12px] font-semibold text-[#344054] hover:bg-[#F8F9FB] transition">{isMe ? '編集' : '本部編集'}</button>}
+                                                {isRoot && <button onClick={() => orgRemove(pid, dispNm)} title="組織図から削除" className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-[#EAECF0] text-[#98A2B3] hover:text-rose-600 hover:bg-rose-50 transition shrink-0"><Trash2 size={13} /></button>}
                                             </div>
                                         </div>
                                     </span>
@@ -10717,6 +10741,10 @@
                                                                     {staff == null ? <div className="flex items-center gap-1.5 text-[12px] text-[#CBD2DC]"><Loader2 size={13} className="animate-spin" />集計中…</div>
                                                                      : staff.length === 0 ? <div className="text-[12px] text-[#CBD2DC]">{orgSalesMode ? 'この月の稼働スタッフはいません' : '在籍スタッフ情報なし'}</div>
                                                                      : <div className="flex flex-wrap gap-1.5">{staff.map(s => ProfilePop({ pid: s.id, name: s.name, kind: 'therapist' }))}</div>}
+                                                                    {isRoot && <div className="flex items-center gap-1.5 mt-3 pt-3 border-t border-[#F2F4F7]">
+                                                                        <button onClick={() => openAddPerson(shop.name, 'therapist')} className="inline-flex items-center gap-1 text-[12px] font-semibold text-[#667085] hover:text-brand-600 hover:bg-brand-50 border border-[#EAECF0] rounded-lg px-2.5 py-1 transition"><Plus size={13} />スタッフ</button>
+                                                                        <button onClick={() => openAddPerson(shop.name, 'owner')} className="inline-flex items-center gap-1 text-[12px] font-semibold text-[#667085] hover:text-brand-600 hover:bg-brand-50 border border-[#EAECF0] rounded-lg px-2.5 py-1 transition"><Plus size={13} />👑 オーナー</button>
+                                                                    </div>}
                                                                 </div>
                                                             );
                                                         })}

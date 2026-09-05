@@ -25,7 +25,7 @@
 
     <!-- Preconnect for faster loading -->
     <link rel="preconnect" href="https://cdn.tailwindcss.com">
-    <link rel="preconnect" href="https://unpkg.com">
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net">
     <link rel="preconnect" href="https://script.google.com">
     <link rel="dns-prefetch" href="https://script.google.com">
@@ -98,9 +98,9 @@
         }
     </script>
 
-    <!-- React & ReactDOM (Production UMD). defer=描画をブロックせず先にスプラッシュを表示 -->
-    <script defer crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
-    <script defer crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+    <!-- React & ReactDOM (Production UMD). defer=描画をブロックせず先にスプラッシュを表示。CDNはCloudflare cdnjs（高速・キャッシュ良） -->
+    <script defer crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script defer crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 
     <!-- Babel Standalone (version pinned to avoid breaking changes)。deferで初期描画をブロックしない -->
     <script defer crossorigin src="https://unpkg.com/@babel/standalone@7.26.10/babel.min.js"></script>
@@ -374,7 +374,7 @@
             background: linear-gradient(135deg, #FFF4EE 0%, #FFE4D6 50%, #FFFBF7 100%);
         }
         .splash-screen.fade-out {
-            animation: splashFadeOut 0.6s ease-out forwards;
+            animation: splashFadeOut 0.3s ease-out forwards;
         }
         .splash-logo-container {
             text-align: center;
@@ -453,8 +453,9 @@
         .stagger-4 { animation-delay: 0.2s; }
         .stagger-5 { animation-delay: 0.25s; }
     </style>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script>if(window.pdfjsLib)pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
+    <!-- pdf.js は財務PDF機能でのみ使用。deferで初回描画をブロックしない（deferはDOMContentLoaded前に順序実行される） -->
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>document.addEventListener('DOMContentLoaded',function(){if(window.pdfjsLib)pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';});</script>
 </head>
 <body class="bg-slate-50">
     <!-- Splash Screen (pure HTML/CSS, shown before React loads) -->
@@ -1539,13 +1540,15 @@
             }, []);
 
             // ── スプラッシュスクリーン制御 ──
+            // このeffectはReactが実際にマウント（初回描画）した後に走るので、
+            // 追加の待ち時間は最小限にして体感速度を上げる（旧: 1200ms保持+600msフェード＝約1.8秒の固定待ち）。
             useEffect(() => {
                 const splash = document.getElementById('splash');
                 if (!splash) return;
                 const timer = setTimeout(() => {
                     splash.classList.add('fade-out');
-                    setTimeout(() => { splash.remove(); }, 600);
-                }, 1200);
+                    setTimeout(() => { splash.remove(); }, 300);
+                }, 120);
                 return () => clearTimeout(timer);
             }, []);
 

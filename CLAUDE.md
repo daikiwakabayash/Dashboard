@@ -22,7 +22,11 @@ npm run test:watch  # ウォッチモード
 ### デプロイ
 Vercelにpushすると自動デプロイ。
 
-**ビルド（初回表示の高速化）**: `index.html` は開発上のソース（`<script type="text/babel">` のまま編集）。Vercelビルド時に `scripts/precompile.mjs`（`vercel.json` の `buildCommand`）が esbuild で JSX→JS に事前変換し、`@babel/standalone` を除去した `index.html` を配信する（ブラウザ内Babelコンパイルを排除）。ローカルは変換不要でそのまま動作。ビルドが失敗してもVercelは直前の正常デプロイを配信するため本番は壊れない。
+**ビルド（初回表示の高速化）**: `index.html` は開発上のソース（`<script type="text/babel">` のまま編集）。Vercelビルド時に `scripts/precompile.mjs`（`vercel.json` の `buildCommand`）が以下を実行し `public/` へ出力：
+1. **JSX事前変換**: esbuild で JSX→JS に変換し `@babel/standalone` を除去（ブラウザ内Babelコンパイルを排除）。
+2. **Tailwind事前ビルド**: `tailwindcss`(v3) で `styles/tailwind.css` → `public/tailwind.css`（~24KB gzip）を生成し、`index.html`/`owner.html` の `cdn.tailwindcss.com`（Play CDN・約400KB JS＋ブラウザ内JIT）を `<link href="/tailwind.css">` に差し替え。設定は `tailwind.config.js`（theme.extend は `index.html` 内インライン設定と一致させること。`bg-${x.color}` 等の**文字列補間で動的生成されるクラスは safelist** でカバー）。⚠️ Tailwindビルドが失敗した場合は自動でPlay CDNのまま出力（フォールバック＝見た目は壊れない）。
+- ローカルは変換不要でそのまま動作（Play CDNで表示）。ビルドが失敗してもVercelは直前の正常デプロイを配信するため本番は壊れない。
+- React/ReactDOM は Cloudflare **cdnjs**（defer）から読み込み。pdf.js も defer で初回描画をブロックしない。スプラッシュの固定待ちは最小化済み。
 
 ## テスト構成
 

@@ -136,5 +136,11 @@ describe('chat: groupRooms / dm helpers', () => {
     it('extractMentions returns [] when no @token matches', () => {
       expect(extractMentions('メンションなし', [{ id: '1', name: '田中' }])).toEqual([]);
     });
+    it('supports full-width ＠ (Japanese keyboard)', () => {
+      expect(parseMentionQuery('やあ ＠若')).toBe('若');
+      expect(extractMentions('＠田中 よろしく', [{ id: '2', name: '田中' }]).map(x => x.id)).toEqual(['2']);
+      const r = applyMention('やあ ＠若', 5, '若林 正樹');
+      expect(r.value).toBe('やあ @若林 正樹 ');
+    });
   });
 });

@@ -662,18 +662,19 @@
         // ── @メンション（社内チャット） ──────────────────────────────
         const chatEscapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         // カーソル直前の「@入力中」を返す（例: "…@若" → "若"）。無ければ null。空文字（"@"直後）も返す。
-        const chatParseMention = (textBeforeCaret) => { const m = /(?:^|[\s　])@([^\s@　]{0,40})$/.exec(String(textBeforeCaret || '')); return m ? m[1] : null; };
+        // 半角@・全角＠の両方をトリガーにする（日本語キーボードで＠になっても機能する）。
+        const chatParseMention = (textBeforeCaret) => { const m = /(?:^|[\s　])[@＠]([^\s@＠　]{0,40})$/.exec(String(textBeforeCaret || '')); return m ? m[1] : null; };
         // カーソル位置の「@入力中」を「@名前 」に置換。{ value, caret } を返す。
         const chatApplyMention = (value, caret, name) => {
             const v = String(value); const before = v.slice(0, caret); const after = v.slice(caret);
-            const m = /(^|[\s　])@([^\s@　]{0,40})$/.exec(before);
+            const m = /(^|[\s　])[@＠]([^\s@＠　]{0,40})$/.exec(before);
             const start = m ? (before.length - m[0].length + m[1].length) : caret; // 先頭の空白は残す
             const insert = '@' + name + ' ';
             return { value: v.slice(0, start) + insert + after, caret: start + insert.length };
         };
-        // 本文から候補({id,name})に一致する @メンションを抽出（長い名前優先・重複排除）。
+        // 本文から候補({id,name})に一致する @メンションを抽出（長い名前優先・重複排除）。全角＠も半角@として扱う。
         const chatExtractMentions = (text, candidates) => {
-            let t = String(text || ''); const out = []; const seen = new Set();
+            let t = String(text || '').replace(/＠/g, '@'); const out = []; const seen = new Set();
             (candidates || []).slice().sort((a, b) => String(b.name || '').length - String(a.name || '').length).forEach(c => {
                 if (!c || !c.name || seen.has(String(c.id))) return;
                 const token = '@' + c.name;
@@ -681,13 +682,13 @@
             });
             return out;
         };
-        // 本文をURLリンク＋@メンションのピル表示に整形。
+        // 本文をURLリンク＋@メンションのピル表示に整形。全角＠も半角@に正規化して表示。
         const chatRenderText = (text, mentionNames) => {
             const names = Array.from(new Set([...(mentionNames || []).filter(Boolean), '全員'])).sort((a, b) => b.length - a.length);
             const mAlt = names.map(n => '@' + chatEscapeRe(n)).join('|');
             const re = new RegExp('(https?:\\/\\/[^\\s<>"\']+' + (mAlt ? '|' + mAlt : '') + ')', 'g');
             const mRe = mAlt ? new RegExp('^(?:' + mAlt + ')$') : null;
-            return String(text || '').split(re).map((p, i) => {
+            return String(text || '').replace(/＠/g, '@').split(re).map((p, i) => {
                 if (/^https?:\/\//.test(p)) return <a key={i} href={p} target="_blank" rel="noopener noreferrer" className="text-brand-600 hover:underline break-all">{p}</a>;
                 if (mRe && mRe.test(p)) return <span key={i} className="text-brand-700 bg-brand-50 rounded px-1 font-semibold">{p}</span>;
                 return <React.Fragment key={i}>{p}</React.Fragment>;

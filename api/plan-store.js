@@ -589,6 +589,10 @@ export default async function handler(req, res) {
           text,
           imgIds: (Array.isArray(m.imgIds) ? m.imgIds : []).map(String).slice(0, 6),
           links: extractLinks(text),
+          mentions: (Array.isArray(m.mentions) ? m.mentions : [])
+            .filter(x => x && x.id && x.name)
+            .map(x => ({ id: String(x.id).slice(0, 64), name: String(x.name).slice(0, 80) }))
+            .slice(0, 30),
           reactions: {},
           createdAt: new Date().toISOString(),
         };
@@ -605,6 +609,21 @@ export default async function handler(req, res) {
             : (room.members || []).map(String).filter(id => id !== rec.fromStaffId); // 送信者以外のメンバー
           if (!(Array.isArray(targets) && targets.length === 0)) {
             sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: rid, title, body: bodyText, url: '/?tab=chat' }, targets);
+          }
+        }
+        // メンション通知: 店舗ルーム等でルーム通知の対象外でも、名指しされた本人には必ず届ける。
+        // @全員(__all__)は全員宛（announceで既に全員に送っている場合は送信者以外へ）。
+        if (rec.mentions.length && room) {
+          const roomTitle = room.kind === 'dm' ? rec.fromName : (room.name || 'チャット');
+          const mBody = (rec.text || '📷 画像').slice(0, 120);
+          const hasAll = rec.mentions.some(x => x.id === '__all__');
+          const mentionTargets = hasAll ? null : rec.mentions.map(x => String(x.id)).filter(id => id && id !== rec.fromStaffId);
+          // group/dm/announce は上でルーム通知済み。店舗ルームや、@全員以外の名指しのみ追加送信。
+          if (room.kind === 'store' || (mentionTargets && mentionTargets.length)) {
+            const t2 = (mentionTargets && mentionTargets.length) ? mentionTargets : null;
+            if (!(Array.isArray(t2) && t2.length === 0)) {
+              sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: rid, title: `🔔 ${rec.fromName} さんがメンション`, body: `${roomTitle}: ${mBody}`, url: '/?tab=chat' }, t2);
+            }
           }
         }
         return res.status(200).json({ ok: true, message: rec });

@@ -659,6 +659,41 @@
             ? <a key={i} href={p} target="_blank" rel="noopener noreferrer" className="text-brand-600 hover:underline break-all">{p}</a>
             : <React.Fragment key={i}>{p}</React.Fragment>);
 
+        // ── @メンション（社内チャット） ──────────────────────────────
+        const chatEscapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // カーソル直前の「@入力中」を返す（例: "…@若" → "若"）。無ければ null。空文字（"@"直後）も返す。
+        const chatParseMention = (textBeforeCaret) => { const m = /(?:^|[\s　])@([^\s@　]{0,40})$/.exec(String(textBeforeCaret || '')); return m ? m[1] : null; };
+        // カーソル位置の「@入力中」を「@名前 」に置換。{ value, caret } を返す。
+        const chatApplyMention = (value, caret, name) => {
+            const v = String(value); const before = v.slice(0, caret); const after = v.slice(caret);
+            const m = /(^|[\s　])@([^\s@　]{0,40})$/.exec(before);
+            const start = m ? (before.length - m[0].length + m[1].length) : caret; // 先頭の空白は残す
+            const insert = '@' + name + ' ';
+            return { value: v.slice(0, start) + insert + after, caret: start + insert.length };
+        };
+        // 本文から候補({id,name})に一致する @メンションを抽出（長い名前優先・重複排除）。
+        const chatExtractMentions = (text, candidates) => {
+            let t = String(text || ''); const out = []; const seen = new Set();
+            (candidates || []).slice().sort((a, b) => String(b.name || '').length - String(a.name || '').length).forEach(c => {
+                if (!c || !c.name || seen.has(String(c.id))) return;
+                const token = '@' + c.name;
+                if (t.includes(token)) { seen.add(String(c.id)); out.push({ id: String(c.id), name: String(c.name) }); t = t.split(token).join(' '); }
+            });
+            return out;
+        };
+        // 本文をURLリンク＋@メンションのピル表示に整形。
+        const chatRenderText = (text, mentionNames) => {
+            const names = Array.from(new Set([...(mentionNames || []).filter(Boolean), '全員'])).sort((a, b) => b.length - a.length);
+            const mAlt = names.map(n => '@' + chatEscapeRe(n)).join('|');
+            const re = new RegExp('(https?:\\/\\/[^\\s<>"\']+' + (mAlt ? '|' + mAlt : '') + ')', 'g');
+            const mRe = mAlt ? new RegExp('^(?:' + mAlt + ')$') : null;
+            return String(text || '').split(re).map((p, i) => {
+                if (/^https?:\/\//.test(p)) return <a key={i} href={p} target="_blank" rel="noopener noreferrer" className="text-brand-600 hover:underline break-all">{p}</a>;
+                if (mRe && mRe.test(p)) return <span key={i} className="text-brand-700 bg-brand-50 rounded px-1 font-semibold">{p}</span>;
+                return <React.Fragment key={i}>{p}</React.Fragment>;
+            });
+        };
+
         // 組織図: 店舗名から地理ランク(北→南)を推定（lib/geo.js と同仕様のフロント版）
         const ORG_KW = { '北海道':1,'札幌':1,'旭川':1,'函館':1,'すすきの':1,'青森':2,'岩手':3,'盛岡':3,'宮城':4,'仙台':4,'秋田':5,'山形':6,'福島':7,'郡山':7,'いわき':7,'茨城':8,'水戸':8,'つくば':8,'栃木':9,'宇都宮':9,'群馬':10,'高崎':10,'前橋':10,'埼玉':11,'大宮':11,'浦和':11,'川越':11,'所沢':11,'越谷':11,'川口':11,'春日部':11,'千葉':12,'船橋':12,'柏':12,'松戸':12,'津田沼':12,'海浜幕張':12,'幕張':12,'東京':13,'銀座':13,'新宿':13,'渋谷':13,'恵比寿':13,'池袋':13,'品川':13,'五反田':13,'目黒':13,'中目黒':13,'池尻大橋':13,'三軒茶屋':13,'下北沢':13,'自由が丘':13,'二子玉川':13,'大森':13,'蒲田':13,'大井町':13,'中野':13,'荻窪':13,'高円寺':13,'阿佐ヶ谷':13,'吉祥寺':13,'錦糸町':13,'押上':13,'亀戸':13,'北千住':13,'上野':13,'浅草':13,'秋葉原':13,'日暮里':13,'人形町':13,'茅場町':13,'八重洲':13,'東京駅':13,'有楽町':13,'新橋':13,'田町':13,'浜松町':13,'赤坂':13,'六本木':13,'飯田橋':13,'神楽坂':13,'大塚':13,'巣鴨':13,'十条':13,'赤羽':13,'成増':13,'練馬':13,'光が丘':13,'笹塚':13,'中野坂上':13,'方南町':13,'三鷹':13,'武蔵境':13,'国分寺':13,'国立':13,'立川':13,'八王子':13,'町田':13,'府中':13,'調布':13,'西東京':13,'田無':13,'神奈川':14,'横浜':14,'川崎':14,'武蔵小杉':14,'溝の口':14,'鶴見':14,'関内':14,'桜木町':14,'藤沢':14,'大和':14,'海老名':14,'厚木':14,'相模':14,'新百合ヶ丘':14,'新潟':15,'富山':16,'石川':17,'金沢':17,'福井':18,'山梨':19,'甲府':19,'長野':20,'松本':20,'岐阜':21,'静岡':22,'浜松':22,'沼津':22,'愛知':23,'名古屋':23,'八事':23,'栄':23,'金山':23,'豊田':23,'岡崎':23,'三重':24,'志摩':24,'四日市':24,'滋賀':25,'大津':25,'草津':25,'京都':26,'四条烏丸':26,'烏丸':26,'河原町':26,'京都駅':26,'大阪':27,'梅田':27,'難波':27,'なんば':27,'天王寺':27,'本町':27,'心斎橋':27,'江坂':27,'天満':27,'天六':27,'中百舌鳥':27,'堺':27,'京橋':27,'淀屋橋':27,'兵庫':28,'神戸':28,'三宮':28,'西宮':28,'尼崎':28,'姫路':28,'奈良':29,'和歌山':30,'鳥取':31,'島根':32,'松江':32,'岡山':33,'広島':34,'山口':35,'徳島':36,'香川':37,'高松':37,'愛媛':38,'松山':38,'高知':39,'福岡':40,'博多':40,'天神':40,'小倉':40,'佐賀':41,'長崎':42,'熊本':43,'大分':44,'宮崎':45,'鹿児島':46,'沖縄':47,'那覇':47,'国際通り':47,'オーストラリア':1000,'シドニー':1000,'メルボルン':1000,'パース':1000,'ブリスベン':1000,'ゴールドコースト':1000,'アデレード':1000,'ケアンズ':1000,'マレーシア':1000,'クアラルンプール':1000,'ペナン':1000,'ジョホール':1000,'モントキアラ':1000,'Sydney':1000,'Melbourne':1000,'Perth':1000,'Brisbane':1000,'Malaysia':1000,'Australia':1000,'KL':1000,'Sunway':1000,'Velocity':1000,'KLCC':1000,'Bangsar':1000,'Damansara':1000,'Cheras':1000,'Petaling':1000,'上溝':14,'相模原':14,'綱島':14,'上大岡':14,'センター南':14,'センター北':14,'都筑':14,'あざみ野':14,'たまプラーザ':14,'青葉台':14,'藤が丘':14,'平塚':14,'茅ヶ崎':14,'戸塚':14,'金沢文庫':14,'横須賀':14,'本厚木':14,'元住吉':14,'日吉':14,'能見台':14,'弘明寺':14,'新馬場':13,'大山':13,'用賀':13,'経堂':13,'千歳烏山':13,'下高井戸':13,'明大前':13,'東中野':13,'高田馬場':13,'大久保':13,'神田':13,'門前仲町':13,'清澄白河':13,'豊洲':13,'月島':13,'勝どき':13,'三田':13,'白金':13,'広尾':13,'麻布十番':13,'表参道':13,'原宿':13,'代々木':13,'初台':13,'幡ヶ谷':13,'永福町':13,'西荻窪':13,'東小金井':13,'武蔵小金井':13,'ひばりヶ丘':13,'田端':13,'王子':13,'西日暮里':13,'綾瀬':13,'金町':13,'亀有':13,'小岩':13,'葛西':13,'上北沢':13,'仙川':13,'勝田台':12,'八千代':12,'新浦安':12,'浦安':12,'本八幡':12,'市川':12,'西船橋':12,'南流山':12,'流山':12,'北習志野':12,'稲毛':12,'蘇我':12,'木更津':12,'武蔵浦和':11,'南浦和':11,'朝霞':11,'志木':11,'ふじみ野':11,'和光':11,'戸田':11,'蕨':11,'太田':10,'浦添':47,'宜野湾':47,'北谷':47,'名護':47,'諫早':42,'佐世保':42,'布施':27,'枚方':27,'高槻':27,'吹田':27,'豊中':27 };
         const ORG_KW_KEYS = Object.keys(ORG_KW).sort((a, b) => b.length - a.length);
@@ -715,6 +750,8 @@
                         const showUnread = !unreadShown && t > (openReadTs || 0) && String(m.fromStaffId) !== String(myId);
                         if (showUnread) unreadShown = true;
                         const mine = String(m.fromStaffId) === String(myId);
+                        // 自分がメンションされているか（@全員 含む）
+                        const iMentioned = !mine && Array.isArray(m.mentions) && m.mentions.some(x => x && (String(x.id) === String(myId) || x.id === '__all__'));
                         const reactions = m.reactions && typeof m.reactions === 'object' ? m.reactions : {};
                         // 既読者（送信者以外で、この投稿以降にルームを開いた＝既読ポインタが投稿時刻以上）
                         const readers = (mine && Array.isArray(readMembers))
@@ -725,7 +762,7 @@
                             <React.Fragment key={m.id}>
                                 {showDay && <div className="flex items-center gap-3 my-3 px-1"><div className="flex-1 h-px bg-[#EAECF0]" /><span className="text-[11px] font-medium text-[#98A2B3]">{fmtDay(m.createdAt)}</span><div className="flex-1 h-px bg-[#EAECF0]" /></div>}
                                 {showUnread && <div className="flex items-center gap-2 my-2 px-1"><div className="flex-1 h-px bg-brand-300" /><span className="text-[11px] font-semibold text-brand-600">ここから未読</span><div className="flex-1 h-px bg-brand-300" /></div>}
-                                <div className="group relative flex items-start gap-3 px-2 py-1.5 rounded-lg hover:bg-[#F8F9FB] transition-colors">
+                                <div className={`group relative flex items-start gap-3 px-2 py-1.5 rounded-lg transition-colors ${iMentioned ? 'bg-brand-50/70 hover:bg-brand-50 ring-1 ring-brand-100' : 'hover:bg-[#F8F9FB]'}`}>
                                     <ChatAvatar name={m.fromName} />
                                     <div className="min-w-0 flex-1">
                                         <div className="flex items-baseline gap-2 flex-wrap">
@@ -733,7 +770,7 @@
                                             {(() => { const sh = resolveShop ? resolveShop(m.fromStaffId, m.fromShop) : m.fromShop; return sh ? <span className="text-[12px] text-[#98A2B3]">{sh}</span> : null; })()}
                                             <span className="text-[11px] text-[#98A2B3]">{fmtTime(m.createdAt)}</span>
                                         </div>
-                                        {m.text && <div className="text-[14px] text-[#111827] leading-relaxed whitespace-pre-wrap break-words mt-0.5" style={{ wordBreak: 'break-word' }}>{chatLinkify(m.text)}</div>}
+                                        {m.text && <div className="text-[14px] text-[#111827] leading-relaxed whitespace-pre-wrap break-words mt-0.5" style={{ wordBreak: 'break-word' }}>{chatRenderText(m.text, (m.mentions || []).map(x => x && x.name).filter(Boolean))}</div>}
                                         {Array.isArray(m.imgIds) && m.imgIds.length > 0 && <div className="mt-2 flex flex-wrap gap-2">{m.imgIds.map(id => <ChatImage key={id} imgId={id} onClick={() => onImageClick && onImageClick(id)} />)}</div>}
                                         {(Object.keys(reactions).length > 0 || pickFor === m.id) && (
                                             <div className="flex items-center gap-1.5 mt-2 flex-wrap">
@@ -2032,6 +2069,8 @@
             const [chatRoomId, setChatRoomId] = useState(null);       // 選択中ルーム（null=一覧表示・モバイル用）
             const [chatDraft, setChatDraft] = useState('');
             const [chatSending, setChatSending] = useState(false);
+            const [chatMention, setChatMention] = useState(null);      // @メンション候補 {query, list:[{id,name}], index} or null
+            const chatTaRef = useRef(null);                            // 本文textarea参照（メンション挿入後のカーソル復元）
             const [chatStaged, setChatStaged] = useState([]);          // 送信前の画像 [{id,dataUrl}]
             const [chatListSearch, setChatListSearch] = useState('');
             // ルームのピン留め（端末ローカル・個人設定）。ピンしたルームは一覧の最上部「固定」に表示。
@@ -2050,6 +2089,20 @@
             const chatResolveShop = (id, fallback) => { const p = (profileData.profiles || {})[String(id)]; return (p && Array.isArray(p.shops) && p.shops[0]) || fallback || ''; };
             const chatMyShop = (Array.isArray(authState.shops) && authState.shops[0]) || '';
             const chatIsRoot = !!authState.root;
+            // @メンション候補（{id,name}）。グループ/DMはメンバー、店舗/全社は全スタッフ。先頭に「全員」。自分は除外。
+            const chatMentionCandidates = (room) => {
+                if (!room) return [];
+                const out = []; const seen = new Set();
+                const add = (id, name) => { id = String(id || ''); name = String(name || '').trim(); if (!id || !name || id === chatMyId || seen.has(id)) return; seen.add(id); out.push({ id, name }); };
+                if (room.kind === 'group' || room.kind === 'dm') {
+                    (room.members || []).forEach(id => add(id, chatResolveName(id, '')));
+                } else {
+                    (soStaffs || []).forEach(s => add(s.id, s.name));
+                    ((chatData.dir && chatData.dir.staff) || []).forEach(s => add(s.id, s.name));
+                }
+                if (room.kind !== 'dm') out.unshift({ id: '__all__', name: '全員' });
+                return out;
+            };
             const CHAT_STAMPS = ['👍', '🙏', '🎉', '🔥', '💛', '😊', '😂', '👏', '✨', '🙌', '💪', '❤️'];
             // ルーム可視判定（lib/chat.js の roomVisibleTo と同じルール）
             const chatRoomVisible = (room, me) => {
@@ -2124,9 +2177,11 @@
                 setChatSending(true);
                 // 送信画像をキャッシュへ（即描画用）
                 chatStaged.forEach(s => { if (s.id && s.dataUrl) chatImgCache[s.id] = s.dataUrl; });
+                const roomForMsg = (chatData.rooms || []).find(r => r.id === chatRoomId);
+                const mentions = t ? chatExtractMentions(t, chatMentionCandidates(roomForMsg)) : [];
                 try {
-                    await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'send', roomId: chatRoomId, msg: { fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds } }) });
-                    setChatDraft(''); setChatStaged([]); setChatEmojiOpen(false);
+                    await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'send', roomId: chatRoomId, msg: { fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions } }) });
+                    setChatDraft(''); setChatStaged([]); setChatEmojiOpen(false); setChatMention(null);
                     await chatLoad();
                 } catch {} finally { setChatSending(false); }
             };
@@ -10070,6 +10125,23 @@
                             const otherRooms = sortByActivity(allRooms.filter(r => !isPinned(r) && matchRoom(r)));
                             const activeRoom = allRooms.find(r => r.id === chatRoomId) || null;
                             const activeMsgs = activeRoom ? (chatData.messages[activeRoom.id] || []) : [];
+                            // @メンション: 入力に応じて候補を更新
+                            const chatOnDraft = (e) => {
+                                const v = e.target.value; setChatDraft(v);
+                                const caret = (e.target.selectionStart != null) ? e.target.selectionStart : v.length;
+                                const q = chatParseMention(v.slice(0, caret));
+                                if (q == null) { setChatMention(null); return; }
+                                const ql = q.toLowerCase();
+                                const list = chatMentionCandidates(activeRoom).filter(c => !q || String(c.name).toLowerCase().includes(ql)).slice(0, 8);
+                                setChatMention(list.length ? { query: q, list, index: 0 } : null);
+                            };
+                            // 候補を選んで @名前 を挿入
+                            const chatPickMention = (name) => {
+                                const ta = chatTaRef.current; const caret = ta ? (ta.selectionStart || chatDraft.length) : chatDraft.length;
+                                const r = chatApplyMention(chatDraft, caret, name);
+                                setChatDraft(r.value); setChatMention(null);
+                                requestAnimationFrame(() => { if (ta) { ta.focus(); try { ta.setSelectionRange(r.caret, r.caret); } catch {} } });
+                            };
                             const dirStaff = (chatData.dir.staff || []).filter(s => String(s.id) !== chatMyId);
                             // 既読集計: このルームの各メンバーの既読ポインタ（reads[staffId][roomId]）
                             const activeMemberIds = activeRoom ? (Array.isArray(activeRoom.members) ? activeRoom.members.map(String) : []) : [];
@@ -10174,6 +10246,20 @@
                                                         {/* コンポーザー（ChatGPT/Slack風の一体型）。スマホは全画面なのでホームバー分の余白を確保 */}
                                                         <div className="px-3 md:px-4 pt-1 pb-[max(env(safe-area-inset-bottom,0px),12px)] shrink-0">
                                                             {chatEmojiOpen && <div className="mb-2 p-2 bg-[#F8F9FB] border border-[#EAECF0] rounded-lg flex flex-wrap gap-1">{CHAT_STAMPS.map(s => <button key={s} onClick={() => setChatDraft(d => d + s)} className="w-8 h-8 flex items-center justify-center rounded-md hover:bg-white text-xl transition">{s}</button>)}</div>}
+                                                            {chatMention && chatMention.list.length > 0 && (
+                                                                <div className="mb-2 bg-white border border-[#EAECF0] rounded-xl shadow-lg overflow-hidden max-h-56 overflow-y-auto">
+                                                                    <div className="px-3 py-1.5 text-[11px] font-bold text-[#98A2B3] border-b border-[#F2F4F7]">メンションする相手</div>
+                                                                    {chatMention.list.map((c, i) => (
+                                                                        <button key={c.id} onMouseDown={e => { e.preventDefault(); chatPickMention(c.name); }} className={`w-full flex items-center gap-2.5 px-3 py-2 text-left transition ${i === chatMention.index ? 'bg-brand-50' : 'hover:bg-[#F8F9FB]'}`}>
+                                                                            {c.id === '__all__'
+                                                                                ? <span className="w-7 h-7 rounded-full bg-brand-100 text-brand-600 flex items-center justify-center text-[13px] font-bold shrink-0">@</span>
+                                                                                : <span className={`w-7 h-7 rounded-full flex items-center justify-center text-[12px] font-semibold shrink-0 ${chatAvatarColor(c.name)}`}>{(c.name || '？').trim().charAt(0)}</span>}
+                                                                            <span className="text-[14px] text-[#111827] font-medium truncate">{c.name}</span>
+                                                                            {c.id === '__all__' && <span className="ml-auto text-[11px] text-[#98A2B3]">このルーム全員</span>}
+                                                                        </button>
+                                                                    ))}
+                                                                </div>
+                                                            )}
                                                             <div className="rounded-xl border border-[#EAECF0] bg-white focus-within:border-brand-400 focus-within:ring-2 focus-within:ring-brand-100 transition">
                                                                 {chatStaged.length > 0 && (
                                                                     <div className="px-3 pt-3 flex gap-2 flex-wrap">
@@ -10182,7 +10268,15 @@
                                                                         ))}
                                                                     </div>
                                                                 )}
-                                                                <textarea value={chatDraft} onChange={e => setChatDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !chatIsMobile) { e.preventDefault(); chatSend(); } }} rows={1} placeholder={chatIsMobile ? `${roomTitle(activeRoom)} に投稿` : `${roomTitle(activeRoom)} に投稿（Enterで送信 / Shift+Enterで改行）`} className="w-full resize-none max-h-40 bg-transparent px-3.5 pt-3 pb-1.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none" style={{ minHeight: '44px' }} />
+                                                                <textarea ref={chatTaRef} value={chatDraft} onChange={chatOnDraft} onKeyDown={e => {
+                                                                    if (chatMention && chatMention.list.length > 0) {
+                                                                        if (e.key === 'ArrowDown') { e.preventDefault(); setChatMention(v => ({ ...v, index: (v.index + 1) % v.list.length })); return; }
+                                                                        if (e.key === 'ArrowUp') { e.preventDefault(); setChatMention(v => ({ ...v, index: (v.index - 1 + v.list.length) % v.list.length })); return; }
+                                                                        if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); chatPickMention(chatMention.list[chatMention.index].name); return; }
+                                                                        if (e.key === 'Escape') { e.preventDefault(); setChatMention(null); return; }
+                                                                    }
+                                                                    if (e.key === 'Enter' && !e.shiftKey && !chatIsMobile) { e.preventDefault(); chatSend(); }
+                                                                }} rows={1} placeholder={chatIsMobile ? `${roomTitle(activeRoom)} に投稿（@でメンション）` : `${roomTitle(activeRoom)} に投稿（Enterで送信 / Shift+Enterで改行 / @でメンション）`} className="w-full resize-none max-h-40 bg-transparent px-3.5 pt-3 pb-1.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none" style={{ minHeight: '44px' }} />
                                                                 <div className="flex items-center gap-1 px-2 pb-2">
                                                                     <label className="w-8 h-8 flex items-center justify-center rounded-md text-[#667085] hover:bg-[#F2F4F7] cursor-pointer transition" title="画像を添付">
                                                                         <ImageIcon size={18} />

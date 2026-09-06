@@ -3,6 +3,7 @@ import {
   genId, storeRoomId, ANNOUNCE_ROOM_ID, ensureBaseRooms, roomVisibleTo,
   unreadCount, firstUnreadIndex, extractLinks, toggleReaction, groupRooms,
   dmPartnerId, findDmRoom,
+  parseMentionQuery, applyMention, extractMentions,
 } from '../lib/chat.js';
 
 describe('chat: id helpers', () => {
@@ -108,5 +109,32 @@ describe('chat: groupRooms / dm helpers', () => {
   it('findDmRoom finds an existing 1:1 room', () => {
     expect(findDmRoom(rooms, '9', '1').id).toBe('d1');
     expect(findDmRoom(rooms, '9', '2')).toBeNull();
+  });
+
+  describe('mentions', () => {
+    it('parseMentionQuery detects the active @token before the caret', () => {
+      expect(parseMentionQuery('おはよう @若')).toBe('若');
+      expect(parseMentionQuery('@')).toBe('');            // @直後
+      expect(parseMentionQuery('先頭@田中')).toBeNull();   // 直前が非空白＝メンションではない
+      expect(parseMentionQuery('確認します')).toBeNull();
+      expect(parseMentionQuery('@若林 正樹 ')).toBeNull(); // 空白で確定済み
+    });
+    it('applyMention replaces the typed @token with @Name and returns caret', () => {
+      const r = applyMention('やあ @若', 5, '若林 正樹');
+      expect(r.value).toBe('やあ @若林 正樹 ');
+      expect(r.caret).toBe(r.value.length);
+    });
+    it('applyMention keeps text after the caret', () => {
+      const r = applyMention('@田 です', 2, '田中');
+      expect(r.value).toBe('@田中  です');
+    });
+    it('extractMentions matches candidates and prefers longer names', () => {
+      const cands = [{ id: '1', name: '田' }, { id: '2', name: '田中' }, { id: '__all__', name: '全員' }];
+      const got = extractMentions('@田中 と @全員 へ', cands);
+      expect(got.map(x => x.id).sort()).toEqual(['2', '__all__']);
+    });
+    it('extractMentions returns [] when no @token matches', () => {
+      expect(extractMentions('メンションなし', [{ id: '1', name: '田中' }])).toEqual([]);
+    });
   });
 });

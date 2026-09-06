@@ -2668,6 +2668,10 @@
             };
             const [evShowPast, setEvShowPast] = useState(false);       // 終了した予定を表示するか
             const [evCollapsed, setEvCollapsed] = useState({});        // セクション折りたたみ {key:true}
+            const [evTab, setEvTab] = useState('study');               // 上部タブ（勉強会/飲み会/部活）
+            const [evEditRow, setEvEditRow] = useState(null);          // 編集中の行ID（カード展開）
+            const [evSeen, setEvSeen] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_ev_seen') || '{}') || {}; } catch { return {}; } });
+            const evMarkSeen = (key) => setEvSeen(prev => { const n = { ...prev, [key]: Date.now() }; try { localStorage.setItem('naoru_ev_seen', JSON.stringify(n)); } catch {} return n; });
             const evEditingRef = useRef(false);       // セル編集中はポーリング上書きを止める
             const evSaveTimers = useRef({});
             const EV_WD = ['日', '月', '火', '水', '木', '金', '土'];
@@ -2688,6 +2692,7 @@
                 const id = `r_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
                 setEvData(d => { const rows = Array.isArray(d.sections[section]) ? d.sections[section] : []; return { ...d, sections: { ...d.sections, [section]: [...rows, { id, cells: {}, updatedBy: chatMyName }] } }; });
                 await evUpsertRow(section, { id, cells: {} });
+                return id;
             };
             const evEditCell = (section, id, colKey, value) => {
                 setEvData(d => { const rows = (d.sections[section] || []).map(r => r.id === id ? { ...r, cells: { ...r.cells, [colKey]: value } } : r); return { ...d, sections: { ...d.sections, [section]: rows } }; });
@@ -11142,134 +11147,111 @@
                             );
                         })()}
                         {currentPage === 'events' && (() => {
-                            const dateInputCls = (past) => `w-full bg-transparent px-2.5 py-2 text-[13px] focus:outline-none focus:bg-brand-50/60 ${past ? 'text-[#98A2B3]' : 'text-[#111827]'}`;
                             const isISO = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+                            const cv = (r, k) => (r.cells && r.cells[k]) || '';
+                            const allRowsOf = (k) => Array.isArray(evData.sections[k]) ? evData.sections[k] : [];
+                            const newCountOf = (k) => allRowsOf(k).filter(r => (Date.parse(r.updatedAt || r.createdAt || '') || 0) > (evSeen[k] || 0) && !evIsPast(cv(r, 'date'))).length;
+                            const sec = EV_SECTIONS.find(s => s.key === evTab) || EV_SECTIONS[0];
+                            const hasContact = sec.cols.some(c => c.key === 'contact');
+                            const hasOwner = sec.cols.some(c => c.key === 'owner');
+                            const allRows = allRowsOf(sec.key);
+                            const pastCount = allRows.filter(r => evIsPast(cv(r, 'date'))).length;
+                            let rows = evShowPast ? allRows.slice() : allRows.filter(r => !evIsPast(cv(r, 'date')));
+                            rows.sort((a, b) => { const pa = evParseDate(cv(a, 'date')); const pb = evParseDate(cv(b, 'date')); const va = (pa && !pa.recurring) ? pa.date.getTime() : 8.64e15; const vb = (pb && !pb.recurring) ? pb.date.getTime() : 8.64e15; return va - vb; });
+                            const inputCls = 'w-full h-10 rounded-lg border border-[#EAECF0] bg-white px-3 text-[14px] text-[#111827] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition';
+                            const fieldLabels = { time: '時間', place: '場所', teacher: '講師', capacity: '定員', content: '内容', club: '部活', charge: '担当', chatTitle: 'グループ名' };
+                            const upsertNow = (row) => { const r2 = (evData.sections[sec.key] || []).find(x => x.id === row.id) || row; evUpsertRow(sec.key, r2); };
                             return (
                                 <div className="p-4 md:p-6 font-sans" style={{ background: 'linear-gradient(180deg, #EDF1F8 0%, #F8F9FB 18%, #F8F9FB 90%, #FCF6F1 100%)', color: '#111827' }}>
-                                    <div className="max-w-[1400px] mx-auto">
-                                        <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
-                                            <div className="flex items-start gap-2.5">
-                                                <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-600 flex items-center justify-center text-white shrink-0 mt-0.5 shadow-md shadow-brand-500/25"><Calendar size={18} /></div>
-                                                <div>
-                                                    <h1 className="text-[20px] md:text-[22px] font-semibold tracking-tight text-ink-900">勉強会・イベント日程</h1>
-                                                    <p className="text-[13px] text-[#667085] mt-0.5">みんなで編集できる共有表。更新は自動保存。終了した予定は自動で隠れます。</p>
-                                                </div>
+                                    <div className="max-w-3xl mx-auto">
+                                        <div className="flex items-center gap-2.5 mb-3">
+                                            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-600 flex items-center justify-center text-white shrink-0 shadow-md shadow-brand-500/25"><Calendar size={18} /></div>
+                                            <div className="min-w-0">
+                                                <h1 className="text-[19px] md:text-[22px] font-semibold tracking-tight text-ink-900 leading-tight">勉強会・イベント日程</h1>
+                                                <p className="hidden sm:block text-[13px] text-[#667085] mt-0.5">日程をタップで詳細・編集。参加は「グループチャットへ」から。</p>
                                             </div>
-                                            <label className="inline-flex items-center gap-2 text-[13px] font-medium text-[#667085] cursor-pointer select-none">
-                                                <input type="checkbox" checked={evShowPast} onChange={e => setEvShowPast(e.target.checked)} className="w-4 h-4 accent-[#F37021]" />
-                                                終了した予定も表示
-                                            </label>
                                         </div>
-                                        {!evData.configured && <div className="mb-3 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[13px]">共有ストア（KV/Supabase/GAS）が未設定のため保存されません。管理者に有効化を依頼してください。</div>}
+                                        {/* タブ（勉強会 / 飲み会 / 部活）＋新着バッジ */}
+                                        <div className="flex items-center gap-1.5 mb-3 overflow-x-auto pb-1">
+                                            {EV_SECTIONS.map(s => { const active = s.key === evTab; const nc = newCountOf(s.key); const up = allRowsOf(s.key).filter(r => !evIsPast(cv(r, 'date'))).length; return (
+                                                <button key={s.key} onClick={() => { setEvTab(s.key); setEvEditRow(null); evMarkSeen(s.key); }} className={`relative shrink-0 px-4 py-2 rounded-full text-[13px] font-bold transition ${active ? 'text-white shadow-sm' : 'text-[#667085] bg-white border border-[#EAECF0] hover:bg-[#F8F9FB]'}`} style={active ? { background: s.accent } : {}}>
+                                                    {s.title}<span className={`ml-1.5 ${active ? 'text-white/80' : 'text-[#98A2B3]'}`}>{up}</span>
+                                                    {nc > 0 && <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center bg-rose-500 text-white text-[10px] font-bold rounded-full ring-2 ring-white">{nc}</span>}
+                                                </button>
+                                            ); })}
+                                        </div>
+                                        {!evData.configured && <div className="mb-3 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[13px]">共有ストア未設定のため保存されません。管理者に有効化を依頼してください。</div>}
+                                        <div className="flex items-center justify-between mb-2">
+                                            <label className="inline-flex items-center gap-2 text-[12px] font-medium text-[#667085] cursor-pointer select-none"><input type="checkbox" checked={evShowPast} onChange={e => setEvShowPast(e.target.checked)} className="w-4 h-4 accent-[#F37021]" />終了も表示{pastCount ? `（${pastCount}）` : ''}</label>
+                                            <button onClick={async () => { const id = await evAddRow(sec.key); setEvEditRow(id); }} className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-white text-[13px] font-bold shadow-sm transition" style={{ background: sec.accent }}><Plus size={16} />予定を追加</button>
+                                        </div>
                                         {!evData.loaded ? <div className="text-center text-[#98A2B3] text-[13px] py-10">読み込み中…</div> : (
-                                        <div className="space-y-4">
-                                            {EV_SECTIONS.map(sec => {
-                                                const allRows = Array.isArray(evData.sections[sec.key]) ? evData.sections[sec.key] : [];
-                                                const pastCount = allRows.filter(r => evIsPast(r.cells && r.cells.date)).length;
-                                                const rows = evShowPast ? allRows : allRows.filter(r => !evIsPast(r.cells && r.cells.date));
-                                                const upcoming = allRows.length - pastCount;
-                                                const collapsed = !!evCollapsed[sec.key];
-                                                const hasContact = sec.cols.some(c => c.key === 'contact');
-                                                const minW = sec.cols.reduce((a, c) => a + c.w, 0) + (hasContact ? 108 : 0) + 92 + 84;
+                                        <div className="space-y-2.5">
+                                            {rows.length === 0 && <div className="text-center text-[#98A2B3] text-[13px] py-12 bg-white rounded-2xl border border-[#EAECF0]">まだ予定がありません。<br />右上の「予定を追加」から作成できます。</div>}
+                                            {rows.map(row => {
+                                                const past = evIsPast(cv(row, 'date'));
+                                                const editing = evEditRow === row.id;
+                                                const isNew = (Date.parse(row.updatedAt || row.createdAt || '') || 0) > (evSeen[sec.key] || 0) && !past;
+                                                const room = evRoomOf(cv(row, 'roomId'));
+                                                const partIds = room ? (room.members || []).map(String) : [];
+                                                const dISO = isISO(cv(row, 'date'));
+                                                const dObj = dISO ? new Date(Number(cv(row, 'date').slice(0, 4)), Number(cv(row, 'date').slice(5, 7)) - 1, Number(cv(row, 'date').slice(8, 10))) : null;
+                                                const ownerNm = hasOwner ? (evUserName(cv(row, 'ownerId')) || cv(row, 'owner')) : '';
+                                                const title = cv(row, 'content') || cv(row, 'club') || '（内容未入力）';
                                                 return (
-                                                    <div key={sec.key} className="bg-white rounded-xl border border-[#EAECF0] overflow-hidden">
-                                                        <button onClick={() => setEvCollapsed(c => ({ ...c, [sec.key]: !c[sec.key] }))} className="w-full flex items-center gap-2 px-4 py-2.5 text-left" style={{ background: sec.accent }}>
-                                                            <ChevronDown size={18} className={`text-white transition-transform ${collapsed ? '-rotate-90' : ''}`} />
-                                                            <span className="font-semibold text-white text-[15px]">{sec.title}</span>
-                                                            <span className="text-white/85 text-[12px] font-medium">開催予定 {upcoming}件{pastCount > 0 ? ` ・ 終了 ${pastCount}件` : ''}</span>
-                                                        </button>
-                                                        {!collapsed && (<>
-                                                        <div className="overflow-x-auto">
-                                                            <table className="w-full border-collapse text-[13px]" style={{ minWidth: minW }}>
-                                                                <thead>
-                                                                    <tr style={{ background: sec.bg }}>
-                                                                        {sec.cols.map(c => <th key={c.key} className="text-left font-semibold text-[#475467] px-2.5 py-2.5 border-b border-[#EAECF0] align-middle" style={{ width: c.w, minWidth: c.w }}>{c.label}</th>)}
-                                                                        {hasContact && <th className="text-left font-semibold text-[#475467] px-2.5 py-2.5 border-b border-[#EAECF0] align-middle" style={{ width: 108, minWidth: 108 }}>参加</th>}
-                                                                        <th className="text-left font-semibold text-[#98A2B3] px-2.5 py-2.5 border-b border-[#EAECF0] align-middle" style={{ width: 92, minWidth: 92 }}>登録日</th>
-                                                                        <th className="border-b border-[#EAECF0]" style={{ width: 84, minWidth: 84 }}></th>
-                                                                    </tr>
-                                                                </thead>
-                                                                <tbody>
-                                                                    {rows.map(row => {
-                                                                        const past = evIsPast(row.cells && row.cells.date);
-                                                                        const cells = row.cells || {};
-                                                                        const room = evRoomOf(cells.roomId);
-                                                                        const partIds = room ? (room.members || []).map(String) : [];
-                                                                        return (
-                                                                            <tr key={row.id} style={{ background: past ? '#F2F4F7' : '#fff' }}>
-                                                                                {sec.cols.map(c => (
-                                                                                    <td key={c.key} className="border-b border-r border-[#F0F1F4] p-0 align-middle" style={{ width: c.w, minWidth: c.w }}>
-                                                                                        {c.key === 'date' ? (
-                                                                                            <div className="px-1 py-1">
-                                                                                                <input type="date" value={isISO(cells.date) ? cells.date : ''}
-                                                                                                    onChange={e => evEditCell(sec.key, row.id, 'date', e.target.value)}
-                                                                                                    onFocus={() => { evEditingRef.current = true; }}
-                                                                                                    onBlur={() => { evEditingRef.current = false; const r = (evData.sections[sec.key] || []).find(x => x.id === row.id); if (r) evUpsertRow(sec.key, r); }}
-                                                                                                    className={dateInputCls(past)} />
-                                                                                                {isISO(cells.date) ? (past ? <div className="px-2.5 text-[10px] font-semibold text-[#B0B7C3]">終了</div> : null)
-                                                                                                 : (cells.date ? <div className="px-2.5 text-[11px] text-[#98A2B3] truncate">{cells.date}</div> : null)}
-                                                                                            </div>
-                                                                                        ) : c.key === 'owner' ? (
-                                                                                            <EvUserSelect value={cells.ownerId} name={evUserName(cells.ownerId) || cells.owner || ''} users={evUsers} past={past}
-                                                                                                onOpenChange={(o) => { evEditingRef.current = o; }}
-                                                                                                onPick={(id, nm) => { const nextRow = { ...row, cells: { ...cells, ownerId: id, owner: nm } }; setEvData(d => ({ ...d, sections: { ...d.sections, [sec.key]: (d.sections[sec.key] || []).map(r => r.id === row.id ? nextRow : r) } })); evUpsertRow(sec.key, nextRow); }} />
-                                                                                        ) : c.key === 'contact' ? (
-                                                                                            <div className="px-2 py-2">
-                                                                                                {room ? (
-                                                                                                    <button onClick={() => evJoinChat(cells.roomId)} disabled={evChatBusy === cells.roomId} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-brand-50 text-brand-700 border border-brand-200 text-[12px] font-bold hover:bg-brand-100 disabled:opacity-50 transition"><MessageSquare size={13} />グループチャットへ</button>
-                                                                                                ) : (
-                                                                                                    <div className="text-[11px] text-[#98A2B3] leading-snug">右の「保存」で<br />チャットを作成</div>
-                                                                                                )}
-                                                                                            </div>
-                                                                                        ) : (
-                                                                                            <textarea
-                                                                                                value={cells[c.key] || ''}
-                                                                                                onChange={e => evEditCell(sec.key, row.id, c.key, e.target.value)}
-                                                                                                onFocus={() => { evEditingRef.current = true; }}
-                                                                                                onBlur={() => { evEditingRef.current = false; const r = (evData.sections[sec.key] || []).find(x => x.id === row.id); if (r) evUpsertRow(sec.key, r); }}
-                                                                                                rows={1}
-                                                                                                placeholder={c.key === 'chatTitle' ? 'グループ名' : ''}
-                                                                                                className={`w-full resize-none bg-transparent px-2.5 py-2 text-[13px] leading-snug focus:outline-none focus:bg-brand-50/60 placeholder:text-[#CBD2DC] ${past ? 'text-[#98A2B3]' : 'text-[#111827]'}`}
-                                                                                                style={{ minHeight: '36px' }}
-                                                                                            />
-                                                                                        )}
-                                                                                    </td>
-                                                                                ))}
-                                                                                {hasContact && (
-                                                                                    <td className="border-b border-r border-[#F0F1F4] px-2 py-2 align-middle" style={{ width: 108, minWidth: 108 }}>
-                                                                                        {room ? (
-                                                                                            <div className="relative inline-block group/pt">
-                                                                                                <button onClick={() => setEvPartOpen(evPartOpen === row.id ? '' : row.id)} className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[12px] font-bold text-[#344054] hover:bg-[#F2F4F7] transition"><Users size={13} className="text-brand-500" />{partIds.length}人参加</button>
-                                                                                                <div className={`${evPartOpen === row.id ? 'block' : 'hidden'} md:group-hover/pt:block absolute z-30 top-full mt-1 left-0 min-w-[170px] max-h-56 overflow-y-auto bg-white border border-[#EAECF0] rounded-xl shadow-xl p-2`} onClick={e => e.stopPropagation()}>
-                                                                                                    <div className="text-[10px] font-bold text-[#98A2B3] px-1 pb-1.5">参加者 {partIds.length}名</div>
-                                                                                                    {partIds.length === 0 && <div className="text-[12px] text-[#98A2B3] px-1 py-2">まだ参加者はいません</div>}
-                                                                                                    {partIds.map(id => { const nm = id === '__root__' ? '管理者' : (chatResolveName(id, '') || 'スタッフ'); return (
-                                                                                                        <div key={id} className="flex items-center gap-2 px-1 py-1">
-                                                                                                            <span className={`w-6 h-6 rounded-full ${chatAvatarColor(nm)} inline-flex items-center justify-center text-[11px] font-semibold shrink-0`}>{String(nm).trim().charAt(0)}</span>
-                                                                                                            <span className="text-[13px] text-[#344054] truncate">{nm}</span>
-                                                                                                        </div>
-                                                                                                    ); })}
-                                                                                                </div>
-                                                                                            </div>
-                                                                                        ) : <span className="text-[12px] text-[#CBD2DC]">—</span>}
-                                                                                    </td>
-                                                                                )}
-                                                                                <td className="border-b border-r border-[#F0F1F4] px-2.5 py-2 align-middle text-[11px] text-[#98A2B3] whitespace-nowrap">{evFmtReg(row.updatedAt || row.createdAt)}</td>
-                                                                                <td className="border-b border-[#F0F1F4] align-middle" style={{ width: 84, minWidth: 84 }}>
-                                                                                    <div className="flex items-center justify-center gap-0.5">
-                                                                                        {hasContact && <button onClick={() => evSaveChat(sec.key, row, sec.title)} disabled={evChatBusy === row.id} className="px-2 h-7 inline-flex items-center justify-center rounded-lg bg-brand-500 text-white text-[11px] font-bold hover:bg-brand-600 disabled:opacity-50 transition" title="グループチャットを作成/更新">{evChatBusy === row.id ? '…' : (room ? '更新' : '保存')}</button>}
-                                                                                        <button onClick={() => evDeleteRow(sec.key, row.id)} className="w-7 h-7 inline-flex items-center justify-center rounded-lg text-[#98A2B3] hover:text-rose-500 hover:bg-[#F2F4F7]" title="行を削除"><X size={14} /></button>
-                                                                                    </div>
-                                                                                </td>
-                                                                            </tr>
-                                                                        );
-                                                                    })}
-                                                                    {rows.length === 0 && <tr><td colSpan={sec.cols.length + (hasContact ? 3 : 2)} className="text-center text-[#98A2B3] py-6 text-[13px]">{allRows.length > 0 && !evShowPast ? `開催予定はありません（終了 ${pastCount}件は非表示）。上の「終了した予定も表示」で確認できます。` : 'まだ予定がありません。「＋ 行を追加」から入力してください。'}</td></tr>}
-                                                                </tbody>
-                                                            </table>
+                                                    <div key={row.id} className={`bg-white rounded-2xl border border-[#EAECF0] ${past ? 'opacity-70' : ''} ${editing ? 'ring-2 ring-brand-200' : ''} overflow-hidden`}>
+                                                        <div className="p-3.5">
+                                                            <div className="flex items-start gap-3">
+                                                                <div className={`shrink-0 w-14 rounded-xl flex flex-col items-center justify-center py-1.5 ${past ? 'bg-[#F2F4F7] text-[#98A2B3]' : 'text-white'}`} style={past ? {} : { background: sec.accent }}>
+                                                                    {dObj ? <><span className="text-[17px] font-black leading-none">{dObj.getMonth() + 1}/{dObj.getDate()}</span><span className="text-[10px] font-bold mt-0.5">{EV_WD[dObj.getDay()]}</span></> : <span className="text-[11px] font-bold px-1 text-center leading-tight">{cv(row, 'date') || '日付未定'}</span>}
+                                                                </div>
+                                                                <div className="min-w-0 flex-1">
+                                                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                                                        <span className="text-[15px] font-bold text-[#111827] break-words">{title}</span>
+                                                                        {isNew && <span className="text-[10px] font-black text-white bg-rose-500 rounded-full px-1.5 py-0.5">NEW</span>}
+                                                                        {past && <span className="text-[10px] font-bold text-[#98A2B3] bg-[#F2F4F7] rounded px-1.5 py-0.5">終了</span>}
+                                                                    </div>
+                                                                    <div className="flex items-center gap-x-3 gap-y-0.5 flex-wrap text-[12px] text-[#667085] mt-1">
+                                                                        {cv(row, 'time') && <span>🕒 {cv(row, 'time')}</span>}
+                                                                        {cv(row, 'place') && <span>📍 {cv(row, 'place')}</span>}
+                                                                        {cv(row, 'teacher') && <span>講師: {cv(row, 'teacher')}</span>}
+                                                                        {cv(row, 'capacity') && <span>定員 {cv(row, 'capacity')}</span>}
+                                                                        {cv(row, 'charge') && <span>担当: {cv(row, 'charge')}</span>}
+                                                                        {ownerNm && <span>責任者: {ownerNm}</span>}
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                            <div className="flex items-center gap-2 mt-3">
+                                                                {hasContact && room && (
+                                                                    <div className="relative group/pt">
+                                                                        <button onClick={() => setEvPartOpen(evPartOpen === row.id ? '' : row.id)} className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[12px] font-bold text-[#344054] bg-[#F6F7F9] hover:bg-[#EEF0F3] transition"><Users size={13} className="text-brand-500" />{partIds.length}人</button>
+                                                                        <div className={`${evPartOpen === row.id ? 'block' : 'hidden'} md:group-hover/pt:block absolute z-30 bottom-full mb-1 left-0 min-w-[170px] max-h-56 overflow-y-auto bg-white border border-[#EAECF0] rounded-xl shadow-xl p-2`} onClick={e => e.stopPropagation()}>
+                                                                            <div className="text-[10px] font-bold text-[#98A2B3] px-1 pb-1.5">参加者 {partIds.length}名</div>
+                                                                            {partIds.length === 0 && <div className="text-[12px] text-[#98A2B3] px-1 py-2">まだいません</div>}
+                                                                            {partIds.map(id => { const nm = id === '__root__' ? '管理者' : (chatResolveName(id, '') || 'スタッフ'); return <div key={id} className="flex items-center gap-2 px-1 py-1"><span className={`w-6 h-6 rounded-full ${chatAvatarColor(nm)} inline-flex items-center justify-center text-[11px] font-semibold shrink-0`}>{String(nm).trim().charAt(0)}</span><span className="text-[13px] text-[#344054] truncate">{nm}</span></div>; })}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+                                                                {hasContact && (room
+                                                                    ? <button onClick={() => evJoinChat(cv(row, 'roomId'))} disabled={evChatBusy === cv(row, 'roomId')} className="flex-1 inline-flex items-center justify-center gap-1.5 h-10 rounded-xl bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-bold shadow-sm shadow-brand-200/50 disabled:opacity-50 transition"><MessageSquare size={15} />グループチャットへ参加</button>
+                                                                    : <button onClick={() => evSaveChat(sec.key, row, sec.title)} disabled={evChatBusy === row.id} className="flex-1 inline-flex items-center justify-center gap-1.5 h-10 rounded-xl border border-brand-300 text-brand-600 text-[13px] font-bold hover:bg-brand-50 disabled:opacity-50 transition"><Plus size={15} />{evChatBusy === row.id ? '作成中…' : 'グループチャットを作成'}</button>)}
+                                                                <button onClick={() => setEvEditRow(editing ? null : row.id)} className="inline-flex items-center justify-center gap-1 h-10 px-3 rounded-xl border border-[#EAECF0] text-[13px] font-semibold text-[#667085] hover:bg-[#F8F9FB] transition">{editing ? '閉じる' : '編集'}</button>
+                                                            </div>
                                                         </div>
-                                                        <div className="px-3 py-2 border-t border-[#EAECF0]"><button onClick={() => evAddRow(sec.key)} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] font-semibold text-[#667085] hover:bg-[#F2F4F7] transition"><Plus size={15} />行を追加</button></div>
-                                                        </>)}
+                                                        {editing && (
+                                                            <div className="border-t border-[#F2F4F7] p-3.5 bg-[#FAFBFC] space-y-2.5">
+                                                                <div><div className="text-[11px] font-bold text-[#344054] mb-1">日付</div><input type="date" value={dISO ? cv(row, 'date') : ''} onChange={e => evEditCell(sec.key, row.id, 'date', e.target.value)} onFocus={() => { evEditingRef.current = true; }} onBlur={() => { evEditingRef.current = false; upsertNow(row); }} className={inputCls} /></div>
+                                                                {hasOwner && <div><div className="text-[11px] font-bold text-[#344054] mb-1">責任者</div><div className="rounded-lg border border-[#EAECF0] bg-white"><EvUserSelect value={cv(row, 'ownerId')} name={ownerNm} users={evUsers} onOpenChange={o => { evEditingRef.current = o; }} onPick={(id, nm) => { const nextRow = { ...row, cells: { ...row.cells, ownerId: id, owner: nm } }; setEvData(d => ({ ...d, sections: { ...d.sections, [sec.key]: (d.sections[sec.key] || []).map(r => r.id === row.id ? nextRow : r) } })); evUpsertRow(sec.key, nextRow); }} /></div></div>}
+                                                                {sec.cols.filter(c => !['date', 'owner', 'contact'].includes(c.key)).map(c => (
+                                                                    <div key={c.key}><div className="text-[11px] font-bold text-[#344054] mb-1">{fieldLabels[c.key] || c.label}</div>
+                                                                        <textarea value={cv(row, c.key)} onChange={e => evEditCell(sec.key, row.id, c.key, e.target.value)} onFocus={() => { evEditingRef.current = true; }} onBlur={() => { evEditingRef.current = false; upsertNow(row); }} rows={c.key === 'content' ? 2 : 1} placeholder={c.key === 'chatTitle' ? 'グループ名（未入力なら自動）' : ''} className="w-full resize-none rounded-lg border border-[#EAECF0] bg-white px-3 py-2 text-[14px] text-[#111827] placeholder:text-[#CBD2DC] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" /></div>
+                                                                ))}
+                                                                <div className="flex items-center gap-2 pt-1">
+                                                                    {hasContact && <button onClick={() => evSaveChat(sec.key, row, sec.title)} disabled={evChatBusy === row.id} className="inline-flex items-center gap-1.5 px-3 h-9 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[12px] font-bold disabled:opacity-50 transition">{evChatBusy === row.id ? '…' : (room ? 'グループ更新' : 'グループ作成')}</button>}
+                                                                    <button onClick={() => { evDeleteRow(sec.key, row.id); setEvEditRow(null); }} className="ml-auto inline-flex items-center gap-1.5 px-3 h-9 rounded-lg text-rose-600 text-[12px] font-bold hover:bg-rose-50 transition"><Trash2 size={14} />この予定を削除</button>
+                                                                </div>
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 );
                                             })}

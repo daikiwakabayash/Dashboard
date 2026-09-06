@@ -560,6 +560,17 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, members });
       }
 
+      // 自己参加（勉強会・イベントの「グループチャットへ」導線）。group のみ・自分を追加。
+      if (action === 'join' && body.roomId && body.staffId) {
+        const rid = String(body.roomId);
+        const room = rooms.find(r => r && r.id === rid);
+        if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
+        const members = [...new Set([...(room.members || []).map(String), String(body.staffId)])].slice(0, 500);
+        const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, members } : r);
+        await save({ rooms: nextRooms });
+        return res.status(200).json({ ok: true, members });
+      }
+
       // グループ名・アイコン変更。group のみ・メンバー or root。
       if (action === 'setRoom' && body.roomId) {
         const rid = String(body.roomId);

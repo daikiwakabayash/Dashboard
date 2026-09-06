@@ -2090,14 +2090,43 @@
             const chatMyShop = (Array.isArray(authState.shops) && authState.shops[0]) || '';
             const chatIsRoot = !!authState.root;
             // @メンション候補（{id,name}）。グループ/DMはメンバー、店舗/全社は全スタッフ。先頭に「全員」。自分は除外。
+            // 店舗の在籍スタッフ（=組織図と同じ判定）。SalonOneのshop_id所属をベースに、
+            // プロフィールで担当店舗を手入力した人は「その設定を固定として優先」。受付/ヘルプ等の非セラピストは除外。
+            const chatStoreStaff = (storeName) => {
+                const nn = soShopNorm(storeName);
+                const shop = (soShopsRaw || []).find(x => soShopNorm(x.name) === nn)
+                    || (soShopsRaw || []).find(x => { const xn = soShopNorm(x.name); return nn.length >= 2 && (xn.includes(nn) || nn.includes(xn)); });
+                const shopId = shop ? String(shop.id) : '';
+                const profs = (profileData.profiles) || {};
+                const nameInThisShop = (sn) => { const pn = soShopNorm(sn); return pn === nn || (pn.length >= 2 && (pn.includes(nn) || nn.includes(pn))); };
+                const out = []; const seen = new Set();
+                const add = (id, name) => { id = String(id || ''); name = String(name || '').trim(); if (!id || !name || id === chatMyId || seen.has(id) || isNonTherapistName(name)) return; seen.add(id); out.push({ id, name }); };
+                // 1) プロフィールで担当店舗を手入力（固定・優先）＝この店舗を含む人
+                Object.entries(profs).forEach(([pid, p]) => {
+                    if (!/^\d+$/.test(pid)) return;
+                    if (Array.isArray(p.shops) && p.shops.length && p.shops.some(nameInThisShop)) add(pid, p.nameKanji || chatResolveName(pid, ''));
+                });
+                // 2) SalonOne所属（shop_id一致）。ただしプロフィールで担当店舗を別途固定した人は除外（＝手入力優先）
+                if (shopId) (soStaffs || []).forEach(st => {
+                    if (String(st.shop_id || '') !== shopId || st.deleted) return;
+                    const p = profs[String(st.id)];
+                    if (p && Array.isArray(p.shops) && p.shops.length) return; // プロフィールの担当店舗が優先（上の1で処理）
+                    add(st.id, st.name);
+                });
+                return out;
+            };
             const chatMentionCandidates = (room) => {
                 if (!room) return [];
                 const out = []; const seen = new Set();
                 const add = (id, name) => { id = String(id || ''); name = String(name || '').trim(); if (!id || !name || id === chatMyId || seen.has(id)) return; seen.add(id); out.push({ id, name }); };
                 if (room.kind === 'group' || room.kind === 'dm') {
                     (room.members || []).forEach(id => add(id, chatResolveName(id, '')));
+                } else if (room.kind === 'store') {
+                    // 店舗ルーム: その店舗の在籍スタッフのみ（店舗外の人は入れない）
+                    chatStoreStaff(room.shop || room.name).forEach(s => add(s.id, s.name));
                 } else {
-                    (soStaffs || []).forEach(s => add(s.id, s.name));
+                    // 全社アナウンス: 全スタッフ
+                    (soStaffs || []).forEach(s => { if (!s.deleted) add(s.id, s.name); });
                     ((chatData.dir && chatData.dir.staff) || []).forEach(s => add(s.id, s.name));
                 }
                 if (room.kind !== 'dm') out.unshift({ id: '__all__', name: '全員' });
@@ -2258,6 +2287,18 @@
             const boardLastSeen = ((boardData.reads || {})[chatMyId]) || 0;
             const boardIsUnread = (p) => (Date.parse(p.createdAt || '') || 0) > boardLastSeen && String(p.authorId) !== chatMyId;
             const boardUnreadTotal = useMemo(() => (boardData.posts || []).reduce((n, p) => boardIsUnread(p) ? n + 1 : n, 0), [boardData, boardLastSeen, chatMyId]);
+            // ── アプリアイコンのバッジ（未読の赤丸＋数字）: チャット＋お知らせハブの合計。 ──
+            // PWA(ホーム画面に追加)でiOS16.4+/Android/デスクトップに表示。SWにも同期し、閉じている間の
+            // プッシュ受信でインクリメントされる基準値を最新化する。
+            useEffect(() => {
+                if (!authState.authenticated) return;
+                const total = (Number(chatUnreadTotal) || 0) + (Number(boardUnreadTotal) || 0);
+                try {
+                    if ('setAppBadge' in navigator) { if (total > 0) navigator.setAppBadge(total).catch(() => {}); else navigator.clearAppBadge().catch(() => {}); }
+                } catch {}
+                // SWへ最新の合計を通知（閉じている間のプッシュ増分の基準にする）
+                try { if (navigator.serviceWorker && navigator.serviceWorker.controller) navigator.serviceWorker.controller.postMessage({ type: 'badge', count: total }); } catch {}
+            }, [authState.authenticated, chatUnreadTotal, boardUnreadTotal]);
             const boardLoad = async () => {
                 try { const r = await fetch('/api/plan-store?type=board'); const j = await r.json().catch(() => ({})); setBoardData({ posts: Array.isArray(j.posts) ? j.posts : [], reads: (j.reads && typeof j.reads === 'object') ? j.reads : {}, configured: j.configured !== false, loaded: true }); }
                 catch { setBoardData(d => ({ ...d, loaded: true })); }

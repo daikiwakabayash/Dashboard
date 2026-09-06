@@ -590,20 +590,52 @@ export default async function handler(req, res) {
         if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
         const isMember = (room.members || []).map(String).includes(String(body.staffId));
         if (!(body.root || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const oldM = (room.members || []).map(String);
         const members = [...new Set(body.members.map(String))].slice(0, 500);
         const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, members } : r);
-        await save({ rooms: nextRooms });
+        // システムメッセージ（追加/退出させた）＝ actorName + names が渡された時のみ生成（events等の内部更新では出さない）
+        let nextMessages = messages;
+        if (body.actorName && body.names && typeof body.names === 'object') {
+          const nm = (id) => String(body.names[id] || 'メンバー');
+          const sys = [];
+          members.filter(id => !oldM.includes(id)).forEach(id => sys.push(`${body.actorName} が ${nm(id)} を追加しました`));
+          oldM.filter(id => !members.includes(id)).forEach(id => sys.push(`${body.actorName} が ${nm(id)} を退出させました`));
+          if (sys.length) {
+            const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).concat(sys.map(text => ({ id: genId('m'), roomId: rid, system: true, text, createdAt: new Date().toISOString() }))).slice(-CHAT_MSG_CAP);
+            nextMessages = { ...messages, [rid]: arr };
+          }
+        }
+        await save({ rooms: nextRooms, messages: nextMessages });
         return res.status(200).json({ ok: true, members });
       }
 
-      // 自己参加（勉強会・イベントの「グループチャットへ」導線）。group のみ・自分を追加。
+      // 自己退出（グループを離れる）。group のみ・システムメッセージ「〇〇が退出しました」。
+      if (action === 'leave' && body.roomId && body.staffId) {
+        const rid = String(body.roomId);
+        const room = rooms.find(r => r && r.id === rid);
+        if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
+        const members = (room.members || []).map(String).filter(id => id !== String(body.staffId));
+        const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, members } : r);
+        const rec = { id: genId('m'), roomId: rid, system: true, text: `${String(body.name || 'メンバー')} が退出しました`, createdAt: new Date().toISOString() };
+        const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).concat(rec).slice(-CHAT_MSG_CAP);
+        await save({ rooms: nextRooms, messages: { ...messages, [rid]: arr } });
+        return res.status(200).json({ ok: true, members });
+      }
+
+      // 自己参加（勉強会・イベントの「グループチャットへ」導線／招待受諾）。group のみ・自分を追加。
       if (action === 'join' && body.roomId && body.staffId) {
         const rid = String(body.roomId);
         const room = rooms.find(r => r && r.id === rid);
         if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
+        const already = (room.members || []).map(String).includes(String(body.staffId));
         const members = [...new Set([...(room.members || []).map(String), String(body.staffId)])].slice(0, 500);
         const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, members } : r);
-        await save({ rooms: nextRooms });
+        let nextMessages = messages;
+        if (!already && body.name) {
+          const rec = { id: genId('m'), roomId: rid, system: true, text: `${String(body.name)} が参加しました`, createdAt: new Date().toISOString() };
+          nextMessages = { ...messages, [rid]: (Array.isArray(messages[rid]) ? messages[rid] : []).concat(rec).slice(-CHAT_MSG_CAP) };
+        }
+        await save({ rooms: nextRooms, messages: nextMessages });
         return res.status(200).json({ ok: true, members });
       }
 

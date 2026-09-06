@@ -376,6 +376,9 @@
         .tg-anim-lid { animation: tgLidOff .6s cubic-bezier(.5,-0.4,.7,.5) both; }
         .tg-float { position: absolute; bottom: -20px; animation: tgFloatUp linear infinite; will-change: transform, opacity; }
         .tg-sweep::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.55), transparent); transform: translateX(-120%) skewX(-18deg); animation: tgSweep 2.6s ease-in-out infinite; }
+        /* 自分の吹き出し（ブランド色背景）内のリンク・メンションを白系で見やすく */
+        .chat-bubble-mine a { color: #fff; text-decoration: underline; }
+        .chat-bubble-mine span { background: rgba(255,255,255,0.22) !important; color: #fff !important; }
         .splash-screen {
             position: fixed;
             inset: 0;
@@ -740,6 +743,10 @@
             const lenRef = React.useRef(-1);
             const [pickFor, setPickFor] = React.useState(null);
             const [readOpen, setReadOpen] = React.useState(null);   // 既読者ポップオーバーを開いているメッセージID
+            const [menuFor, setMenuFor] = React.useState(null);     // 長押しメニューを開いているメッセージID
+            const pressTimer = React.useRef(null);
+            const pressStart = (id) => { pressTimer.current = setTimeout(() => { setMenuFor(id); if (navigator.vibrate) try { navigator.vibrate(10); } catch {} }, 420); };
+            const pressCancel = () => { if (pressTimer.current) { clearTimeout(pressTimer.current); pressTimer.current = null; } };
             React.useEffect(() => { if (msgs.length !== lenRef.current) { lenRef.current = msgs.length; if (endRef.current) endRef.current.scrollIntoView({ block: 'end' }); } }, [msgs.length]);
             const fmtTime = (iso) => { const d = new Date(iso); const now = new Date(); const hm = `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; return d.toDateString() === now.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`; };
             const WD = ['日', '月', '火', '水', '木', '金', '土'];
@@ -767,58 +774,68 @@
                             <React.Fragment key={m.id}>
                                 {showDay && <div className="flex items-center gap-3 my-3 px-1"><div className="flex-1 h-px bg-[#EAECF0]" /><span className="text-[11px] font-medium text-[#98A2B3]">{fmtDay(m.createdAt)}</span><div className="flex-1 h-px bg-[#EAECF0]" /></div>}
                                 {showUnread && <div className="flex items-center gap-2 my-2 px-1"><div className="flex-1 h-px bg-brand-300" /><span className="text-[11px] font-semibold text-brand-600">ここから未読</span><div className="flex-1 h-px bg-brand-300" /></div>}
-                                <div className={`group relative flex items-start gap-3 px-2 py-1.5 rounded-lg transition-colors ${iMentioned ? 'bg-brand-50/70 hover:bg-brand-50 ring-1 ring-brand-100' : 'hover:bg-[#F8F9FB]'}`}>
-                                    <ChatAvatar name={m.fromName} />
-                                    <div className="min-w-0 flex-1">
-                                        <div className="flex items-baseline gap-2 flex-wrap">
-                                            <span className="font-semibold text-[14px] text-[#111827]">{m.fromName || '不明'}</span>
-                                            {(() => { const sh = resolveShop ? resolveShop(m.fromStaffId, m.fromShop) : m.fromShop; return sh ? <span className="text-[12px] text-[#98A2B3]">{sh}</span> : null; })()}
-                                            <span className="text-[11px] text-[#98A2B3]">{fmtTime(m.createdAt)}</span>
-                                            {m._pending && <span className="text-[10px] text-[#98A2B3]">送信中…</span>}
-                                        </div>
-                                        {m.replyTo && m.replyTo.id && <div className="mt-1 mb-0.5 pl-2 border-l-[3px] border-brand-300 bg-[#F6F7F9] rounded-r-md px-2 py-1"><div className="text-[11px] font-bold text-brand-600">{m.replyTo.name || '返信'}</div><div className="text-[11px] text-[#98A2B3] truncate max-w-[260px]">{m.replyTo.text || '（画像）'}</div></div>}
-                                        {m.text && <div className="text-[14px] text-[#111827] leading-relaxed whitespace-pre-wrap break-words mt-0.5" style={{ wordBreak: 'break-word' }}>{chatRenderText(m.text, (m.mentions || []).map(x => x && x.name).filter(Boolean))}</div>}
-                                        {Array.isArray(m.imgIds) && m.imgIds.length > 0 && <div className="mt-2 flex flex-wrap gap-2">{m.imgIds.map(id => <ChatImage key={id} imgId={id} onClick={() => onImageClick && onImageClick(allImgIds, imgIndexOf(id))} />)}</div>}
-                                        {(Object.keys(reactions).length > 0 || pickFor === m.id) && (
-                                            <div className="flex items-center gap-1.5 mt-2 flex-wrap">
-                                                {Object.entries(reactions).map(([emo, ids]) => {
-                                                    const on = (ids || []).map(String).includes(String(myId));
-                                                    return <button key={emo} onClick={() => onReact(m.id, emo)} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[12px] font-semibold border transition ${on ? 'bg-brand-50 border-brand-200 text-brand-700' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{emo} {(ids || []).length}</button>;
-                                                })}
-                                                {pickFor === m.id && <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-[#F8F9FB] border border-[#EAECF0]">{stamps.map(s => <button key={s} onClick={() => { onReact(m.id, s); setPickFor(null); }} className="text-base hover:scale-125 transition-transform leading-none">{s}</button>)}</span>}
-                                            </div>
-                                        )}
-                                        {/* フッター行（LINE風）: 既読 → スタンプ → 削除 を1行にまとめる */}
-                                        <div className="flex items-center gap-1 mt-1">
+                                {(() => {
+                                    const authorName = (resolveName ? resolveName(m.fromStaffId, m.fromName || '') : (m.fromName || '')) || (m.fromStaffId === '__root__' ? '管理者' : 'スタッフ');
+                                    const shop = resolveShop ? resolveShop(m.fromStaffId, m.fromShop) : m.fromShop;
+                                    const bubble = mine ? 'bg-brand-500 text-white rounded-2xl rounded-br-md' : `bg-white border border-[#EAECF0] text-[#111827] rounded-2xl rounded-bl-md ${iMentioned ? 'ring-2 ring-brand-300' : ''}`;
+                                    const doReply = () => onReply && onReply({ id: m.id, name: authorName, text: (m.text || (m.imgIds && m.imgIds.length ? '画像' : '')).slice(0, 140) });
+                                    const meta = (
+                                        <div className={`flex flex-col ${mine ? 'items-end' : 'items-start'} justify-end shrink-0 pb-0.5`}>
                                             {mine && Array.isArray(readMembers) && readers.length > 0 && (
-                                                <div className="relative inline-block group/rd">
-                                                    <button onClick={() => setReadOpen(readOpen === m.id ? null : m.id)} className="flex items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-[#F2F4F7] transition" title="既読した人を表示">
-                                                        <span className="text-[10px] text-brand-500 font-bold leading-none">✓✓</span>
-                                                        <div className="flex -space-x-1.5">
-                                                            {readers.slice(0, 6).map((id, i) => { const nm = readNames[i] || 'スタッフ'; return <span key={id} className={`w-4 h-4 rounded-full ${chatAvatarColor(nm)} ring-2 ring-white inline-flex items-center justify-center text-[8px] font-bold`}>{String(nm).trim().charAt(0)}</span>; })}
-                                                        </div>
-                                                        {readers.length > 6 && <span className="text-[10px] text-[#98A2B3] font-semibold">+{readers.length - 6}</span>}
-                                                        <span className="text-[10px] text-[#98A2B3] font-medium">既読 {readers.length}{readMembers.length > 1 ? `/${readMembers.length - 1}` : ''}</span>
-                                                    </button>
+                                                <div className="relative group/rd">
+                                                    <button onClick={() => setReadOpen(readOpen === m.id ? null : m.id)} className="text-[10px] text-[#98A2B3] font-medium hover:text-brand-600" title="既読した人を表示">既読{readers.length}{readMembers.length > 1 ? `/${readMembers.length - 1}` : ''}</button>
                                                     {readOpen === m.id && <div className="fixed inset-0 z-20" onClick={e => { e.stopPropagation(); setReadOpen(null); }} />}
-                                                    {/* 既読者一覧: PCはカーソルを合わせると浮かぶ／スマホはタップで表示 */}
-                                                    <div className={`${readOpen === m.id ? 'block' : 'hidden'} md:group-hover/rd:block absolute z-30 bottom-full mb-1 left-0 min-w-[170px] max-h-56 overflow-y-auto bg-white border border-[#EAECF0] rounded-xl shadow-xl p-2`} onClick={e => e.stopPropagation()}>
+                                                    <div className={`${readOpen === m.id ? 'block' : 'hidden'} md:group-hover/rd:block absolute z-30 bottom-full mb-1 right-0 min-w-[160px] max-h-56 overflow-y-auto bg-white border border-[#EAECF0] rounded-xl shadow-xl p-2`} onClick={e => e.stopPropagation()}>
                                                         <div className="text-[10px] font-bold text-[#98A2B3] px-1 pb-1.5">既読 {readers.length}名</div>
-                                                        {readers.map((id, i) => { const nm = readNames[i] || 'スタッフ'; return (
-                                                            <div key={id} className="flex items-center gap-2 px-1 py-1">
-                                                                <span className={`w-6 h-6 rounded-full ${chatAvatarColor(nm)} inline-flex items-center justify-center text-[11px] font-semibold shrink-0`}>{String(nm).trim().charAt(0)}</span>
-                                                                <span className="text-[13px] text-[#344054] truncate">{nm}</span>
-                                                            </div>
-                                                        ); })}
+                                                        {readers.map((id, i) => { const nm = readNames[i] || 'スタッフ'; return <div key={id} className="flex items-center gap-2 px-1 py-1"><span className={`w-6 h-6 rounded-full ${chatAvatarColor(nm)} inline-flex items-center justify-center text-[11px] font-semibold shrink-0`}>{String(nm).trim().charAt(0)}</span><span className="text-[13px] text-[#344054] truncate">{nm}</span></div>; })}
                                                     </div>
                                                 </div>
                                             )}
-                                            <button onClick={() => setPickFor(pickFor === m.id ? null : m.id)} title="リアクション" className={`inline-flex items-center justify-center w-7 h-7 rounded-full text-[15px] leading-none transition ${pickFor === m.id ? 'bg-brand-50 text-brand-600' : 'text-[#98A2B3] hover:text-brand-600 hover:bg-[#F2F4F7]'}`}>😊</button>
-                                            <button onClick={() => onReply && onReply({ id: m.id, name: m.fromName || (resolveName ? resolveName(m.fromStaffId, '') : '') || 'メッセージ', text: (m.text || (m.imgIds && m.imgIds.length ? '画像' : '')).slice(0, 140) })} title="返信" className="inline-flex items-center justify-center w-7 h-7 rounded-full text-[#98A2B3] hover:text-brand-600 hover:bg-[#F2F4F7] transition"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 17 4 12 9 7" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" /></svg></button>
-                                            {(mine || isRoot) && <button onClick={() => onDelete(m.id)} title="削除" className="inline-flex items-center justify-center w-7 h-7 rounded-full text-[#98A2B3] hover:text-rose-600 hover:bg-[#F2F4F7] transition"><Trash2 size={13} /></button>}
+                                            <span className="text-[10px] text-[#B0B7C3] whitespace-nowrap">{m._pending ? '送信中…' : fmtTime(m.createdAt)}</span>
                                         </div>
-                                    </div>
-                                </div>
+                                    );
+                                    return (
+                                        <div className={`flex items-end gap-2 px-1.5 py-1 ${mine ? 'flex-row-reverse' : 'flex-row'}`}>
+                                            {!mine && <div className="shrink-0 self-end"><ChatAvatar name={authorName} size="sm" /></div>}
+                                            <div className={`flex flex-col max-w-[80%] md:max-w-[72%] ${mine ? 'items-end' : 'items-start'}`}>
+                                                {!mine && <div className="flex items-center gap-1.5 mb-0.5 pl-1"><span className="text-[12px] font-semibold text-[#344054]">{authorName}</span>{shop && <span className="text-[10px] text-[#98A2B3]">{shop}</span>}</div>}
+                                                <div className={`flex items-end gap-1.5 ${mine ? 'flex-row-reverse' : 'flex-row'} max-w-full`}>
+                                                    {/* 吹き出し */}
+                                                    <div className="relative min-w-0">
+                                                        <div
+                                                            onContextMenu={e => { e.preventDefault(); setMenuFor(m.id); }}
+                                                            onTouchStart={() => pressStart(m.id)} onTouchEnd={pressCancel} onTouchMove={pressCancel}
+                                                            className={`group relative inline-block px-3 py-2 ${bubble} shadow-[0_1px_1px_rgba(16,24,40,0.06)]`} style={{ wordBreak: 'break-word' }}>
+                                                            {m.replyTo && m.replyTo.id && <div className={`mb-1 pl-2 border-l-[3px] rounded-r-md px-2 py-1 ${mine ? 'border-white/60 bg-white/15' : 'border-brand-300 bg-[#F6F7F9]'}`}><div className={`text-[11px] font-bold ${mine ? 'text-white/90' : 'text-brand-600'}`}>{m.replyTo.name || '返信'}</div><div className={`text-[11px] truncate max-w-[220px] ${mine ? 'text-white/70' : 'text-[#98A2B3]'}`}>{m.replyTo.text || '（画像）'}</div></div>}
+                                                            {m.text && <div className={`text-[14px] leading-relaxed whitespace-pre-wrap break-words ${mine ? 'chat-bubble-mine' : ''}`}>{chatRenderText(m.text, (m.mentions || []).map(x => x && x.name).filter(Boolean))}</div>}
+                                                            {/* 長押し/右クリックメニュー */}
+                                                            {menuFor === m.id && (<>
+                                                                <div className="fixed inset-0 z-30" onClick={() => setMenuFor(null)} />
+                                                                <div className={`absolute z-40 bottom-full mb-1 ${mine ? 'right-0' : 'left-0'} bg-white border border-[#EAECF0] rounded-2xl shadow-xl p-1.5 w-max`} onClick={e => e.stopPropagation()}>
+                                                                    <div className="flex items-center gap-0.5 px-1 pb-1.5 mb-1 border-b border-[#F2F4F7]">
+                                                                        {stamps.slice(0, 6).map(s => <button key={s} onClick={() => { onReact(m.id, s); setMenuFor(null); }} className="w-8 h-8 flex items-center justify-center text-[18px] rounded-full hover:bg-[#F2F4F7] active:scale-95 transition">{s}</button>)}
+                                                                    </div>
+                                                                    <button onClick={() => { doReply(); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 17 4 12 9 7" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" /></svg>返信</button>
+                                                                    {(mine || isRoot) && <button onClick={() => { onDelete(m.id); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-rose-600 hover:bg-rose-50"><Trash2 size={15} />{mine ? '送信を取り消す' : '削除'}</button>}
+                                                                </div>
+                                                            </>)}
+                                                        </div>
+                                                    </div>
+                                                    {meta}
+                                                </div>
+                                                {/* 画像（吹き出しの下・LINE風に独立表示） */}
+                                                {Array.isArray(m.imgIds) && m.imgIds.length > 0 && <div className={`mt-1 flex flex-wrap gap-1.5 ${mine ? 'justify-end' : 'justify-start'}`}>{m.imgIds.map(id => <ChatImage key={id} imgId={id} onClick={() => onImageClick && onImageClick(allImgIds, imgIndexOf(id))} />)}</div>}
+                                                {/* リアクション */}
+                                                {(Object.keys(reactions).length > 0 || pickFor === m.id) && (
+                                                    <div className={`flex items-center gap-1.5 mt-1 flex-wrap ${mine ? 'justify-end' : 'justify-start'}`}>
+                                                        {Object.entries(reactions).map(([emo, ids]) => { const on = (ids || []).map(String).includes(String(myId)); return <button key={emo} onClick={() => onReact(m.id, emo)} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[12px] font-semibold border transition ${on ? 'bg-brand-50 border-brand-200 text-brand-700' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{emo} {(ids || []).length}</button>; })}
+                                                        {pickFor === m.id && <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[#F8F9FB] border border-[#EAECF0]">{stamps.map(s => <button key={s} onClick={() => { onReact(m.id, s); setPickFor(null); }} className="text-base hover:scale-125 transition-transform leading-none">{s}</button>)}</span>}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
                             </React.Fragment>
                         );
                     })}

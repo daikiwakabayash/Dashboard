@@ -10150,9 +10150,16 @@
                             // スマホ判定: Enterは改行、送信は送信ボタンのみ（PCはEnter送信/Shift+Enter改行）
                             const chatIsMobile = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(max-width: 767px)').matches;
                             const allRooms = (chatData.rooms || []).filter(r => chatRoomVisible(r, me));
-                            const roomTitle = (r) => r.kind === 'dm' ? (chatStaffName((r.members || []).map(String).find(x => x !== chatMyId)) || 'ダイレクト') : r.name;
+                            // DMの相手表示名: プロフィールの漢字フルネーム → SalonOneロスター/ディレクトリ → 最後にフォールバック
+                            const chatDmName = (r) => {
+                                const partner = (r.members || []).map(String).find(x => x !== chatMyId);
+                                if (partner === '__root__') return '管理者';
+                                const p = (profileData.profiles || {})[partner];
+                                return (p && p.nameKanji) || chatResolveName(partner, '') || chatStaffName(partner) || 'ダイレクト';
+                            };
+                            const roomTitle = (r) => r.kind === 'dm' ? chatDmName(r) : r.name;
                             const roomIconEmoji = (r) => r.kind === 'announce' ? '📣' : r.kind === 'store' ? '🏠' : r.kind === 'group' ? '👥' : '💬';
-                            const roomSub = (r) => r.kind === 'announce' ? '全員が閲覧' : r.kind === 'store' ? '店舗ルーム' : r.kind === 'group' ? `メンバー ${(r.members || []).length}名` : (chatStaffName((r.members || []).map(String).find(x => x !== chatMyId)) ? 'ダイレクトメッセージ' : '');
+                            const roomSub = (r) => r.kind === 'announce' ? '全員が閲覧' : r.kind === 'store' ? '店舗ルーム' : r.kind === 'group' ? `メンバー ${(r.members || []).length}名` : 'ダイレクトメッセージ';
                             const lastMsg = (r) => { const a = chatData.messages[r.id] || []; return a[a.length - 1] || null; };
                             const relTime = (iso) => { if (!iso) return ''; const d = new Date(iso), now = new Date(); const diff = (now - d) / 1000; if (diff < 60) return 'たった今'; if (diff < 3600) return `${Math.floor(diff / 60)}分前`; if (d.toDateString() === now.toDateString()) return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; const y = new Date(now); y.setDate(now.getDate() - 1); if (d.toDateString() === y.toDateString()) return '昨日'; return `${d.getMonth() + 1}/${d.getDate()}`; };
                             const q = chatListSearch.trim();

@@ -735,6 +735,7 @@
             const endRef = React.useRef(null);
             const lenRef = React.useRef(-1);
             const [pickFor, setPickFor] = React.useState(null);
+            const [readOpen, setReadOpen] = React.useState(null);   // 既読者ポップオーバーを開いているメッセージID
             React.useEffect(() => { if (msgs.length !== lenRef.current) { lenRef.current = msgs.length; if (endRef.current) endRef.current.scrollIntoView({ block: 'end' }); } }, [msgs.length]);
             const fmtTime = (iso) => { const d = new Date(iso); const now = new Date(); const hm = `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; return d.toDateString() === now.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`; };
             const WD = ['日', '月', '火', '水', '木', '金', '土'];
@@ -769,6 +770,7 @@
                                             <span className="font-semibold text-[14px] text-[#111827]">{m.fromName || '不明'}</span>
                                             {(() => { const sh = resolveShop ? resolveShop(m.fromStaffId, m.fromShop) : m.fromShop; return sh ? <span className="text-[12px] text-[#98A2B3]">{sh}</span> : null; })()}
                                             <span className="text-[11px] text-[#98A2B3]">{fmtTime(m.createdAt)}</span>
+                                            {m._pending && <span className="text-[10px] text-[#98A2B3]">送信中…</span>}
                                         </div>
                                         {m.text && <div className="text-[14px] text-[#111827] leading-relaxed whitespace-pre-wrap break-words mt-0.5" style={{ wordBreak: 'break-word' }}>{chatRenderText(m.text, (m.mentions || []).map(x => x && x.name).filter(Boolean))}</div>}
                                         {Array.isArray(m.imgIds) && m.imgIds.length > 0 && <div className="mt-2 flex flex-wrap gap-2">{m.imgIds.map(id => <ChatImage key={id} imgId={id} onClick={() => onImageClick && onImageClick(id)} />)}</div>}
@@ -782,13 +784,25 @@
                                             </div>
                                         )}
                                         {mine && Array.isArray(readMembers) && readers.length > 0 && (
-                                            <div className="mt-1 flex items-center gap-1.5" title={`既読: ${readNames.join('、')}`}>
-                                                <span className="text-[10px] text-brand-500 font-bold leading-none">✓✓</span>
-                                                <div className="flex -space-x-1.5">
-                                                    {readers.slice(0, 6).map((id, i) => { const nm = readNames[i] || 'スタッフ'; return <span key={id} className={`w-4 h-4 rounded-full ${chatAvatarColor(nm)} ring-2 ring-white inline-flex items-center justify-center text-[8px] font-bold`}>{String(nm).trim().charAt(0)}</span>; })}
+                                            <div className="relative inline-block mt-1 group/rd">
+                                                <button onClick={() => setReadOpen(readOpen === m.id ? null : m.id)} className="flex items-center gap-1.5 rounded-md px-1 py-0.5 -mx-1 hover:bg-[#F2F4F7] transition" title="既読した人を表示">
+                                                    <span className="text-[10px] text-brand-500 font-bold leading-none">✓✓</span>
+                                                    <div className="flex -space-x-1.5">
+                                                        {readers.slice(0, 6).map((id, i) => { const nm = readNames[i] || 'スタッフ'; return <span key={id} className={`w-4 h-4 rounded-full ${chatAvatarColor(nm)} ring-2 ring-white inline-flex items-center justify-center text-[8px] font-bold`}>{String(nm).trim().charAt(0)}</span>; })}
+                                                    </div>
+                                                    {readers.length > 6 && <span className="text-[10px] text-[#98A2B3] font-semibold">+{readers.length - 6}</span>}
+                                                    <span className="text-[10px] text-[#98A2B3] font-medium">既読 {readers.length}{readMembers.length > 1 ? `/${readMembers.length - 1}` : ''}</span>
+                                                </button>
+                                                {/* 既読者一覧: PCはカーソルを合わせると浮かぶ／スマホはタップで表示 */}
+                                                <div className={`${readOpen === m.id ? 'block' : 'hidden'} md:group-hover/rd:block absolute z-30 bottom-full mb-1 left-0 min-w-[170px] max-h-56 overflow-y-auto bg-white border border-[#EAECF0] rounded-xl shadow-xl p-2`} onClick={e => e.stopPropagation()}>
+                                                    <div className="text-[10px] font-bold text-[#98A2B3] px-1 pb-1.5">既読 {readers.length}名</div>
+                                                    {readers.map((id, i) => { const nm = readNames[i] || 'スタッフ'; return (
+                                                        <div key={id} className="flex items-center gap-2 px-1 py-1">
+                                                            <span className={`w-6 h-6 rounded-full ${chatAvatarColor(nm)} inline-flex items-center justify-center text-[11px] font-semibold shrink-0`}>{String(nm).trim().charAt(0)}</span>
+                                                            <span className="text-[13px] text-[#344054] truncate">{nm}</span>
+                                                        </div>
+                                                    ); })}
                                                 </div>
-                                                {readers.length > 6 && <span className="text-[10px] text-[#98A2B3] font-semibold">+{readers.length - 6}</span>}
-                                                <span className="text-[10px] text-[#98A2B3] font-medium">既読 {readers.length}{readMembers.length > 1 ? `/${readMembers.length - 1}` : ''}</span>
                                             </div>
                                         )}
                                     </div>
@@ -2214,11 +2228,16 @@
                 const roomId = chatRoomId;
                 // 楽観的に即クリア（LINE風の即応・同じ本文の二重送信も防ぐ）
                 setChatDraft(''); setChatStaged([]); setChatEmojiOpen(false); setChatMention(null);
+                // 楽観的に自分のメッセージを即表示（サーバー往復を待たない）。chatLoadで本物に置き換わる。
+                const tmpId = 'tmp_' + Date.now().toString(36);
+                const optimistic = { id: tmpId, roomId, fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions, reactions: {}, createdAt: new Date().toISOString(), _pending: true };
+                setChatData(d => ({ ...d, messages: { ...d.messages, [roomId]: [...(d.messages[roomId] || []), optimistic] } }));
                 try {
                     await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'send', roomId, msg: { fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions } }) });
                     await chatLoad();
                 } catch {
-                    // 失敗時は入力を復元（送信できていない）
+                    // 失敗時は仮メッセージを消して入力を復元（送信できていない）
+                    setChatData(d => ({ ...d, messages: { ...d.messages, [roomId]: (d.messages[roomId] || []).filter(x => x.id !== tmpId) } }));
                     setChatDraft(prev => prev ? prev : t);
                 } finally { chatSendingRef.current = false; setChatSending(false); }
             };

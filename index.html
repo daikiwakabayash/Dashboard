@@ -4912,7 +4912,11 @@
                 } catch (e) { setSoFutureRepeat({ sales, count, ready: true, loading: false }); }
             };
             // 店舗別集計: 出店順(SO_SHOP_ORDER)で全店を並べ、SalonOne導入店(soShopsに一致)のみ実データを取得。未導入は0。
-            const soShopNorm = (n) => String(n || '').replace('NAORU整体', '').replace('NAORU', '').replace(/\s+/g, '').replace(/[院店]$/, '').trim();
+            // 全体管理シートCSV名 ↔ SalonOne実店舗名 の表記揺れ辞書（正規化後キー同士を統一）。
+            // SalonOne側に「市」「ア」等が入りマッチできず未反映(0)になる店舗をここで吸収する。
+            // 例) CSV「沖縄コザ院」= SalonOne「沖縄市コザ院」／ CSV「大分あけのクロス」= SalonOne「大分あけのアクロス院」。
+            const ZK_NAME_ALIASES = { '沖縄市コザ': '沖縄コザ', '大分あけのアクロス': '大分あけのクロス' };
+            const soShopNorm = (n) => { const b = String(n || '').replace('NAORU整体', '').replace('NAORU', '').replace(/\s+/g, '').replace(/[院店]$/, '').trim(); return ZK_NAME_ALIASES[b] || b; };
             // セラピスト数の共通化: 店舗名を全体管理シート(ZK_FIXED)の正規名に寄せ、上書きキーを一意化。
             // これにより SalonOne売上分析(店舗別) と 全体管理シート のセラピスト数を必ず一致させる。
             const zkCanonName = (name) => {

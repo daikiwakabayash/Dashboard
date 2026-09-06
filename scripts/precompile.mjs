@@ -49,7 +49,9 @@ if (m) {
   });
   const code = out.code.replace(/<\/(script)/gi, '<\\/$1'); // インライン<script>の早期終了防止
   const inlined = '<script>\ndocument.addEventListener("DOMContentLoaded",function(){\n' + code + '\n});\n</script>';
-  html = html.replace(re, inlined);
+  // ⚠️ 置換文字列に $& / $1 等が含まれると String.replace が特殊パターンとして展開してしまう
+  //    （コード中の /.../.replace(re,'\\$&') 等が壊れる）。関数リプレーサで $ を無害化する。
+  html = html.replace(re, () => inlined);
   html = html.replace(/[ \t]*<!--[^\n]*Babel Standalone[^\n]*-->\n/gi, '');
   html = html.replace(/[ \t]*<script[^>]*@babel\/standalone[^>]*><\/script>\n/gi, '');
   html = html.replace('</head>', '<!--precompiled--></head>');

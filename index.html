@@ -2072,6 +2072,7 @@
             const [chatSending, setChatSending] = useState(false);
             const [chatMention, setChatMention] = useState(null);      // @メンション候補 {query, list:[{id,name}], index} or null
             const chatTaRef = useRef(null);                            // 本文textarea参照（メンション挿入後のカーソル復元）
+            const chatSendingRef = useRef(false);                       // 二重送信ガード（同期・stateの遅延に依存しない）
             const [chatStaged, setChatStaged] = useState([]);          // 送信前の画像 [{id,dataUrl}]
             const [chatListSearch, setChatListSearch] = useState('');
             // ルームのピン留め（端末ローカル・個人設定）。ピンしたルームは一覧の最上部「固定」に表示。
@@ -2202,18 +2203,24 @@
             });
             const chatUploadImage = (file) => chatUploadImageTo('chat', file);
             const chatSend = async () => {
+                if (chatSendingRef.current) return;                    // 二重送信ガード（連打・Enter重複を防止）
                 const t = chatDraft.trim(); const imgIds = chatStaged.map(s => s.id);
                 if ((!t && !imgIds.length) || !chatRoomId) return;
-                setChatSending(true);
+                chatSendingRef.current = true; setChatSending(true);
                 // 送信画像をキャッシュへ（即描画用）
                 chatStaged.forEach(s => { if (s.id && s.dataUrl) chatImgCache[s.id] = s.dataUrl; });
                 const roomForMsg = (chatData.rooms || []).find(r => r.id === chatRoomId);
                 const mentions = t ? chatExtractMentions(t, chatMentionCandidates(roomForMsg)) : [];
+                const roomId = chatRoomId;
+                // 楽観的に即クリア（LINE風の即応・同じ本文の二重送信も防ぐ）
+                setChatDraft(''); setChatStaged([]); setChatEmojiOpen(false); setChatMention(null);
                 try {
-                    await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'send', roomId: chatRoomId, msg: { fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions } }) });
-                    setChatDraft(''); setChatStaged([]); setChatEmojiOpen(false); setChatMention(null);
+                    await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'send', roomId, msg: { fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions } }) });
                     await chatLoad();
-                } catch {} finally { setChatSending(false); }
+                } catch {
+                    // 失敗時は入力を復元（送信できていない）
+                    setChatDraft(prev => prev ? prev : t);
+                } finally { chatSendingRef.current = false; setChatSending(false); }
             };
             const chatReact = async (msgId, emoji) => {
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'react', roomId: chatRoomId, msgId, emoji, staffId: chatMyId }) }); await chatLoad(); } catch {}

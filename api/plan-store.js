@@ -37,7 +37,7 @@ const BOARD_FILE_PREFIX = 'naoru:board:file:';// 添付ファイルは1件1キ�
 const BOARD_POST_CAP = 500;                   // 保持する最大投稿数
 const PUSH_KEY = 'naoru:push:v1';             // { subs:[{endpoint,keys,staffId,name,createdAt}] } Webプッシュ購読
 const EVENTS_KEY = 'naoru:events:v1';         // { sections:{study:[row],event:[row],bukatsu:[row]} } 勉強会・イベント日程（共有編集）
-const PROFILE_KEY = 'naoru:profile:v1';       // { profiles:{pid:{kind,nameKanji,nameKana,bio,mainImg,subImgs,sns,shops,updatedAt}} } スタッフ/オーナーのプロフィール（組織図で表示・店舗割当の上書き）
+const PROFILE_KEY = 'naoru:profile:v1';       // { profiles:{pid:{kind,nameKanji,nameKana,bio,mainImg,subImgs,sns,shops,birthday,updatedAt}} } スタッフ/オーナーのプロフィール（組織図で表示・店舗割当の上書き・birthday=誕生日の当日表示）
 
 // ── Webプッシュ送信（VAPID設定時のみ動作・未設定なら黙ってスキップ） ──
 const VAPID_PUBLIC = () => process.env.VAPID_PUBLIC_KEY || '';
@@ -411,6 +411,8 @@ export default async function handler(req, res) {
             return pick;
           })(),
           shops: (Array.isArray(p.shops) ? p.shops : []).map(x => String(x).slice(0, 80)).slice(0, 50),
+          // 生年月日（任意）。YYYY-MM-DD または MM-DD のみ許可。誕生日の当日表示に使用。
+          birthday: (() => { const b = String(p.birthday || '').trim(); return /^(\d{4}-)?\d{2}-\d{2}$/.test(b) ? b : ''; })(),
           updatedAt: new Date().toISOString(),
         };
         const next = { ...profiles, [pid]: clean };

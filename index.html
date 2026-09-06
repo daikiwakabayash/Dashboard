@@ -10723,12 +10723,13 @@
                                     mainImg: p.mainImg || '', subImgs: Array.isArray(p.subImgs) ? [...p.subImgs] : [],
                                     sns: { instagram: '', x: '', youtube: '', tiktok: '', ...(p.sns || {}) },
                                     shops: Array.isArray(p.shops) ? [...p.shops] : [],
+                                    birthday: p.birthday || '',
                                 });
                             };
                             // root: 新規に人を追加（SalonOneに居ない人・手動追加）。manual:のpidでプロフィール作成。
                             const openAddPerson = (shopName, kind) => {
                                 setProfileView(null);
-                                setProfileEdit({ pid: `manual:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`, kind: kind || 'therapist', nameKanji: '', nameKana: '', bio: '', mainImg: '', subImgs: [], sns: { instagram: '', x: '', youtube: '', tiktok: '' }, shops: shopName ? [shopName] : [] });
+                                setProfileEdit({ pid: `manual:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`, kind: kind || 'therapist', nameKanji: '', nameKana: '', bio: '', mainImg: '', subImgs: [], sns: { instagram: '', x: '', youtube: '', tiktok: '' }, shops: shopName ? [shopName] : [], birthday: '' });
                             };
                             // root: 組織図から人を削除。プロフィールがあれば削除、SalonOne由来/設定オーナーは非表示リストで隠す。
                             const orgRemove = async (pid, name) => {
@@ -10740,6 +10741,10 @@
                             };
                             // ホバー/タップで出るプロフィールカード（写真・名前・自己紹介・SNS・DM・編集）
                             const snsMeta = { instagram: { label: 'Instagram', color: 'text-pink-600' }, x: { label: 'X', color: 'text-[#111827]' }, youtube: { label: 'YouTube', color: 'text-red-600' }, tiktok: { label: 'TikTok', color: 'text-[#111827]' }, facebook: { label: 'Facebook', color: 'text-blue-600' }, line: { label: 'LINE', color: 'text-green-600' }, website: { label: 'Web', color: 'text-brand-600' } };
+                            // 本日(JST)の MM-DD。誕生日判定に使用。
+                            const todayMMDD = (() => { const n = new Date(); const j = new Date(n.getTime() + (n.getTimezoneOffset() + 540) * 60000); return `${String(j.getMonth() + 1).padStart(2, '0')}-${String(j.getDate()).padStart(2, '0')}`; })();
+                            // プロフィールの誕生日が本日か（生年月日はYYYY-MM-DD or MM-DD。年は無視して月日で判定）
+                            const isBirthdayToday = (prof) => { if (!prof || !prof.birthday) return false; const m = String(prof.birthday).match(/(\d{2})-(\d{2})$/); return !!m && `${m[1]}-${m[2]}` === todayMMDD; };
                             // プロフィールカードの中身（デスクトップのホバー／スマホのモーダル共通）
                             const renderProfileBody = (pid, fallbackName, fallbackKind, big) => {
                                 const prof = profiles[pid];
@@ -10748,12 +10753,14 @@
                                 const numericId = /^\d+$/.test(String(pid));
                                 const dispNm = (prof && prof.nameKanji) || fallbackName || 'スタッフ';
                                 const snsList = prof && prof.sns ? Object.entries(prof.sns).filter(([, v]) => v) : [];
+                                const bday = isBirthdayToday(prof);
                                 return (<>
+                                    {bday && <div className="mb-3 rounded-xl bg-gradient-to-r from-pink-50 to-amber-50 border border-pink-200 px-3 py-2 text-[13px] font-black text-pink-700 flex items-center gap-1.5">🎂 本日は {dispNm} さんのお誕生日です！🎉</div>}
                                     {prof ? (<>
-                                        {prof.mainImg && <div className={`w-full ${big ? 'aspect-[4/3]' : 'aspect-[4/3]'} rounded-xl overflow-hidden bg-[#F2F4F7] mb-3 cursor-zoom-in`} onClick={() => setChatLightbox(prof.mainImg)}><img src={chatImgSrc(prof.mainImg)} className="w-full h-full object-cover" loading="lazy" alt="" /></div>}
+                                        {prof.mainImg && <div className={`w-full ${big ? 'aspect-[4/3]' : 'aspect-[4/3]'} rounded-xl overflow-hidden bg-[#F2F4F7] mb-3 cursor-zoom-in ${bday ? 'ring-2 ring-pink-300' : ''}`} onClick={() => setChatLightbox(prof.mainImg)}><img src={chatImgSrc(prof.mainImg)} className="w-full h-full object-cover" loading="lazy" alt="" /></div>}
                                         {Array.isArray(prof.subImgs) && prof.subImgs.length > 0 && <div className="flex gap-1.5 mb-3">{prof.subImgs.map(id => <span key={id} className={`${big ? 'w-16 h-16' : 'w-12 h-12'} rounded-lg overflow-hidden bg-[#F2F4F7] cursor-zoom-in`} onClick={() => setChatLightbox(id)}><img src={chatImgSrc(id)} className="w-full h-full object-cover" loading="lazy" alt="" /></span>)}</div>}
                                         <div className="flex items-center gap-2 flex-wrap">
-                                            <span className={`${big ? 'text-[18px]' : 'text-[15px]'} font-bold text-[#111827]`}>{dispNm}</span>
+                                            <span className={`${big ? 'text-[18px]' : 'text-[15px]'} font-bold text-[#111827]`}>{bday ? `🎂 ${dispNm}` : dispNm}</span>
                                             <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${prof.kind === 'owner' ? 'text-brand-700 bg-brand-50' : 'text-teal-700 bg-teal-50'}`}>{prof.kind === 'owner' ? 'オーナー' : 'セラピスト'}</span>
                                         </div>
                                         {prof.nameKana && <div className="text-[12px] text-[#98A2B3] mt-0.5">{prof.nameKana}</div>}
@@ -10775,12 +10782,13 @@
                             const ProfilePop = ({ pid, name, kind }) => {
                                 const prof = profiles[pid];
                                 const dispNm = (prof && prof.nameKanji) || name || 'スタッフ';
+                                const bday = isBirthdayToday(prof);
                                 return (
                                     <span key={pid} className="group relative inline-block align-top">
-                                        <button onClick={e => { e.stopPropagation(); setProfileView({ pid, name, kind }); }} className={`inline-flex items-center gap-1.5 text-[12px] pl-1 pr-2.5 py-1 rounded-full border transition ${kind === 'owner' ? 'text-brand-700 bg-brand-50 border-brand-100 font-semibold hover:bg-brand-100/70' : 'text-[#344054] bg-[#F8F9FB] border-[#EAECF0] hover:bg-white hover:border-[#D6DAE1]'}`}>
-                                            {prof && prof.mainImg ? <span className="w-5 h-5 rounded-full overflow-hidden shrink-0 bg-[#F2F4F7]"><img src={chatImgSrc(prof.mainImg)} className="w-full h-full object-cover" loading="lazy" alt="" /></span> : <span className={`w-5 h-5 rounded-full ${chatAvatarColor(dispNm)} inline-flex items-center justify-center text-[10px] font-semibold`}>{String(dispNm || '？').charAt(0)}</span>}
-                                            {dispNm}
-                                            {prof && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" title="プロフィール登録済み" />}
+                                        <button onClick={e => { e.stopPropagation(); setProfileView({ pid, name, kind }); }} className={`inline-flex items-center gap-1.5 text-[12px] pl-1 pr-2.5 py-1 rounded-full border transition ${bday ? 'text-pink-700 bg-gradient-to-r from-pink-50 to-amber-50 border-pink-200 font-bold hover:from-pink-100 hover:to-amber-100 ring-1 ring-pink-200' : kind === 'owner' ? 'text-brand-700 bg-brand-50 border-brand-100 font-semibold hover:bg-brand-100/70' : 'text-[#344054] bg-[#F8F9FB] border-[#EAECF0] hover:bg-white hover:border-[#D6DAE1]'}`} title={bday ? `本日 ${dispNm} さんのお誕生日です🎉` : undefined}>
+                                            {prof && prof.mainImg ? <span className={`w-5 h-5 rounded-full overflow-hidden shrink-0 bg-[#F2F4F7] ${bday ? 'ring-2 ring-pink-300' : ''}`}><img src={chatImgSrc(prof.mainImg)} className="w-full h-full object-cover" loading="lazy" alt="" /></span> : <span className={`w-5 h-5 rounded-full ${bday ? 'bg-pink-100 text-pink-600' : chatAvatarColor(dispNm)} inline-flex items-center justify-center text-[10px] font-semibold`}>{bday ? '🎂' : String(dispNm || '？').charAt(0)}</span>}
+                                            {bday ? `🎂 ${dispNm}` : dispNm}
+                                            {bday ? <span className="text-[9px] font-black text-pink-700 bg-pink-100 rounded-full px-1.5 py-0.5 leading-none">🎉お誕生日</span> : (prof && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" title="プロフィール登録済み" />)}
                                         </button>
                                         {/* デスクトップのみホバーで簡易表示（スマホはタップでモーダル） */}
                                         <div className="hidden md:group-hover:block absolute left-0 top-full mt-2 z-40 w-64 bg-white rounded-2xl border border-[#EAECF0] shadow-xl p-4 text-left cursor-default" onClick={e => e.stopPropagation()}>
@@ -10921,6 +10929,11 @@
                                                         <div className="grid grid-cols-2 gap-2">
                                                             <div><div className="text-[12px] font-bold text-[#344054] mb-1.5">名前（漢字）</div><input value={d.nameKanji} onChange={e => setD({ nameKanji: e.target.value })} placeholder="山田 太郎" className={inputCls} /></div>
                                                             <div><div className="text-[12px] font-bold text-[#344054] mb-1.5">名前（カナ）</div><input value={d.nameKana} onChange={e => setD({ nameKana: e.target.value })} placeholder="ヤマダ タロウ" className={inputCls} /></div>
+                                                        </div>
+                                                        {/* 生年月日（任意）: 誕生日当日は組織図で名前が変わる */}
+                                                        <div>
+                                                            <div className="text-[12px] font-bold text-[#344054] mb-1.5">生年月日 <span className="text-[#98A2B3] font-normal">任意・誕生日の当日だけ組織図で名前が変わります🎂</span></div>
+                                                            <input type="date" value={d.birthday || ''} onChange={e => setD({ birthday: e.target.value })} className={inputCls} />
                                                         </div>
                                                         {/* 自己紹介 */}
                                                         <div>

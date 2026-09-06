@@ -22,7 +22,11 @@ npm run test:watch  # ウォッチモード
 ### デプロイ
 Vercelにpushすると自動デプロイ。
 
-**ビルド（初回表示の高速化）**: `index.html` は開発上のソース（`<script type="text/babel">` のまま編集）。Vercelビルド時に `scripts/precompile.mjs`（`vercel.json` の `buildCommand`）が esbuild で JSX→JS に事前変換し、`@babel/standalone` を除去した `index.html` を配信する（ブラウザ内Babelコンパイルを排除）。ローカルは変換不要でそのまま動作。ビルドが失敗してもVercelは直前の正常デプロイを配信するため本番は壊れない。
+**ビルド（初回表示の高速化）**: `index.html` は開発上のソース（`<script type="text/babel">` のまま編集）。Vercelビルド時に `scripts/precompile.mjs`（`vercel.json` の `buildCommand`）が以下を実行し `public/` へ出力：
+1. **JSX事前変換**: esbuild で JSX→JS に変換し `@babel/standalone` を除去（ブラウザ内Babelコンパイルを排除）。
+2. **Tailwind事前ビルド**: `tailwindcss`(v3) で `styles/tailwind.css` → `public/tailwind.css`（~24KB gzip）を生成し、`index.html`/`owner.html` の `cdn.tailwindcss.com`（Play CDN・約400KB JS＋ブラウザ内JIT）を `<link href="/tailwind.css">` に差し替え。設定は `tailwind.config.js`（theme.extend は `index.html` 内インライン設定と一致させること。`bg-${x.color}` 等の**文字列補間で動的生成されるクラスは safelist** でカバー）。⚠️ Tailwindビルドが失敗した場合は自動でPlay CDNのまま出力（フォールバック＝見た目は壊れない）。
+- ローカルは変換不要でそのまま動作（Play CDNで表示）。ビルドが失敗してもVercelは直前の正常デプロイを配信するため本番は壊れない。
+- React/ReactDOM は Cloudflare **cdnjs**（defer）から読み込み。pdf.js も defer で初回描画をブロックしない。スプラッシュの固定待ちは最小化済み。
 
 ## テスト構成
 
@@ -46,7 +50,7 @@ api/                # ⚠️ Vercel Hobbyの関数数上限(12)対策で「1エ�
   feedback.js       # フィードバックAPI（GAS連携・取得/送信）
   health.js         # ヘルスチェック（env.planStore で保存先の有効状態も返す）
   salonone.js       # SalonOne 分析APIプロキシ（APIキー隠蔽・GET限定・許可リスト）
-  plan-store.js     # SalonOne計画の目標・アクション共有ストア（全デバイス同期）。保存先=Vercel KV(推奨) or Supabase or GAS。未設定時はlocalStorage継続。?type=allowance で手当（領収書）の提出・個人別生産性も同ストアに保存（submit/delete/recordProductivity）。?type=thanksgift でサンクスギフト投票を保存（vote/delete・投票期間と自分不可はサーバー側でも強制）
+  plan-store.js     # SalonOne計画の目標・アクション共有ストア（全デバイス同期）。保存先=Vercel KV(推奨) or Supabase or GAS。未設定時はlocalStorage継続。?type=allowance で手当（領収書）の提出・個人別生産性も同ストアに保存（submit/delete/recordProductivity）。?type=thanksgift でサンクスギフト投票を保存（vote/delete・投票期間と自分不可はサーバー側でも強制）。?type=chat で社内チャット（rooms/messages/reads/dir・画像別キー）。?type=board で掲示板（全社発信）を保存（post/comment/deleteComment/uploadImage/uploadFile/pin/delete/read・画像はchatと同じ別キー、ファイルは naoru:board:file:<id>）。コメントは post.comments[{id,parentId,fromStaffId,fromName,text,mentions,createdAt}]＝投稿への返信・@メンション対応（メンション/返信先/投稿者へweb-push通知）。?type=push でWebプッシュ購読（config/subscribe/unsubscribe）。掲示板投稿・グループ/DM/全社アナウンスのチャット送信時に、購読者へ web-push で通知送信（VAPID未設定なら無効）。?type=chat で社内チャットを保存（rooms/messages/reads/dir・画像は別キー naoru:chat:img:<id>・ensureRooms/createRoom/send/react/read/uploadImage/deleteMsg/deleteRoom）
   tasks.js          # タスク系API
   settlement.js     # 返金明細書ディスパッチャ → /api/settlement-auth|owners|store（?fn=auth/owners/store・rewrite）
   square.js         # Squareディスパッチャ → /api/square/metrics|settlement|test（?fn=metrics/settlement/test・rewrite）
@@ -58,6 +62,10 @@ lib/
   salonone.js       # SalonOne API連携ロジック（エンドポイント許可リスト・検証・URL組立）
   allowances.js     # 手当（領収書）計算ロジック（毎月上限型/通算チャージ型・年末失効）。tests/allowances.test.js
   thanksgift.js     # サンクスギフト（感謝の投票）ロジック（投票期間の判定=毎月1日00:01〜2日23:59 JST・対象=前月／1人1票upsert・自分不可・ランキング集計）。tests/thanksgift.test.js
+  chat.js           # 社内チャット ロジック（ルーム可視判定・未読集計・リンク抽出・リアクショントグル・DM検索）。tests/chat.test.js
+  board.js          # 掲示板（全社発信）ロジック（新着集計・並び替え・リンク抽出・動画URL埋め込み判定）。tests/board.test.js
+  events.js         # 勉強会・イベント日程 ロジック（日付解釈・過ぎた予定の判定＝グレーアウト・セクション定義）。tests/events.test.js
+  geo.js            # 組織図の地理順（店舗名→都道府県ランク北→南・海外最下部・地域グルーピング）。tests/geo.test.js
   settlement.js     # 返金明細書 共通ロジック（オーナー認証トークン・スナップショット・計算・期日/注意書き）
   handlers/         # api/ ディスパッチャから呼ばれる実ハンドラ群（Serverless Functionにカウントされない）
     settlement-auth.js / settlement-owners.js / settlement-store.js
@@ -97,6 +105,7 @@ tests/              # Vitestテスト
   - `KV_REST_API_URL` / `KV_REST_API_TOKEN` — 計画の目標・アクション共有ストア（`api/plan-store.js`）用のVercel KV。VercelのStorageでKVを作成すると自動注入（GAS不要・推奨）
   - ⚠️ **共有ストアの有効化が必要**: `api/plan-store.js` のブロブ系ストア（手当`allowance`・`accountmeta`・`zktherapist`・サンクスギフト`thanksgift`）は **KV or Supabase or「KVStore対応のGAS」** のいずれかが必要。GASを使う場合は `gas/settlement-gas-sample.js` の最新版（`type=kv`/`action=saveKv` 実装済み）を再デプロイすること。未対応だと保存が無反応（`configured:true` でも永続化されない）
   - `AUTH_SALT` — トークン用ソルト（オプション・オーナー認証で使用）
+  - `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` — Webプッシュ通知用（掲示板投稿・グループ/DMチャットの新着通知）。`npx web-push generate-vapid-keys` で生成し、公開鍵/秘密鍵をVercel環境変数に設定（SUBJECTは `mailto:...`）。未設定なら通知機能は自動でオフ（本体は正常動作）。⚠️ iPhoneは「ホーム画面に追加」でPWAインストール後のみ通知可（iOS16.4+）
 
 ## SalonOne 分析API連携
 SalonOne（`https://salonone.net`）の**読み取り専用**分析APIと連携する。
@@ -146,6 +155,27 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
 - **公開制（root管理）**: 受け取った側の感謝コメントは、**rootが対象月を【公開】したときだけ**本人に表示される（未公開の間は本人にも非表示）。root専用「公開管理」で対象月ごとに公開/非公開を切替（`/api/plan-store?type=thanksgift` の `action=publish`・`{period,publish}`→`published:[...]`）。フロントは `tgData.published` で受け取り側をゲート（`publishedSet.has(v.period)`）。ランキング（本部集計）は公開に関わらずrootは常に閲覧可。
 - **保存**: 共有ストア（`/api/plan-store?type=thanksgift`・KV/Supabase/GAS）に `{votes:[...], log:[...], published:[...], test:{...}}` を保存。`votes` は現状（`id=対象月__投票者ID` で1人1票upsert）、`log` は送信/編集/取消の追記のみ履歴（送信履歴表示用・上限3000件）、`published` は公開済み対象月の配列。
 - ロジックは `lib/thanksgift.js`（`getVotingState`/`validateVote`/`upsertVote`/`tallyRanking`/`receivedFor`）に分離しテスト済み。フロントは投票状態をサーバーGETの `votingState` から受け取る。
+
+## 社内チャット（チャットタブ）
+店舗・グループ・個別（DM）のやり取りを1箇所に集約する社内専用チャット。
+- **タブ**: サイドバー先頭「チャット」（全ロール表示）。未読件数バッジをサイド/モバイルナビに表示（認証後は定期ポーリングで更新・チャット表示中は6秒/他は25秒間隔）。
+- **ルーム種別**: `announce`（全社アナウンス・全員閲覧）／`store`（店舗ルーム・その店舗の所属/アクセス者＋root）／`group`（メンバー明示）／`dm`（1:1・メンバーのみ、rootでも非メンバーのDMは不可）。全社アナウンス＋店舗ルーム＋スタッフ一覧は「広い権限のセッション（全店が見えるroot/複数店）」が `ensureRooms` で土台生成（サンクスギフトの `setdir` と同じ思想）。
+- **機能**: 既読（`ここから未読`区切り＋未読バッジ）・スタンプ/リアクション（1ユーザー1絵文字トグル）・画像添付（クライアントで最大1400px/JPEGに縮小→別キー保存・ライトボックス）・URL自動リンク・新しいルーム作成（グループ名＋メンバー選択／DMは相手1名・既存DMは再利用）。投稿者名は**ログイン中のアカウント名**（root=管理者・SSO=本名・owner=アカウント名）、投稿時刻を表示。
+- **保存**: 共有ストア（`/api/plan-store?type=chat`・KV/Supabase/GAS）。1ルーム最大400件でリングバッファ。⚠️ plan-store はサーバー認証を持たない（thanksgift と同じ信頼モデル）＝UIレベルの社内利用前提。ロジックは `lib/chat.js`（`roomVisibleTo`/`unreadCount`/`extractLinks`/`toggleReaction` 等）に分離しテスト済み。
+
+## サンクスポイント（サンクスギフトタブ内）
+サンクスギフトの送受信をポイント化して本人に可視化。`送る=+10pt / 受け取る(公開分)=+30pt`。
+- staff/owner のサンクスギフトタブ上部に「サンクスポイント」カード（累計pt・今月の獲得・今月送った/受け取った件数とpt・全社ランキング`N位/M名`）。
+- 「もらった感謝」に**これまでの感謝メッセージ**を対象月ごとに常時表示（公開済みは開封演出を待たずいつでも読み返せる＋開封演出の再生ボタン）。点数計算は votes（送信=全票／受信=公開分）から算出。
+
+## 掲示板（全社発信）＋PWA＋Webプッシュ
+- **お知らせハブタブ**（旧「掲示板」・id=`board`）: 本部/スタッフ→全社への発信。左=作成（送信者/タイトル/本文/関連リンク/動画URL/画像・ファイルのドラッグ&ドロップ/重要度トグル）／右=受信一覧（フィルタ すべて/本部/店舗/⭐重要・並び替え 新しい/古い・リスト/グリッド表示）。投稿は title/important/link を保持。テキスト・URL自動リンク・画像（縮小して別キー保存）・ファイル添付（約4MB・`naoru:board:file:<id>`）・動画URL（YouTube/Vimeo埋め込み・.mp4は`<video>`）。root/投稿者は削除、rootはピン留め（各カードの「…」メニュー）。**未読は読むまで「1」＋未読バッジが残る**（開いただけでは既読化しない・カードクリック/「すべて既読」で既読）。ブックマークは端末ローカル（`naoru_board_bm`）。発信者名はSalonOneロスターで本名解決。保存=`/api/plan-store?type=board`、ロジックは`lib/board.js`。
+- **PWA**: `manifest.webmanifest`＋`sw.js`＋アイコン（`icon-192/512(-maskable)`・`apple-touch-icon`）で携帯にインストール可。SWは**キャッシュしない**（fetchはパススルー＝古いビルドが残らない）。用途はインストール可能化とプッシュ受信のみ。`scripts/precompile.mjs`がpublicへコピー。
+- **Webプッシュ**: `sw.js`のpush/notificationclickで受信・遷移（`/?tab=board|chat`）。購読は`/api/plan-store?type=push`（GETで公開鍵配布・subscribe/unsubscribe）。送信は掲示板投稿=全員、チャットはグループ/DM=メンバー・全社アナウンス=全員（店舗ルームは送らない）。`web-push`依存・VAPID環境変数が必要（上記）。フロントは掲示板ヘッダーの「通知をオンにする」で許可＋購読。
+
+## 勉強会・イベント日程（共有編集グリッド）／組織図
+- **勉強会・イベントタブ**: スプレッドシート風の共有編集表。3セクション（勉強会／飲み会などのイベント／部活）。各セルはtextareaで直接編集→**自動保存**（デバウンス700ms・`upsertRow`）。行の追加/削除可。**日付が過ぎた行は自動グレーアウト**（`lib/events.js` の `parseEventDate`/`isPastEvent`・毎週/未定は対象外）。保存=`/api/plan-store?type=events`（sections別・行単位upsert/delete）。編集中(`evEditingRef`)はポーリング取り込みを止めて入力消失を防止。
+- **組織図タブ**: エリア（店舗名から都道府県を推定＝`lib/geo.js`／北→南・海外最下部）→店舗→オーナー/スタッフ。**月選択**で、その月に**売上>0**のスタッフのみ表示（SalonOne売上と同じ per-shop `sales/summary` の `by_staff`・`org_sales_v1` にキャッシュ・レート制限バックオフ）。楽トレ/ヘルプ/受付/役職(`isNonTherapistName`)は除外。オーナーは「オーナー設定」の管轄店舗から紐付け（👑）。検索・合計ヘッダー付き。地域辞書に無い店舗は「その他」（要追加）。
 
 ## 開発ルール
 - `index.html` を編集したら `npm test` を実行して構造テストを通す

@@ -14,6 +14,8 @@
 // POST /api/plan-store {goals,actions} → { ok:true }
 
 import { getVotingState, validateVote, upsertVote, removeVote } from '../lib/thanksgift.js';
+import { ensureBaseRooms, extractLinks, toggleReaction, genId } from '../lib/chat.js';
+import { videoEmbed } from '../lib/board.js';
 
 // Vercel KV / Upstash Redis / Vercel Redis いずれの環境変数名でも動くよう両対応（REST APIは共通）
 const KV_URL = () => process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_REST_API_URL || '';
@@ -27,6 +29,45 @@ const ALLOWANCE_KEY = 'naoru:allowance:v1'; // { submissions:[...], productivity
 const ACCTMETA_KEY = 'naoru:accountmeta:v1'; // { owner: { role, staffId, staffName } }
 const ZKTHERAPIST_KEY = 'naoru:zktherapist:v1'; // { 'shopName|YYYY-MM': count } 全体管理シートのセラピスト数 手動上書き
 const THANKSGIFT_KEY = 'naoru:thanksgift:v1'; // { votes:[{id,period,fromStaffId,fromStaffName,fromShop,toStaffId,toStaffName,toShop,comment,createdAt}] } サンクスギフト投票
+const CHAT_KEY = 'naoru:chat:v1';             // { rooms:[...], messages:{roomId:[...]}, reads:{staffId:{roomId:ms}}, dir:{staff:[...]} } 社内チャット
+const CHAT_IMG_PREFIX = 'naoru:chat:img:';    // 画像は1枚1キーで別保存（blob肥大化を避ける）
+const CHAT_MSG_CAP = 400;                     // 1ルームあたり保持する最大メッセージ数（古いものから破棄）
+const BOARD_KEY = 'naoru:board:v1';           // { posts:[...], reads:{staffId:ms} } 掲示板（全社発信）
+const BOARD_FILE_PREFIX = 'naoru:board:file:';// 添付ファイルは1件1キーで別保存
+const BOARD_POST_CAP = 500;                   // 保持する最大投稿数
+const PUSH_KEY = 'naoru:push:v1';             // { subs:[{endpoint,keys,staffId,name,createdAt}] } Webプッシュ購読
+const EVENTS_KEY = 'naoru:events:v1';         // { sections:{study:[row],event:[row],bukatsu:[row]} } 勉強会・イベント日程（共有編集）
+const PROFILE_KEY = 'naoru:profile:v1';       // { profiles:{pid:{kind,nameKanji,nameKana,bio,mainImg,subImgs,sns,shops,birthday,updatedAt}} } スタッフ/オーナーのプロフィール（組織図で表示・店舗割当の上書き・birthday=誕生日の当日表示）
+
+// ── Webプッシュ送信（VAPID設定時のみ動作・未設定なら黙ってスキップ） ──
+const VAPID_PUBLIC = () => process.env.VAPID_PUBLIC_KEY || '';
+const VAPID_PRIVATE = () => process.env.VAPID_PRIVATE_KEY || '';
+const VAPID_SUBJECT = () => process.env.VAPID_SUBJECT || 'mailto:admin@naoru.example';
+// 対象購読へ通知を送る。web-push は動的import（未インストール環境でもハンドラは壊れない）。
+// filterStaffIds が配列なら、その staffId の購読のみへ送信（未指定＝全員）。
+async function sendPush(hasKV, hasSB, gas, payload, filterStaffIds) {
+  try {
+    if (!VAPID_PUBLIC() || !VAPID_PRIVATE()) return; // 未設定＝無効
+    const mod = await import('web-push').catch(() => null);
+    const webpush = mod && (mod.default || mod);
+    if (!webpush) return;
+    webpush.setVapidDetails(VAPID_SUBJECT(), VAPID_PUBLIC(), VAPID_PRIVATE());
+    const store = (await blobGet(PUSH_KEY, hasKV, hasSB, gas)) || {};
+    let subs = Array.isArray(store.subs) ? store.subs : [];
+    const only = Array.isArray(filterStaffIds) ? new Set(filterStaffIds.map(String)) : null;
+    const targets = only ? subs.filter(s => only.has(String(s.staffId))) : subs;
+    const body = JSON.stringify(payload);
+    const dead = [];
+    await Promise.all(targets.map(async (s) => {
+      try { await webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, body); }
+      catch (e) { if (e && (e.statusCode === 404 || e.statusCode === 410)) dead.push(s.endpoint); }
+    }));
+    if (dead.length) { // 失効した購読を掃除
+      const next = subs.filter(s => !dead.includes(s.endpoint));
+      await blobSet(PUSH_KEY, { subs: next }, hasKV, hasSB, gas);
+    }
+  } catch (_) { /* 送信失敗は投稿処理を止めない */ }
+}
 
 // ── Vercel KV (Upstash REST) ──
 async function kvGet(key) {
@@ -182,6 +223,571 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
       return res.status(400).json({ ok: false, error: 'invalid zktherapist action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── 勉強会・イベント日程ストア（共有編集グリッド）: ?type=events ──
+  const isEvents = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'events';
+  if (isEvents) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ sections: {}, configured: false });
+    try {
+      const cur = (await blobGet(EVENTS_KEY, hasKV, hasSB, gas)) || {};
+      const sections = (cur.sections && typeof cur.sections === 'object') ? cur.sections : {};
+      if (req.method === 'GET') return res.status(200).json({ sections, configured: true });
+      const body = req.body || {};
+      const sk = String(body.section || '');
+      if (!['study', 'event', 'bukatsu'].includes(sk)) return res.status(400).json({ ok: false, error: 'bad_section' });
+      const rows = Array.isArray(sections[sk]) ? sections[sk] : [];
+      if (body.action === 'upsertRow' && body.row && body.row.id) {
+        const cells = (body.row.cells && typeof body.row.cells === 'object') ? body.row.cells : {};
+        const clean = {}; for (const k of Object.keys(cells)) clean[String(k)] = String(cells[k] ?? '').slice(0, 300);
+        const rec = { id: String(body.row.id), cells: clean, updatedBy: String(body.row.updatedBy || ''), updatedAt: new Date().toISOString() };
+        const exists = rows.some(r => r && r.id === rec.id);
+        const next = exists ? rows.map(r => r && r.id === rec.id ? rec : r) : rows.concat(rec);
+        const nextSections = { ...sections, [sk]: next.slice(0, 400) };
+        await blobSet(EVENTS_KEY, { sections: nextSections }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, row: rec });
+      }
+      if (body.action === 'deleteRow' && body.id) {
+        const next = rows.filter(r => r && r.id !== String(body.id));
+        await blobSet(EVENTS_KEY, { sections: { ...sections, [sk]: next } }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      if (body.action === 'reorder' && Array.isArray(body.order)) {
+        const map = new Map(rows.map(r => [String(r.id), r]));
+        const next = body.order.map(id => map.get(String(id))).filter(Boolean);
+        // 並べ替えに含まれない行は末尾に温存
+        for (const r of rows) if (!body.order.map(String).includes(String(r.id))) next.push(r);
+        await blobSet(EVENTS_KEY, { sections: { ...sections, [sk]: next } }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid events action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── 掲示板（全社発信）ストア: ?type=board ──
+  const isBoard = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'board';
+  if (isBoard) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ posts: [], reads: {}, configured: false });
+    try {
+      // 添付ファイル取得: GET ?type=board&file=<id> → { name, dataUrl }
+      if (req.method === 'GET' && req.query.file) {
+        const f = await blobGet(BOARD_FILE_PREFIX + String(req.query.file), hasKV, hasSB, gas);
+        if (!f) return res.status(404).json({ ok: false, error: 'not_found' });
+        return res.status(200).json({ ok: true, ...f });
+      }
+      const cur = (await blobGet(BOARD_KEY, hasKV, hasSB, gas)) || {};
+      const posts = Array.isArray(cur.posts) ? cur.posts : [];
+      const reads = (cur.reads && typeof cur.reads === 'object') ? cur.reads : {};
+      if (req.method === 'GET') return res.status(200).json({ posts, reads, configured: true });
+
+      const body = req.body || {};
+      const action = body.action;
+
+      if (action === 'post' && body.post) {
+        const p = body.post;
+        const text = String(p.text || '').slice(0, 8000);
+        const title = String(p.title || '').slice(0, 200);
+        const rec = {
+          id: genId('post'),
+          authorId: String(p.authorId || ''),
+          authorName: String(p.authorName || '').slice(0, 80),
+          authorShop: String(p.authorShop || '').slice(0, 80),
+          authorRoot: !!p.authorRoot,
+          title,
+          important: !!p.important,
+          text,
+          link: /^https?:\/\//.test(String(p.link || '')) ? String(p.link).slice(0, 500) : '',
+          links: extractLinks(text),
+          imgIds: (Array.isArray(p.imgIds) ? p.imgIds : []).map(String).slice(0, 8),
+          files: (Array.isArray(p.files) ? p.files : []).slice(0, 8).map(f => ({ id: String(f.id || ''), name: String(f.name || 'file').slice(0, 120), type: String(f.type || ''), size: Number(f.size) || 0 })),
+          videoUrl: (() => { const v = videoEmbed(p.videoUrl); return v ? String(p.videoUrl).slice(0, 500) : ''; })(),
+          pinned: false,
+          createdAt: new Date().toISOString(),
+        };
+        const nextPosts = [rec, ...posts].slice(0, BOARD_POST_CAP);
+        await blobSet(BOARD_KEY, { posts: nextPosts, reads: { ...reads, [rec.authorId]: Date.now() } }, hasKV, hasSB, gas);
+        // 全員へプッシュ（購読者全員）
+        sendPush(hasKV, hasSB, gas, { kind: 'board', title: `${rec.important ? '❗' : '📣'} ${title || rec.authorName || 'お知らせ'}`, body: (title ? text : text).slice(0, 120) || '新しい掲示があります', url: '/?tab=board' });
+        return res.status(200).json({ ok: true, post: rec });
+      }
+      if (action === 'uploadImage' && body.dataUrl) {
+        const dataUrl = String(body.dataUrl);
+        if (!/^data:image\/(png|jpe?g|gif|webp);base64,/.test(dataUrl)) return res.status(400).json({ ok: false, error: 'bad_image' });
+        if (dataUrl.length > 3_500_000) return res.status(413).json({ ok: false, error: 'too_large' });
+        const id = genId('img');
+        await blobSet(CHAT_IMG_PREFIX + id, dataUrl, hasKV, hasSB, gas); // 画像はチャットと同じ保存先を再利用
+        return res.status(200).json({ ok: true, id });
+      }
+      if (action === 'uploadFile' && body.dataUrl && body.name) {
+        const dataUrl = String(body.dataUrl);
+        if (!/^data:[^;]+;base64,/.test(dataUrl)) return res.status(400).json({ ok: false, error: 'bad_file' });
+        if (dataUrl.length > 6_000_000) return res.status(413).json({ ok: false, error: 'too_large' }); // ~4.4MBまで
+        const id = genId('file');
+        await blobSet(BOARD_FILE_PREFIX + id, { name: String(body.name).slice(0, 120), type: String(body.fileType || ''), dataUrl }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, id });
+      }
+      if (action === 'pin' && body.id) {
+        const nextPosts = posts.map(p => p && p.id === String(body.id) ? { ...p, pinned: !!body.pinned } : p);
+        await blobSet(BOARD_KEY, { posts: nextPosts, reads }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      if (action === 'react' && body.id && body.emoji && body.staffId) {
+        const nextPosts = posts.map(p => p && p.id === String(body.id) ? { ...p, reactions: toggleReaction(p.reactions, String(body.emoji), String(body.staffId)) } : p);
+        // リアクション＝閲覧とみなし、その人の既読も進める
+        const nextReads = { ...reads, [String(body.staffId)]: Math.max(Number(reads[String(body.staffId)]) || 0, Date.now()) };
+        await blobSet(BOARD_KEY, { posts: nextPosts, reads: nextReads }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      // コメント投稿（返信＝parentId・メンション対応）
+      if (action === 'comment' && body.id && body.comment) {
+        const c = body.comment;
+        const text = String(c.text || '').slice(0, 2000);
+        if (!text) return res.status(400).json({ ok: false, error: 'empty' });
+        const rec = {
+          id: genId('cm'),
+          parentId: c.parentId ? String(c.parentId) : '',
+          fromStaffId: String(c.fromStaffId || ''),
+          fromName: String(c.fromName || '').slice(0, 80),
+          fromShop: String(c.fromShop || '').slice(0, 80),
+          text,
+          mentions: (Array.isArray(c.mentions) ? c.mentions : []).filter(x => x && x.id && x.name).map(x => ({ id: String(x.id).slice(0, 64), name: String(x.name).slice(0, 80) })).slice(0, 30),
+          createdAt: new Date().toISOString(),
+        };
+        let target = null;
+        const nextPosts = posts.map(p => { if (p && p.id === String(body.id)) { target = p; const comments = [...(Array.isArray(p.comments) ? p.comments : []), rec].slice(-500); return { ...p, comments }; } return p; });
+        if (!target) return res.status(404).json({ ok: false, error: 'not_found' });
+        const nextReads = { ...reads, [rec.fromStaffId]: Math.max(Number(reads[rec.fromStaffId]) || 0, Date.now()) };
+        await blobSet(BOARD_KEY, { posts: nextPosts, reads: nextReads }, hasKV, hasSB, gas);
+        // 通知: 投稿者＋メンション＋（返信なら親コメント投稿者）へ
+        const set = new Set();
+        if (target.authorId && String(target.authorId) !== rec.fromStaffId) set.add(String(target.authorId));
+        rec.mentions.forEach(m => { if (m.id && m.id !== rec.fromStaffId && m.id !== '__all__') set.add(String(m.id)); });
+        if (rec.parentId) { const parent = (target.comments || []).find(x => x.id === rec.parentId); if (parent && parent.fromStaffId && String(parent.fromStaffId) !== rec.fromStaffId) set.add(String(parent.fromStaffId)); }
+        const hasAll = rec.mentions.some(m => m.id === '__all__');
+        const list = hasAll ? null : [...set];
+        if (!(Array.isArray(list) && list.length === 0)) sendPush(hasKV, hasSB, gas, { kind: 'board', title: `💬 ${rec.fromName} さんがコメント`, body: `${(target.title || 'お知らせ')}: ${text}`.slice(0, 120), url: '/?tab=board' }, list);
+        return res.status(200).json({ ok: true, comment: rec });
+      }
+      if (action === 'deleteComment' && body.id && body.commentId) {
+        const nextPosts = posts.map(p => { if (p && p.id === String(body.id)) { const comments = (Array.isArray(p.comments) ? p.comments : []).filter(c => !(c.id === String(body.commentId) && (body.root || String(c.fromStaffId) === String(body.staffId)))); return { ...p, comments }; } return p; });
+        await blobSet(BOARD_KEY, { posts: nextPosts, reads }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      if (action === 'delete' && body.id) {
+        const nextPosts = posts.filter(p => {
+          if (!p || p.id !== String(body.id)) return true;
+          return !(body.root || String(p.authorId) === String(body.staffId)); // 本人/rootのみ削除
+        });
+        await blobSet(BOARD_KEY, { posts: nextPosts, reads }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      if (action === 'read' && body.staffId) {
+        await blobSet(BOARD_KEY, { posts, reads: { ...reads, [String(body.staffId)]: Number(body.ts) || Date.now() } }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid board action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── プロフィールストア: ?type=profile ──
+  // 各スタッフ/オーナーが自分のプロフィール（写真・名前・自己紹介・SNS・担当店舗）を編集。
+  // 組織図でホバー表示し、店舗割当はSalonOneをベースにしつつ本人の設定を優先する。
+  const isProfile = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'profile';
+  if (isProfile) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ profiles: {}, configured: false });
+    try {
+      // 画像1枚取得（チャットと同じ保存先を再利用）: GET ?type=profile&img=<id>
+      if (req.method === 'GET' && req.query.img) {
+        const dataUrl = await blobGet(CHAT_IMG_PREFIX + String(req.query.img), hasKV, hasSB, gas);
+        if (!dataUrl) return res.status(404).json({ ok: false, error: 'not_found' });
+        return res.status(200).json({ ok: true, dataUrl });
+      }
+      const cur = (await blobGet(PROFILE_KEY, hasKV, hasSB, gas)) || {};
+      const profiles = (cur.profiles && typeof cur.profiles === 'object') ? cur.profiles : {};
+      const hidden = Array.isArray(cur.hidden) ? cur.hidden.map(String) : []; // 組織図から非表示にした人（root操作）
+      if (req.method === 'GET') return res.status(200).json({ profiles, hidden, configured: true });
+
+      const body = req.body || {};
+      const action = body.action;
+
+      // 画像アップロード（チャットと同じ 1枚1キー・別保存）
+      if (action === 'uploadImage' && body.dataUrl) {
+        const dataUrl = String(body.dataUrl);
+        if (!/^data:image\/(png|jpe?g|gif|webp);base64,/.test(dataUrl)) return res.status(400).json({ ok: false, error: 'bad_image' });
+        if (dataUrl.length > 3_500_000) return res.status(413).json({ ok: false, error: 'too_large' });
+        const id = genId('img');
+        await blobSet(CHAT_IMG_PREFIX + id, dataUrl, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, id });
+      }
+
+      // 保存（本人 or root）。pid＝本人の識別子（staffId or owner:<name>）。
+      if (action === 'save' && body.pid && body.profile) {
+        const pid = String(body.pid);
+        if (!(body.root || String(body.staffId) === pid)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const p = body.profile;
+        const clean = {
+          pid,
+          kind: p.kind === 'owner' ? 'owner' : 'therapist',
+          nameKanji: String(p.nameKanji || '').slice(0, 60),
+          nameKana: String(p.nameKana || '').slice(0, 60),
+          bio: String(p.bio || '').slice(0, 2000),
+          mainImg: String(p.mainImg || '').slice(0, 64),
+          subImgs: (Array.isArray(p.subImgs) ? p.subImgs : []).map(String).slice(0, 3),
+          sns: (() => {
+            const s = (p.sns && typeof p.sns === 'object') ? p.sns : {};
+            const pick = {}; for (const k of ['instagram', 'x', 'youtube', 'tiktok', 'facebook', 'line', 'website']) { if (s[k]) pick[k] = String(s[k]).slice(0, 300); }
+            return pick;
+          })(),
+          shops: (Array.isArray(p.shops) ? p.shops : []).map(x => String(x).slice(0, 80)).slice(0, 50),
+          // 生年月日（任意）。YYYY-MM-DD または MM-DD のみ許可。誕生日の当日表示に使用。
+          birthday: (() => { const b = String(p.birthday || '').trim(); return /^(\d{4}-)?\d{2}-\d{2}$/.test(b) ? b : ''; })(),
+          updatedAt: new Date().toISOString(),
+        };
+        const next = { ...profiles, [pid]: clean };
+        await blobSet(PROFILE_KEY, { profiles: next, hidden }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, profile: clean });
+      }
+
+      // 削除（本人 or root）
+      if (action === 'delete' && body.pid) {
+        const pid = String(body.pid);
+        if (!(body.root || String(body.staffId) === pid)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const next = { ...profiles }; delete next[pid];
+        await blobSet(PROFILE_KEY, { profiles: next, hidden }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+
+      // 組織図から非表示/再表示（root専用）。SalonOne由来の人はこのリストで隠す。
+      if (action === 'hide' && body.id) {
+        if (!body.root) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const nextHidden = [...new Set([...hidden, String(body.id)])].slice(0, 5000);
+        await blobSet(PROFILE_KEY, { profiles, hidden: nextHidden }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, hidden: nextHidden });
+      }
+      if (action === 'unhide' && body.id) {
+        if (!body.root) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const nextHidden = hidden.filter(x => x !== String(body.id));
+        await blobSet(PROFILE_KEY, { profiles, hidden: nextHidden }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, hidden: nextHidden });
+      }
+
+      return res.status(400).json({ ok: false, error: 'invalid profile action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── Webプッシュ購読ストア: ?type=push ──
+  const isPush = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'push';
+  if (isPush) {
+    try {
+      // 公開鍵とプッシュ有効状態を返す（フロントが購読に使う）
+      if (req.method === 'GET') {
+        return res.status(200).json({ enabled: !!(VAPID_PUBLIC() && VAPID_PRIVATE()), publicKey: VAPID_PUBLIC(), configured: !!(hasKV || hasSB || gas) });
+      }
+      if (!hasKV && !hasSB && !gas) return res.status(200).json({ ok: false, configured: false });
+      const body = req.body || {};
+      const store = (await blobGet(PUSH_KEY, hasKV, hasSB, gas)) || {};
+      const subs = Array.isArray(store.subs) ? store.subs : [];
+      if (body.action === 'subscribe' && body.subscription && body.subscription.endpoint) {
+        const s = body.subscription;
+        const rec = { endpoint: String(s.endpoint), keys: s.keys || {}, staffId: String(body.staffId || ''), name: String(body.name || '').slice(0, 80), createdAt: new Date().toISOString() };
+        const next = subs.filter(x => x && x.endpoint !== rec.endpoint).concat(rec).slice(-5000);
+        await blobSet(PUSH_KEY, { subs: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      if (body.action === 'unsubscribe' && body.endpoint) {
+        const next = subs.filter(x => x && x.endpoint !== String(body.endpoint));
+        await blobSet(PUSH_KEY, { subs: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid push action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── 社内チャット ストア: ?type=chat ──
+  // rooms / messages / reads / dir を1つのblobで共有。画像は別キー(CHAT_IMG_PREFIX+id)。
+  const isChat = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'chat';
+  if (isChat) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ rooms: [], messages: {}, reads: {}, dir: { staff: [] }, configured: false });
+    try {
+      // 画像1枚取得: GET ?type=chat&img=<id>（&raw=1 で生バイナリ配信＝LINE風に高速・ブラウザキャッシュ可）
+      if (req.method === 'GET' && req.query.img) {
+        const dataUrl = await blobGet(CHAT_IMG_PREFIX + String(req.query.img), hasKV, hasSB, gas);
+        if (!dataUrl) return res.status(404).json({ ok: false, error: 'not_found' });
+        if (req.query.raw) {
+          const m = /^data:([^;]+);base64,(.*)$/s.exec(String(dataUrl));
+          if (m) {
+            res.setHeader('Content-Type', m[1]);
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable'); // 画像はid固定=不変
+            return res.status(200).send(Buffer.from(m[2], 'base64'));
+          }
+        }
+        return res.status(200).json({ ok: true, dataUrl });
+      }
+      const cur = (await blobGet(CHAT_KEY, hasKV, hasSB, gas)) || {};
+      const rooms = Array.isArray(cur.rooms) ? cur.rooms : [];
+      const messages = (cur.messages && typeof cur.messages === 'object') ? cur.messages : {};
+      const reads = (cur.reads && typeof cur.reads === 'object') ? cur.reads : {};
+      const dir = (cur.dir && typeof cur.dir === 'object') ? { staff: Array.isArray(cur.dir.staff) ? cur.dir.staff : [], updatedAt: cur.dir.updatedAt || '' } : { staff: [], updatedAt: '' };
+      const notes = (cur.notes && typeof cur.notes === 'object') ? cur.notes : {};   // { [roomId]: [{id,fromStaffId,fromName,text,imgIds,createdAt}] } ノート
+      const save = (patch) => blobSet(CHAT_KEY, { rooms, messages, reads, dir, notes, ...patch }, hasKV, hasSB, gas);
+
+      if (req.method === 'GET') {
+        return res.status(200).json({ rooms, messages, reads, dir, notes, configured: true });
+      }
+
+      const body = req.body || {};
+      const action = body.action;
+
+      // 全社アナウンス＋店舗ルーム＋スタッフディレクトリを用意（広い権限のセッションが呼ぶ）
+      if (action === 'ensureRooms') {
+        const nextRooms = ensureBaseRooms(rooms, Array.isArray(body.shops) ? body.shops : []);
+        let nextDir = dir;
+        if (Array.isArray(body.staff) && body.staff.length) {
+          const map = new Map((dir.staff || []).map(s => [String(s.id), s]));
+          for (const s of body.staff) {
+            const id = String((s && s.id) || ''); if (!id) continue;
+            map.set(id, { id, name: String(s.name || ''), shop: String(s.shop || '') });
+          }
+          nextDir = { staff: [...map.values()].slice(0, 8000), updatedAt: new Date().toISOString() };
+        }
+        await save({ rooms: nextRooms, dir: nextDir });
+        return res.status(200).json({ ok: true, rooms: nextRooms, dir: nextDir });
+      }
+
+      // ルーム作成（group/dm）。members・name・kind をそのまま採用。
+      if (action === 'createRoom' && body.room) {
+        const r = body.room;
+        const room = {
+          id: r.id ? String(r.id) : genId('room'),
+          kind: (r.kind === 'dm' || r.kind === 'group') ? r.kind : 'group',
+          name: String(r.name || '').slice(0, 60),
+          icon: String(r.icon || '').slice(0, 16),
+          shop: String(r.shop || ''),
+          members: (Array.isArray(r.members) ? r.members : []).map(String).slice(0, 500),
+          createdBy: String(r.createdBy || ''),
+          createdAt: new Date().toISOString(),
+        };
+        const nextRooms = rooms.filter(x => x && x.id !== room.id).concat(room);
+        await save({ rooms: nextRooms });
+        return res.status(200).json({ ok: true, room });
+      }
+
+      // グループのメンバー変更（招待/退会）。group のみ・メンバー or root。
+      if (action === 'setMembers' && body.roomId && Array.isArray(body.members)) {
+        const rid = String(body.roomId);
+        const room = rooms.find(r => r && r.id === rid);
+        if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
+        const isMember = (room.members || []).map(String).includes(String(body.staffId));
+        if (!(body.root || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const oldM = (room.members || []).map(String);
+        const members = [...new Set(body.members.map(String))].slice(0, 500);
+        const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, members } : r);
+        // システムメッセージ（追加/退出させた）＝ actorName + names が渡された時のみ生成（events等の内部更新では出さない）
+        let nextMessages = messages;
+        if (body.actorName && body.names && typeof body.names === 'object') {
+          const nm = (id) => String(body.names[id] || 'メンバー');
+          const sys = [];
+          members.filter(id => !oldM.includes(id)).forEach(id => sys.push(`${body.actorName} が ${nm(id)} を追加しました`));
+          oldM.filter(id => !members.includes(id)).forEach(id => sys.push(`${body.actorName} が ${nm(id)} を退出させました`));
+          if (sys.length) {
+            const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).concat(sys.map(text => ({ id: genId('m'), roomId: rid, system: true, text, createdAt: new Date().toISOString() }))).slice(-CHAT_MSG_CAP);
+            nextMessages = { ...messages, [rid]: arr };
+          }
+        }
+        await save({ rooms: nextRooms, messages: nextMessages });
+        return res.status(200).json({ ok: true, members });
+      }
+
+      // 自己退出（グループを離れる）。group のみ・システムメッセージ「〇〇が退出しました」。
+      if (action === 'leave' && body.roomId && body.staffId) {
+        const rid = String(body.roomId);
+        const room = rooms.find(r => r && r.id === rid);
+        if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
+        const members = (room.members || []).map(String).filter(id => id !== String(body.staffId));
+        const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, members } : r);
+        const rec = { id: genId('m'), roomId: rid, system: true, text: `${String(body.name || 'メンバー')} が退出しました`, createdAt: new Date().toISOString() };
+        const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).concat(rec).slice(-CHAT_MSG_CAP);
+        await save({ rooms: nextRooms, messages: { ...messages, [rid]: arr } });
+        return res.status(200).json({ ok: true, members });
+      }
+
+      // 自己参加（勉強会・イベントの「グループチャットへ」導線／招待受諾）。group のみ・自分を追加。
+      if (action === 'join' && body.roomId && body.staffId) {
+        const rid = String(body.roomId);
+        const room = rooms.find(r => r && r.id === rid);
+        if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
+        const already = (room.members || []).map(String).includes(String(body.staffId));
+        const members = [...new Set([...(room.members || []).map(String), String(body.staffId)])].slice(0, 500);
+        const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, members } : r);
+        let nextMessages = messages;
+        if (!already && body.name) {
+          const rec = { id: genId('m'), roomId: rid, system: true, text: `${String(body.name)} が参加しました`, createdAt: new Date().toISOString() };
+          nextMessages = { ...messages, [rid]: (Array.isArray(messages[rid]) ? messages[rid] : []).concat(rec).slice(-CHAT_MSG_CAP) };
+        }
+        await save({ rooms: nextRooms, messages: nextMessages });
+        return res.status(200).json({ ok: true, members });
+      }
+
+      // グループ名・アイコン変更。group のみ・メンバー or root。
+      if (action === 'setRoom' && body.roomId) {
+        const rid = String(body.roomId);
+        const room = rooms.find(r => r && r.id === rid);
+        if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
+        const isMember = (room.members || []).map(String).includes(String(body.staffId));
+        if (!(body.root || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const patch = {};
+        if (typeof body.name === 'string') patch.name = body.name.slice(0, 60);
+        if (typeof body.icon === 'string') patch.icon = body.icon.slice(0, 16);
+        const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, ...patch } : r);
+        await save({ rooms: nextRooms });
+        return res.status(200).json({ ok: true, room: { ...room, ...patch } });
+      }
+
+      // メッセージ送信（画像は先に uploadImage で入れて imgIds を渡す）
+      if (action === 'send' && body.roomId && body.msg) {
+        const rid = String(body.roomId);
+        const m = body.msg;
+        const text = String(m.text || '').slice(0, 4000);
+        const rec = {
+          id: genId('m'),
+          roomId: rid,
+          fromStaffId: String(m.fromStaffId || ''),
+          fromName: String(m.fromName || '').slice(0, 80),
+          fromShop: String(m.fromShop || '').slice(0, 80),
+          text,
+          imgIds: (Array.isArray(m.imgIds) ? m.imgIds : []).map(String).slice(0, 6),
+          links: extractLinks(text),
+          mentions: (Array.isArray(m.mentions) ? m.mentions : [])
+            .filter(x => x && x.id && x.name)
+            .map(x => ({ id: String(x.id).slice(0, 64), name: String(x.name).slice(0, 80) }))
+            .slice(0, 30),
+          replyTo: (m.replyTo && m.replyTo.id) ? { id: String(m.replyTo.id).slice(0, 40), name: String(m.replyTo.name || '').slice(0, 80), text: String(m.replyTo.text || '').slice(0, 140) } : null,
+          reactions: {},
+          createdAt: new Date().toISOString(),
+        };
+        const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).concat(rec).slice(-CHAT_MSG_CAP);
+        const nextMessages = { ...messages, [rid]: arr };
+        const nextReads = { ...reads, [rec.fromStaffId]: { ...(reads[rec.fromStaffId] || {}), [rid]: Date.parse(rec.createdAt) } };
+        await save({ messages: nextMessages, reads: nextReads });
+        // プッシュ通知: グループ/DM/全社アナウンスの新着を対象者へ（店舗ルームはスパム回避のため送らない）
+        const room = rooms.find(r => r && r.id === rid);
+        if (room && (room.kind === 'group' || room.kind === 'dm' || room.kind === 'announce')) {
+          const title = room.kind === 'dm' ? `💬 ${rec.fromName}` : `💬 ${room.name}`;
+          const bodyText = (rec.text || (rec.imgIds.length ? '📷 画像' : '新着メッセージ')).slice(0, 120);
+          const targets = (room.kind === 'announce') ? null // 全員
+            : (room.members || []).map(String).filter(id => id !== rec.fromStaffId); // 送信者以外のメンバー
+          if (!(Array.isArray(targets) && targets.length === 0)) {
+            sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: rid, title, body: bodyText, url: '/?tab=chat' }, targets);
+          }
+        }
+        // メンション通知: 店舗ルーム等でルーム通知の対象外でも、名指しされた本人には必ず届ける。
+        // @全員(__all__)は全員宛（announceで既に全員に送っている場合は送信者以外へ）。
+        if (rec.mentions.length && room) {
+          const roomTitle = room.kind === 'dm' ? rec.fromName : (room.name || 'チャット');
+          const mBody = (rec.text || '📷 画像').slice(0, 120);
+          const hasAll = rec.mentions.some(x => x.id === '__all__');
+          const mentionTargets = hasAll ? null : rec.mentions.map(x => String(x.id)).filter(id => id && id !== rec.fromStaffId);
+          // group/dm/announce は上でルーム通知済み。店舗ルームや、@全員以外の名指しのみ追加送信。
+          if (room.kind === 'store' || (mentionTargets && mentionTargets.length)) {
+            const t2 = (mentionTargets && mentionTargets.length) ? mentionTargets : null;
+            if (!(Array.isArray(t2) && t2.length === 0)) {
+              sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: rid, title: `🔔 ${rec.fromName} さんがメンション`, body: `${roomTitle}: ${mBody}`, url: '/?tab=chat' }, t2);
+            }
+          }
+        }
+        return res.status(200).json({ ok: true, message: rec });
+      }
+
+      // 画像アップロード（1枚1キー）。dataUrl（data:image/...;base64,） を保存し id を返す。
+      if (action === 'uploadImage' && body.dataUrl) {
+        const dataUrl = String(body.dataUrl);
+        if (!/^data:image\/(png|jpe?g|gif|webp);base64,/.test(dataUrl)) return res.status(400).json({ ok: false, error: 'bad_image' });
+        if (dataUrl.length > 3_500_000) return res.status(413).json({ ok: false, error: 'too_large' }); // ~2.6MB相当
+        const id = genId('img');
+        await blobSet(CHAT_IMG_PREFIX + id, dataUrl, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, id });
+      }
+
+      // リアクション トグル
+      if (action === 'react' && body.roomId && body.msgId && body.emoji && body.staffId) {
+        const rid = String(body.roomId);
+        const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).map(msg =>
+          msg && msg.id === String(body.msgId) ? { ...msg, reactions: toggleReaction(msg.reactions, String(body.emoji), String(body.staffId)) } : msg
+        );
+        await save({ messages: { ...messages, [rid]: arr } });
+        return res.status(200).json({ ok: true });
+      }
+
+      // 既読ポインタ更新
+      if (action === 'read' && body.roomId && body.staffId) {
+        const sid = String(body.staffId), rid = String(body.roomId);
+        const ts = Number(body.ts) || Date.now();
+        const nextReads = { ...reads, [sid]: { ...(reads[sid] || {}), [rid]: ts } };
+        await save({ reads: nextReads });
+        return res.status(200).json({ ok: true });
+      }
+
+      // メッセージ削除（本人 or root）
+      if (action === 'deleteMsg' && body.roomId && body.msgId) {
+        const rid = String(body.roomId);
+        const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).filter(msg => {
+          if (!msg || msg.id !== String(body.msgId)) return true;
+          return !(body.root || String(msg.fromStaffId) === String(body.staffId)); // 本人/rootのみ削除可
+        });
+        await save({ messages: { ...messages, [rid]: arr } });
+        return res.status(200).json({ ok: true });
+      }
+
+      // ルーム削除（group/dm のみ・作成者 or root）。announce/store は消せない。
+      if (action === 'deleteRoom' && body.roomId) {
+        const rid = String(body.roomId);
+        const target = rooms.find(r => r && r.id === rid);
+        if (!target || target.kind === 'announce' || target.kind === 'store') return res.status(400).json({ ok: false, error: 'not_deletable' });
+        if (!(body.root || String(target.createdBy) === String(body.staffId))) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const nextRooms = rooms.filter(r => r && r.id !== rid);
+        const nextMessages = { ...messages }; delete nextMessages[rid];
+        await save({ rooms: nextRooms, messages: nextMessages });
+        return res.status(200).json({ ok: true });
+      }
+
+      // ノート追加（ルームの固定メモ。テキスト＋画像）。ルームメンバー or root。
+      if (action === 'noteAdd' && body.roomId && body.note) {
+        const rid = String(body.roomId);
+        const room = rooms.find(r => r && r.id === rid);
+        if (!room) return res.status(404).json({ ok: false, error: 'not_found' });
+        const n = body.note;
+        const rec = {
+          id: genId('note'),
+          fromStaffId: String(n.fromStaffId || ''),
+          fromName: String(n.fromName || '').slice(0, 80),
+          text: String(n.text || '').slice(0, 4000),
+          imgIds: (Array.isArray(n.imgIds) ? n.imgIds : []).map(String).slice(0, 6),
+          createdAt: new Date().toISOString(),
+        };
+        if (!rec.text && rec.imgIds.length === 0) return res.status(400).json({ ok: false, error: 'empty' });
+        const arr = [rec, ...(Array.isArray(notes[rid]) ? notes[rid] : [])].slice(0, 200);
+        await save({ notes: { ...notes, [rid]: arr } });
+        return res.status(200).json({ ok: true, note: rec });
+      }
+      if (action === 'noteDelete' && body.roomId && body.noteId) {
+        const rid = String(body.roomId);
+        const arr = (Array.isArray(notes[rid]) ? notes[rid] : []).filter(x => !(x.id === String(body.noteId) && (body.root || String(x.fromStaffId) === String(body.staffId))));
+        await save({ notes: { ...notes, [rid]: arr } });
+        return res.status(200).json({ ok: true });
+      }
+
+      return res.status(400).json({ ok: false, error: 'invalid chat action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
     }

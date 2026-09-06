@@ -343,6 +343,41 @@ export default async function handler(req, res) {
         await blobSet(BOARD_KEY, { posts: nextPosts, reads: nextReads }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true });
       }
+      // コメント投稿（返信＝parentId・メンション対応）
+      if (action === 'comment' && body.id && body.comment) {
+        const c = body.comment;
+        const text = String(c.text || '').slice(0, 2000);
+        if (!text) return res.status(400).json({ ok: false, error: 'empty' });
+        const rec = {
+          id: genId('cm'),
+          parentId: c.parentId ? String(c.parentId) : '',
+          fromStaffId: String(c.fromStaffId || ''),
+          fromName: String(c.fromName || '').slice(0, 80),
+          fromShop: String(c.fromShop || '').slice(0, 80),
+          text,
+          mentions: (Array.isArray(c.mentions) ? c.mentions : []).filter(x => x && x.id && x.name).map(x => ({ id: String(x.id).slice(0, 64), name: String(x.name).slice(0, 80) })).slice(0, 30),
+          createdAt: new Date().toISOString(),
+        };
+        let target = null;
+        const nextPosts = posts.map(p => { if (p && p.id === String(body.id)) { target = p; const comments = [...(Array.isArray(p.comments) ? p.comments : []), rec].slice(-500); return { ...p, comments }; } return p; });
+        if (!target) return res.status(404).json({ ok: false, error: 'not_found' });
+        const nextReads = { ...reads, [rec.fromStaffId]: Math.max(Number(reads[rec.fromStaffId]) || 0, Date.now()) };
+        await blobSet(BOARD_KEY, { posts: nextPosts, reads: nextReads }, hasKV, hasSB, gas);
+        // 通知: 投稿者＋メンション＋（返信なら親コメント投稿者）へ
+        const set = new Set();
+        if (target.authorId && String(target.authorId) !== rec.fromStaffId) set.add(String(target.authorId));
+        rec.mentions.forEach(m => { if (m.id && m.id !== rec.fromStaffId && m.id !== '__all__') set.add(String(m.id)); });
+        if (rec.parentId) { const parent = (target.comments || []).find(x => x.id === rec.parentId); if (parent && parent.fromStaffId && String(parent.fromStaffId) !== rec.fromStaffId) set.add(String(parent.fromStaffId)); }
+        const hasAll = rec.mentions.some(m => m.id === '__all__');
+        const list = hasAll ? null : [...set];
+        if (!(Array.isArray(list) && list.length === 0)) sendPush(hasKV, hasSB, gas, { kind: 'board', title: `💬 ${rec.fromName} さんがコメント`, body: `${(target.title || 'お知らせ')}: ${text}`.slice(0, 120), url: '/?tab=board' }, list);
+        return res.status(200).json({ ok: true, comment: rec });
+      }
+      if (action === 'deleteComment' && body.id && body.commentId) {
+        const nextPosts = posts.map(p => { if (p && p.id === String(body.id)) { const comments = (Array.isArray(p.comments) ? p.comments : []).filter(c => !(c.id === String(body.commentId) && (body.root || String(c.fromStaffId) === String(body.staffId)))); return { ...p, comments }; } return p; });
+        await blobSet(BOARD_KEY, { posts: nextPosts, reads }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
       if (action === 'delete' && body.id) {
         const nextPosts = posts.filter(p => {
           if (!p || p.id !== String(body.id)) return true;

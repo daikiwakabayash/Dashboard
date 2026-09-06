@@ -731,7 +731,10 @@
         };
 
         // 会話のメッセージ一覧（日付区切り・未読区切り・スタンプ・自動スクロール）
-        const ChatMessageList = ({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, stamps, onImageClick, readMembers, roomReads, resolveName, resolveShop }) => {
+        const ChatMessageList = ({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, onReply, stamps, onImageClick, readMembers, roomReads, resolveName, resolveShop }) => {
+            // ルーム内の全画像ID（アルバム/ライトボックスのスライド用）と各IDの位置
+            const allImgIds = []; (msgs || []).forEach(m => (m.imgIds || []).forEach(id => allImgIds.push(id)));
+            const imgIndexOf = (id) => allImgIds.indexOf(id);
             const endRef = React.useRef(null);
             const lenRef = React.useRef(-1);
             const [pickFor, setPickFor] = React.useState(null);
@@ -772,8 +775,9 @@
                                             <span className="text-[11px] text-[#98A2B3]">{fmtTime(m.createdAt)}</span>
                                             {m._pending && <span className="text-[10px] text-[#98A2B3]">送信中…</span>}
                                         </div>
+                                        {m.replyTo && m.replyTo.id && <div className="mt-1 mb-0.5 pl-2 border-l-[3px] border-brand-300 bg-[#F6F7F9] rounded-r-md px-2 py-1"><div className="text-[11px] font-bold text-brand-600">{m.replyTo.name || '返信'}</div><div className="text-[11px] text-[#98A2B3] truncate max-w-[260px]">{m.replyTo.text || '（画像）'}</div></div>}
                                         {m.text && <div className="text-[14px] text-[#111827] leading-relaxed whitespace-pre-wrap break-words mt-0.5" style={{ wordBreak: 'break-word' }}>{chatRenderText(m.text, (m.mentions || []).map(x => x && x.name).filter(Boolean))}</div>}
-                                        {Array.isArray(m.imgIds) && m.imgIds.length > 0 && <div className="mt-2 flex flex-wrap gap-2">{m.imgIds.map(id => <ChatImage key={id} imgId={id} onClick={() => onImageClick && onImageClick(id)} />)}</div>}
+                                        {Array.isArray(m.imgIds) && m.imgIds.length > 0 && <div className="mt-2 flex flex-wrap gap-2">{m.imgIds.map(id => <ChatImage key={id} imgId={id} onClick={() => onImageClick && onImageClick(allImgIds, imgIndexOf(id))} />)}</div>}
                                         {(Object.keys(reactions).length > 0 || pickFor === m.id) && (
                                             <div className="flex items-center gap-1.5 mt-2 flex-wrap">
                                                 {Object.entries(reactions).map(([emo, ids]) => {
@@ -809,6 +813,7 @@
                                                 </div>
                                             )}
                                             <button onClick={() => setPickFor(pickFor === m.id ? null : m.id)} title="リアクション" className={`inline-flex items-center justify-center w-7 h-7 rounded-full text-[15px] leading-none transition ${pickFor === m.id ? 'bg-brand-50 text-brand-600' : 'text-[#98A2B3] hover:text-brand-600 hover:bg-[#F2F4F7]'}`}>😊</button>
+                                            <button onClick={() => onReply && onReply({ id: m.id, name: m.fromName || (resolveName ? resolveName(m.fromStaffId, '') : '') || 'メッセージ', text: (m.text || (m.imgIds && m.imgIds.length ? '画像' : '')).slice(0, 140) })} title="返信" className="inline-flex items-center justify-center w-7 h-7 rounded-full text-[#98A2B3] hover:text-brand-600 hover:bg-[#F2F4F7] transition"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 17 4 12 9 7" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" /></svg></button>
                                             {(mine || isRoot) && <button onClick={() => onDelete(m.id)} title="削除" className="inline-flex items-center justify-center w-7 h-7 rounded-full text-[#98A2B3] hover:text-rose-600 hover:bg-[#F2F4F7] transition"><Trash2 size={13} /></button>}
                                         </div>
                                     </div>
@@ -2167,7 +2172,7 @@
             };
             // ── 社内チャット ──────────────────────────────────────────────
             // rooms/messages/reads/dir を共有ストア(/api/plan-store?type=chat)で同期。ポーリングで更新。
-            const [chatData, setChatData] = useState({ rooms: [], messages: {}, reads: {}, dir: { staff: [] }, configured: true, loaded: false });
+            const [chatData, setChatData] = useState({ rooms: [], messages: {}, reads: {}, dir: { staff: [] }, notes: {}, configured: true, loaded: false });
             const [chatRoomId, setChatRoomId] = useState(null);       // 選択中ルーム（null=一覧表示・モバイル用）
             const [chatDraft, setChatDraft] = useState('');
             const [chatSending, setChatSending] = useState(false);
@@ -2182,7 +2187,21 @@
             const [chatEmojiOpen, setChatEmojiOpen] = useState(false);
             const [chatOpenReadTs, setChatOpenReadTs] = useState(0);   // ルームを開いた時点の既読位置（未読区切り用に固定）
             const [chatNewRoom, setChatNewRoom] = useState(null);      // {kind, name, members:[id], q} or null
-            const [chatLightbox, setChatLightbox] = useState(null);    // 画像拡大表示 imgId
+            const [chatLightbox, setChatLightbox] = useState(null);    // 画像拡大表示 {list:[imgId], i:index}（LINE風スライド）
+            const [chatReplyTo, setChatReplyTo] = useState(null);      // 返信先メッセージ {id,name,text}
+            const [chatAlbumOpen, setChatAlbumOpen] = useState(false); // アルバム（ルーム内の全画像）
+            const [chatNotesOpen, setChatNotesOpen] = useState(false); // ノート
+            const [chatNoteDraft, setChatNoteDraft] = useState('');    // ノート入力
+            const [chatNoteImgs, setChatNoteImgs] = useState([]);      // ノート添付画像 [{id,dataUrl}]
+            // 単一画像を開くヘルパー（従来の呼び出し互換: idひとつでも配列化）
+            const openLightbox = (ids, i) => { const list = Array.isArray(ids) ? ids : [ids]; setChatLightbox({ list, i: Math.max(0, Math.min(i || 0, list.length - 1)) }); };
+            const chatSwipeRef = useRef(0);                            // ライトボックスのスワイプ開始X
+            // ライトボックス: PCの←→で前後、Escで閉じる
+            useEffect(() => {
+                if (!chatLightbox) return;
+                const onKey = (e) => { const list = (chatLightbox.list || []); if (!list.length) return; if (e.key === 'ArrowRight') setChatLightbox(v => ({ ...v, i: ((v.i || 0) + 1) % list.length })); else if (e.key === 'ArrowLeft') setChatLightbox(v => ({ ...v, i: ((v.i || 0) - 1 + list.length) % list.length })); else if (e.key === 'Escape') setChatLightbox(null); };
+                window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
+            }, [chatLightbox]);
             const chatMyId = authState.root ? '__root__' : String(authState.staffId || authState.owner || '');
             // 表示名は SalonOneロスターの本名（漢字フルネーム）を優先。staffName空/ログインID化け(staff691等)でも本名で表示。
             const chatResolveName = (id, fallback) => { const sid = String(id || ''); const s = (soStaffs || []).find(x => String(x.id) === sid); if (s && s.name) return s.name; const d = ((chatData.dir && chatData.dir.staff) || []).find(x => String(x.id) === sid); if (d && d.name) return d.name; return fallback || ''; };
@@ -2266,7 +2285,7 @@
                 try {
                     const r = await fetch('/api/plan-store?type=chat');
                     const j = await r.json().catch(() => ({}));
-                    setChatData({ rooms: Array.isArray(j.rooms) ? j.rooms : [], messages: (j.messages && typeof j.messages === 'object') ? j.messages : {}, reads: (j.reads && typeof j.reads === 'object') ? j.reads : {}, dir: (j.dir && typeof j.dir === 'object') ? { staff: Array.isArray(j.dir.staff) ? j.dir.staff : [] } : { staff: [] }, configured: j.configured !== false, loaded: true });
+                    setChatData({ rooms: Array.isArray(j.rooms) ? j.rooms : [], messages: (j.messages && typeof j.messages === 'object') ? j.messages : {}, reads: (j.reads && typeof j.reads === 'object') ? j.reads : {}, dir: (j.dir && typeof j.dir === 'object') ? { staff: Array.isArray(j.dir.staff) ? j.dir.staff : [] } : { staff: [] }, notes: (j.notes && typeof j.notes === 'object') ? j.notes : {}, configured: j.configured !== false, loaded: true });
                 } catch { setChatData(d => ({ ...d, loaded: true })); }
             };
             const chatEnsuredRef = useRef('');
@@ -2313,14 +2332,15 @@
                 const roomForMsg = (chatData.rooms || []).find(r => r.id === chatRoomId);
                 const mentions = t ? chatExtractMentions(t, chatMentionCandidates(roomForMsg)) : [];
                 const roomId = chatRoomId;
+                const replyTo = chatReplyTo;
                 // 楽観的に即クリア（LINE風の即応・同じ本文の二重送信も防ぐ）
-                setChatDraft(''); setChatStaged([]); setChatEmojiOpen(false); setChatMention(null);
+                setChatDraft(''); setChatStaged([]); setChatEmojiOpen(false); setChatMention(null); setChatReplyTo(null);
                 // 楽観的に自分のメッセージを即表示（サーバー往復を待たない）。chatLoadで本物に置き換わる。
                 const tmpId = 'tmp_' + Date.now().toString(36);
-                const optimistic = { id: tmpId, roomId, fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions, reactions: {}, createdAt: new Date().toISOString(), _pending: true };
+                const optimistic = { id: tmpId, roomId, fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions, replyTo: replyTo || null, reactions: {}, createdAt: new Date().toISOString(), _pending: true };
                 setChatData(d => ({ ...d, messages: { ...d.messages, [roomId]: [...(d.messages[roomId] || []), optimistic] } }));
                 try {
-                    await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'send', roomId, msg: { fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions } }) });
+                    await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'send', roomId, msg: { fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions, replyTo: replyTo || null } }) });
                     await chatLoad();
                 } catch {
                     // 失敗時は仮メッセージを消して入力を復元（送信できていない）
@@ -2330,6 +2350,17 @@
             };
             const chatReact = async (msgId, emoji) => {
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'react', roomId: chatRoomId, msgId, emoji, staffId: chatMyId }) }); await chatLoad(); } catch {}
+            };
+            // ── ノート（ルームの固定メモ） ──
+            const chatNoteAdd = async () => {
+                const t = chatNoteDraft.trim(); const imgIds = chatNoteImgs.map(s => s.id);
+                if ((!t && !imgIds.length) || !chatRoomId) return;
+                chatNoteImgs.forEach(s => { if (s.id && s.dataUrl) chatImgCache[s.id] = s.dataUrl; });
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'noteAdd', roomId: chatRoomId, note: { fromStaffId: chatMyId, fromName: chatMyName, text: t, imgIds } }) }); setChatNoteDraft(''); setChatNoteImgs([]); await chatLoad(); } catch {}
+            };
+            const chatNoteDelete = async (noteId) => {
+                if (!window.confirm('このノートを削除しますか？')) return;
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'noteDelete', roomId: chatRoomId, noteId, staffId: chatMyId, root: chatIsRoot }) }); await chatLoad(); } catch {}
             };
             const chatMarkRead = async (roomId) => {
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'read', roomId, staffId: chatMyId, ts: Date.now() }) }); } catch {}
@@ -3036,12 +3067,12 @@
             }, [currentPage]);
             // モーダル/シート/ドロワー表示中は背景（body）のスクロールをロック（スクロール抜けを防止）
             useEffect(() => {
-                const anyOverlay = !!(profileView || profileEdit || boardComposerOpen || boardStatusId || chatNewRoom || chatPanel || mobileNavOpen || mobileAcctOpen || chatLightbox);
+                const anyOverlay = !!(profileView || profileEdit || boardComposerOpen || boardStatusId || chatNewRoom || chatPanel || mobileNavOpen || mobileAcctOpen || chatLightbox || chatAlbumOpen || chatNotesOpen);
                 if (!anyOverlay) return;
                 const prev = document.body.style.overflow;
                 document.body.style.overflow = 'hidden';
                 return () => { document.body.style.overflow = prev; };
-            }, [profileView, profileEdit, boardComposerOpen, boardStatusId, chatNewRoom, chatPanel, mobileNavOpen, mobileAcctOpen, chatLightbox]);
+            }, [profileView, profileEdit, boardComposerOpen, boardStatusId, chatNewRoom, chatPanel, mobileNavOpen, mobileAcctOpen, chatLightbox, chatAlbumOpen, chatNotesOpen]);
             // 組織図: 「売上で絞る」がONのときだけ、選択月の店舗別スタッフ売上（by_staff）を集計取得。
             // 既定はOFF＝在籍ロスターを即表示（読み込みなし）。
             useEffect(() => {
@@ -10468,21 +10499,25 @@
                                                             <button onClick={() => setChatRoomId(null)} className="md:hidden w-9 h-9 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-ink-700 shrink-0 -ml-1"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg></button>
                                                             {roomIcon(activeRoom, false)}
                                                             <div className="min-w-0"><div className="font-semibold text-[15px] text-[#111827] truncate leading-tight">{roomTitle(activeRoom)}</div><div className="text-[12px] text-[#667085] leading-tight">{roomSub(activeRoom)}</div></div>
-                                                            {activeRoom.kind === 'group' && (
-                                                                <button onClick={() => { setChatMemberQ(''); setChatRenameVal(null); setChatPanel('members'); }} className="ml-auto flex items-center gap-1.5 pl-1 pr-2.5 h-9 rounded-full border border-[#EAECF0] hover:bg-[#F8F9FB] transition" title="メンバーを表示・管理">
-                                                                    <div className="flex -space-x-2">
-                                                                        {activeMemberIds.slice(0, 4).map(id => { const nm = chatResolveName(id, ''); return <span key={id} className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-semibold ring-2 ring-white ${chatAvatarColor(nm)}`}>{(nm || '？').trim().charAt(0)}</span>; })}
-                                                                        {activeMemberIds.length > 4 && <span className="w-6 h-6 rounded-full bg-[#F2F4F7] text-[#667085] flex items-center justify-center text-[10px] font-semibold ring-2 ring-white">+{activeMemberIds.length - 4}</span>}
-                                                                    </div>
-                                                                    <span className="text-[12px] font-semibold text-[#344054] hidden sm:inline">{activeMemberIds.length}名</span>
-                                                                </button>
-                                                            )}
-                                                            {(activeRoom.kind === 'group' || activeRoom.kind === 'dm') && (chatIsRoot || String(activeRoom.createdBy) === chatMyId) && (
-                                                                <button onClick={async () => { if (window.confirm('このルームを削除しますか？')) { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'deleteRoom', roomId: activeRoom.id, staffId: chatMyId, root: chatIsRoot }) }).catch(() => {}); setChatRoomId(null); await chatLoad(); } }} className={`${activeRoom.kind === 'dm' ? 'ml-auto' : ''} w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3] hover:text-rose-500`} title="ルーム削除"><Trash2 size={15} /></button>
-                                                            )}
+                                                            <div className="ml-auto flex items-center gap-1">
+                                                                <button onClick={() => setChatNotesOpen(true)} title="ノート" className="w-9 h-9 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#667085] transition text-[17px] leading-none">📌</button>
+                                                                <button onClick={() => setChatAlbumOpen(true)} title="アルバム（画像一覧）" className="w-9 h-9 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#667085] transition"><ImageIcon size={17} /></button>
+                                                                {activeRoom.kind === 'group' && (
+                                                                    <button onClick={() => { setChatMemberQ(''); setChatRenameVal(null); setChatPanel('members'); }} className="flex items-center gap-1.5 pl-1 pr-2.5 h-9 rounded-full border border-[#EAECF0] hover:bg-[#F8F9FB] transition" title="メンバーを表示・管理">
+                                                                        <div className="flex -space-x-2">
+                                                                            {activeMemberIds.slice(0, 3).map(id => { const nm = chatResolveName(id, ''); return <span key={id} className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-semibold ring-2 ring-white ${chatAvatarColor(nm)}`}>{(nm || '？').trim().charAt(0)}</span>; })}
+                                                                            {activeMemberIds.length > 3 && <span className="w-6 h-6 rounded-full bg-[#F2F4F7] text-[#667085] flex items-center justify-center text-[10px] font-semibold ring-2 ring-white">+{activeMemberIds.length - 3}</span>}
+                                                                        </div>
+                                                                        <span className="text-[12px] font-semibold text-[#344054] hidden sm:inline">{activeMemberIds.length}名</span>
+                                                                    </button>
+                                                                )}
+                                                                {(activeRoom.kind === 'group' || activeRoom.kind === 'dm') && (chatIsRoot || String(activeRoom.createdBy) === chatMyId) && (
+                                                                    <button onClick={async () => { if (window.confirm('このルームを削除しますか？')) { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'deleteRoom', roomId: activeRoom.id, staffId: chatMyId, root: chatIsRoot }) }).catch(() => {}); setChatRoomId(null); await chatLoad(); } }} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3] hover:text-rose-500" title="ルーム削除"><Trash2 size={15} /></button>
+                                                                )}
+                                                            </div>
                                                         </div>
 
-                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(id) => setChatLightbox(id)} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} resolveShop={chatResolveShop} />
+                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(list, i) => openLightbox(list, i)} onReply={(msg) => { setChatReplyTo(msg); requestAnimationFrame(() => { try { chatTaRef.current && chatTaRef.current.focus(); } catch {} }); }} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} resolveShop={chatResolveShop} />
 
                                                         {/* コンポーザー（ChatGPT/Slack風の一体型）。スマホは全画面なのでホームバー分の余白を確保 */}
                                                         <div className="px-3 md:px-4 pt-1 pb-[max(env(safe-area-inset-bottom,0px),12px)] shrink-0">
@@ -10499,6 +10534,12 @@
                                                                             {c.id === '__all__' && <span className="ml-auto text-[11px] text-[#98A2B3]">このルーム全員</span>}
                                                                         </button>
                                                                     ))}
+                                                                </div>
+                                                            )}
+                                                            {chatReplyTo && (
+                                                                <div className="flex items-center gap-2 mb-1.5 pl-2 border-l-[3px] border-brand-400 bg-[#F6F7F9] rounded-r-lg px-2 py-1.5">
+                                                                    <div className="min-w-0 flex-1"><div className="text-[11px] font-bold text-brand-600">{chatReplyTo.name} に返信</div><div className="text-[12px] text-[#667085] truncate">{chatReplyTo.text || '（画像）'}</div></div>
+                                                                    <button onClick={() => setChatReplyTo(null)} className="w-6 h-6 flex items-center justify-center rounded-md text-[#98A2B3] hover:bg-[#EAECF0] shrink-0"><X size={13} /></button>
                                                                 </div>
                                                             )}
                                                             <div className="rounded-xl border border-[#EAECF0] bg-white focus-within:border-brand-400 focus-within:ring-2 focus-within:ring-brand-100 transition">
@@ -10526,6 +10567,7 @@
                                                                         <input type="file" accept="image/*" multiple className="hidden" onChange={async e => { const files = [...(e.target.files || [])].slice(0, 6); e.target.value = ''; for (const f of files) { const up = await chatUploadImage(f); if (up) { chatImgCache[up.id] = up.dataUrl; setChatStaged(prev => [...prev, up]); } } }} />
                                                                     </label>
                                                                     <button onClick={() => setChatEmojiOpen(o => !o)} className={`w-8 h-8 flex items-center justify-center rounded-md text-lg transition ${chatEmojiOpen ? 'bg-brand-50 text-brand-600' : 'text-[#667085] hover:bg-[#F2F4F7]'}`} title="スタンプ">☺</button>
+                                                                    <button onClick={() => { const ta = chatTaRef.current; const caret = ta ? (ta.selectionStart || chatDraft.length) : chatDraft.length; const needSp = caret > 0 && !/\s|　/.test(chatDraft.charAt(caret - 1)); const ins = (needSp ? ' @' : '@'); const nv = chatDraft.slice(0, caret) + ins + chatDraft.slice(caret); setChatDraft(nv); const list = chatMentionCandidates(activeRoom).slice(0, 8); setChatMention(list.length ? { query: '', list, index: 0 } : null); requestAnimationFrame(() => { if (ta) { ta.focus(); const c = caret + ins.length; try { ta.setSelectionRange(c, c); } catch {} } }); }} className="w-8 h-8 flex items-center justify-center rounded-md text-[17px] font-bold text-[#667085] hover:bg-[#F2F4F7] transition" title="メンション">@</button>
                                                                     <button onClick={chatSend} disabled={chatSending || (!chatDraft.trim() && chatStaged.length === 0)} className="ml-auto w-9 h-9 flex items-center justify-center rounded-lg bg-brand-500 hover:bg-brand-600 text-white disabled:bg-[#EAECF0] disabled:text-[#98A2B3] active:scale-95 transition"><Send size={16} /></button>
                                                                 </div>
                                                             </div>
@@ -10664,13 +10706,86 @@
                                         </div>
                                     )}
 
-                                    {/* 画像ライトボックス */}
-                                    {chatLightbox && (
-                                        <div className="fixed inset-0 z-[95] bg-[#111827]/85 flex items-center justify-center p-4" onClick={() => setChatLightbox(null)}>
-                                            <button onClick={() => setChatLightbox(null)} className="absolute top-4 right-4 w-10 h-10 rounded-lg bg-white/15 hover:bg-white/25 text-white flex items-center justify-center transition"><X size={22} /></button>
-                                            <img src={chatImgSrc(chatLightbox)} className="max-w-full max-h-full rounded-lg object-contain" alt="拡大画像" onClick={e => e.stopPropagation()} />
-                                        </div>
-                                    )}
+                                    {/* 画像ライトボックス（LINE風: 前後の写真をスワイプ/矢印で見られる） */}
+                                    {chatLightbox && (() => {
+                                        const list = (chatLightbox.list || []).filter(Boolean);
+                                        const i = Math.max(0, Math.min(chatLightbox.i || 0, list.length - 1));
+                                        const go = (d) => setChatLightbox(v => { const n = ((v.i || 0) + d + list.length) % list.length; return { ...v, i: n }; });
+                                        return (
+                                            <div className="fixed inset-0 z-[95] bg-[#111827]/90 flex items-center justify-center select-none" onClick={() => setChatLightbox(null)}
+                                                onTouchStart={e => { chatSwipeRef.current = e.touches[0].clientX; }}
+                                                onTouchEnd={e => { const dx = (e.changedTouches[0].clientX - (chatSwipeRef.current || 0)); if (Math.abs(dx) > 45 && list.length > 1) { e.stopPropagation(); go(dx < 0 ? 1 : -1); } }}>
+                                                <button onClick={e => { e.stopPropagation(); setChatLightbox(null); }} className="absolute top-4 right-4 w-10 h-10 rounded-lg bg-white/15 hover:bg-white/25 text-white flex items-center justify-center transition z-10"><X size={22} /></button>
+                                                {list.length > 1 && <div className="absolute top-5 left-1/2 -translate-x-1/2 text-white/80 text-[13px] font-semibold">{i + 1} / {list.length}</div>}
+                                                {list.length > 1 && <button onClick={e => { e.stopPropagation(); go(-1); }} className="absolute left-2 md:left-5 top-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-white/15 hover:bg-white/25 text-white flex items-center justify-center transition z-10"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg></button>}
+                                                {list.length > 1 && <button onClick={e => { e.stopPropagation(); go(1); }} className="absolute right-2 md:right-5 top-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-white/15 hover:bg-white/25 text-white flex items-center justify-center transition z-10"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6" /></svg></button>}
+                                                <img key={list[i]} src={chatImgSrc(list[i])} className="max-w-[92vw] max-h-[86vh] rounded-lg object-contain animate-fade-in" alt="拡大画像" onClick={e => e.stopPropagation()} />
+                                            </div>
+                                        );
+                                    })()}
+
+                                    {/* アルバム（ルーム内の全画像） */}
+                                    {chatAlbumOpen && activeRoom && (() => {
+                                        const imgs = []; (activeMsgs || []).forEach(m => (m.imgIds || []).forEach(id => imgs.push(id)));
+                                        return (
+                                            <div className="fixed inset-0 z-[90] bg-[#111827]/45 backdrop-blur-sm flex items-end md:items-center justify-center p-0 md:p-4" onClick={() => setChatAlbumOpen(false)}>
+                                                <div className="bg-white w-full md:max-w-2xl md:rounded-2xl rounded-t-2xl shadow-2xl max-h-[88vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+                                                    <div className="px-5 py-3.5 border-b border-[#EAECF0] flex items-center justify-between shrink-0">
+                                                        <h3 className="font-semibold text-[15px] text-[#111827] flex items-center gap-2"><ImageIcon size={17} className="text-brand-500" />アルバム <span className="text-[12px] text-[#98A2B3] font-normal">{imgs.length}枚</span></h3>
+                                                        <button onClick={() => setChatAlbumOpen(false)} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3]"><X size={18} /></button>
+                                                    </div>
+                                                    <div className="overflow-y-auto p-3">
+                                                        {imgs.length === 0 ? <div className="text-center text-[#98A2B3] text-[13px] py-12">まだ画像がありません</div> : (
+                                                            <div className="grid grid-cols-3 md:grid-cols-4 gap-2">
+                                                                {imgs.map((id, i) => <button key={id + i} onClick={() => { setChatAlbumOpen(false); openLightbox(imgs, i); }} className="aspect-square rounded-lg overflow-hidden bg-[#F2F4F7] hover:opacity-90 transition"><img src={chatImgSrc(id)} loading="lazy" className="w-full h-full object-cover" alt="" /></button>)}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
+
+                                    {/* ノート（ルームの固定メモ） */}
+                                    {chatNotesOpen && activeRoom && (() => {
+                                        const notes = Array.isArray((chatData.notes || {})[activeRoom.id]) ? chatData.notes[activeRoom.id] : [];
+                                        const nrel = (iso) => { const d = new Date(iso); return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; };
+                                        return (
+                                            <div className="fixed inset-0 z-[90] bg-[#111827]/45 backdrop-blur-sm flex items-end md:items-center justify-center p-0 md:p-4" onClick={() => setChatNotesOpen(false)}>
+                                                <div className="bg-white w-full md:max-w-lg md:rounded-2xl rounded-t-2xl shadow-2xl h-[92vh] md:h-auto md:max-h-[88vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+                                                    <div className="px-5 py-3.5 border-b border-[#EAECF0] flex items-center justify-between shrink-0">
+                                                        <h3 className="font-semibold text-[15px] text-[#111827] flex items-center gap-2">📌 ノート <span className="text-[12px] text-[#98A2B3] font-normal">{notes.length}件</span></h3>
+                                                        <button onClick={() => setChatNotesOpen(false)} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3]"><X size={18} /></button>
+                                                    </div>
+                                                    {/* 作成 */}
+                                                    <div className="px-4 pt-3 pb-2 border-b border-[#F2F4F7] shrink-0">
+                                                        {chatNoteImgs.length > 0 && <div className="flex gap-2 flex-wrap mb-2">{chatNoteImgs.map((s, i) => <div key={s.id || i} className="relative"><img src={s.dataUrl} className="w-14 h-14 rounded-lg object-cover border border-[#EAECF0]" alt="" /><button onClick={() => setChatNoteImgs(prev => prev.filter((_, j) => j !== i))} className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-[#111827] text-white rounded-full flex items-center justify-center"><X size={11} /></button></div>)}</div>}
+                                                        <textarea value={chatNoteDraft} onChange={e => setChatNoteDraft(e.target.value)} rows={2} placeholder="共有メモを残す（決定事項・リンク・持ち物など）" className="w-full resize-none rounded-lg border border-[#EAECF0] bg-white px-3 py-2 text-[13px] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
+                                                        <div className="flex items-center gap-1 mt-1.5">
+                                                            <label className="w-8 h-8 flex items-center justify-center rounded-md text-[#667085] hover:bg-[#F2F4F7] cursor-pointer transition" title="画像を添付"><ImageIcon size={17} /><input type="file" accept="image/*" multiple className="hidden" onChange={async e => { const files = [...(e.target.files || [])].slice(0, 6); e.target.value = ''; for (const f of files) { const up = await chatUploadImage(f); if (up) { chatImgCache[up.id] = up.dataUrl; setChatNoteImgs(prev => [...prev, up]); } } }} /></label>
+                                                            <button onClick={chatNoteAdd} disabled={!chatNoteDraft.trim() && chatNoteImgs.length === 0} className="ml-auto px-4 h-9 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-semibold disabled:bg-[#EAECF0] disabled:text-[#98A2B3] transition">ノートに追加</button>
+                                                        </div>
+                                                    </div>
+                                                    {/* 一覧 */}
+                                                    <div className="overflow-y-auto px-4 py-3 space-y-3">
+                                                        {notes.length === 0 && <div className="text-center text-[#98A2B3] text-[13px] py-10">まだノートはありません。<br />大事な連絡や決定事項をここに固定できます。</div>}
+                                                        {notes.map(n => { const nm = n.fromStaffId === '__root__' ? '管理者' : (chatResolveName(n.fromStaffId, n.fromName || '') || 'スタッフ'); const canDel = chatIsRoot || String(n.fromStaffId) === chatMyId; return (
+                                                            <div key={n.id} className="rounded-xl border border-[#EAECF0] p-3">
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className={`w-6 h-6 rounded-full ${chatAvatarColor(nm)} inline-flex items-center justify-center text-[11px] font-semibold shrink-0`}>{String(nm).trim().charAt(0)}</span>
+                                                                    <span className="text-[12px] font-bold text-[#111827]">{nm}</span>
+                                                                    <span className="text-[11px] text-[#98A2B3]">{nrel(n.createdAt)}</span>
+                                                                    {canDel && <button onClick={() => chatNoteDelete(n.id)} className="ml-auto text-[11px] text-[#98A2B3] hover:text-rose-500">削除</button>}
+                                                                </div>
+                                                                {n.text && <div className="text-[14px] text-[#344054] whitespace-pre-wrap break-words mt-1.5" style={{ wordBreak: 'break-word' }}>{chatRenderText(n.text, [])}</div>}
+                                                                {Array.isArray(n.imgIds) && n.imgIds.length > 0 && <div className="flex flex-wrap gap-2 mt-2">{n.imgIds.map((id, i) => <button key={id} onClick={() => openLightbox(n.imgIds, i)} className="w-20 h-20 rounded-lg overflow-hidden bg-[#F2F4F7]"><img src={chatImgSrc(id)} loading="lazy" className="w-full h-full object-cover" alt="" /></button>)}</div>}
+                                                            </div>
+                                                        ); })}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
                                 </div>
                             );
                         })()}
@@ -10729,7 +10844,7 @@
                                         {p.title && <div className="text-[16px] font-bold text-[#111827] mt-2.5 leading-snug break-words" style={{ wordBreak: 'break-word' }}>{p.title}</div>}
                                         {p.text && <div className={`text-[14px] text-[#475467] leading-relaxed whitespace-pre-wrap break-words ${p.title ? 'mt-1.5' : 'mt-2.5'}`} style={{ wordBreak: 'break-word' }}>{chatLinkify(p.text)}</div>}
                                         {p.link && <a href={p.link} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="mt-2.5 inline-flex items-center gap-1.5 text-[13px] text-brand-600 hover:underline break-all">🔗 {p.link}</a>}
-                                        {Array.isArray(p.imgIds) && p.imgIds.length > 0 && <div className="mt-2.5 flex flex-wrap gap-2">{p.imgIds.map(id => <ChatImage key={id} imgId={id} onClick={() => setChatLightbox(id)} />)}</div>}
+                                        {Array.isArray(p.imgIds) && p.imgIds.length > 0 && <div className="mt-2.5 flex flex-wrap gap-2">{p.imgIds.map((id, i) => <ChatImage key={id} imgId={id} onClick={() => openLightbox(p.imgIds, i)} />)}</div>}
                                         {vid && (vid.kind === 'youtube' || vid.kind === 'vimeo') && <div className="mt-2.5 rounded-lg overflow-hidden border border-[#EAECF0]" style={{ aspectRatio: '16 / 9' }}><iframe src={vid.embedUrl} className="w-full h-full" frameBorder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen title="video" /></div>}
                                         {vid && vid.kind === 'file' && <video src={vid.src} controls className="mt-2.5 w-full max-h-[360px] rounded-lg border border-[#EAECF0] bg-black" />}
                                         {vid && vid.kind === 'link' && <a href={vid.src} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="mt-2.5 inline-block text-[13px] text-brand-600 hover:underline break-all">🔗 {vid.src}</a>}
@@ -11198,8 +11313,10 @@
                                 return (<>
                                     {bday && <div className="mb-3 rounded-xl bg-gradient-to-r from-pink-50 to-amber-50 border border-pink-200 px-3 py-2 text-[13px] font-black text-pink-700 flex items-center gap-1.5">🎂 本日は {dispNm} さんのお誕生日です！🎉</div>}
                                     {prof ? (<>
-                                        {prof.mainImg && <div className={`w-full ${big ? 'aspect-[4/3]' : 'aspect-[4/3]'} rounded-xl overflow-hidden bg-[#F2F4F7] mb-3 cursor-zoom-in ${bday ? 'ring-2 ring-pink-300' : ''}`} onClick={() => setChatLightbox(prof.mainImg)}><img src={chatImgSrc(prof.mainImg)} className="w-full h-full object-cover" loading="lazy" alt="" /></div>}
-                                        {Array.isArray(prof.subImgs) && prof.subImgs.length > 0 && <div className="flex gap-1.5 mb-3">{prof.subImgs.map(id => <span key={id} className={`${big ? 'w-16 h-16' : 'w-12 h-12'} rounded-lg overflow-hidden bg-[#F2F4F7] cursor-zoom-in`} onClick={() => setChatLightbox(id)}><img src={chatImgSrc(id)} className="w-full h-full object-cover" loading="lazy" alt="" /></span>)}</div>}
+                                        {(() => { const pics = [prof.mainImg, ...(Array.isArray(prof.subImgs) ? prof.subImgs : [])].filter(Boolean); return (<>
+                                        {prof.mainImg && <div className={`w-full ${big ? 'aspect-[4/3]' : 'aspect-[4/3]'} rounded-xl overflow-hidden bg-[#F2F4F7] mb-3 cursor-zoom-in ${bday ? 'ring-2 ring-pink-300' : ''}`} onClick={() => openLightbox(pics, 0)}><img src={chatImgSrc(prof.mainImg)} className="w-full h-full object-cover" loading="lazy" alt="" /></div>}
+                                        {Array.isArray(prof.subImgs) && prof.subImgs.length > 0 && <div className="flex gap-1.5 mb-3">{prof.subImgs.map((id, i) => <span key={id} className={`${big ? 'w-16 h-16' : 'w-12 h-12'} rounded-lg overflow-hidden bg-[#F2F4F7] cursor-zoom-in`} onClick={() => openLightbox(pics, (prof.mainImg ? 1 : 0) + i)}><img src={chatImgSrc(id)} className="w-full h-full object-cover" loading="lazy" alt="" /></span>)}</div>}
+                                        </>); })()}
                                         <div className="flex items-center gap-2 flex-wrap">
                                             <span className={`${big ? 'text-[18px]' : 'text-[15px]'} font-bold text-[#111827]`}>{bday ? `🎂 ${dispNm}` : dispNm}</span>
                                             <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${prof.kind === 'owner' ? 'text-brand-700 bg-brand-50' : 'text-teal-700 bg-teal-50'}`}>{prof.kind === 'owner' ? 'オーナー' : 'セラピスト'}</span>

@@ -539,10 +539,11 @@ export default async function handler(req, res) {
       const messages = (cur.messages && typeof cur.messages === 'object') ? cur.messages : {};
       const reads = (cur.reads && typeof cur.reads === 'object') ? cur.reads : {};
       const dir = (cur.dir && typeof cur.dir === 'object') ? { staff: Array.isArray(cur.dir.staff) ? cur.dir.staff : [], updatedAt: cur.dir.updatedAt || '' } : { staff: [], updatedAt: '' };
-      const save = (patch) => blobSet(CHAT_KEY, { rooms, messages, reads, dir, ...patch }, hasKV, hasSB, gas);
+      const notes = (cur.notes && typeof cur.notes === 'object') ? cur.notes : {};   // { [roomId]: [{id,fromStaffId,fromName,text,imgIds,createdAt}] } ノート
+      const save = (patch) => blobSet(CHAT_KEY, { rooms, messages, reads, dir, notes, ...patch }, hasKV, hasSB, gas);
 
       if (req.method === 'GET') {
-        return res.status(200).json({ rooms, messages, reads, dir, configured: true });
+        return res.status(200).json({ rooms, messages, reads, dir, notes, configured: true });
       }
 
       const body = req.body || {};
@@ -639,6 +640,7 @@ export default async function handler(req, res) {
             .filter(x => x && x.id && x.name)
             .map(x => ({ id: String(x.id).slice(0, 64), name: String(x.name).slice(0, 80) }))
             .slice(0, 30),
+          replyTo: (m.replyTo && m.replyTo.id) ? { id: String(m.replyTo.id).slice(0, 40), name: String(m.replyTo.name || '').slice(0, 80), text: String(m.replyTo.text || '').slice(0, 140) } : null,
           reactions: {},
           createdAt: new Date().toISOString(),
         };
@@ -724,6 +726,32 @@ export default async function handler(req, res) {
         const nextRooms = rooms.filter(r => r && r.id !== rid);
         const nextMessages = { ...messages }; delete nextMessages[rid];
         await save({ rooms: nextRooms, messages: nextMessages });
+        return res.status(200).json({ ok: true });
+      }
+
+      // ノート追加（ルームの固定メモ。テキスト＋画像）。ルームメンバー or root。
+      if (action === 'noteAdd' && body.roomId && body.note) {
+        const rid = String(body.roomId);
+        const room = rooms.find(r => r && r.id === rid);
+        if (!room) return res.status(404).json({ ok: false, error: 'not_found' });
+        const n = body.note;
+        const rec = {
+          id: genId('note'),
+          fromStaffId: String(n.fromStaffId || ''),
+          fromName: String(n.fromName || '').slice(0, 80),
+          text: String(n.text || '').slice(0, 4000),
+          imgIds: (Array.isArray(n.imgIds) ? n.imgIds : []).map(String).slice(0, 6),
+          createdAt: new Date().toISOString(),
+        };
+        if (!rec.text && rec.imgIds.length === 0) return res.status(400).json({ ok: false, error: 'empty' });
+        const arr = [rec, ...(Array.isArray(notes[rid]) ? notes[rid] : [])].slice(0, 200);
+        await save({ notes: { ...notes, [rid]: arr } });
+        return res.status(200).json({ ok: true, note: rec });
+      }
+      if (action === 'noteDelete' && body.roomId && body.noteId) {
+        const rid = String(body.roomId);
+        const arr = (Array.isArray(notes[rid]) ? notes[rid] : []).filter(x => !(x.id === String(body.noteId) && (body.root || String(x.fromStaffId) === String(body.staffId))));
+        await save({ notes: { ...notes, [rid]: arr } });
         return res.status(200).json({ ok: true });
       }
 

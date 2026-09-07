@@ -2628,18 +2628,22 @@
                     let subscribed = false;
                     if (pushState.supported && j.enabled) { try { const reg = await navigator.serviceWorker.ready; const sub = await reg.pushManager.getSubscription(); subscribed = !!sub; } catch {} }
                     setPushState(s => ({ ...s, enabled: !!j.enabled, publicKey: j.publicKey || '', subscribed }));
-                } catch {}
+                    return { enabled: !!j.enabled, publicKey: j.publicKey || '' };   // 最新値を返す（stateは非同期のため呼び出し側で使う）
+                } catch { return { enabled: false, publicKey: '' }; }
             };
             const pushSubscribe = async () => {
                 setPushState(s => ({ ...s, busy: true }));
                 try {
                     if (!pushState.supported) { alert('この端末/ブラウザはプッシュ通知に非対応です。iPhoneはSafariで「ホーム画面に追加」→ホームのアイコンから開くと通知が使えます（iOS16.4以上）。'); return; }
-                    // サーバー側の通知設定(VAPID)が未有効＝この環境では購読できない。よくある原因は環境変数の未設定/対象環境違い。
-                    if (!pushState.enabled || !pushState.publicKey) { await pushRefresh(); if (!pushState.enabled || !pushState.publicKey) { alert('サーバー側の通知設定が有効になっていません。\n管理者へ: Vercelの VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT を、今アクセスしている環境（本番なら Production、プレビューURLなら Preview）にも設定して再デプロイしてください。'); return; } }
+                    // iOSはユーザー操作の直後に許可を求める必要があるため、fetch等のawaitより先に要求する。
                     const perm = await Notification.requestPermission();
                     if (perm !== 'granted') { alert('通知が許可されませんでした。端末の設定＞このアプリ＞通知 から許可してください。'); return; }
+                    // サーバー側の通知設定(VAPID)を最新で取り直して判定（stateは非同期で古い値のことがある）。
+                    let cfg = { enabled: pushState.enabled, publicKey: pushState.publicKey };
+                    if (!cfg.enabled || !cfg.publicKey) cfg = await pushRefresh();   // 返り値の最新値で判定（setStateの遅延に依存しない）
+                    if (!cfg.enabled || !cfg.publicKey) { alert('サーバー側の通知設定が有効になっていません。\n管理者へ: Vercelの VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT を、今アクセスしている環境（本番なら Production、プレビューURLなら Preview）にも設定して再デプロイしてください。'); return; }
                     const reg = await navigator.serviceWorker.ready;
-                    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8(pushState.publicKey) });
+                    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8(cfg.publicKey) });
                     await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'push', action: 'subscribe', subscription: sub.toJSON(), staffId: chatMyId, name: chatMyName }) });
                     setPushState(s => ({ ...s, subscribed: true }));
                 } catch (e) { alert('通知の登録に失敗しました: ' + (e && e.message || e)); }

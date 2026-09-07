@@ -2516,13 +2516,6 @@
             // 本部(hq)メンバー（チャットIDが owner か staffId）も名前解決の対象に含める。
             const chatResolveName = (id, fallback) => { const sid = String(id || ''); const s = (soStaffs || []).find(x => String(x.id) === sid); if (s && s.name) return s.name; const d = ((chatData.dir && chatData.dir.staff) || []).find(x => String(x.id) === sid); if (d && d.name) return d.name; const h = (orgHq || []).find(x => String(x.staffId) === sid || String(x.owner) === sid); if (h && h.name) return h.name; return fallback || ''; };
             const chatMyName = (authState.root && !authIsHq) ? '管理者' : (chatResolveName(chatMyId, authState.staffName || authState.owner) || 'スタッフ');
-            // 画面に出すアカウント表示名。ログインID(staff691等)ではなく、登録された本名（プロフィールの漢字→SalonOneロスター→staffName）を優先。
-            const acctDisplayName = (authState.root && !authIsHq) ? '管理者' : (() => {
-                const sid = String(authState.staffId || '');
-                const p = sid && (profileData.profiles || {})[sid];
-                return (p && p.nameKanji) || (sid && chatResolveName(sid, '')) || authState.staffName || authState.owner || 'アカウント';
-            })();
-            const acctInitial = String(acctDisplayName || 'A').trim().charAt(0) || 'A';
             // 名前の横の店舗: 本人が設定したプロフィールの担当店舗（先頭）を優先。未設定はSalonOne所属。
             // ※表示時に解決（profileData読み出し）。ここでは呼ばない＝profileData未宣言時のTDZ回避。
             const chatResolveShop = (id, fallback) => { const p = (profileData.profiles || {})[String(id)]; return (p && Array.isArray(p.shops) && p.shops[0]) || fallback || ''; };
@@ -3090,6 +3083,14 @@
             const [orgSales, setOrgSales] = useState({});   // { `${shopId}__${YYYY-MM}`: [{id,name,gross}] }
             // ── プロフィール（組織図のホバー表示・本人が編集・店舗割当の上書き） ──
             const [profileData, setProfileData] = useState({ profiles: {}, hidden: [], loaded: false, configured: true });
+            // 画面に出すアカウント表示名。ログインID(staff691等)ではなく、登録された本名（プロフィールの漢字→SalonOneロスター→staffName）を優先。
+            // ⚠️ profileData を参照するので必ずその宣言より後で定義（前だとTDZでクラッシュ）。
+            const acctDisplayName = (authState.root && !authIsHq) ? '管理者' : (() => {
+                const sid = String(authState.staffId || '');
+                const p = sid && (profileData.profiles || {})[sid];
+                return (p && p.nameKanji) || (sid && chatResolveName(sid, '')) || authState.staffName || authState.owner || 'アカウント';
+            })();
+            const acctInitial = String(acctDisplayName || 'A').trim().charAt(0) || 'A';
             const [profileEdit, setProfileEdit] = useState(null); // 編集中ドラフト or null
             const [profileView, setProfileView] = useState(null); // モバイル等でタップ表示中の pid
             // ── ボトムシートの「下スワイプで閉じる」（カードのどこでも、先頭までスクロール済みで下に引くと閉じる） ──

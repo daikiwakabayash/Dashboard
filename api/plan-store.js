@@ -524,7 +524,9 @@ export default async function handler(req, res) {
           nameKana: String(p.nameKana || '').slice(0, 60),
           bio: String(p.bio || '').slice(0, 2000),
           mainImg: String(p.mainImg || '').slice(0, 64),
-          // メイン写真の表示位置（object-position "X% Y%"）。切れる場合に使う範囲を調整。
+          // メイン写真の切り抜き元（未加工の元画像ID）。再トリミング時に元画像から切り抜くため保持（画質劣化防止）。
+          mainImgRaw: String(p.mainImgRaw || '').slice(0, 64),
+          // メイン写真の表示位置（object-position "X% Y%"）。旧プロフィール後方互換（切り抜き前の位置調整）。
           mainPos: (() => { const v = String(p.mainPos || '').trim(); return /^\d{1,3}% \d{1,3}%$/.test(v) ? v : ''; })(),
           subImgs: (Array.isArray(p.subImgs) ? p.subImgs : []).map(String).slice(0, 3),
           sns: (() => {

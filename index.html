@@ -388,6 +388,9 @@
         /* 自分の吹き出し（ブランド色背景）内のリンク・メンションを白系で見やすく */
         .chat-bubble-mine a { color: #fff; text-decoration: underline; }
         .chat-bubble-mine span { background: rgba(255,255,255,0.22) !important; color: #fff !important; }
+        /* スタンプ押下直後のポップ演出（押せたことを即確認できる） */
+        @keyframes reactPop { 0% { transform: scale(0.4); opacity: 0.2; } 55% { transform: scale(1.18); opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
+        .react-pop { animation: reactPop 0.34s cubic-bezier(0.34,1.56,0.64,1); }
         .splash-screen {
             position: fixed;
             inset: 0;
@@ -889,7 +892,7 @@
                                                 ))}</div>}
                                                 {/* リアクション */}
                                                 {(Object.keys(reactions).length > 0 || pickFor === m.id) && (
-                                                    <div className={`flex items-center gap-1 mt-0.5 flex-wrap ${mine ? 'justify-end' : 'justify-start'}`}>
+                                                    <div data-react-row className={`flex items-center gap-1 mt-0.5 flex-wrap ${mine ? 'justify-end' : 'justify-start'}`}>
                                                         {Object.entries(reactions).map(([emo, ids]) => {
                                                             const on = (ids || []).map(String).includes(String(myId));
                                                             const open = reactWho && reactWho.msgId === m.id && reactWho.emoji === emo;
@@ -2574,6 +2577,18 @@
                 if (!had) r[emoji] = [...(Array.isArray(r[emoji]) ? r[emoji] : []), sid];
                 return r;
             };
+            // スタンプ付与直後に「その吹き出しのリアクション行」を画面内へ（最小スクロール）＝押せたか即分かる。
+            const revealReaction = (msgId) => {
+                requestAnimationFrame(() => { requestAnimationFrame(() => {
+                    try {
+                        const el = document.getElementById('chatmsg-' + msgId);
+                        if (!el) return;
+                        const chip = el.querySelector('[data-react-row]');
+                        (chip || el).scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                        if (chip) { chip.classList.remove('react-pop'); void chip.offsetWidth; chip.classList.add('react-pop'); }
+                    } catch {}
+                }); });
+            };
             const chatReact = async (msgId, emoji) => {
                 const rid = chatRoomId, uid = String(chatMyId);
                 // 楽観的にその場でトグル（サーバー往復・全再取得を待たない＝即反応）。次のポーリングでサーバーと一致。
@@ -2581,6 +2596,7 @@
                     if (!m || m.id !== msgId) return m;
                     return { ...m, reactions: reactToggleOne(m.reactions, emoji, uid) };
                 }) } }));
+                revealReaction(msgId);
                 try { await chatPost({ action: 'react', roomId: rid, msgId, emoji, staffId: uid }); } catch {}
             };
             // ── ノート（ルームの固定メモ） ──

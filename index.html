@@ -2637,6 +2637,7 @@
             const [profileData, setProfileData] = useState({ profiles: {}, hidden: [], loaded: false, configured: true });
             const [profileEdit, setProfileEdit] = useState(null); // 編集中ドラフト or null
             const [profileView, setProfileView] = useState(null); // モバイル等でタップ表示中の pid
+            const [profPicIdx, setProfPicIdx] = useState({}); // { pid: 表示中の写真インデックス }（サブ写真タップで大きく表示）
             const [profileSaving, setProfileSaving] = useState(false);
             const [profileShopQ, setProfileShopQ] = useState(''); // 編集モーダルの担当店舗検索
             // 本人の識別子: SSO/staffは staffId、オーナー(settlementアカウント)は owner:<名前>
@@ -11438,10 +11439,15 @@
                                 return (<>
                                     {bday && <div className="mb-3 rounded-xl bg-gradient-to-r from-pink-50 to-amber-50 border border-pink-200 px-3 py-2 text-[13px] font-black text-pink-700 flex items-center gap-1.5">🎂 本日は {dispNm} さんのお誕生日です！🎉</div>}
                                     {prof ? (<>
-                                        {(() => { const pics = [prof.mainImg, ...(Array.isArray(prof.subImgs) ? prof.subImgs : [])].filter(Boolean); return (<>
-                                        {prof.mainImg && <div className={`w-full ${big ? 'aspect-[4/3]' : 'aspect-[4/3]'} rounded-xl overflow-hidden bg-[#F2F4F7] mb-3 cursor-zoom-in ${bday ? 'ring-2 ring-pink-300' : ''}`} onClick={() => openLightbox(pics, 0)}><img src={chatImgSrc(prof.mainImg)} className="w-full h-full object-cover" loading="lazy" alt="" /></div>}
-                                        {Array.isArray(prof.subImgs) && prof.subImgs.length > 0 && <div className="flex gap-1.5 mb-3">{prof.subImgs.map((id, i) => <span key={id} className={`${big ? 'w-16 h-16' : 'w-12 h-12'} rounded-lg overflow-hidden bg-[#F2F4F7] cursor-zoom-in`} onClick={() => openLightbox(pics, (prof.mainImg ? 1 : 0) + i)}><img src={chatImgSrc(id)} className="w-full h-full object-cover" loading="lazy" alt="" /></span>)}</div>}
-                                        </>); })()}
+                                        {(() => {
+                                            const pics = [prof.mainImg, ...(Array.isArray(prof.subImgs) ? prof.subImgs : [])].filter(Boolean);
+                                            if (!pics.length) return null;
+                                            const sel = Math.min(Math.max(0, profPicIdx[pid] || 0), pics.length - 1);
+                                            return (<>
+                                                <div className={`w-full aspect-[4/3] rounded-xl overflow-hidden bg-[#F2F4F7] mb-2.5 ${bday ? 'ring-2 ring-pink-300' : ''}`}><img src={chatImgSrc(pics[sel])} className="w-full h-full object-cover transition-opacity" loading="lazy" alt="" /></div>
+                                                {pics.length > 1 && <div className="flex gap-1.5 mb-3">{pics.map((id, i) => <button key={id} onClick={() => setProfPicIdx(m => ({ ...m, [pid]: i }))} className={`${big ? 'w-16 h-16' : 'w-12 h-12'} rounded-lg overflow-hidden bg-[#F2F4F7] transition ${i === sel ? 'ring-2 ring-brand-500' : 'opacity-60 hover:opacity-100'}`}><img src={chatImgSrc(id)} className="w-full h-full object-cover" loading="lazy" alt="" /></button>)}</div>}
+                                            </>);
+                                        })()}
                                         <div className="flex items-center gap-2 flex-wrap">
                                             <span className={`${big ? 'text-[18px]' : 'text-[15px]'} font-bold text-[#111827]`}>{bday ? `🎂 ${dispNm}` : dispNm}</span>
                                             <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${prof.kind === 'hq' ? 'text-indigo-700 bg-indigo-50' : prof.kind === 'owner' ? 'text-brand-700 bg-brand-50' : 'text-teal-700 bg-teal-50'}`}>{prof.kind === 'hq' ? '本部' : prof.kind === 'owner' ? 'オーナー' : 'セラピスト'}</span>

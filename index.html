@@ -1168,6 +1168,10 @@
         const soHasSession = () => !!(soAuth.at || soAuth.rt);
         // サロンワンのロール → NAORUロール（root/owner/staff）へ写像
         const mapSalonOneRole = (role) => role === 'brand_admin' ? 'root' : (role === 'shop_admin' ? 'owner' : 'staff');
+        // 本部＝個人名でログインする root権限アカウント。root フラグを立てて全店・全機能を許可しつつ、
+        // 表示名（チャット/組織図）は本人の名前を保持する（role='hq' で識別）。
+        const HQ_ROLE = 'hq';
+        const isHqRole = (r) => r === HQ_ROLE;
 
         const _origFetch = window.fetch.bind(window);
         let _soRefreshPromise = null;
@@ -1633,7 +1637,7 @@
                     const staffName = localStorage.getItem('naoru_auth_staffname') || '';
                     const provider = localStorage.getItem('naoru_auth_provider') || 'settlement';
                     // 保存トークンがあれば即ログイン状態で表示（楽観的表示）。検証はバックグラウンドで行い、無効なら後でログイン画面に戻す。
-                    return token ? { checking: false, authenticated: true, token, owner, root, shops, role, staffId, staffName, provider }
+                    return token ? { checking: false, authenticated: true, token, owner, root: root || isHqRole(role), shops, role, staffId, staffName, provider }
                                  : { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '', provider: 'settlement' };
                 } catch { return { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '', provider: 'settlement' }; }
             });
@@ -1704,9 +1708,11 @@
                                 // KV拡張情報（GAS列に依存しない）を優先適用
                                 const km = (await loadAcctMeta())[authState.owner]; if (km) { role = km.role || role; staffId = km.staffId || staffId; staffName = km.staffName || staffName; }
                             } catch {}
-                        } else { role = 'root'; staffId = ''; staffName = ''; }
-                        persistAuth(authState.owner, authState.token, !!data.root, shops, role, staffId, staffName);
-                        setAuthState({ checking: false, authenticated: true, token: authState.token, owner: authState.owner, root: !!data.root, shops: data.root ? null : shops, role, staffId, staffName });
+                        } else if (!isHqRole(authState.role)) { role = 'root'; staffId = ''; staffName = ''; }
+                        // 本部(hq)は root権限だが、個人名（role/staffId/staffName）を保持する
+                        const eff = !!data.root || isHqRole(role);
+                        persistAuth(authState.owner, authState.token, eff, eff ? null : shops, role, staffId, staffName);
+                        setAuthState({ checking: false, authenticated: true, token: authState.token, owner: authState.owner, root: eff, shops: eff ? null : shops, role, staffId, staffName });
                     } else {
                         clearAuth();
                         setAuthState({ checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '' });
@@ -1760,19 +1766,22 @@
                     const ssoP = (id && id.toLowerCase() !== 'root') ? soLogin(id, pw) : Promise.resolve({ ok: false });
                     const data = await settlementP;
                     if (data.ok) {
-                        const shops = data.root ? null : (Array.isArray(data.shops) ? data.shops : []);
-                        const role = data.role || (data.root ? 'root' : 'owner'), staffId = data.staffId || '', staffName = data.staffName || '';
+                        const role0 = data.role || (data.root ? 'root' : 'owner');
+                        const eff0 = !!data.root || isHqRole(role0);           // 本部(hq)は root権限
+                        const shops = eff0 ? null : (Array.isArray(data.shops) ? data.shops : []);
+                        const role = role0, staffId = data.staffId || '', staffName = data.staffName || '';
                         // まず即ログイン完了（体感速度）。role/staff の拡張情報(accountmeta)は後追いでマージ。
-                        persistAuth(data.owner || '', data.token, !!data.root, shops, role, staffId, staffName, 'settlement');
-                        setAuthState({ checking: false, authenticated: true, token: data.token, owner: data.owner || '', root: !!data.root, shops, role, staffId, staffName, provider: 'settlement' });
+                        persistAuth(data.owner || '', data.token, eff0, shops, role, staffId, staffName, 'settlement');
+                        setAuthState({ checking: false, authenticated: true, token: data.token, owner: data.owner || '', root: eff0, shops, role, staffId, staffName, provider: 'settlement' });
                         setAuthPassword(''); setAuthId('');
                         if (!data.root) {
                             loadAcctMeta().then(meta => {
                                 const m = meta[data.owner]; if (!m) return;
                                 const r = m.role || role, si = m.staffId || staffId, sn = m.staffName || staffName;
                                 if (r === role && si === staffId && sn === staffName) return;
-                                persistAuth(data.owner || '', data.token, false, shops, r, si, sn, 'settlement');
-                                setAuthState(s => ({ ...s, role: r, staffId: si, staffName: sn }));
+                                const eff = !!data.root || isHqRole(r);        // KVでhqと判明したら root権限へ昇格
+                                persistAuth(data.owner || '', data.token, eff, eff ? null : shops, r, si, sn, 'settlement');
+                                setAuthState(s => ({ ...s, root: eff, shops: eff ? null : s.shops, role: r, staffId: si, staffName: sn }));
                             }).catch(() => {});
                         }
                     } else if (id) {
@@ -2233,10 +2242,12 @@
                 const onKey = (e) => { const list = (chatLightbox.list || []); if (!list.length) return; if (e.key === 'ArrowRight') setChatLightbox(v => ({ ...v, i: ((v.i || 0) + 1) % list.length })); else if (e.key === 'ArrowLeft') setChatLightbox(v => ({ ...v, i: ((v.i || 0) - 1 + list.length) % list.length })); else if (e.key === 'Escape') setChatLightbox(null); };
                 window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
             }, [chatLightbox]);
-            const chatMyId = authState.root ? '__root__' : String(authState.staffId || authState.owner || '');
+            // 本部(hq)は root権限だが、チャット/掲示板の表示は「管理者」ではなく本人名で行う（＝個人アカウント）。
+            const authIsHq = isHqRole(authState.role);
+            const chatMyId = (authState.root && !authIsHq) ? '__root__' : String(authState.staffId || authState.owner || '');
             // 表示名は SalonOneロスターの本名（漢字フルネーム）を優先。staffName空/ログインID化け(staff691等)でも本名で表示。
             const chatResolveName = (id, fallback) => { const sid = String(id || ''); const s = (soStaffs || []).find(x => String(x.id) === sid); if (s && s.name) return s.name; const d = ((chatData.dir && chatData.dir.staff) || []).find(x => String(x.id) === sid); if (d && d.name) return d.name; return fallback || ''; };
-            const chatMyName = authState.root ? '管理者' : (chatResolveName(chatMyId, authState.staffName || authState.owner) || 'スタッフ');
+            const chatMyName = (authState.root && !authIsHq) ? '管理者' : (chatResolveName(chatMyId, authState.staffName || authState.owner) || 'スタッフ');
             // 名前の横の店舗: 本人が設定したプロフィールの担当店舗（先頭）を優先。未設定はSalonOne所属。
             // ※表示時に解決（profileData読み出し）。ここでは呼ばない＝profileData未宣言時のTDZ回避。
             const chatResolveShop = (id, fallback) => { const p = (profileData.profiles || {})[String(id)]; return (p && Array.isArray(p.shops) && p.shops[0]) || fallback || ''; };
@@ -2605,6 +2616,7 @@
             ];
             const [evData, setEvData] = useState({ sections: {}, configured: true, loaded: false });
             const [orgSearch, setOrgSearch] = useState('');
+            const [orgHq, setOrgHq] = useState([]); // 本部メンバー [{owner, name, staffId}]（accountmetaのrole==='hq'）
             // 組織図: 月選択＋その月に売上のあるスタッフ（SalonOne売上と同じ考え方）
             const [orgMonth, setOrgMonth] = useState(() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}`; });
             const [orgSales, setOrgSales] = useState({});   // { `${shopId}__${YYYY-MM}`: [{id,name,gross}] }
@@ -3386,6 +3398,17 @@
             useEffect(() => {
                 if (((currentPage === 'settlement' && stAdminOpen) || currentPage === 'settings') && stAccounts === null) stLoadAccounts();
             }, [currentPage, stAdminOpen]);
+            // 組織図を開いたら本部メンバー（accountmetaのrole==='hq'）を読み込む（全ロールで閲覧可・plan-storeは未認証GET）
+            useEffect(() => {
+                if (currentPage !== 'org') return;
+                loadAcctMeta().then(meta => {
+                    const list = Object.entries(meta || {})
+                        .filter(([, m]) => m && m.role === 'hq')
+                        .map(([owner, m]) => ({ owner, name: (m.staffName || owner), staffId: String(m.staffId || '') }))
+                        .sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
+                    setOrgHq(list);
+                }).catch(() => {});
+            }, [currentPage]);
             // 選択・月が変わったら選択店舗のデータを再取得
             useEffect(() => {
                 if (currentPage !== 'settlement') return;
@@ -11430,8 +11453,35 @@
                                             </div>
                                         )}
 
+                                        {/* 本部（root権限）＝個人名でログインするメンバー。組織図の先頭に固定表示。 */}
+                                        {orgHq.length > 0 && (!q || orgHq.some(m => String(m.name).includes(q))) && (
+                                            <div className="mb-6">
+                                                <div className="flex items-center gap-2.5 mb-3">
+                                                    <span className="inline-flex items-center gap-1.5 text-[14px] font-bold text-[#111827]"><span className="text-[16px]">🏛️</span>本部</span>
+                                                    <span className="text-[12px] font-semibold text-[#98A2B3] bg-white border border-[#EAECF0] rounded-full px-2 py-0.5">{orgHq.length}名</span>
+                                                    <div className="flex-1 h-px bg-[#EAECF0]" />
+                                                </div>
+                                                <div className="bg-gradient-to-br from-amber-50/70 to-white rounded-xl border border-amber-200/70 p-4">
+                                                    <div className="flex flex-wrap gap-1.5">
+                                                        {orgHq.filter(m => !q || String(m.name).includes(q)).map(m => {
+                                                            const pid = (m.staffId && /^\d+$/.test(m.staffId)) ? m.staffId : `owner:${m.owner}`;
+                                                            const prof = profiles[pid];
+                                                            const dispNm = (prof && prof.nameKanji) || m.name || m.owner;
+                                                            return (
+                                                                <button key={m.owner} onClick={e => { e.stopPropagation(); setProfileView({ pid, name: dispNm, kind: 'owner' }); }} className="inline-flex items-center gap-1.5 pl-1 pr-2.5 py-1 rounded-full border text-[12px] font-semibold text-amber-800 bg-amber-50 border-amber-200 hover:bg-amber-100 transition" title="本部（root権限）">
+                                                                    {prof && prof.mainImg ? <span className="w-5 h-5 rounded-full overflow-hidden shrink-0 bg-[#F2F4F7]"><img src={chatImgSrc(prof.mainImg)} className="w-full h-full object-cover" loading="lazy" alt="" /></span> : <span className="w-5 h-5 rounded-full bg-amber-100 text-amber-700 inline-flex items-center justify-center text-[11px] font-bold">👑</span>}
+                                                                    {dispNm}
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                    <p className="text-[11px] text-[#98A2B3] mt-2.5">本部メンバーは全店・全機能（root権限）にアクセスできます。名前をタップでプロフィール・メッセージ。</p>
+                                                </div>
+                                            </div>
+                                        )}
+
                                         {loading ? <div className="text-center text-[#98A2B3] text-[13px] py-16">店舗・スタッフを取得中…</div>
-                                         : regionGroups.length === 0 ? <div className="text-center text-[#98A2B3] text-[14px] py-16">該当する店舗がありません。</div>
+                                         : regionGroups.length === 0 && orgHq.length === 0 ? <div className="text-center text-[#98A2B3] text-[14px] py-16">該当する店舗がありません。</div>
                                          : (
                                         <div className="space-y-8">
                                             {regionGroups.map(grp => (
@@ -16952,10 +17002,10 @@
                                     <div>
                                         <div className="text-[11px] font-black text-slate-400 mb-1">種別</div>
                                         <div className="flex gap-2 flex-wrap">
-                                            {[{ v: 'owner', l: 'オーナー' }, { v: 'staff', l: 'セラピスト/マネージャー' }].map(r => (
+                                            {[{ v: 'owner', l: 'オーナー' }, { v: 'staff', l: 'セラピスト/マネージャー' }, { v: 'hq', l: '本部' }].map(r => (
                                                 <button key={r.v} onClick={() => setStAcctForm(f => ({ ...f, role: r.v }))} className={`px-3 py-1.5 rounded-lg text-xs font-black border ${stAcctForm.role === r.v ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}>{r.l}</button>
                                             ))}
-                                            <span className="text-[11px] text-slate-400 font-bold self-center ml-1">{isStaffForm ? 'サンクスギフト表示・返金明細書は非表示' : '返金明細書を閲覧可'}</span>
+                                            <span className="text-[11px] text-slate-400 font-bold self-center ml-1">{stAcctForm.role === 'hq' ? '本部＝root権限（全店・全機能・アカウント管理可）。名前でログイン' : isStaffForm ? 'サンクスギフト表示・返金明細書は非表示' : '返金明細書を閲覧可'}</span>
                                         </div>
                                     </div>
 

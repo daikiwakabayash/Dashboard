@@ -80,7 +80,8 @@ tests/              # Vitestテスト
 
 ## セキュリティ
 - **認証（アカウント制・ロール別）**: ダッシュボード本体のログインは **ID（氏名）＋PASS のアカウント制**。ログインは `/api/settlement-auth`（`?fn=auth`）を使い、返金明細書のオーナーアカウント（GAS「オーナー設定」＋`SETTLEMENT_OWNER_*`）と共通。ログイン後は **アカウントに割り当てた店舗のみ表示**（`soShops` を `authState.shops` パターンでフィルタ。root=全店）。root は `DASHBOARD_PASSWORD` でログイン（全店舗・`__root__` トークン）。localStorageに `naoru_auth_token`/`naoru_auth_owner`/`naoru_auth_root`/`naoru_auth_shops`/`naoru_auth_role`/`naoru_auth_staffid`/`naoru_auth_staffname` を保存。`DASHBOARD_PASSWORD`・アカウント共に未設定なら認証スキップ（開発用）
-  - **3ロール**: `root`（管理者・全店・オーナー設定可）／`owner`（オーナー・管轄店舗・返金明細書可）／`staff`（セラピスト/マネージャー・所属/管轄店舗・返金明細書は非表示）。マネージャー/複数管轄はアクセス店舗リストの複数指定で表現
+  - **4ロール**: `root`（管理者・全店・オーナー設定可・共有PASS＝`DASHBOARD_PASSWORD`）／`hq`（**本部**・個人名でログインする root権限アカウント）／`owner`（オーナー・管轄店舗・返金明細書可）／`staff`（セラピスト/マネージャー・所属/管轄店舗・返金明細書は非表示）。マネージャー/複数管轄はアクセス店舗リストの複数指定で表現
+  - **本部（hq）**: root権限を「それぞれの本部の人の名前」で持たせるためのロール。オーナー設定でロール=本部＋個人名/PASSを発行。ログインは通常アカウントと同じ（名前＋PASS）で、`settlement-auth` が `meta.role==='hq'` を検出したら **rootToken を発行して `root:true`** で返す（サーバー側も settlement-owners/settlement-store で root と同等に扱う）。roleは `hq` のまま保持し、チャット/掲示板の表示名・組織図は「管理者」ではなく**本人名**（root共有ログインは従来どおり「管理者」）。roleは KV(`accountmeta`) と GAS「オーナー設定」の両方に保存され、`settlement-auth` は KV も読むため GAS 未再デプロイでも判定可。組織図タブ先頭に「🏛️ 本部」セクションで一覧表示（全ロール閲覧可）
   - **タブのロール連動**: 返金明細書=root/ownerのみ（staffは非表示・退避）／オーナー設定=rootのみ／手当タブはstaffなら本人の店舗・氏名を自動入力（`staffId`でSalonOne配属スタッフに紐付け→返金明細書に自動反映）／事業計画はstaffなら所属店舗の計画を自動表示
   - アカウント管理は「オーナー設定」タブ（root専用）。ロール選択＋（staffは）SalonOneロスターから本人を選び `staffId`/`staffName` を紐付け。「店舗一覧からまとめてアカウント作成」で一括発行（`stBulkCreate`）
   - 拡張情報 `role`/`staffId`/`staffName` は **KV(plan-store `?type=accountmeta`)を優先**（GAS列に依存せず即反映）。GAS「オーナー設定」シートにも列追加済み（`OWNER_HEADERS` 末尾・旧4列は自動移行）だが、GAS再デプロイ前でもKVで動作。フロントは保存時にKVへ書き、ログイン/検証時にKVを読んで `authState.role/staffId/staffName` に反映

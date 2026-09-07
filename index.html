@@ -3099,67 +3099,75 @@
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'unhide', id: String(id), root: !!authState.root }) }); await profileLoad(); } catch {}
             };
             const profileUploadImage = (file) => chatUploadImageTo('profile', file);
-            // ── プロフィール写真トリミング（正方形・ドラッグで移動＋ズームで拡大／iOSのCropと同じ操作感） ──
+            // ── プロフィール写真トリミング（正方形・ドラッグで移動＋ピンチ/スライダーで拡大／iOSのCropと同じ操作感） ──
             // srcId の画像を正方形に切り抜き、onApply(dataUrl) に渡す。表示位置調整ではなく実際の画像を作る（表示側は object-cover のみでズレなし）。
+            // ⚠️ ドラッグ/ズームは React state を介さず DOM を直接更新（imgRef.style）＝毎フレーム再描画せず滑らか。
+            //    JSX 側の img style には transform/width/height を書かない（再レンダーで上書きされないように）。
             const ProfileCropModal = ({ srcId, onApply, onCancel, saving }) => {
                 const src = chatImgSrc(srcId);
-                const [nat, setNat] = React.useState(null); // {nw,nh}
-                const [c, setC] = React.useState(0);        // 切り抜き正方形の一辺（元画像px）
-                const [cx, setCx] = React.useState(0);
-                const [cy, setCy] = React.useState(0);
-                const imgRef = React.useRef(null);
+                const imgEl = React.useRef(null);   // 表示中の<img>
+                const bmp = React.useRef(null);     // 描画用のImage（自然サイズ）
                 const frameRef = React.useRef(null);
-                const dragRef = React.useRef(null);
+                const s = React.useRef({ nw: 0, nh: 0, P: 0, s0: 1, z: 1, minZ: 1, maxZ: 6, tx: 0, ty: 0, ready: false });
+                const ptr = React.useRef(new Map()); // pointerId -> {x,y}
+                const gest = React.useRef(null);     // ドラッグ/ピンチ開始時の基準
+                const [ready, setReady] = React.useState(false);
+                const [zoomPct, setZoomPct] = React.useState(100); // スライダー表示用
                 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+                const clampPan = () => { const t = s.current; const dw = t.nw * t.s0 * t.z, dh = t.nh * t.s0 * t.z; const mx = Math.max(0, (dw - t.P) / 2), my = Math.max(0, (dh - t.P) / 2); t.tx = clamp(t.tx, -mx, mx); t.ty = clamp(t.ty, -my, my); };
+                const paint = () => { const t = s.current; const el = imgEl.current; if (!el || !t.ready) return; const dw = t.nw * t.s0 * t.z, dh = t.nh * t.s0 * t.z; el.style.width = dw + 'px'; el.style.height = dh + 'px'; el.style.transform = `translate(-50%,-50%) translate(${t.tx}px,${t.ty}px)`; };
+                const setZoom = (z, keepUi) => { const t = s.current; const nz = clamp(z, t.minZ, t.maxZ); const f = nz / t.z; t.tx *= f; t.ty *= f; t.z = nz; clampPan(); paint(); if (!keepUi) setZoomPct(Math.round((nz / t.minZ) * 100)); };
                 React.useEffect(() => {
                     let alive = true;
                     const im = new Image(); im.crossOrigin = 'anonymous';
-                    im.onload = () => { if (!alive) return; const nw = im.naturalWidth, nh = im.naturalHeight; imgRef.current = im; const base = Math.min(nw, nh); setNat({ nw, nh }); setC(base); setCx((nw - base) / 2); setCy((nh - base) / 2); };
+                    im.onload = () => {
+                        if (!alive) return; bmp.current = im;
+                        const t = s.current; t.nw = im.naturalWidth; t.nh = im.naturalHeight;
+                        const P = frameRef.current ? frameRef.current.getBoundingClientRect().width : 320;
+                        t.P = P; t.s0 = P / Math.min(t.nw, t.nh); t.z = 1; t.minZ = 1; t.tx = 0;
+                        // 縦長写真は顔が上寄りなので、初期位置を少し上寄せ（上部を見せる）
+                        const dh = t.nh * t.s0 * t.z; const my = Math.max(0, (dh - P) / 2); t.ty = clamp(my * 0.5, 0, my);
+                        t.ready = true; setReady(true); requestAnimationFrame(paint);
+                    };
                     im.src = src;
                     return () => { alive = false; };
                 }, [src]);
-                const zoom = nat ? Math.min(nat.nw, nat.nh) / (c || 1) : 1;
-                const applyZoom = (z) => {
-                    if (!nat) return; const base = Math.min(nat.nw, nat.nh); const nc = base / z;
-                    const ccx = cx + c / 2, ccy = cy + c / 2;
-                    setC(nc); setCx(clamp(ccx - nc / 2, 0, nat.nw - nc)); setCy(clamp(ccy - nc / 2, 0, nat.nh - nc));
-                };
-                const onDown = (e) => { if (!nat || !frameRef.current) return; const fw = frameRef.current.getBoundingClientRect().width; dragRef.current = { x: e.clientX, y: e.clientY, cx, cy, fw }; try { e.currentTarget.setPointerCapture(e.pointerId); } catch { } };
-                const onMove = (e) => { const d = dragRef.current; if (!d || !nat) return; const per = c / d.fw; setCx(clamp(d.cx - (e.clientX - d.x) * per, 0, nat.nw - c)); setCy(clamp(d.cy - (e.clientY - d.y) * per, 0, nat.nh - c)); };
-                const onUp = (e) => { dragRef.current = null; try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { } };
+                const onDown = (e) => { if (!s.current.ready) return; ptr.current.set(e.pointerId, { x: e.clientX, y: e.clientY }); try { e.currentTarget.setPointerCapture(e.pointerId); } catch { } const pts = [...ptr.current.values()]; if (pts.length === 1) { gest.current = { mode: 'pan', x: pts[0].x, y: pts[0].y, tx: s.current.tx, ty: s.current.ty }; } else if (pts.length === 2) { const dx = pts[0].x - pts[1].x, dy = pts[0].y - pts[1].y; gest.current = { mode: 'pinch', dist: Math.hypot(dx, dy) || 1, z: s.current.z }; } };
+                const onMove = (e) => { if (!ptr.current.has(e.pointerId)) return; ptr.current.set(e.pointerId, { x: e.clientX, y: e.clientY }); const g = gest.current; if (!g) return; const pts = [...ptr.current.values()]; if (g.mode === 'pan' && pts.length === 1) { s.current.tx = g.tx + (pts[0].x - g.x); s.current.ty = g.ty + (pts[0].y - g.y); clampPan(); paint(); } else if (pts.length >= 2) { const dx = pts[0].x - pts[1].x, dy = pts[0].y - pts[1].y; const d = Math.hypot(dx, dy) || 1; if (g.mode !== 'pinch') { gest.current = { mode: 'pinch', dist: d, z: s.current.z }; return; } setZoom(g.z * (d / g.dist), true); } };
+                const onUp = (e) => { ptr.current.delete(e.pointerId); try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { } const t = s.current; setZoomPct(Math.round((t.z / t.minZ) * 100)); const pts = [...ptr.current.values()]; if (pts.length === 1) { gest.current = { mode: 'pan', x: pts[0].x, y: pts[0].y, tx: t.tx, ty: t.ty }; } else if (pts.length === 0) { gest.current = null; } };
                 const doApply = () => {
-                    if (!nat || !imgRef.current) return;
+                    const t = s.current; if (!t.ready || !bmp.current) return;
+                    const ds = t.s0 * t.z; const c = t.P / ds; // 切り抜く正方形の一辺（自然px）
+                    const sx = clamp(t.nw / 2 - t.tx / ds - c / 2, 0, Math.max(0, t.nw - c));
+                    const sy = clamp(t.nh / 2 - t.ty / ds - c / 2, 0, Math.max(0, t.nh - c));
                     const OUT = 720; const cv = document.createElement('canvas'); cv.width = OUT; cv.height = OUT;
-                    const ctx = cv.getContext('2d'); ctx.imageSmoothingQuality = 'high';
-                    ctx.drawImage(imgRef.current, cx, cy, c, c, 0, 0, OUT, OUT);
-                    onApply(cv.toDataURL('image/jpeg', 0.85));
+                    const ctx = cv.getContext('2d'); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+                    ctx.drawImage(bmp.current, sx, sy, c, c, 0, 0, OUT, OUT);
+                    onApply(cv.toDataURL('image/jpeg', 0.88));
                 };
                 return (
-                    <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-black/70" onClick={onCancel}>
+                    <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-black/75" onClick={onCancel}>
                         <div className="w-full max-w-sm rounded-2xl bg-white p-4 shadow-2xl" onClick={e => e.stopPropagation()}>
-                            <div className="text-[14px] font-bold text-[#101828] mb-1">写真を切り抜く</div>
-                            <div className="text-[11px] text-[#98A2B3] mb-3">ドラッグで移動・スライダーで拡大して、見せたい範囲に合わせてください。</div>
-                            <div ref={frameRef} onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
+                            <div className="text-[15px] font-bold text-[#101828] mb-0.5">写真を切り抜く</div>
+                            <div className="text-[11px] text-[#98A2B3] mb-3">ドラッグで移動・2本指ピンチ／スライダーで拡大して、正方形に合わせてください。</div>
+                            <div ref={frameRef} onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp} onPointerLeave={onUp}
                                 className="relative w-full aspect-square overflow-hidden rounded-xl bg-[#0b1220] select-none" style={{ touchAction: 'none', cursor: 'grab' }}>
-                                {nat ? (
-                                    <img src={src} draggable={false} alt="" style={{ position: 'absolute', left: `${-(cx / c) * 100}%`, top: `${-(cy / c) * 100}%`, width: `${(nat.nw / c) * 100}%`, height: 'auto', maxWidth: 'none', userSelect: 'none', pointerEvents: 'none' }} />
-                                ) : (
-                                    <div className="absolute inset-0 flex items-center justify-center text-white/60 text-[12px]">読み込み中…</div>
-                                )}
-                                {/* 三分割グリッド */}
+                                <img ref={imgEl} src={src} draggable={false} alt="" style={{ position: 'absolute', left: '50%', top: '50%', maxWidth: 'none', userSelect: 'none', pointerEvents: 'none', visibility: ready ? 'visible' : 'hidden', willChange: 'transform' }} />
+                                {!ready && <div className="absolute inset-0 flex items-center justify-center text-white/60 text-[12px]">読み込み中…</div>}
+                                {/* 三分割グリッド＋外周 */}
                                 <div className="pointer-events-none absolute inset-0">
-                                    <div className="absolute left-1/3 top-0 bottom-0 w-px bg-white/25" /><div className="absolute left-2/3 top-0 bottom-0 w-px bg-white/25" />
-                                    <div className="absolute top-1/3 left-0 right-0 h-px bg-white/25" /><div className="absolute top-2/3 left-0 right-0 h-px bg-white/25" />
-                                    <div className="absolute inset-0 rounded-xl ring-1 ring-white/40" />
+                                    <div className="absolute left-1/3 top-0 bottom-0 w-px bg-white/20" /><div className="absolute left-2/3 top-0 bottom-0 w-px bg-white/20" />
+                                    <div className="absolute top-1/3 left-0 right-0 h-px bg-white/20" /><div className="absolute top-2/3 left-0 right-0 h-px bg-white/20" />
+                                    <div className="absolute inset-0 rounded-xl ring-1 ring-white/50" />
                                 </div>
                             </div>
-                            <div className="flex items-center gap-2 mt-3">
+                            <div className="flex items-center gap-3 mt-3">
                                 <span className="text-[11px] font-bold text-[#98A2B3] shrink-0">拡大</span>
-                                <input type="range" min="100" max="400" value={Math.round(zoom * 100)} onChange={e => applyZoom(Number(e.target.value) / 100)} className="flex-1 accent-brand-500" disabled={!nat} />
+                                <input type="range" min="100" max="400" value={zoomPct} onChange={e => setZoom((Number(e.target.value) / 100) * s.current.minZ)} className="flex-1 accent-brand-500" disabled={!ready} />
                             </div>
                             <div className="flex gap-2 mt-4">
-                                <button onClick={onCancel} className="flex-1 h-10 rounded-lg border border-[#EAECF0] text-[13px] font-semibold text-[#344054] hover:bg-[#F8F9FB]">キャンセル</button>
-                                <button onClick={doApply} disabled={!nat || saving} className="flex-1 h-10 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-bold disabled:opacity-50">{saving ? '保存中…' : '適用'}</button>
+                                <button onClick={onCancel} className="flex-1 h-11 rounded-lg border border-[#EAECF0] text-[14px] font-semibold text-[#344054] hover:bg-[#F8F9FB]">キャンセル</button>
+                                <button onClick={doApply} disabled={!ready || saving} className="flex-1 h-11 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[14px] font-bold disabled:opacity-50">{saving ? '保存中…' : '適用'}</button>
                             </div>
                         </div>
                     </div>

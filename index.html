@@ -2904,6 +2904,7 @@
                 try { localStorage.setItem('org_sales_v1', JSON.stringify(cache)); } catch {}
             };
             const [evShowPast, setEvShowPast] = useState(false);       // 終了した予定を表示するか
+            const [evSearch, setEvSearch] = useState('');              // キーワード検索
             const [evCollapsed, setEvCollapsed] = useState({});        // セクション折りたたみ {key:true}
             const [evTab, setEvTab] = useState('study');               // 上部タブ（勉強会/飲み会/部活）
             const [evEditRow, setEvEditRow] = useState(null);          // 編集中の行ID（カード展開）
@@ -11619,8 +11620,14 @@
                             const hasOwner = sec.cols.some(c => c.key === 'owner');
                             const allRows = allRowsOf(sec.key);
                             const pastCount = allRows.filter(r => evIsPast(cv(r, 'date'))).length;
-                            let rows = evShowPast ? allRows.slice() : allRows.filter(r => !evIsPast(cv(r, 'date')));
+                            let rows = (evShowPast || evSearch.trim()) ? allRows.slice() : allRows.filter(r => !evIsPast(cv(r, 'date')));
                             rows.sort((a, b) => { const pa = evParseDate(cv(a, 'date')); const pb = evParseDate(cv(b, 'date')); const va = (pa && !pa.recurring) ? pa.date.getTime() : 8.64e15; const vb = (pb && !pb.recurring) ? pb.date.getTime() : 8.64e15; return va - vb; });
+                            // キーワード検索（内容/場所/講師/担当/責任者/グループ名/日付/時間などを対象。全角半角・カナ・大小文字を吸収）
+                            if (evSearch.trim()) {
+                                const norm = (s) => String(s || '').normalize('NFKC').toLowerCase().replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));
+                                const eq = norm(evSearch);
+                                rows = rows.filter(r => { const c = r.cells || {}; const hay = [c.content, c.place, c.teacher, c.club, c.charge, c.chatTitle, c.date, c.time, c.owner, evUserName(c.ownerId)].map(norm).join(' '); return hay.includes(eq); });
+                            }
                             const inputCls = 'w-full h-10 rounded-lg border border-[#EAECF0] bg-white px-3 text-[14px] text-[#111827] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition';
                             const fieldLabels = { time: '時間', place: '場所', teacher: '講師', capacity: '定員', content: '内容', club: '部活', charge: '担当', chatTitle: 'グループ名' };
                             const upsertNow = (row) => { const r2 = (evData.sections[sec.key] || []).find(x => x.id === row.id) || row; evUpsertRow(sec.key, r2); };
@@ -11645,6 +11652,8 @@
                                             ); })}
                                         </div>
                                         {!evData.configured && <div className="mb-3 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[13px]">共有ストア未設定のため保存されません。管理者に有効化を依頼してください。</div>}
+                                        {/* キーワード検索（内容・場所・担当などで絞り込み） */}
+                                        <div className="relative mb-2"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]" /><input value={evSearch} onChange={e => setEvSearch(e.target.value)} placeholder={`「${sec.title}」をキーワードで検索（内容・場所・担当など）`} className="w-full h-9 pl-9 pr-8 rounded-lg bg-white border border-[#EAECF0] text-[13px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />{evSearch && <button onClick={() => setEvSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center justify-center rounded-full text-[#98A2B3] hover:bg-[#EAECF0]"><X size={13} /></button>}</div>
                                         <div className="flex items-center justify-between mb-2">
                                             <label className="inline-flex items-center gap-2 text-[12px] font-medium text-[#667085] cursor-pointer select-none"><input type="checkbox" checked={evShowPast} onChange={e => setEvShowPast(e.target.checked)} className="w-4 h-4 accent-[#F37021]" />終了も表示{pastCount ? `（${pastCount}）` : ''}</label>
                                             <button onClick={async () => { const id = await evAddRow(sec.key); setEvEditRow(id); }} className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-white text-[13px] font-bold shadow-sm transition" style={{ background: sec.accent }}><Plus size={16} />予定を追加</button>

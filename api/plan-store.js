@@ -50,7 +50,12 @@ const VAPID_PRIVATE = () => process.env.VAPID_PRIVATE_KEY || '';
 const VAPID_SUBJECT = () => process.env.VAPID_SUBJECT || 'mailto:admin@naoru.example';
 // 対象購読へ通知を送る。web-push は動的import（未インストール環境でもハンドラは壊れない）。
 // filterStaffIds が配列なら、その staffId の購読のみへ送信（未指定＝全員）。
-async function sendPush(hasKV, hasSB, gas, payload, filterStaffIds) {
+// 購読者ごとの通知設定を正規化。board=掲示板/お知らせハブ, chat='all'|'mention'|'off'
+function normalizePrefs(p) {
+  p = (p && typeof p === 'object') ? p : {};
+  return { board: p.board !== false, chat: ['all', 'mention', 'off'].includes(p.chat) ? p.chat : 'all' };
+}
+async function sendPush(hasKV, hasSB, gas, payload, filterStaffIds, opts) {
   try {
     if (!VAPID_PUBLIC() || !VAPID_PRIVATE()) return; // 未設定＝無効
     const mod = await import('web-push').catch(() => null);
@@ -60,7 +65,22 @@ async function sendPush(hasKV, hasSB, gas, payload, filterStaffIds) {
     const store = (await blobGet(PUSH_KEY, hasKV, hasSB, gas)) || {};
     let subs = Array.isArray(store.subs) ? store.subs : [];
     const only = Array.isArray(filterStaffIds) ? new Set(filterStaffIds.map(String)) : null;
-    const targets = only ? subs.filter(s => only.has(String(s.staffId))) : subs;
+    const kind = (payload && payload.kind) || '';
+    const o = opts || {};
+    const mentionSet = new Set((o.mentionIds || []).map(String));
+    const mentionAll = !!o.mentionAll;
+    // 各購読者の設定で配信可否を判定
+    const allow = (s) => {
+      const p = normalizePrefs(s && s.prefs);
+      if (kind === 'board') return p.board;
+      if (kind === 'chat') {
+        if (p.chat === 'off') return false;
+        if (p.chat === 'mention') return mentionAll || mentionSet.has(String(s.staffId));
+        return true; // 'all'
+      }
+      return true;
+    };
+    const targets = (only ? subs.filter(s => only.has(String(s.staffId))) : subs).filter(allow);
     const body = JSON.stringify(payload);
     const dead = [];
     await Promise.all(targets.map(async (s) => {
@@ -553,9 +573,13 @@ export default async function handler(req, res) {
   const isPush = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'push';
   if (isPush) {
     try {
-      // 公開鍵とプッシュ有効状態を返す（フロントが購読に使う）
+      // 公開鍵とプッシュ有効状態を返す（フロントが購読に使う）。staffId指定時はその人の通知設定も返す。
       if (req.method === 'GET') {
-        return res.status(200).json({ enabled: !!(VAPID_PUBLIC() && VAPID_PRIVATE()), publicKey: VAPID_PUBLIC(), configured: !!(hasKV || hasSB || gas) });
+        let prefs = null;
+        if (req.query.staffId && (hasKV || hasSB || gas)) {
+          try { const st = (await blobGet(PUSH_KEY, hasKV, hasSB, gas)) || {}; const found = (Array.isArray(st.subs) ? st.subs : []).find(x => String(x.staffId) === String(req.query.staffId) && x.prefs); prefs = normalizePrefs(found && found.prefs); } catch { prefs = null; }
+        }
+        return res.status(200).json({ enabled: !!(VAPID_PUBLIC() && VAPID_PRIVATE()), publicKey: VAPID_PUBLIC(), configured: !!(hasKV || hasSB || gas), prefs });
       }
       if (!hasKV && !hasSB && !gas) return res.status(200).json({ ok: false, configured: false });
       const body = req.body || {};
@@ -563,10 +587,20 @@ export default async function handler(req, res) {
       const subs = Array.isArray(store.subs) ? store.subs : [];
       if (body.action === 'subscribe' && body.subscription && body.subscription.endpoint) {
         const s = body.subscription;
-        const rec = { endpoint: String(s.endpoint), keys: s.keys || {}, staffId: String(body.staffId || ''), name: String(body.name || '').slice(0, 80), createdAt: new Date().toISOString() };
+        // 通知設定: 明示指定→それ／既存の同一staffId購読→引き継ぎ／なければ既定
+        const inherited = subs.find(x => x && String(x.staffId) === String(body.staffId || '') && x.prefs);
+        const prefs = normalizePrefs(body.prefs || (inherited && inherited.prefs));
+        const rec = { endpoint: String(s.endpoint), keys: s.keys || {}, staffId: String(body.staffId || ''), name: String(body.name || '').slice(0, 80), prefs, createdAt: new Date().toISOString() };
         const next = subs.filter(x => x && x.endpoint !== rec.endpoint).concat(rec).slice(-5000);
         await blobSet(PUSH_KEY, { subs: next }, hasKV, hasSB, gas);
-        return res.status(200).json({ ok: true });
+        return res.status(200).json({ ok: true, prefs });
+      }
+      // 通知設定の更新（同一staffIdの全購読に反映）
+      if (body.action === 'setPrefs' && body.staffId) {
+        const prefs = normalizePrefs(body.prefs);
+        const next = subs.map(x => (x && String(x.staffId) === String(body.staffId)) ? { ...x, prefs } : x);
+        await blobSet(PUSH_KEY, { subs: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, prefs });
       }
       if (body.action === 'unsubscribe' && body.endpoint) {
         const next = subs.filter(x => x && x.endpoint !== String(body.endpoint));
@@ -788,32 +822,23 @@ export default async function handler(req, res) {
           await saveRoomMsgs(rid, (await getRoomMsgs(rid)).concat(rec).slice(-CHAT_MSG_CAP));
         }
         await saveReads(nextReads);                    // 送信者の既読を更新（別キー）
-        // プッシュ通知: グループ/DM/全社アナウンスの新着を対象者へ（店舗ルームはスパム回避のため送らない）
+        // プッシュ通知（通知は1メッセージにつき1通のみ＝重複防止）。メンション情報を渡し、
+        // 「メンションのみ受信」設定の人には該当時だけ届く（sendPush側で購読者ごとに判定）。
         const room = rooms.find(r => r && r.id === rid);
+        const mentionAll = rec.mentions.some(x => x.id === '__all__');
+        const mentionIds = rec.mentions.map(x => String(x.id)).filter(id => id && id !== '__all__' && id !== rec.fromStaffId);
+        const mediaLabel = rec.media && rec.media.length ? (rec.media[0].kind === 'video' ? '🎬 動画' : '📎 ファイル') : '';
+        const bodyText = (rec.text || (rec.imgIds.length ? '📷 画像' : (mediaLabel || '新着メッセージ'))).slice(0, 120);
         if (room && (room.kind === 'group' || room.kind === 'dm' || room.kind === 'announce')) {
           const title = room.kind === 'dm' ? `💬 ${rec.fromName}` : `💬 ${room.name}`;
-          const mediaLabel = rec.media && rec.media.length ? (rec.media[0].kind === 'video' ? '🎬 動画' : '📎 ファイル') : '';
-          const bodyText = (rec.text || (rec.imgIds.length ? '📷 画像' : (mediaLabel || '新着メッセージ'))).slice(0, 120);
           const targets = (room.kind === 'announce') ? null // 全員
             : (room.members || []).map(String).filter(id => id !== rec.fromStaffId); // 送信者以外のメンバー
           if (!(Array.isArray(targets) && targets.length === 0)) {
-            sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: rid, title, body: bodyText, url: '/?tab=chat' }, targets);
+            sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: rid, title, body: bodyText, url: '/?tab=chat' }, targets, { mentionIds, mentionAll });
           }
-        }
-        // メンション通知: 店舗ルーム等でルーム通知の対象外でも、名指しされた本人には必ず届ける。
-        // @全員(__all__)は全員宛（announceで既に全員に送っている場合は送信者以外へ）。
-        if (rec.mentions.length && room) {
-          const roomTitle = room.kind === 'dm' ? rec.fromName : (room.name || 'チャット');
-          const mBody = (rec.text || '📷 画像').slice(0, 120);
-          const hasAll = rec.mentions.some(x => x.id === '__all__');
-          const mentionTargets = hasAll ? null : rec.mentions.map(x => String(x.id)).filter(id => id && id !== rec.fromStaffId);
-          // group/dm/announce は上でルーム通知済み。店舗ルームや、@全員以外の名指しのみ追加送信。
-          if (room.kind === 'store' || (mentionTargets && mentionTargets.length)) {
-            const t2 = (mentionTargets && mentionTargets.length) ? mentionTargets : null;
-            if (!(Array.isArray(t2) && t2.length === 0)) {
-              sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: rid, title: `🔔 ${rec.fromName} さんがメンション`, body: `${roomTitle}: ${mBody}`, url: '/?tab=chat' }, t2);
-            }
-          }
+        } else if (room && room.kind === 'store' && mentionIds.length) {
+          // 店舗ルームは通常のルーム通知はしない（スパム回避）が、名指しされた本人にだけ1通届ける。
+          sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: rid, title: `🔔 ${rec.fromName} さんがメンション`, body: `${room.name || 'チャット'}: ${bodyText}`, url: '/?tab=chat' }, mentionIds, { mentionIds, mentionAll });
         }
         return res.status(200).json({ ok: true, message: rec });
       }

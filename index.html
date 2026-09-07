@@ -2343,6 +2343,9 @@
             const [chatNotesOpen, setChatNotesOpen] = useState(false); // ノート
             const [chatNoteDraft, setChatNoteDraft] = useState('');    // ノート入力
             const [chatNoteImgs, setChatNoteImgs] = useState([]);      // ノート添付画像 [{id,dataUrl}]
+            const [chatNoteEditId, setChatNoteEditId] = useState(null);// 編集中のノートID（nullなら新規）
+            const [chatNotePick, setChatNotePick] = useState(null);    // スタンプピッカーを開いているノートID
+            const [noteSeen, setNoteSeen] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_note_seen') || '{}') || {}; } catch { return {}; } }); // ルーム別ノート既読時刻
             // 単一画像を開くヘルパー（従来の呼び出し互換: idひとつでも配列化）
             const openLightbox = (ids, i) => { const list = Array.isArray(ids) ? ids : [ids]; setChatLightbox({ list, i: Math.max(0, Math.min(i || 0, list.length - 1)) }); };
             // 受信した画像/動画/ファイルを端末に保存。iOSは共有シート（写真/ファイルに保存）、PCはダウンロード。
@@ -2558,16 +2561,39 @@
                 try { await chatPost({ action: 'react', roomId: rid, msgId, emoji, staffId: uid }); } catch {}
             };
             // ── ノート（ルームの固定メモ） ──
-            const chatNoteAdd = async () => {
+            // 新規追加 or 編集（chatNoteEditId があれば編集）
+            const chatNoteSave = async () => {
                 const t = chatNoteDraft.trim(); const imgIds = chatNoteImgs.map(s => s.id);
                 if ((!t && !imgIds.length) || !chatRoomId) return;
                 chatNoteImgs.forEach(s => { if (s.id && s.dataUrl) chatImgCache[s.id] = s.dataUrl; });
-                try { await chatPost({ action: 'noteAdd', roomId: chatRoomId, note: { fromStaffId: chatMyId, fromName: chatMyName, text: t, imgIds } }); setChatNoteDraft(''); setChatNoteImgs([]); await chatLoad(); } catch {}
+                try {
+                    if (chatNoteEditId) await chatPost({ action: 'noteEdit', roomId: chatRoomId, noteId: chatNoteEditId, note: { text: t, imgIds }, staffId: chatMyId, root: chatIsRoot });
+                    else await chatPost({ action: 'noteAdd', roomId: chatRoomId, note: { fromStaffId: chatMyId, fromName: chatMyName, text: t, imgIds } });
+                    setChatNoteDraft(''); setChatNoteImgs([]); setChatNoteEditId(null); await chatLoad();
+                } catch {}
+            };
+            const chatNoteEditStart = (n) => { setChatNoteEditId(n.id); setChatNoteDraft(n.text || ''); setChatNoteImgs((n.imgIds || []).map(id => ({ id, dataUrl: chatImgCache[id] || chatImgSrc(id) }))); };
+            const chatNoteEditCancel = () => { setChatNoteEditId(null); setChatNoteDraft(''); setChatNoteImgs([]); };
+            const chatNoteReact = async (noteId, emoji) => {
+                const rid = chatRoomId, uid = String(chatMyId);
+                setChatData(d => ({ ...d, notes: { ...(d.notes || {}), [rid]: ((d.notes || {})[rid] || []).map(x => {
+                    if (!x || x.id !== noteId) return x;
+                    const r = { ...(x.reactions && typeof x.reactions === 'object' ? x.reactions : {}) };
+                    const cur = (r[emoji] || []).map(String);
+                    r[emoji] = cur.includes(uid) ? cur.filter(y => y !== uid) : [...cur, uid];
+                    if (r[emoji].length === 0) delete r[emoji];
+                    return { ...x, reactions: r };
+                }) } }));
+                try { await chatPost({ action: 'noteReact', roomId: rid, noteId, emoji, staffId: uid }); } catch {}
             };
             const chatNoteDelete = async (noteId) => {
                 if (!window.confirm('このノートを削除しますか？')) return;
                 try { await chatPost({ action: 'noteDelete', roomId: chatRoomId, noteId, staffId: chatMyId, root: chatIsRoot }); await chatLoad(); } catch {}
             };
+            // ノートの新着判定（未読ドット用）。最新のノート更新時刻 > このルームの既読時刻。
+            const chatNoteLatest = (roomId) => { const arr = (chatData.notes || {})[roomId] || []; let mx = 0; arr.forEach(n => { const t = Date.parse(n.updatedAt || n.createdAt || '') || 0; if (t > mx) mx = t; }); return mx; };
+            const chatNoteHasNew = (roomId) => { const arr = (chatData.notes || {})[roomId] || []; return arr.length > 0 && chatNoteLatest(roomId) > (noteSeen[roomId] || 0); };
+            const chatNoteMarkSeen = (roomId) => { const ts = Date.now(); setNoteSeen(m => { const n = { ...m, [roomId]: ts }; try { localStorage.setItem('naoru_note_seen', JSON.stringify(n)); } catch {} return n; }); };
             const chatMarkRead = async (roomId) => {
                 const ts = Date.now();
                 // 楽観更新：ローカルの既読を即進める（未読バッジ/区切りがすぐ消える。ポーリング待ちで残る問題を解消）
@@ -10866,7 +10892,7 @@
                                                             {roomIcon(activeRoom, false)}
                                                             <div className="min-w-0"><div className="font-semibold text-[15px] text-[#111827] truncate leading-tight">{roomTitle(activeRoom)}</div><div className="text-[12px] text-[#667085] leading-tight">{roomSub(activeRoom)}</div></div>
                                                             <div className="ml-auto flex items-center gap-1">
-                                                                <button onClick={() => setChatNotesOpen(true)} title="ノート" className="w-9 h-9 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#667085] transition text-[17px] leading-none">📌</button>
+                                                                <button onClick={() => { chatNoteEditCancel(); setChatNotesOpen(true); chatNoteMarkSeen(activeRoom.id); }} title="ノート" className="relative w-9 h-9 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#667085] transition text-[17px] leading-none">📌{((chatData.notes || {})[activeRoom.id] || []).length > 0 && <span className={`absolute -top-0.5 -right-0.5 min-w-[16px] h-[16px] px-1 flex items-center justify-center rounded-full text-[9px] font-bold text-white ${chatNoteHasNew(activeRoom.id) ? 'bg-rose-500' : 'bg-[#98A2B3]'}`}>{((chatData.notes || {})[activeRoom.id] || []).length}</span>}</button>
                                                                 <button onClick={() => setChatAlbumOpen(true)} title="アルバム（画像一覧）" className="w-9 h-9 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#667085] transition"><ImageIcon size={17} /></button>
                                                                 {activeRoom.kind === 'group' && (
                                                                     <button onClick={() => { setChatMemberQ(''); setChatRenameVal(null); setChatPanel('members'); }} className="flex items-center gap-1.5 pl-1 pr-2.5 h-9 rounded-full border border-[#EAECF0] hover:bg-[#F8F9FB] transition" title="メンバーを表示・管理">
@@ -11169,23 +11195,34 @@
                                                         {chatNoteImgs.length > 0 && <div className="flex gap-2 flex-wrap mb-2">{chatNoteImgs.map((s, i) => <div key={s.id || i} className="relative"><img src={s.dataUrl} className="w-14 h-14 rounded-lg object-cover border border-[#EAECF0]" alt="" /><button onClick={() => setChatNoteImgs(prev => prev.filter((_, j) => j !== i))} className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-[#111827] text-white rounded-full flex items-center justify-center"><X size={11} /></button></div>)}</div>}
                                                         <textarea value={chatNoteDraft} onChange={e => setChatNoteDraft(e.target.value)} rows={2} placeholder="共有メモを残す（決定事項・リンク・持ち物など）" className="w-full resize-none rounded-lg border border-[#EAECF0] bg-white px-3 py-2 text-[13px] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
                                                         <div className="flex items-center gap-1 mt-1.5">
+                                                            {chatNoteEditId && <span className="text-[11px] font-bold text-brand-600 mr-1">編集中</span>}
                                                             <label className="w-8 h-8 flex items-center justify-center rounded-md text-[#667085] hover:bg-[#F2F4F7] cursor-pointer transition" title="画像を添付"><ImageIcon size={17} /><input type="file" accept="image/*" multiple className="hidden" onChange={async e => { const files = [...(e.target.files || [])].slice(0, 6); e.target.value = ''; for (const f of files) { const up = await chatUploadImage(f); if (up) { chatImgCache[up.id] = up.dataUrl; setChatNoteImgs(prev => [...prev, up]); } } }} /></label>
-                                                            <button onClick={chatNoteAdd} disabled={!chatNoteDraft.trim() && chatNoteImgs.length === 0} className="ml-auto px-4 h-9 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-semibold disabled:bg-[#EAECF0] disabled:text-[#98A2B3] transition">ノートに追加</button>
+                                                            {chatNoteEditId && <button onClick={chatNoteEditCancel} className="ml-auto px-3 h-9 rounded-lg border border-[#EAECF0] text-[13px] font-semibold text-[#667085] hover:bg-[#F8F9FB] transition">キャンセル</button>}
+                                                            <button onClick={chatNoteSave} disabled={!chatNoteDraft.trim() && chatNoteImgs.length === 0} className={`${chatNoteEditId ? '' : 'ml-auto'} px-4 h-9 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-semibold disabled:bg-[#EAECF0] disabled:text-[#98A2B3] transition`}>{chatNoteEditId ? '更新する' : 'ノートに追加'}</button>
                                                         </div>
                                                     </div>
                                                     {/* 一覧 */}
                                                     <div className="overflow-y-auto px-4 py-3 space-y-3">
                                                         {notes.length === 0 && <div className="text-center text-[#98A2B3] text-[13px] py-10">まだノートはありません。<br />大事な連絡や決定事項をここに固定できます。</div>}
-                                                        {notes.map(n => { const nm = n.fromStaffId === '__root__' ? '管理者' : (chatResolveName(n.fromStaffId, n.fromName || '') || 'スタッフ'); const canDel = chatIsRoot || String(n.fromStaffId) === chatMyId; return (
-                                                            <div key={n.id} className="rounded-xl border border-[#EAECF0] p-3">
+                                                        {notes.map(n => { const nm = n.fromStaffId === '__root__' ? '管理者' : (chatResolveName(n.fromStaffId, n.fromName || '') || 'スタッフ'); const canEdit = chatIsRoot || String(n.fromStaffId) === chatMyId; const reactions = n.reactions && typeof n.reactions === 'object' ? n.reactions : {}; const edited = n.updatedAt && n.createdAt && (Date.parse(n.updatedAt) - Date.parse(n.createdAt) > 1000); return (
+                                                            <div key={n.id} className={`rounded-xl border p-3 ${chatNoteEditId === n.id ? 'border-brand-300 ring-2 ring-brand-100' : 'border-[#EAECF0]'}`}>
                                                                 <div className="flex items-center gap-2">
                                                                     <span className={`w-6 h-6 rounded-full ${chatAvatarColor(nm)} inline-flex items-center justify-center text-[11px] font-semibold shrink-0`}>{String(nm).trim().charAt(0)}</span>
                                                                     <span className="text-[12px] font-bold text-[#111827]">{nm}</span>
-                                                                    <span className="text-[11px] text-[#98A2B3]">{nrel(n.createdAt)}</span>
-                                                                    {canDel && <button onClick={() => chatNoteDelete(n.id)} className="ml-auto text-[11px] text-[#98A2B3] hover:text-rose-500">削除</button>}
+                                                                    <span className="text-[11px] text-[#98A2B3]">{nrel(n.updatedAt || n.createdAt)}{edited ? '（編集済み）' : ''}</span>
+                                                                    <div className="ml-auto flex items-center gap-2">
+                                                                        {canEdit && <button onClick={() => chatNoteEditStart(n)} className="text-[11px] text-[#98A2B3] hover:text-brand-600">編集</button>}
+                                                                        {canEdit && <button onClick={() => chatNoteDelete(n.id)} className="text-[11px] text-[#98A2B3] hover:text-rose-500">削除</button>}
+                                                                    </div>
                                                                 </div>
-                                                                {n.text && <div className="text-[14px] text-[#344054] whitespace-pre-wrap break-words mt-1.5" style={{ wordBreak: 'break-word' }}>{chatRenderText(n.text, [])}</div>}
+                                                                {n.text && <div className="text-[14px] text-[#344054] whitespace-pre-wrap break-words mt-1.5 select-text" style={{ wordBreak: 'break-word', WebkitUserSelect: 'text', userSelect: 'text' }}>{chatRenderText(n.text, [])}</div>}
                                                                 {Array.isArray(n.imgIds) && n.imgIds.length > 0 && <div className="flex flex-wrap gap-2 mt-2">{n.imgIds.map((id, i) => <button key={id} onClick={() => openLightbox(n.imgIds, i)} className="w-20 h-20 rounded-lg overflow-hidden bg-[#F2F4F7]"><img src={chatImgSrc(id)} loading="lazy" className="w-full h-full object-cover" alt="" /></button>)}</div>}
+                                                                {/* リアクション（誰でも押せる） */}
+                                                                <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+                                                                    {Object.entries(reactions).map(([emo, ids]) => { const on = (ids || []).map(String).includes(String(chatMyId)); return <button key={emo} onClick={() => chatNoteReact(n.id, emo)} className={`inline-flex items-center gap-0.5 px-1.5 py-[1px] rounded-full text-[11px] font-semibold border leading-none transition ${on ? 'bg-brand-50 border-brand-200 text-brand-700' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}><span className="text-[13px] leading-none">{emo}</span>{(ids || []).length}</button>; })}
+                                                                    <button onClick={() => setChatNotePick(chatNotePick === n.id ? null : n.id)} className="w-6 h-6 flex items-center justify-center rounded-full text-[13px] leading-none text-[#98A2B3] hover:bg-[#F2F4F7] transition" title="スタンプ">😊</button>
+                                                                    {chatNotePick === n.id && <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[#F8F9FB] border border-[#EAECF0]">{CHAT_STAMPS.map(s => <button key={s} onClick={() => { chatNoteReact(n.id, s); setChatNotePick(null); }} className="text-base hover:scale-125 transition-transform leading-none">{s}</button>)}</span>}
+                                                                </div>
                                                             </div>
                                                         ); })}
                                                     </div>

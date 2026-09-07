@@ -894,24 +894,63 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
-      // ノート追加（ルームの固定メモ。テキスト＋画像）。ルームメンバー or root。
+      // ノート更新をメンバーへ通知（📌）。add/edit 共通。
+      const notifyNote = (room, rec, verb) => {
+        if (!room) return;
+        const title = `📌 ${room.name || (room.kind === 'dm' ? rec.fromName : 'ノート')}`;
+        const targets = room.kind === 'announce' ? null : (room.members || []).map(String).filter(id => id !== String(rec.fromStaffId));
+        if (Array.isArray(targets) && targets.length === 0) return;
+        const snippet = (rec.text || '📷 画像').slice(0, 80);
+        sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: room.id, title, body: `📌 ノートが${verb}されました: ${snippet}`, url: '/?tab=chat' }, targets, {});
+      };
+      // ノート追加（ルームの固定メモ。テキスト＋画像＋リンク＋リアクション）。ルームメンバー or root。
       if (action === 'noteAdd' && body.roomId && body.note) {
         const rid = String(body.roomId);
         const room = rooms.find(r => r && r.id === rid);
         if (!room) return res.status(404).json({ ok: false, error: 'not_found' });
         const n = body.note;
+        const now = new Date().toISOString();
         const rec = {
           id: genId('note'),
           fromStaffId: String(n.fromStaffId || ''),
           fromName: String(n.fromName || '').slice(0, 80),
           text: String(n.text || '').slice(0, 4000),
           imgIds: (Array.isArray(n.imgIds) ? n.imgIds : []).map(String).slice(0, 6),
-          createdAt: new Date().toISOString(),
+          links: extractLinks(String(n.text || '')),
+          reactions: {},
+          createdAt: now, updatedAt: now,
         };
         if (!rec.text && rec.imgIds.length === 0) return res.status(400).json({ ok: false, error: 'empty' });
         const arr = [rec, ...(Array.isArray(notes[rid]) ? notes[rid] : [])].slice(0, 200);
         await save({ notes: { ...notes, [rid]: arr } });
+        notifyNote(room, rec, '追加');
         return res.status(200).json({ ok: true, note: rec });
+      }
+      // ノート編集（投稿者本人 or root）。
+      if (action === 'noteEdit' && body.roomId && body.noteId && body.note) {
+        const rid = String(body.roomId);
+        const room = rooms.find(r => r && r.id === rid);
+        const cur = Array.isArray(notes[rid]) ? notes[rid] : [];
+        const idx = cur.findIndex(x => x && x.id === String(body.noteId));
+        if (idx < 0) return res.status(404).json({ ok: false, error: 'not_found' });
+        const target = cur[idx];
+        if (!(body.root || String(target.fromStaffId) === String(body.staffId))) return res.status(403).json({ ok: false, error: 'forbidden' });
+        const n = body.note;
+        const text = String(n.text || '').slice(0, 4000);
+        const imgIds = (Array.isArray(n.imgIds) ? n.imgIds : []).map(String).slice(0, 6);
+        if (!text && imgIds.length === 0) return res.status(400).json({ ok: false, error: 'empty' });
+        const updated = { ...target, text, imgIds, links: extractLinks(text), updatedAt: new Date().toISOString() };
+        const arr = cur.map((x, i) => i === idx ? updated : x);
+        await save({ notes: { ...notes, [rid]: arr } });
+        notifyNote(room, updated, '更新');
+        return res.status(200).json({ ok: true, note: updated });
+      }
+      // ノートへのリアクション（スタンプ）トグル。
+      if (action === 'noteReact' && body.roomId && body.noteId && body.emoji && body.staffId) {
+        const rid = String(body.roomId);
+        const arr = (Array.isArray(notes[rid]) ? notes[rid] : []).map(x => x && x.id === String(body.noteId) ? { ...x, reactions: toggleReaction(x.reactions, String(body.emoji), String(body.staffId)) } : x);
+        await save({ notes: { ...notes, [rid]: arr } });
+        return res.status(200).json({ ok: true });
       }
       if (action === 'noteDelete' && body.roomId && body.noteId) {
         const rid = String(body.roomId);

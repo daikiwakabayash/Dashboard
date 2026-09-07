@@ -2885,7 +2885,9 @@
             const BOARD_STAMPS = ['👍', '🙏', '🎉', '🔥', '💛', '👏', '✅', '😊'];
             const [boardBm, setBoardBm] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_board_bm') || '[]') || []; } catch { return []; } });
             const boardToggleBm = (id) => setBoardBm(prev => { const n = prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]; try { localStorage.setItem('naoru_board_bm', JSON.stringify(n)); } catch {} return n; });
-            const boardLastSeen = ((boardData.reads || {})[chatMyId]) || 0;
+            // 既読の時刻は「サーバー保存 or 端末ローカルの新しい方」を採用（サーバー未保存でもリロードで通知が復活しない）。
+            const [boardSeenLocal, setBoardSeenLocal] = useState(() => { try { return Number(localStorage.getItem('naoru_board_seen')) || 0; } catch { return 0; } });
+            const boardLastSeen = Math.max(((boardData.reads || {})[chatMyId]) || 0, boardSeenLocal || 0);
             const boardIsUnread = (p) => (Date.parse(p.createdAt || '') || 0) > boardLastSeen && String(p.authorId) !== chatMyId;
             const boardUnreadTotal = useMemo(() => (boardData.posts || []).reduce((n, p) => boardIsUnread(p) ? n + 1 : n, 0), [boardData, boardLastSeen, chatMyId]);
             // ── アプリアイコンのバッジ（未読の赤丸＋数字）: チャット＋お知らせハブの合計。 ──
@@ -2919,6 +2921,7 @@
             // 既読は「開いただけ」では進めない＝未読バッジが読むまで残る。明示的に既読化する。
             const boardSetSeen = async (ts) => {
                 setBoardData(d => ({ ...d, reads: { ...(d.reads || {}), [chatMyId]: ts } })); // 楽観更新（バッジ即消し）
+                setBoardSeenLocal(ts); try { localStorage.setItem('naoru_board_seen', String(ts)); } catch {} // 端末にも保存（リロードで復活しない）
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'read', staffId: chatMyId, ts }) }); } catch {}
             };
             const boardMarkAllRead = () => boardSetSeen(Date.now());
@@ -3122,6 +3125,17 @@
             const [evEditRow, setEvEditRow] = useState(null);          // 編集中の行ID（カード展開）
             const [evSeen, setEvSeen] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_ev_seen') || '{}') || {}; } catch { return {}; } });
             const evMarkSeen = (key) => setEvSeen(prev => { const n = { ...prev, [key]: Date.now() }; try { localStorage.setItem('naoru_ev_seen', JSON.stringify(n)); } catch {} return n; });
+            // 勉強会・イベントタブを開いたら全セクションを既読化（端末に保存）。以後は新しい予定が来るまで赤バッジは付かない。
+            const evDataRef = useRef(null); evDataRef.current = evData;
+            useEffect(() => {
+                if (currentPage !== 'events') return;
+                const t = setTimeout(() => {
+                    const secs = (evDataRef.current && evDataRef.current.sections) || {};
+                    const keys = Object.keys(secs); if (!keys.length) return;
+                    setEvSeen(prev => { const n = { ...prev }; const now = Date.now(); keys.forEach(k => { n[k] = now; }); try { localStorage.setItem('naoru_ev_seen', JSON.stringify(n)); } catch {} return n; });
+                }, 1500);
+                return () => clearTimeout(t);
+            }, [currentPage]);
             const evEditingRef = useRef(false);       // セル編集中はポーリング上書きを止める
             const evSaveTimers = useRef({});
             const EV_WD = ['日', '月', '火', '水', '木', '金', '土'];
@@ -10827,8 +10841,11 @@
                 );
             }
 
-            if (loading) {
-                console.log('⏳ Rendering loading screen');
+            // GAS経営データ(rawData)を必要とするのは一部の分析ページのみ。
+            // それ以外（チャット/重要掲示板/勉強会/組織図/全体管理シート/SalonOne 等）は
+            // データ取得を待たずに即表示＝アプリ/チャットが素早く開く（データは裏で読み込み継続）。
+            const BIZ_DATA_PAGES = ['dashboard', 'charts', 'marketing', 'planning'];
+            if (loading && BIZ_DATA_PAGES.includes(currentPage)) {
                 return (
                     <div className="min-h-screen bg-gradient-to-br from-brand-50 via-white to-amber-50 flex items-center justify-center">
                         <div className="text-center space-y-6 animate-fade-in">
@@ -10983,7 +11000,7 @@
                                         </div>
                                     </div>
                                     <div>
-                                        <div className="text-[13px] font-bold text-ink-800 mb-2">📣 お知らせハブ（掲示板）</div>
+                                        <div className="text-[13px] font-bold text-ink-800 mb-2">📣 重要掲示板</div>
                                         <button onClick={() => pushSetPrefs({ ...pushState.prefs, board: !pushState.prefs.board })} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl border text-[14px] font-medium transition ${pushState.prefs.board ? 'border-brand-300 bg-brand-50 text-brand-700' : 'border-[#EAECF0] bg-white text-ink-700'}`}>
                                             <span>新しい投稿・コメントを通知</span>
                                             <span className={`relative w-11 h-6 rounded-full transition ${pushState.prefs.board ? 'bg-brand-500' : 'bg-[#CBD2DC]'}`}><span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition ${pushState.prefs.board ? 'left-[22px]' : 'left-0.5'}`} /></span>
@@ -11030,7 +11047,7 @@
                                         </button>}
                                         {authState.root && <button onClick={() => { setMobileAcctOpen(false); setCurrentPage('board'); }} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-[14px] font-semibold text-ink-800 hover:bg-ink-50 active:bg-ink-50 transition">
                                             <span className="w-9 h-9 rounded-lg bg-ink-50 text-ink-600 flex items-center justify-center shrink-0"><Megaphone size={18} /></span>
-                                            お知らせハブ
+                                            重要掲示板
                                         </button>}
                                         {/* 通知のON/OFF（スマホはここから設定できる） */}
                                         <button onClick={() => { if (pushState.subscribed) { pushUnsubscribe(); } else { pushSubscribe(); } }} disabled={pushState.busy} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-[14px] font-semibold text-ink-800 hover:bg-ink-50 active:bg-ink-50 transition disabled:opacity-60">
@@ -11740,7 +11757,7 @@
                                         <div className="flex items-center justify-between gap-3 mb-4">
                                             <div className="flex items-center gap-2.5 min-w-0">
                                                 <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-600 flex items-center justify-center text-white shrink-0 shadow-md shadow-brand-500/25"><Megaphone size={18} /></div>
-                                                <h1 className="text-[20px] md:text-[22px] font-semibold tracking-tight text-ink-900">お知らせハブ</h1>
+                                                <h1 className="text-[20px] md:text-[22px] font-semibold tracking-tight text-ink-900">重要掲示板</h1>
                                             </div>
                                             <div className="flex items-center gap-2 shrink-0">
                                                 {/* 更新フィード（何がいつ更新されたか） */}
@@ -12168,8 +12185,8 @@
                                         </div>
                                     )}
                                     <div className="flex items-center gap-1.5 mt-4 pt-3.5 border-t border-[#F2F4F7]">
-                                        {canDm && <button onClick={() => { setProfileView(null); startDm(dmTarget, dispNm); }} className="flex-1 inline-flex items-center justify-center gap-1.5 h-10 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-semibold transition"><MessageSquare size={14} />メッセージ</button>}
-                                        {canEdit && <button onClick={() => openProfileEditor(pid, dispNm, fallbackKind)} className="flex-1 inline-flex items-center justify-center gap-1.5 h-10 px-3 rounded-lg border border-[#EAECF0] text-[13px] font-semibold text-[#344054] hover:bg-[#F8F9FB] transition">{isMe ? '編集' : '本部編集'}</button>}
+                                        {canDm && <button onClick={() => { setProfileView(null); startDm(dmTarget, dispNm); }} className="flex-1 min-w-0 inline-flex items-center justify-center gap-1 h-10 px-2 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-semibold whitespace-nowrap transition"><MessageSquare size={14} className="shrink-0" />メッセージ</button>}
+                                        {canEdit && <button onClick={() => openProfileEditor(pid, dispNm, fallbackKind)} className="flex-1 min-w-0 inline-flex items-center justify-center gap-1.5 h-10 px-2 rounded-lg border border-[#EAECF0] text-[13px] font-semibold text-[#344054] whitespace-nowrap hover:bg-[#F8F9FB] transition">{isMe ? '編集' : '本部編集'}</button>}
                                         {isRoot && <button onClick={() => orgRemove(pid, dispNm)} title="組織図から削除" className="inline-flex items-center justify-center w-10 h-10 rounded-lg border border-[#EAECF0] text-[#98A2B3] hover:text-rose-600 hover:bg-rose-50 transition shrink-0"><Trash2 size={14} /></button>}
                                     </div>
                                 </>);
@@ -21699,19 +21716,20 @@
         const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authIsHq = false, authOwner = '', authRole = 'root', authStaffName = '', collapsed = false, setCollapsed = () => {}, chatUnread = 0, boardUnread = 0, eventsUnread = 0, mobileNavOpen = false, setMobileNavOpen = () => {} }) => {
             // カテゴリー別にグルーピング（見やすさ・高級感のため）
             const navSections = [
+                // ⚠️ コミュニケーション4機能は当面「本部(hq)・管理者(root)」のみに表示（rootOnly）。
+                //    問題なければ rootOnly を外して全ロールに開放する。チャットを一番上に配置。
+                { label: 'コミュニケーション', items: [
+                    { id: 'chat', label: 'チャット', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, badge: chatUnread, rootOnly: true },
+                    { id: 'board', label: '重要掲示板', icon: <Megaphone size={18} />, mobileIcon: <Megaphone size={18} />, badge: boardUnread, rootOnly: true },
+                    { id: 'events', label: '勉強会・イベント', icon: <Calendar size={18} />, mobileIcon: <Calendar size={18} />, badge: eventsUnread, rootOnly: true },
+                    { id: 'org', label: '組織図', icon: <Users size={18} />, mobileIcon: <Users size={18} />, rootOnly: true },
+                ] },
                 { label: '経営・分析', items: [
                     { id: 'zenkanri', label: '全体管理シート', icon: <BarChart3 size={18} />, mobileIcon: <BarChart3 size={18} /> },
                     { id: 'salonone', label: 'SalonOne売上', icon: <Calendar size={18} />, mobileIcon: <Calendar size={18} /> },
                     { id: 'square', label: 'サブスク分析', icon: <CreditCard size={18} />, mobileIcon: <CreditCard size={18} /> },
-                    { id: 'planning', label: '事業計画', icon: <Target size={18} />, mobileIcon: <Target size={18} /> },
-                ] },
-                // ⚠️ コミュニケーション4機能は当面「本部(hq)・管理者(root)」のみに表示（rootOnly）。
-                //    問題なければ rootOnly を外して全ロールに開放する。
-                { label: 'コミュニケーション', items: [
-                    { id: 'chat', label: 'チャット', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, badge: chatUnread, rootOnly: true },
-                    { id: 'board', label: 'お知らせハブ', icon: <Megaphone size={18} />, mobileIcon: <Megaphone size={18} />, badge: boardUnread, rootOnly: true },
-                    { id: 'events', label: '勉強会・イベント', icon: <Calendar size={18} />, mobileIcon: <Calendar size={18} />, badge: eventsUnread, rootOnly: true },
-                    { id: 'org', label: '組織図', icon: <Users size={18} />, mobileIcon: <Users size={18} />, rootOnly: true },
+                    // 事業計画はスタッフ/オーナーには当面非表示（本部(hq)・管理者(root)のみ）
+                    { id: 'planning', label: '事業計画', icon: <Target size={18} />, mobileIcon: <Target size={18} />, rootOnly: true },
                 ] },
                 { label: '店舗運営', items: [
                     { id: 'settlement', label: '返金明細書', icon: <Banknote size={18} />, mobileIcon: <Banknote size={18} />, hideForStaff: true },

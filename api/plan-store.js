@@ -573,6 +573,7 @@ export default async function handler(req, res) {
           kind: (r.kind === 'dm' || r.kind === 'group') ? r.kind : 'group',
           name: String(r.name || '').slice(0, 60),
           icon: String(r.icon || '').slice(0, 16),
+          iconImg: String(r.iconImg || '').slice(0, 64),
           shop: String(r.shop || ''),
           members: (Array.isArray(r.members) ? r.members : []).map(String).slice(0, 500),
           createdBy: String(r.createdBy || ''),

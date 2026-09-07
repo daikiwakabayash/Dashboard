@@ -644,13 +644,16 @@
         // ネイティブ遅延読み込み＋ブラウザHTTPキャッシュ（不変）。base64/JSONのオーバーヘッドなし。
         const chatImgCache = {};
         const chatImgSrc = (imgId) => chatImgCache[imgId] || `/api/plan-store?type=chat&img=${encodeURIComponent(imgId)}&raw=1`;
+        // サムネは固定サイズの箱で表示（読み込み前後で高さが変わらない＝チャットのスクロールがガタつかない）。
+        // 全体はタップでライトボックス表示（トリミング無し）。
         const ChatImage = ({ imgId, onClick }) => {
             const [loaded, setLoaded] = React.useState(!!chatImgCache[imgId]);
             return (
-                <img src={chatImgSrc(imgId)} loading="lazy" decoding="async" onClick={onClick}
-                    onLoad={() => setLoaded(true)}
-                    className={`max-w-[260px] max-h-[260px] rounded-lg border border-[#EAECF0] object-cover cursor-zoom-in bg-[#F2F4F7] ${loaded ? '' : 'min-w-[140px] min-h-[100px] animate-pulse'}`}
-                    alt="添付画像" />
+                <div onClick={onClick} className="w-[180px] h-[180px] md:w-[200px] md:h-[200px] rounded-lg border border-[#EAECF0] overflow-hidden bg-[#F2F4F7] cursor-zoom-in shrink-0 relative">
+                    {!loaded && <div className="absolute inset-0 animate-pulse bg-[#EEF0F3]" />}
+                    <img src={chatImgSrc(imgId)} loading="lazy" decoding="async" onLoad={() => setLoaded(true)}
+                        className="w-full h-full object-cover" alt="添付画像" />
+                </div>
             );
         };
 
@@ -822,7 +825,7 @@
             const fmtDay = (iso) => { const d = new Date(iso); const now = new Date(); const t = new Date(now); const y = new Date(now); y.setDate(now.getDate() - 1); if (d.toDateString() === t.toDateString()) return '今日'; if (d.toDateString() === y.toDateString()) return '昨日'; return `${d.getMonth() + 1}月${d.getDate()}日(${WD[d.getDay()]})`; };
             let lastDay = ''; let unreadShown = false;
             return (
-                <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto px-2 md:px-3 py-3" style={{ background: '#FFFFFF', overscrollBehavior: 'contain' }}>
+                <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto px-2 md:px-3 py-3" style={{ background: '#FFFFFF', overscrollBehavior: 'contain', overflowAnchor: 'none' }}>
                   <div ref={contentRef}>
                     {msgs.length === 0 && <div className="text-center text-[#98A2B3] text-sm py-16">まだメッセージはありません。<br />最初のひとことを送ってみましょう。</div>}
                     {msgs.map((m) => {

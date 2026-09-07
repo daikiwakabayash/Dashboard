@@ -33,7 +33,8 @@ const CHAT_KEY = 'naoru:chat:v1';             // { rooms:[...], messages:{roomId
 const CHAT_READS_KEY = 'naoru:chat:reads:v1'; // 既読ポインタ { staffId:{roomId:ms} } を別キーに分離（頻繁なread書込がmessagesを巻き込んで消す競合を防止）
 const CHAT_MSGS_KEY = 'naoru:chat:msgs:v1';   // 旧: メッセージ集約 { roomId:[...] }（移行元。現在はルーム別キーへ分割）
 const CHAT_MSG_PREFIX = 'naoru:chat:m:';      // メッセージはルーム別キー naoru:chat:m:<roomId> に保存（別ルーム同士の送信が互いを消さない）
-const CHAT_MSG_INDEX_KEY = 'naoru:chat:midx:v1'; // メッセージを持つルームIDの索引（GETはこの索引ぶんだけ読む＝軽量）
+// ※以前あった索引(midx)は廃止。送信時に空ベースから作り直して他ルームを消す不具合があったため、
+//   GETは権威ある rooms 一覧から per-room キーをMGETでまとめて引く方式に変更した。
 const CHAT_IMG_PREFIX = 'naoru:chat:img:';    // 画像は1枚1キーで別保存（blob肥大化を避ける）
 const CHAT_MSG_CAP = 400;                     // 1ルームあたり保持する最大メッセージ数（古いものから破棄）
 const BOARD_KEY = 'naoru:board:v1';           // { posts:[...], reads:{staffId:ms} } 掲示板（全社発信）
@@ -92,6 +93,19 @@ async function kvSet(key, value) {
   if (!r.ok) throw new Error(`KV set ${r.status}`);
   return true;
 }
+// 複数キーを1リクエストで取得（Upstash MGET）。索引を使わずルーム別キーをまとめて読むために使用。
+async function kvMGet(keys) {
+  if (!keys || !keys.length) return [];
+  const r = await fetch(KV_URL(), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${KV_TOKEN()}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(['MGET', ...keys]),
+  });
+  if (!r.ok) throw new Error(`KV mget ${r.status}`);
+  const j = await r.json().catch(() => ({}));
+  const arr = Array.isArray(j.result) ? j.result : [];
+  return arr.map(v => { if (v == null) return null; try { return JSON.parse(v); } catch { return null; } });
+}
 
 // ── Supabase (PostgREST) ──
 async function sbGet(key) {
@@ -132,6 +146,12 @@ async function blobSet(key, value, hasKV, hasSB, gas) {
   if (hasKV) return await kvSet(key, value);
   if (hasSB) return await sbSet(key, value);
   return await gasCall(gas, 'POST', { action: 'saveKv', key, value });
+}
+// 複数キーをまとめて取得（KVはMGETで1往復、それ以外は並列get）
+async function blobMGet(keys, hasKV, hasSB, gas) {
+  if (!keys || !keys.length) return [];
+  if (hasKV) return await kvMGet(keys);
+  return await Promise.all(keys.map(k => blobGet(k, hasKV, hasSB, gas)));
 }
 
 export default async function handler(req, res) {
@@ -540,36 +560,43 @@ export default async function handler(req, res) {
       }
       const cur = (await blobGet(CHAT_KEY, hasKV, hasSB, gas)) || {};
       const rooms = Array.isArray(cur.rooms) ? cur.rooms : [];
-      // メッセージはルーム別キーに分離。索引(midx)からメッセージのあるルームだけ読む。
-      let msgIndex = await blobGet(CHAT_MSG_INDEX_KEY, hasKV, hasSB, gas);
-      const messages = {};
-      if (Array.isArray(msgIndex)) {
-        const arrs = await Promise.all(msgIndex.map(rid => blobGet(CHAT_MSG_PREFIX + rid, hasKV, hasSB, gas)));
-        msgIndex.forEach((rid, i) => { const a = arrs[i]; if (Array.isArray(a) && a.length) messages[rid] = a; });
-      } else {
-        // 未移行: 旧集約(CHAT_MSGS_KEY) or 旧CHAT_KEY.messages から読む（GET表示のため）
-        const agg = await blobGet(CHAT_MSGS_KEY, hasKV, hasSB, gas);
-        const m = (agg && typeof agg === 'object') ? agg : ((cur.messages && typeof cur.messages === 'object') ? cur.messages : {});
-        Object.assign(messages, m);
-        msgIndex = [];
-      }
+      // メッセージはルーム別キー(naoru:chat:m:<roomId>)に保存。
+      // ⚠️ 可変な索引(midx)は使わない：送信時に索引を空ベースから作り直して他ルームを消す不具合があったため、
+      //    権威ある rooms 一覧からキーを引く方式に変更（索引の巻き込み消失を根本回避）。
       const readsCur = await blobGet(CHAT_READS_KEY, hasKV, hasSB, gas);
       const reads = (readsCur && typeof readsCur === 'object') ? readsCur : ((cur.reads && typeof cur.reads === 'object') ? cur.reads : {});
       const dir = (cur.dir && typeof cur.dir === 'object') ? { staff: Array.isArray(cur.dir.staff) ? cur.dir.staff : [], updatedAt: cur.dir.updatedAt || '' } : { staff: [], updatedAt: '' };
       const notes = (cur.notes && typeof cur.notes === 'object') ? cur.notes : {};   // { [roomId]: [{id,fromStaffId,fromName,text,imgIds,createdAt}] } ノート
-      // 1ルームぶんのメッセージだけを書く（他ルームの送信と競合しない）。索引も更新。
-      const saveRoomMsgs = async (rid, arr) => {
-        const a = Array.isArray(arr) ? arr : [];
-        await blobSet(CHAT_MSG_PREFIX + String(rid), a, hasKV, hasSB, gas);
-        const has = a.length > 0, inIdx = msgIndex.includes(String(rid));
-        if (has && !inIdx) { msgIndex = [...msgIndex, String(rid)]; await blobSet(CHAT_MSG_INDEX_KEY, msgIndex, hasKV, hasSB, gas); }
-        else if (!has && inIdx) { msgIndex = msgIndex.filter(x => x !== String(rid)); await blobSet(CHAT_MSG_INDEX_KEY, msgIndex, hasKV, hasSB, gas); }
+      // 旧集約(移行元)。per-roomキーが無いルームの補完に使う。必要時のみ1回だけ読む。
+      let aggFallback = null;
+      const loadAgg = async () => {
+        if (aggFallback === null) {
+          const a = await blobGet(CHAT_MSGS_KEY, hasKV, hasSB, gas);
+          aggFallback = (a && typeof a === 'object') ? a : ((cur.messages && typeof cur.messages === 'object') ? cur.messages : {});
+        }
+        return aggFallback;
       };
+      // 1ルームぶんのメッセージを読む（per-roomキー→無ければ旧集約から）。
+      const getRoomMsgs = async (rid) => {
+        const a = await blobGet(CHAT_MSG_PREFIX + String(rid), hasKV, hasSB, gas);
+        if (Array.isArray(a)) return a;
+        const agg = await loadAgg(); const m = agg[String(rid)];
+        return Array.isArray(m) ? m : [];
+      };
+      // 1ルームぶんのメッセージだけを書く（他ルームの送信と競合しない・索引更新なし）。
+      const saveRoomMsgs = (rid, arr) => blobSet(CHAT_MSG_PREFIX + String(rid), Array.isArray(arr) ? arr : [], hasKV, hasSB, gas);
       const saveReads = (r) => blobSet(CHAT_READS_KEY, r, hasKV, hasSB, gas);
       // save は rooms/dir/notes のみ書き込む（messages/reads は一切触らない＝競合しない）。
       const save = (patch) => blobSet(CHAT_KEY, { rooms, dir, notes, ...patch }, hasKV, hasSB, gas);
 
       if (req.method === 'GET') {
+        // rooms 一覧の per-room キーをMGETでまとめて取得。空のルームは旧集約で補完。
+        const keys = rooms.map(r => CHAT_MSG_PREFIX + String(r.id));
+        const arrs = await blobMGet(keys, hasKV, hasSB, gas);
+        const messages = {};
+        const missing = [];
+        rooms.forEach((r, i) => { const a = arrs[i]; if (Array.isArray(a) && a.length) messages[String(r.id)] = a; else missing.push(String(r.id)); });
+        if (missing.length) { const agg = await loadAgg(); for (const rid of missing) { const m = agg[rid]; if (Array.isArray(m) && m.length) messages[rid] = m; } }
         return res.status(200).json({ rooms, messages, reads, dir, notes, configured: true });
       }
 
@@ -622,18 +649,18 @@ export default async function handler(req, res) {
         const members = [...new Set(body.members.map(String))].slice(0, 500);
         const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, members } : r);
         // システムメッセージ（追加/退出させた）＝ actorName + names が渡された時のみ生成（events等の内部更新では出さない）
-        let nextMessages = messages;
+        let sysArr = null;
         if (body.actorName && body.names && typeof body.names === 'object') {
           const nm = (id) => String(body.names[id] || 'メンバー');
           const sys = [];
           members.filter(id => !oldM.includes(id)).forEach(id => sys.push(`${body.actorName} が ${nm(id)} を追加しました`));
           oldM.filter(id => !members.includes(id)).forEach(id => sys.push(`${body.actorName} が ${nm(id)} を退出させました`));
           if (sys.length) {
-            const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).concat(sys.map(text => ({ id: genId('m'), roomId: rid, system: true, text, createdAt: new Date().toISOString() }))).slice(-CHAT_MSG_CAP);
-            nextMessages = { ...messages, [rid]: arr };
+            const base = await getRoomMsgs(rid);
+            sysArr = base.concat(sys.map(text => ({ id: genId('m'), roomId: rid, system: true, text, createdAt: new Date().toISOString() }))).slice(-CHAT_MSG_CAP);
           }
         }
-        await save({ rooms: nextRooms }); if (nextMessages !== messages) await saveRoomMsgs(rid, nextMessages[rid] || []);
+        await save({ rooms: nextRooms }); if (sysArr) await saveRoomMsgs(rid, sysArr);
         return res.status(200).json({ ok: true, members });
       }
 
@@ -645,7 +672,7 @@ export default async function handler(req, res) {
         const members = (room.members || []).map(String).filter(id => id !== String(body.staffId));
         const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, members } : r);
         const rec = { id: genId('m'), roomId: rid, system: true, text: `${String(body.name || 'メンバー')} が退出しました`, createdAt: new Date().toISOString() };
-        const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).concat(rec).slice(-CHAT_MSG_CAP);
+        const arr = (await getRoomMsgs(rid)).concat(rec).slice(-CHAT_MSG_CAP);
         await save({ rooms: nextRooms }); await saveRoomMsgs(rid, arr);
         return res.status(200).json({ ok: true, members });
       }
@@ -658,12 +685,12 @@ export default async function handler(req, res) {
         const already = (room.members || []).map(String).includes(String(body.staffId));
         const members = [...new Set([...(room.members || []).map(String), String(body.staffId)])].slice(0, 500);
         const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, members } : r);
-        let nextMessages = messages;
+        let joinArr = null;
         if (!already && body.name) {
           const rec = { id: genId('m'), roomId: rid, system: true, text: `${String(body.name)} が参加しました`, createdAt: new Date().toISOString() };
-          nextMessages = { ...messages, [rid]: (Array.isArray(messages[rid]) ? messages[rid] : []).concat(rec).slice(-CHAT_MSG_CAP) };
+          joinArr = (await getRoomMsgs(rid)).concat(rec).slice(-CHAT_MSG_CAP);
         }
-        await save({ rooms: nextRooms }); if (nextMessages !== messages) await saveRoomMsgs(rid, nextMessages[rid] || []);
+        await save({ rooms: nextRooms }); if (joinArr) await saveRoomMsgs(rid, joinArr);
         return res.status(200).json({ ok: true, members });
       }
 
@@ -706,7 +733,7 @@ export default async function handler(req, res) {
           reactions: {},
           createdAt: new Date().toISOString(),
         };
-        const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).concat(rec).slice(-CHAT_MSG_CAP);
+        const arr = (await getRoomMsgs(rid)).concat(rec).slice(-CHAT_MSG_CAP);
         const nextReads = { ...reads, [rec.fromStaffId]: { ...(reads[rec.fromStaffId] || {}), [rid]: Date.parse(rec.createdAt) } };
         await saveRoomMsgs(rid, arr);                  // このルームのメッセージのみ書込（他ルーム送信と競合しない）
         await saveReads(nextReads);                    // 送信者の既読を更新（別キー）
@@ -752,7 +779,7 @@ export default async function handler(req, res) {
       // リアクション トグル
       if (action === 'react' && body.roomId && body.msgId && body.emoji && body.staffId) {
         const rid = String(body.roomId);
-        const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).map(msg =>
+        const arr = (await getRoomMsgs(rid)).map(msg =>
           msg && msg.id === String(body.msgId) ? { ...msg, reactions: toggleReaction(msg.reactions, String(body.emoji), String(body.staffId)) } : msg
         );
         await saveRoomMsgs(rid, arr);
@@ -771,7 +798,7 @@ export default async function handler(req, res) {
       // メッセージ削除（本人 or root）
       if (action === 'deleteMsg' && body.roomId && body.msgId) {
         const rid = String(body.roomId);
-        const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).filter(msg => {
+        const arr = (await getRoomMsgs(rid)).filter(msg => {
           if (!msg || msg.id !== String(body.msgId)) return true;
           return !(body.root || String(msg.fromStaffId) === String(body.staffId)); // 本人/rootのみ削除可
         });
@@ -830,10 +857,13 @@ export default async function handler(req, res) {
           return { ...r, members: nm, createdBy: cb };
         });
         await save({ rooms: nextRooms });
-        // 発言者IDの付け替え：ルーム別キーを1つずつ書き換える
-        for (const [rid, arr] of Object.entries(messages)) {
-          const na = (Array.isArray(arr) ? arr : []).map(m => (m && String(m.fromStaffId) === from ? { ...m, fromStaffId: to } : m));
-          await saveRoomMsgs(rid, na);
+        // 発言者IDの付け替え：全ルームのメッセージを読み、該当分を書き換える
+        for (const r of nextRooms) {
+          if (!r || !r.id) continue;
+          const arr = await getRoomMsgs(r.id);
+          if (!arr.length || !arr.some(m => m && String(m.fromStaffId) === from)) continue;
+          const na = arr.map(m => (m && String(m.fromStaffId) === from ? { ...m, fromStaffId: to } : m));
+          await saveRoomMsgs(r.id, na);
         }
         const nextReads = { ...reads };
         if (nextReads[from]) { nextReads[to] = { ...(nextReads[to] || {}), ...nextReads[from] }; delete nextReads[from]; }
@@ -841,14 +871,19 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, remapped: { from, to }, roomsChanged: changed });
       }
 
-      // 管理: 旧集約メッセージをルーム別キー＋索引へ移行（デプロイ直後に一度呼ぶ・root専用）
+      // 管理: 旧集約メッセージをルーム別キーへ移行（root専用）。索引は廃止したので作らない。
+      // per-roomキーが未作成のルームだけ、旧集約(CHAT_MSGS_KEY)/旧CHAT_KEY.messages から書き出す。
       if (action === 'migrateMsgs' && body.root) {
-        const idx = [];
-        for (const [rid, arr] of Object.entries(messages)) {
-          if (Array.isArray(arr) && arr.length) { await blobSet(CHAT_MSG_PREFIX + String(rid), arr, hasKV, hasSB, gas); idx.push(String(rid)); }
+        const agg = await loadAgg();
+        let migrated = 0;
+        for (const [rid, arr] of Object.entries(agg)) {
+          if (!Array.isArray(arr) || !arr.length) continue;
+          const existing = await blobGet(CHAT_MSG_PREFIX + String(rid), hasKV, hasSB, gas);
+          if (Array.isArray(existing) && existing.length) continue; // 既に移行済み
+          await blobSet(CHAT_MSG_PREFIX + String(rid), arr, hasKV, hasSB, gas);
+          migrated++;
         }
-        await blobSet(CHAT_MSG_INDEX_KEY, idx, hasKV, hasSB, gas);
-        return res.status(200).json({ ok: true, rooms: idx.length });
+        return res.status(200).json({ ok: true, migrated });
       }
       return res.status(400).json({ ok: false, error: 'invalid chat action' });
     } catch (err) {

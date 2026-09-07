@@ -2223,8 +2223,14 @@
             // チャットの書き込みを直列化（共有ブロブの read-modify-write 競合による「送信が消える」不具合対策）。
             // 送信/既読/ルーム作成/メンバー変更などの chat 書き込みを1本のPromiseチェーンで順番に実行する。
             const chatWriteChain = useRef(Promise.resolve());
+            const chatPendingRef = useRef([]);                          // 送信中の楽観メッセージ（ポーリングで消えないよう保持）
+            // タイムアウト付きfetch：ハングしたリクエストがチェーン全体を永久に止める（＝送信ロック）のを防ぐ
             const chatPost = (payload) => {
-                const run = () => fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', ...payload }) });
+                const run = () => {
+                    const ctrl = new AbortController();
+                    const t = setTimeout(() => ctrl.abort(), 20000);
+                    return fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', ...payload }), signal: ctrl.signal }).finally(() => clearTimeout(t));
+                };
                 const p = chatWriteChain.current.then(run, run);         // 直前の書き込み完了後に実行（成否問わず）
                 chatWriteChain.current = p.then(() => {}, () => {});     // チェーンを継続（例外を握りつぶす）
                 return p;
@@ -2341,7 +2347,16 @@
                 try {
                     const r = await fetch('/api/plan-store?type=chat');
                     const j = await r.json().catch(() => ({}));
-                    setChatData({ rooms: Array.isArray(j.rooms) ? j.rooms : [], messages: (j.messages && typeof j.messages === 'object') ? j.messages : {}, reads: (j.reads && typeof j.reads === 'object') ? j.reads : {}, dir: (j.dir && typeof j.dir === 'object') ? { staff: Array.isArray(j.dir.staff) ? j.dir.staff : [] } : { staff: [] }, notes: (j.notes && typeof j.notes === 'object') ? j.notes : {}, configured: j.configured !== false, loaded: true });
+                    const messages = (j.messages && typeof j.messages === 'object') ? j.messages : {};
+                    // 送信中の楽観メッセージ（未確定）はサーバー結果に重ねて保持（ポーリングで消えないように）
+                    const pend = chatPendingRef.current || [];
+                    if (pend.length) {
+                        pend.forEach(m => {
+                            const rid = m.roomId; const list = messages[rid] || [];
+                            if (!list.some(x => x.id === m.id)) messages[rid] = [...list, m];
+                        });
+                    }
+                    setChatData({ rooms: Array.isArray(j.rooms) ? j.rooms : [], messages, reads: (j.reads && typeof j.reads === 'object') ? j.reads : {}, dir: (j.dir && typeof j.dir === 'object') ? { staff: Array.isArray(j.dir.staff) ? j.dir.staff : [] } : { staff: [] }, notes: (j.notes && typeof j.notes === 'object') ? j.notes : {}, configured: j.configured !== false, loaded: true });
                 } catch { setChatData(d => ({ ...d, loaded: true })); }
             };
             const chatEnsuredRef = useRef('');
@@ -2396,11 +2411,14 @@
                     setChatDraft(''); setChatStaged([]); setChatEmojiOpen(false); setChatMention(null); setChatReplyTo(null);
                     // 楽観的に自分のメッセージを即表示（サーバー往復を待たない）。chatLoadで本物に置き換わる。
                     const optimistic = { id: tmpId, roomId, fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions, replyTo: replyTo || null, reactions: {}, createdAt: new Date().toISOString(), _pending: true };
+                    chatPendingRef.current = [...chatPendingRef.current, optimistic]; // ポーリングに消されないよう保持
                     setChatData(d => ({ ...d, messages: { ...d.messages, [roomId]: [...(d.messages[roomId] || []), optimistic] } }));
                     await chatPost({ action: 'send', roomId, msg: { fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions, replyTo: replyTo || null } });
+                    chatPendingRef.current = chatPendingRef.current.filter(x => x.id !== tmpId); // 確定：以後はサーバー本物を表示
                     await chatLoad();
                 } catch {
                     // 失敗時は仮メッセージを消して入力を復元（送信できていない）
+                    chatPendingRef.current = chatPendingRef.current.filter(x => x.id !== tmpId);
                     setChatData(d => ({ ...d, messages: { ...d.messages, [roomId]: (d.messages[roomId] || []).filter(x => x.id !== tmpId) } }));
                     setChatDraft(prev => prev ? prev : t);
                 } finally { chatSendingRef.current = false; setChatSending(false); }

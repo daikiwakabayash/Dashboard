@@ -2383,19 +2383,20 @@
                 const t = chatDraft.trim(); const imgIds = chatStaged.map(s => s.id);
                 if ((!t && !imgIds.length) || !chatRoomId) return;
                 chatSendingRef.current = true; setChatSending(true);
-                // 送信画像をキャッシュへ（即描画用）
-                chatStaged.forEach(s => { if (s.id && s.dataUrl) chatImgCache[s.id] = s.dataUrl; });
-                const roomForMsg = (chatData.rooms || []).find(r => r.id === chatRoomId);
-                const mentions = t ? chatExtractMentions(t, chatMentionCandidates(roomForMsg)) : [];
                 const roomId = chatRoomId;
-                const replyTo = chatReplyTo;
-                // 楽観的に即クリア（LINE風の即応・同じ本文の二重送信も防ぐ）
-                setChatDraft(''); setChatStaged([]); setChatEmojiOpen(false); setChatMention(null); setChatReplyTo(null);
-                // 楽観的に自分のメッセージを即表示（サーバー往復を待たない）。chatLoadで本物に置き換わる。
                 const tmpId = 'tmp_' + Date.now().toString(36);
-                const optimistic = { id: tmpId, roomId, fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions, replyTo: replyTo || null, reactions: {}, createdAt: new Date().toISOString(), _pending: true };
-                setChatData(d => ({ ...d, messages: { ...d.messages, [roomId]: [...(d.messages[roomId] || []), optimistic] } }));
                 try {
+                    // 送信画像をキャッシュへ（即描画用）
+                    chatStaged.forEach(s => { if (s.id && s.dataUrl) chatImgCache[s.id] = s.dataUrl; });
+                    // メンション抽出は失敗しても送信は止めない（候補解決の例外で送信不能にならないように）
+                    let mentions = [];
+                    try { const roomForMsg = (chatData.rooms || []).find(r => r.id === roomId); mentions = t ? chatExtractMentions(t, chatMentionCandidates(roomForMsg)) : []; } catch { mentions = []; }
+                    const replyTo = chatReplyTo;
+                    // 楽観的に即クリア（LINE風の即応・同じ本文の二重送信も防ぐ）
+                    setChatDraft(''); setChatStaged([]); setChatEmojiOpen(false); setChatMention(null); setChatReplyTo(null);
+                    // 楽観的に自分のメッセージを即表示（サーバー往復を待たない）。chatLoadで本物に置き換わる。
+                    const optimistic = { id: tmpId, roomId, fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions, replyTo: replyTo || null, reactions: {}, createdAt: new Date().toISOString(), _pending: true };
+                    setChatData(d => ({ ...d, messages: { ...d.messages, [roomId]: [...(d.messages[roomId] || []), optimistic] } }));
                     await chatPost({ action: 'send', roomId, msg: { fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions, replyTo: replyTo || null } });
                     await chatLoad();
                 } catch {
@@ -3427,9 +3428,11 @@
             useEffect(() => {
                 if (((currentPage === 'settlement' && stAdminOpen) || currentPage === 'settings') && stAccounts === null) stLoadAccounts();
             }, [currentPage, stAdminOpen]);
-            // ログイン後に本部メンバー（accountmetaのrole==='hq'）を読み込む（組織図・チャットDM名・イベント参加者名の解決に使う・plan-storeは未認証GET）
+            // ログイン後＋チャット/組織図/掲示板/イベントを開いた時に本部メンバー（accountmetaのrole==='hq'）を読み込む
+            // （組織図・チャットDM名・イベント参加者名の解決に使う・plan-storeは未認証GET）
             useEffect(() => {
                 if (!authState.authenticated) return;
+                if (!['chat', 'org', 'board', 'events'].includes(currentPage) && orgHq.length) return; // 既に取得済みなら関係ページ以外では再取得しない
                 loadAcctMeta().then(meta => {
                     const raw = Object.entries(meta || {})
                         .filter(([, m]) => m && m.role === 'hq')
@@ -3440,7 +3443,7 @@
                     const list = [...byName.values()].sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
                     setOrgHq(list);
                 }).catch(() => {});
-            }, [authState.authenticated]);
+            }, [authState.authenticated, currentPage]);
             // 選択・月が変わったら選択店舗のデータを再取得
             useEffect(() => {
                 if (currentPage !== 'settlement') return;

@@ -29,7 +29,8 @@ const ALLOWANCE_KEY = 'naoru:allowance:v1'; // { submissions:[...], productivity
 const ACCTMETA_KEY = 'naoru:accountmeta:v1'; // { owner: { role, staffId, staffName } }
 const ZKTHERAPIST_KEY = 'naoru:zktherapist:v1'; // { 'shopName|YYYY-MM': count } 全体管理シートのセラピスト数 手動上書き
 const THANKSGIFT_KEY = 'naoru:thanksgift:v1'; // { votes:[{id,period,fromStaffId,fromStaffName,fromShop,toStaffId,toStaffName,toShop,comment,createdAt}] } サンクスギフト投票
-const CHAT_KEY = 'naoru:chat:v1';             // { rooms:[...], messages:{roomId:[...]}, reads:{staffId:{roomId:ms}}, dir:{staff:[...]} } 社内チャット
+const CHAT_KEY = 'naoru:chat:v1';             // { rooms:[...], messages:{roomId:[...]}, dir:{staff:[...]}, notes:{...} } 社内チャット
+const CHAT_READS_KEY = 'naoru:chat:reads:v1'; // 既読ポインタ { staffId:{roomId:ms} } を別キーに分離（頻繁なread書込がmessagesを巻き込んで消す競合を防止）
 const CHAT_IMG_PREFIX = 'naoru:chat:img:';    // 画像は1枚1キーで別保存（blob肥大化を避ける）
 const CHAT_MSG_CAP = 400;                     // 1ルームあたり保持する最大メッセージ数（古いものから破棄）
 const BOARD_KEY = 'naoru:board:v1';           // { posts:[...], reads:{staffId:ms} } 掲示板（全社発信）
@@ -537,10 +538,14 @@ export default async function handler(req, res) {
       const cur = (await blobGet(CHAT_KEY, hasKV, hasSB, gas)) || {};
       const rooms = Array.isArray(cur.rooms) ? cur.rooms : [];
       const messages = (cur.messages && typeof cur.messages === 'object') ? cur.messages : {};
-      const reads = (cur.reads && typeof cur.reads === 'object') ? cur.reads : {};
+      // 既読は別キー(CHAT_READS_KEY)に分離。無ければ旧データ(cur.reads)から移行。
+      const readsCur = await blobGet(CHAT_READS_KEY, hasKV, hasSB, gas);
+      const reads = (readsCur && typeof readsCur === 'object') ? readsCur : ((cur.reads && typeof cur.reads === 'object') ? cur.reads : {});
       const dir = (cur.dir && typeof cur.dir === 'object') ? { staff: Array.isArray(cur.dir.staff) ? cur.dir.staff : [], updatedAt: cur.dir.updatedAt || '' } : { staff: [], updatedAt: '' };
       const notes = (cur.notes && typeof cur.notes === 'object') ? cur.notes : {};   // { [roomId]: [{id,fromStaffId,fromName,text,imgIds,createdAt}] } ノート
-      const save = (patch) => blobSet(CHAT_KEY, { rooms, messages, reads, dir, notes, ...patch }, hasKV, hasSB, gas);
+      // save は messages/rooms/dir/notes のみ書き込み（reads は含めない＝read書込と競合しない）。
+      const save = (patch) => blobSet(CHAT_KEY, { rooms, messages, dir, notes, ...patch }, hasKV, hasSB, gas);
+      const saveReads = (r) => blobSet(CHAT_READS_KEY, r, hasKV, hasSB, gas);
 
       if (req.method === 'GET') {
         return res.status(200).json({ rooms, messages, reads, dir, notes, configured: true });
@@ -682,7 +687,8 @@ export default async function handler(req, res) {
         const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).concat(rec).slice(-CHAT_MSG_CAP);
         const nextMessages = { ...messages, [rid]: arr };
         const nextReads = { ...reads, [rec.fromStaffId]: { ...(reads[rec.fromStaffId] || {}), [rid]: Date.parse(rec.createdAt) } };
-        await save({ messages: nextMessages, reads: nextReads });
+        await save({ messages: nextMessages });       // メッセージ本体（reads と別キー＝read書込に消されない）
+        await saveReads(nextReads);                    // 送信者の既読を更新（別キー）
         // プッシュ通知: グループ/DM/全社アナウンスの新着を対象者へ（店舗ルームはスパム回避のため送らない）
         const room = rooms.find(r => r && r.id === rid);
         if (room && (room.kind === 'group' || room.kind === 'dm' || room.kind === 'announce')) {
@@ -737,7 +743,7 @@ export default async function handler(req, res) {
         const sid = String(body.staffId), rid = String(body.roomId);
         const ts = Number(body.ts) || Date.now();
         const nextReads = { ...reads, [sid]: { ...(reads[sid] || {}), [rid]: ts } };
-        await save({ reads: nextReads });
+        await saveReads(nextReads);                    // 既読のみ別キーへ（messages/rooms を巻き込まない）
         return res.status(200).json({ ok: true });
       }
 
@@ -809,7 +815,8 @@ export default async function handler(req, res) {
         }
         const nextReads = { ...reads };
         if (nextReads[from]) { nextReads[to] = { ...(nextReads[to] || {}), ...nextReads[from] }; delete nextReads[from]; }
-        await blobSet(CHAT_KEY, { rooms: nextRooms, messages: nextMessages, reads: nextReads, dir, notes }, hasKV, hasSB, gas);
+        await blobSet(CHAT_KEY, { rooms: nextRooms, messages: nextMessages, dir, notes }, hasKV, hasSB, gas);
+        await saveReads(nextReads);
         return res.status(200).json({ ok: true, remapped: { from, to }, roomsChanged: changed });
       }
 

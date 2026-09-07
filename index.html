@@ -790,7 +790,7 @@
                                                 <div className="relative group/rd mt-0.5">
                                                     <button onClick={() => setReadOpen(readOpen === m.id ? null : m.id)} className="text-[10px] text-[#98A2B3] font-medium hover:text-brand-600" title="既読した人を表示">既読{readers.length}{readMembers.length > 1 ? `/${readMembers.length - 1}` : ''}</button>
                                                     {readOpen === m.id && <div className="fixed inset-0 z-20" onClick={e => { e.stopPropagation(); setReadOpen(null); }} />}
-                                                    <div className={`${readOpen === m.id ? 'block' : 'hidden'} md:group-hover/rd:block absolute z-30 bottom-full mb-1 right-0 min-w-[160px] max-h-56 overflow-y-auto bg-white border border-[#EAECF0] rounded-xl shadow-xl p-2`} onClick={e => e.stopPropagation()}>
+                                                    <div className={`${readOpen === m.id ? 'block' : 'hidden'} md:group-hover/rd:block absolute z-30 bottom-full mb-1 left-0 w-[180px] max-w-[70vw] max-h-56 overflow-y-auto bg-white border border-[#EAECF0] rounded-xl shadow-xl p-2`} onClick={e => e.stopPropagation()}>
                                                         <div className="text-[10px] font-bold text-[#98A2B3] px-1 pb-1.5">既読 {readers.length}名</div>
                                                         {readers.map((id, i) => { const nm = readNames[i] || 'スタッフ'; return <div key={id} className="flex items-center gap-2 px-1 py-1"><span className={`w-6 h-6 rounded-full ${chatAvatarColor(nm)} inline-flex items-center justify-center text-[11px] font-semibold shrink-0`}>{String(nm).trim().charAt(0)}</span><span className="text-[13px] text-[#344054] truncate">{nm}</span></div>; })}
                                                     </div>
@@ -3448,10 +3448,8 @@
             }, [currentPage, stAdminOpen]);
             // ログイン後＋チャット/組織図/掲示板/イベントを開いた時に本部メンバー（accountmetaのrole==='hq'）を読み込む
             // （組織図・チャットDM名・イベント参加者名の解決に使う・plan-storeは未認証GET）
-            useEffect(() => {
-                if (!authState.authenticated) return;
-                if (!['chat', 'org', 'board', 'events'].includes(currentPage) && orgHq.length) return; // 既に取得済みなら関係ページ以外では再取得しない
-                loadAcctMeta().then(meta => {
+            const refreshOrgHq = React.useCallback(() => {
+                return loadAcctMeta().then(meta => {
                     const raw = Object.entries(meta || {})
                         .filter(([, m]) => m && m.role === 'hq')
                         .map(([owner, m]) => ({ owner, name: (m.staffName || owner), staffId: String(m.staffId || '') }));
@@ -3461,7 +3459,16 @@
                     const list = [...byName.values()].sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
                     setOrgHq(list);
                 }).catch(() => {});
+            }, []);
+            useEffect(() => {
+                if (!authState.authenticated) return;
+                if (!['chat', 'org', 'board', 'events'].includes(currentPage) && orgHq.length) return; // 既に取得済みなら関係ページ以外では再取得しない
+                refreshOrgHq();
             }, [authState.authenticated, currentPage]);
+            // チャットのルームを開いたら本部メンバー一覧を再取得（本部ロールを後から付与された人の名前も即解決＝「スタッフ」表示を防ぐ）
+            useEffect(() => {
+                if (authState.authenticated && currentPage === 'chat' && chatRoomId) refreshOrgHq();
+            }, [chatRoomId]);
             // 選択・月が変わったら選択店舗のデータを再取得
             useEffect(() => {
                 if (currentPage !== 'settlement') return;

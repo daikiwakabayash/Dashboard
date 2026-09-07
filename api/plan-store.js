@@ -181,6 +181,31 @@ export default async function handler(req, res) {
   const hasSB = !!(SB_URL() && SB_KEY());
   const gas = GAS_URL();
 
+  // ── Vercel Blob アップロード用クライアントトークン発行: ?type=blobupload（動画/PDF/ファイル添付） ──
+  // クライアントの @vercel/blob upload() が handleUploadUrl として叩く。大容量ファイルは
+  // サーバー(4.5MB上限)を経由せず Blob ストレージへ直接アップロードされる。
+  // 有効化には Vercel の Storage で Blob を作成（BLOB_READ_WRITE_TOKEN が自動注入）すること。
+  const isBlobUpload = (req.body || {}).type === 'blobupload';
+  if (isBlobUpload) {
+    if (!process.env.BLOB_READ_WRITE_TOKEN) return res.status(200).json({ ok: false, configured: false, error: 'blob_not_configured' });
+    try {
+      const { handleUpload } = await import('@vercel/blob/client');
+      const jsonResponse = await handleUpload({
+        body: req.body,
+        request: { headers: { get: (k) => req.headers[String(k).toLowerCase()] } },
+        onBeforeGenerateToken: async () => ({
+          allowedContentTypes: ['image/*', 'video/*', 'application/pdf', 'application/*', 'text/*', 'audio/*'],
+          maximumSizeInBytes: 314572800, // 300MB（3〜5分の動画を許容）
+          addRandomSuffix: true,
+        }),
+        onUploadCompleted: async () => {},   // 完了URLはクライアントの upload() 戻り値から取得するため何もしない
+      });
+      return res.status(200).json(jsonResponse);
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
   // ── 手当（領収書）ストア: ?type=allowance / body.type==='allowance' ──
   const isAllowance = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'allowance';
   if (isAllowance) {
@@ -740,6 +765,11 @@ export default async function handler(req, res) {
           fromShop: String(m.fromShop || '').slice(0, 80),
           text,
           imgIds: (Array.isArray(m.imgIds) ? m.imgIds : []).map(String).slice(0, 6),
+          // 動画/PDF/ファイル添付（Vercel Blobの公開URLのみ許可）。{url,name,type,size,kind}
+          media: (Array.isArray(m.media) ? m.media : [])
+            .filter(x => x && typeof x.url === 'string' && /^https:\/\/[a-z0-9.-]*\.?(public\.)?blob\.vercel-storage\.com\//i.test(x.url))
+            .map(x => ({ url: String(x.url).slice(0, 600), name: String(x.name || '').slice(0, 160), type: String(x.type || '').slice(0, 80), size: Number(x.size) || 0, kind: (x.kind === 'video' || x.kind === 'image' || x.kind === 'file') ? x.kind : 'file' }))
+            .slice(0, 6),
           links: extractLinks(text),
           mentions: (Array.isArray(m.mentions) ? m.mentions : [])
             .filter(x => x && x.id && x.name)
@@ -762,7 +792,8 @@ export default async function handler(req, res) {
         const room = rooms.find(r => r && r.id === rid);
         if (room && (room.kind === 'group' || room.kind === 'dm' || room.kind === 'announce')) {
           const title = room.kind === 'dm' ? `💬 ${rec.fromName}` : `💬 ${room.name}`;
-          const bodyText = (rec.text || (rec.imgIds.length ? '📷 画像' : '新着メッセージ')).slice(0, 120);
+          const mediaLabel = rec.media && rec.media.length ? (rec.media[0].kind === 'video' ? '🎬 動画' : '📎 ファイル') : '';
+          const bodyText = (rec.text || (rec.imgIds.length ? '📷 画像' : (mediaLabel || '新着メッセージ'))).slice(0, 120);
           const targets = (room.kind === 'announce') ? null // 全員
             : (room.members || []).map(String).filter(id => id !== rec.fromStaffId); // 送信者以外のメンバー
           if (!(Array.isArray(targets) && targets.length === 0)) {

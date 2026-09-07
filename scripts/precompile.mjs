@@ -13,6 +13,10 @@ import { createHash } from 'crypto';
 const OUT = 'public';
 mkdirSync(OUT, { recursive: true });
 
+// ビルド識別子（毎ビルドで変化）。古いビルドがキャッシュで残っても、クライアントが
+// /version.json と比較して自動で最新へ再読み込みするために使う。
+const BUILD_ID = String(Date.now());
+
 // ── Tailwind を事前ビルド（失敗しても Play CDN のまま動くようフォールバック） ──
 let tailwindOk = false;
 let tailwindVer = ''; // CSS内容のハッシュ（キャッシュバスター）。CSSが変わった時だけ変化。
@@ -66,7 +70,11 @@ if (m) {
   console.log('[precompile] no text/babel block; copying index.html as-is');
 }
 html = swapTailwind(html);
+// ビルドIDを埋め込み（クライアントの自動アップデート判定用）＋ version.json を出力
+html = html.split('__BUILD_ID__').join(BUILD_ID);
 writeFileSync(`${OUT}/index.html`, html);
+writeFileSync(`${OUT}/version.json`, JSON.stringify({ build: BUILD_ID }));
+console.log(`[precompile] build id = ${BUILD_ID} (version.json written)`);
 
 // ── owner.html: Tailwind差し替えのみ（JSXなし） ──
 if (existsSync('owner.html')) {

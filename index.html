@@ -511,6 +511,31 @@
     <div id="root"></div>
 
     <script>
+      // 現在のビルドID（ビルド時に precompile が __BUILD_ID__ を実値へ置換）。
+      window.__BUILD__ = '__BUILD_ID__';
+      // ── 自動アップデート: 古いビルドがキャッシュで残っても最新へ自動で入れ替える ──
+      // /version.json（常に最新をfetch）のビルドIDが、いま動いているページと違えば再読み込み。
+      // iOS PWAは復帰時に再取得しないことがあるので、可視化時＋定期＋起動時にチェックする。
+      (function () {
+        var reloading = false;
+        function checkUpdate() {
+          try {
+            fetch('/version.json?_=' + Date.now(), { cache: 'no-store' })
+              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(function (j) {
+                if (!j || !j.build || reloading) return;
+                // 本番はビルドIDが数字（devは未置換の文字列）。数字のときだけ、値が違えば再読み込み。
+                if (/^[0-9]+$/.test(String(window.__BUILD__)) && String(j.build) !== String(window.__BUILD__)) {
+                  reloading = true; location.reload();
+                }
+              }).catch(function () {});
+          } catch (e) {}
+        }
+        document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') checkUpdate(); });
+        window.addEventListener('focus', checkUpdate);
+        setInterval(checkUpdate, 60000);
+        setTimeout(checkUpdate, 3000);
+      })();
       // 安全網: 何らかの理由でReactがマウントできない（JSエラー等）場合でも、
       // スプラッシュで無限に固まらないよう、一定時間後に再読み込み導線を表示する。
       (function () {
@@ -950,17 +975,17 @@
                                     // メッセージ操作メニュー（吹き出し／画像 どちらの長押しでも同じものを表示）。
                                     const msgMenu = ReactDOM.createPortal(<>
                                         <div className="fixed inset-0 z-[120]" onClick={() => setMenuFor(null)} />
-                                        <div ref={positionMenu} className="fixed z-[121] left-0 top-0 bg-white border border-[#EAECF0] rounded-2xl shadow-xl p-1.5 w-max min-w-[180px] max-w-[92vw]" style={{ maxHeight: '82vh', overflowY: 'auto' }} onClick={e => e.stopPropagation()}>
+                                        <div ref={positionMenu} className="fixed z-[121] left-0 top-0 bg-white border border-[#EAECF0] rounded-2xl shadow-xl p-1 w-max min-w-[176px] max-w-[92vw]" style={{ maxHeight: '82vh', overflowY: 'auto' }} onClick={e => e.stopPropagation()}>
                                             {!mine && <div className="flex items-center flex-wrap gap-0.5 px-1 pb-1.5 mb-1 border-b border-[#F2F4F7] max-w-[280px]">
                                                 {stamps.map(s => <button key={s} onClick={() => { onReact(m.id, s); setMenuFor(null); }} className="w-8 h-8 flex items-center justify-center text-[18px] rounded-full hover:bg-[#F2F4F7] active:scale-95 transition">{s}</button>)}
                                             </div>}
-                                            <button onClick={() => { doReply(); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-1 rounded-lg text-[13px] font-medium text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 17 4 12 9 7" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" /></svg>返信</button>
-                                            {m.text && <button onClick={() => { doCopy(); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-1 rounded-lg text-[13px] font-medium text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>コピー</button>}
-                                            {m.text && <button onClick={() => { doSelectCopy(); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-1 rounded-lg text-[13px] font-medium text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h6m4 0h-4m4 0a2 2 0 0 1 2 2v4m0 6v4a2 2 0 0 1-2 2h-4m-6 0H5a2 2 0 0 1-2-2v-4" /></svg>選択してコピー</button>}
-                                            <button onClick={() => { onForward && onForward(m); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-1 rounded-lg text-[13px] font-medium text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 17 20 12 15 7" /><path d="M4 18v-2a4 4 0 0 1 4-4h12" /></svg>転送</button>
-                                            <button onClick={() => { onPin && onPin(m); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-1 rounded-lg text-[13px] font-medium text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></svg>{pinnedId === m.id ? 'アナウンス解除' : 'アナウンス（上部に固定）'}</button>
-                                            <button onClick={() => { startCapture(m.id); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-1 rounded-lg text-[13px] font-medium text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2" /></svg>キャプチャ（範囲を選んで保存）</button>
-                                            {(mine || isRoot) && <button onClick={() => { onDelete(m.id); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-1 rounded-lg text-[13px] font-medium text-rose-600 hover:bg-rose-50 border-t border-[#F2F4F7] mt-1 pt-2"><Trash2 size={15} />{mine ? '送信を取り消す' : '削除'}</button>}
+                                            <button onClick={() => { doReply(); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-[3px] rounded-lg text-[13px] font-medium leading-tight text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 17 4 12 9 7" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" /></svg>返信</button>
+                                            {m.text && <button onClick={() => { doCopy(); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-[3px] rounded-lg text-[13px] font-medium leading-tight text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>コピー</button>}
+                                            {m.text && <button onClick={() => { doSelectCopy(); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-[3px] rounded-lg text-[13px] font-medium leading-tight text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h6m4 0h-4m4 0a2 2 0 0 1 2 2v4m0 6v4a2 2 0 0 1-2 2h-4m-6 0H5a2 2 0 0 1-2-2v-4" /></svg>選択してコピー</button>}
+                                            <button onClick={() => { onForward && onForward(m); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-[3px] rounded-lg text-[13px] font-medium leading-tight text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 17 20 12 15 7" /><path d="M4 18v-2a4 4 0 0 1 4-4h12" /></svg>転送</button>
+                                            <button onClick={() => { onPin && onPin(m); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-[3px] rounded-lg text-[13px] font-medium leading-tight text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></svg>{pinnedId === m.id ? 'アナウンス解除' : 'アナウンス（上部に固定）'}</button>
+                                            <button onClick={() => { startCapture(m.id); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-[3px] rounded-lg text-[13px] font-medium leading-tight text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2" /></svg>キャプチャ（範囲を選んで保存）</button>
+                                            {(mine || isRoot) && <button onClick={() => { onDelete(m.id); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-[3px] rounded-lg text-[13px] font-medium leading-tight text-rose-600 hover:bg-rose-50 border-t border-[#F2F4F7] mt-0.5 pt-1.5"><Trash2 size={15} />{mine ? '送信を取り消す' : '削除'}</button>}
                                         </div>
                                     </>, document.body);
                                     const hasBubble = !!(m.text || (m.replyTo && m.replyTo.id));   // 吹き出しを出すか（テキスト/返信あり）

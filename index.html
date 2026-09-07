@@ -3086,6 +3086,12 @@
             const [profileData, setProfileData] = useState({ profiles: {}, hidden: [], loaded: false, configured: true });
             const [profileEdit, setProfileEdit] = useState(null); // 編集中ドラフト or null
             const [profileView, setProfileView] = useState(null); // モバイル等でタップ表示中の pid
+            // ── ボトムシートの「下スワイプで閉じる」（カードのどこでも、先頭までスクロール済みで下に引くと閉じる） ──
+            const sheetRef = React.useRef({ y0: 0, dragging: false, moved: 0, el: null, scroller: null });
+            const sheetStart = (e, el) => { const t = e.touches && e.touches[0]; if (!t) return; const s = sheetRef.current; s.el = el; s.scroller = el; s.y0 = t.clientY; s.moved = 0; s.dragging = el.scrollTop <= 0; if (el) el.style.transition = 'none'; };
+            const sheetMove = (e) => { const s = sheetRef.current; const t = e.touches && e.touches[0]; if (!t || !s.el) return; const dy = t.clientY - s.y0; if (!s.dragging) { if (s.scroller.scrollTop <= 0 && dy > 0) { s.dragging = true; s.y0 = t.clientY; } else return; } if (dy <= 0) { s.moved = 0; s.el.style.transform = ''; return; } s.moved = dy; s.el.style.transform = `translateY(${dy}px)`; };
+            const sheetEnd = (onClose) => { const s = sheetRef.current; const el = s.el; const closing = s.moved > 90; s.dragging = false; s.moved = 0; if (el) { el.style.transition = 'transform .22s ease'; el.style.transform = closing ? 'translateY(100%)' : ''; } if (closing) setTimeout(() => { if (el) { el.style.transform = ''; el.style.transition = ''; } onClose(); }, 190); };
+            const sheetProps = (onClose) => ({ onTouchStart: (e) => sheetStart(e, e.currentTarget), onTouchMove: sheetMove, onTouchEnd: () => sheetEnd(onClose), onTouchCancel: () => sheetEnd(() => {}) });
             const [profPicIdx, setProfPicIdx] = useState({}); // { pid: 表示中の写真インデックス }（サブ写真タップで大きく表示）
             const [profileSaving, setProfileSaving] = useState(false);
             const [profileShopQ, setProfileShopQ] = useState(''); // 編集モーダルの担当店舗検索
@@ -11023,7 +11029,7 @@
                         const snsList = prof && prof.sns ? Object.entries(prof.sns).filter(([, v]) => v) : [];
                         return (
                             <div className="fixed inset-0 z-[120] flex items-end md:items-center justify-center bg-black/50 backdrop-blur-sm p-0 md:p-4" onClick={() => setProfileView(null)}>
-                                <div className="bg-white w-full md:max-w-sm rounded-t-2xl md:rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto px-5 pt-3 pb-[max(env(safe-area-inset-bottom,0px),20px)] md:pb-5" onClick={e => e.stopPropagation()}>
+                                <div className="bg-white w-full md:max-w-sm rounded-t-2xl md:rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto px-5 pt-3 pb-[max(env(safe-area-inset-bottom,0px),20px)] md:pb-5" style={{ willChange: 'transform' }} onClick={e => e.stopPropagation()} {...sheetProps(() => setProfileView(null))}>
                                     <div className="flex items-center justify-between mb-2 -mx-1">
                                         <div className="w-9 md:hidden" /><span className="md:hidden w-10 h-1 rounded-full bg-ink-100" />
                                         <button onClick={() => setProfileView(null)} className="w-9 h-9 flex items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F2F4F7]"><X size={18} /></button>
@@ -12408,7 +12414,7 @@
                                         const { pid, name, kind } = profileView;
                                         return (
                                             <div className="fixed inset-0 z-[70] flex items-end md:items-center justify-center bg-[#111827]/50 backdrop-blur-sm p-0 md:p-4" onClick={() => setProfileView(null)}>
-                                                <div className="bg-white w-full md:max-w-sm rounded-t-2xl md:rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto overscroll-contain px-5 pt-3 pb-[max(env(safe-area-inset-bottom,0px),20px)] md:pb-5" onClick={e => e.stopPropagation()}>
+                                                <div className="bg-white w-full md:max-w-sm rounded-t-2xl md:rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto overscroll-contain px-5 pt-3 pb-[max(env(safe-area-inset-bottom,0px),20px)] md:pb-5" style={{ willChange: 'transform' }} onClick={e => e.stopPropagation()} {...sheetProps(() => setProfileView(null))}>
                                                     <div className="flex items-center justify-between mb-2 -mx-1">
                                                         <div className="w-9 md:hidden" />
                                                         <span className="md:hidden w-10 h-1 rounded-full bg-ink-100" />

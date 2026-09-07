@@ -360,6 +360,9 @@
             animation: loadingBar 2s ease-in-out infinite;
         }
         /* ── サンクスギフト 開封演出 ── */
+        /* リプライ元へジャンプした時の一瞬のハイライト */
+        @keyframes chatFlash { 0% { background-color: rgba(243,112,33,0.22); } 100% { background-color: transparent; } }
+        .chat-flash { animation: chatFlash 1.6s ease-out; }
         @keyframes tgOverlayIn { from { opacity: 0; } to { opacity: 1; } }
         @keyframes tgRise { from { opacity: 0; transform: translateY(24px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
         @keyframes tgPop { 0% { opacity: 0; transform: scale(0.6); } 60% { opacity: 1; transform: scale(1.08); } 100% { opacity: 1; transform: scale(1); } }
@@ -754,6 +757,15 @@
             const [readOpen, setReadOpen] = React.useState(null);   // 既読者ポップオーバーを開いているメッセージID
             const [menuFor, setMenuFor] = React.useState(null);     // メニュー(返信/スタンプ/コピー/削除)を開いているメッセージID。モバイルは⋯ボタン、PCはホバー/右クリックで開く（本文の長押しはネイティブ選択＝部分コピーに使う）
             const scrollToEnd = React.useCallback((smooth) => { const el = endRef.current; if (!el) return; try { el.scrollIntoView({ block: 'end', behavior: smooth ? 'smooth' : 'auto' }); } catch { try { el.scrollIntoView(false); } catch {} } }, []);
+            // リプライ元へジャンプ（引用タップ）。該当メッセージへスクロールして一瞬ハイライト（LINE同様）。
+            const scrollToMsg = React.useCallback((id) => {
+                if (!id) return;
+                const el = document.getElementById('chatmsg-' + id);
+                if (!el) { try { alert('元のメッセージが見つかりませんでした（削除済み、または古すぎて表示範囲外の可能性があります）。'); } catch {} return; }
+                try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch { el.scrollIntoView(); }
+                el.classList.add('chat-flash');
+                setTimeout(() => el.classList.remove('chat-flash'), 1600);
+            }, []);
             // 新着（件数変化）で一番下へ
             React.useEffect(() => { if (msgs.length !== lenRef.current) { lenRef.current = msgs.length; scrollToEnd(false); } }, [msgs.length]);
             // ルームを開いたら必ず最新（一番下）へスクロール（LINEと同じ）。画像読み込みで高さが変わるため複数回実行。
@@ -816,7 +828,7 @@
                                         </div>
                                     );
                                     return (
-                                        <div className={`flex items-end gap-2 px-1.5 py-1 ${mine ? 'flex-row-reverse' : 'flex-row'}`}>
+                                        <div id={'chatmsg-' + m.id} className={`flex items-end gap-2 px-1.5 py-1 rounded-xl ${mine ? 'flex-row-reverse' : 'flex-row'}`}>
                                             {!mine && <div className="shrink-0 self-end"><ChatAvatar name={authorName} size="sm" /></div>}
                                             <div className={`flex flex-col max-w-[80%] md:max-w-[72%] ${mine ? 'items-end' : 'items-start'}`}>
                                                 {!mine && <div className="flex items-center gap-1.5 mb-0.5 pl-1"><span className="text-[12px] font-semibold text-[#344054]">{authorName}</span>{shop && <span className="text-[10px] text-[#98A2B3]">{shop}</span>}</div>}
@@ -826,7 +838,7 @@
                                                         <div
                                                             onContextMenu={e => { e.preventDefault(); setMenuFor(m.id); }}
                                                             className={`group relative inline-block px-3 py-2 ${bubble} shadow-[0_1px_1px_rgba(16,24,40,0.06)]`} style={{ wordBreak: 'break-word' }}>
-                                                            {m.replyTo && m.replyTo.id && <div className={`mb-1 pl-2 border-l-[3px] rounded-r-md px-2 py-1 select-none ${mine ? 'border-white/60 bg-white/15' : 'border-brand-300 bg-[#F6F7F9]'}`}><div className={`text-[11px] font-bold ${mine ? 'text-white/90' : 'text-brand-600'}`}>{m.replyTo.name || '返信'}</div><div className={`text-[11px] truncate max-w-[220px] ${mine ? 'text-white/70' : 'text-[#98A2B3]'}`}>{m.replyTo.text || '（画像）'}</div></div>}
+                                                            {m.replyTo && m.replyTo.id && <div role="button" onClick={() => scrollToMsg(m.replyTo.id)} className={`mb-1 pl-2 border-l-[3px] rounded-r-md px-2 py-1 select-none cursor-pointer active:opacity-70 transition ${mine ? 'border-white/60 bg-white/15 hover:bg-white/25' : 'border-brand-300 bg-[#F6F7F9] hover:bg-[#EEF0F3]'}`} title="元のメッセージへ移動"><div className={`text-[11px] font-bold ${mine ? 'text-white/90' : 'text-brand-600'}`}>{m.replyTo.name || '返信'}</div><div className={`text-[11px] truncate max-w-[220px] ${mine ? 'text-white/70' : 'text-[#98A2B3]'}`}>{m.replyTo.text || '（画像）'}</div></div>}
                                                             {/* 本文は長押しでネイティブ選択→部分コピー可能（LINE同様）。select-text＋callout許可。 */}
                                                             {m.text && <div className={`text-[14px] leading-relaxed whitespace-pre-wrap break-words select-text ${mine ? 'chat-bubble-mine' : ''}`} style={{ WebkitUserSelect: 'text', userSelect: 'text', WebkitTouchCallout: 'default', cursor: 'text' }}>{chatRenderText(m.text, (m.mentions || []).map(x => x && x.name).filter(Boolean))}</div>}
                                                             {/* 長押し/右クリックメニュー */}

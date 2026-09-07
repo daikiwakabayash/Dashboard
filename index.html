@@ -615,6 +615,7 @@
         const Plus = (props) => <Icon {...props}><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></Icon>;
         const Trash2 = (props) => <Icon {...props}><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></Icon>;
         const Bookmark = (props) => <Icon {...props}><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></Icon>;
+        const Lock = (props) => <Icon {...props}><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></Icon>;
         const ClipboardCheck = (props) => <Icon {...props}><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/></Icon>;
         const CircleDot = (props) => <Icon {...props}><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/></Icon>;
         const FileText = (props) => <Icon {...props}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></Icon>;
@@ -2702,10 +2703,22 @@
             };
             const evAddRow = async (section) => {
                 const id = `r_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-                setEvData(d => { const rows = Array.isArray(d.sections[section]) ? d.sections[section] : []; return { ...d, sections: { ...d.sections, [section]: [...rows, { id, cells: {}, updatedBy: chatMyName }] } }; });
-                await evUpsertRow(section, { id, cells: {} });
+                // 作成者を既定の責任者にする（責任者だけが編集できるため、作成直後は本人が編集可能）。
+                const cells = { ownerId: String(chatMyId || ''), owner: chatMyName || '' };
+                setEvData(d => { const rows = Array.isArray(d.sections[section]) ? d.sections[section] : []; return { ...d, sections: { ...d.sections, [section]: [...rows, { id, cells, updatedBy: chatMyName }] } }; });
+                await evUpsertRow(section, { id, cells });
                 return id;
             };
+            // 編集できるのは「責任者」本人 と root/本部(hq)のみ。責任者未設定の古い行は root のみ。
+            const evCanEdit = (row) => {
+                if (authState.root) return true;
+                const oid = String((row && row.cells && row.cells.ownerId) || '');
+                return oid !== '' && oid === String(chatMyId || '');
+            };
+            // 更新/作成の完了トースト（「更新されたか分かりにくい」対策）。
+            const [evToast, setEvToast] = useState('');
+            const evToastTimer = useRef(null);
+            const evNotify = (msg) => { setEvToast(msg); clearTimeout(evToastTimer.current); evToastTimer.current = setTimeout(() => setEvToast(''), 2200); };
             const evEditCell = (section, id, colKey, value) => {
                 setEvData(d => { const rows = (d.sections[section] || []).map(r => r.id === id ? { ...r, cells: { ...r.cells, [colKey]: value } } : r); return { ...d, sections: { ...d.sections, [section]: rows } }; });
                 const tk = `${section}:${id}`;
@@ -2751,15 +2764,17 @@
                         setEvData(d => ({ ...d, sections: { ...d.sections, [section]: (d.sections[section] || []).map(r => r.id === row.id ? nextRow : r) } }));
                         await evUpsertRow(section, nextRow);
                         await chatLoad();
+                        evNotify(`「${title}」を更新しました`);
                     } else {
                         const j = await chatCreateRoom({ kind: 'group', name: title, icon: '📅', members });
                         if (j && j.ok && j.room) {
                             const nextRow = { ...row, cells: { ...cells, roomId: j.room.id, chatTitle: title } };
                             setEvData(d => ({ ...d, sections: { ...d.sections, [section]: (d.sections[section] || []).map(r => r.id === row.id ? nextRow : r) } }));
                             await evUpsertRow(section, nextRow);
-                        }
+                            evNotify(`「${title}」のグループを作成しました`);
+                        } else { evNotify('グループの作成に失敗しました'); }
                     }
-                } catch {} finally { setEvChatBusy(''); }
+                } catch { evNotify('保存に失敗しました。通信状況をご確認ください'); } finally { setEvChatBusy(''); }
             };
             // 参加者本人が「グループチャットへ」→ 自分を参加させてチャットを開く
             const evJoinChat = async (roomId) => {
@@ -11190,6 +11205,7 @@
                             const upsertNow = (row) => { const r2 = (evData.sections[sec.key] || []).find(x => x.id === row.id) || row; evUpsertRow(sec.key, r2); };
                             return (
                                 <div className="p-4 md:p-6 font-sans" style={{ background: 'linear-gradient(180deg, #EDF1F8 0%, #F8F9FB 18%, #F8F9FB 90%, #FCF6F1 100%)', color: '#111827' }}>
+                                    {evToast && <div className="fixed left-1/2 -translate-x-1/2 bottom-[calc(env(safe-area-inset-bottom)+20px)] z-[120] px-4 py-2.5 rounded-full bg-ink-900 text-white text-[13px] font-bold shadow-xl flex items-center gap-2 animate-fade-in-up"><Check size={15} className="text-emerald-300" />{evToast}</div>}
                                     <div className="max-w-3xl mx-auto">
                                         <div className="flex items-center gap-2.5 mb-3">
                                             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-600 flex items-center justify-center text-white shrink-0 shadow-md shadow-brand-500/25"><Calendar size={18} /></div>
@@ -11225,6 +11241,7 @@
                                                 const dObj = dISO ? new Date(Number(cv(row, 'date').slice(0, 4)), Number(cv(row, 'date').slice(5, 7)) - 1, Number(cv(row, 'date').slice(8, 10))) : null;
                                                 const ownerNm = hasOwner ? (evUserName(cv(row, 'ownerId')) || cv(row, 'owner')) : '';
                                                 const title = cv(row, 'content') || cv(row, 'club') || '（内容未入力）';
+                                                const canEdit = evCanEdit(row);
                                                 return (
                                                     <div key={row.id} className={`bg-white rounded-2xl border border-[#EAECF0] ${past ? 'opacity-70' : ''} ${editing ? 'ring-2 ring-brand-200' : ''} overflow-hidden`}>
                                                         <div className="p-3.5">
@@ -11261,11 +11278,15 @@
                                                                 )}
                                                                 {hasContact && (room
                                                                     ? <button onClick={() => evJoinChat(cv(row, 'roomId'))} disabled={evChatBusy === cv(row, 'roomId')} className="flex-1 inline-flex items-center justify-center gap-1.5 h-10 rounded-xl bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-bold shadow-sm shadow-brand-200/50 disabled:opacity-50 transition"><MessageSquare size={15} />グループチャットへ参加</button>
-                                                                    : <button onClick={() => evSaveChat(sec.key, row, sec.title)} disabled={evChatBusy === row.id} className="flex-1 inline-flex items-center justify-center gap-1.5 h-10 rounded-xl border border-brand-300 text-brand-600 text-[13px] font-bold hover:bg-brand-50 disabled:opacity-50 transition"><Plus size={15} />{evChatBusy === row.id ? '作成中…' : 'グループチャットを作成'}</button>)}
-                                                                <button onClick={() => setEvEditRow(editing ? null : row.id)} className="inline-flex items-center justify-center gap-1 h-10 px-3 rounded-xl border border-[#EAECF0] text-[13px] font-semibold text-[#667085] hover:bg-[#F8F9FB] transition">{editing ? '閉じる' : '編集'}</button>
+                                                                    : (canEdit
+                                                                        ? <button onClick={() => evSaveChat(sec.key, row, sec.title)} disabled={evChatBusy === row.id} className="flex-1 inline-flex items-center justify-center gap-1.5 h-10 rounded-xl border border-brand-300 text-brand-600 text-[13px] font-bold hover:bg-brand-50 disabled:opacity-50 transition"><Plus size={15} />{evChatBusy === row.id ? '作成中…' : 'グループチャットを作成'}</button>
+                                                                        : <div className="flex-1 inline-flex items-center justify-center h-10 rounded-xl bg-[#F6F7F9] text-[#98A2B3] text-[12px] font-semibold">グループ未作成</div>))}
+                                                                {canEdit
+                                                                    ? <button onClick={() => setEvEditRow(editing ? null : row.id)} className="inline-flex items-center justify-center gap-1 h-10 px-3 rounded-xl border border-[#EAECF0] text-[13px] font-semibold text-[#667085] hover:bg-[#F8F9FB] transition">{editing ? '閉じる' : '編集'}</button>
+                                                                    : <span className="inline-flex items-center gap-1 h-10 px-3 rounded-xl text-[12px] font-medium text-[#98A2B3]" title="責任者のみ編集できます"><Lock size={13} />責任者のみ</span>}
                                                             </div>
                                                         </div>
-                                                        {editing && (
+                                                        {editing && canEdit && (
                                                             <div className="border-t border-[#F2F4F7] p-3.5 bg-[#FAFBFC] space-y-2.5">
                                                                 <div><div className="text-[11px] font-bold text-[#344054] mb-1">日付</div><input type="date" value={dISO ? cv(row, 'date') : ''} onChange={e => evEditCell(sec.key, row.id, 'date', e.target.value)} onFocus={() => { evEditingRef.current = true; }} onBlur={() => { evEditingRef.current = false; upsertNow(row); }} className={inputCls} /></div>
                                                                 {hasOwner && <div><div className="text-[11px] font-bold text-[#344054] mb-1">責任者</div><div className="rounded-lg border border-[#EAECF0] bg-white"><EvUserSelect value={cv(row, 'ownerId')} name={ownerNm} users={evUsers} onOpenChange={o => { evEditingRef.current = o; }} onPick={(id, nm) => { const nextRow = { ...row, cells: { ...row.cells, ownerId: id, owner: nm } }; setEvData(d => ({ ...d, sections: { ...d.sections, [sec.key]: (d.sections[sec.key] || []).map(r => r.id === row.id ? nextRow : r) } })); evUpsertRow(sec.key, nextRow); }} /></div></div>}

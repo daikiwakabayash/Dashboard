@@ -2354,7 +2354,7 @@
             const [noteReactWho, setNoteReactWho] = useState(null);    // ノートのリアクション押下者ポップ {noteId,emoji}
             const [noteSeen, setNoteSeen] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_note_seen') || '{}') || {}; } catch { return {}; } }); // ルーム別ノート既読時刻
             // 単一画像を開くヘルパー（従来の呼び出し互換: idひとつでも配列化）
-            const openLightbox = (ids, i) => { const list = Array.isArray(ids) ? ids : [ids]; setChatLightbox({ list, i: Math.max(0, Math.min(i || 0, list.length - 1)) }); };
+            const openLightbox = (ids, i) => { const g = lbG.current; g.scale = 1; g.tx = 0; g.ty = 0; g.mode = ''; const list = Array.isArray(ids) ? ids : [ids]; setChatLightbox({ list, i: Math.max(0, Math.min(i || 0, list.length - 1)) }); };
             // 受信した画像/動画/ファイルを端末に保存。iOSは共有シート（写真/ファイルに保存）、PCはダウンロード。
             const chatSaveMedia = async (url, baseName) => {
                 try {
@@ -2370,6 +2370,11 @@
                 } catch (e) { try { window.open(url, '_blank'); } catch {} }
             };
             const chatSwipeRef = useRef(0);                            // ライトボックスのスワイプ開始X
+            // 画像ビューアのピンチ拡大/パン/ダブルタップ
+            const lbImgRef = useRef(null);
+            const lbG = useRef({ scale: 1, tx: 0, ty: 0, sdist: 0, sscale: 1, psx: 0, psy: 0, ptx: 0, pty: 0, mode: '', sx: 0, lastTap: 0 });
+            const lbApply = () => { const el = lbImgRef.current; if (!el) return; const g = lbG.current; el.style.transform = `translate(${g.tx}px,${g.ty}px) scale(${g.scale})`; };
+            const lbReset = () => { const g = lbG.current; g.scale = 1; g.tx = 0; g.ty = 0; g.mode = ''; lbApply(); };
             const chatComposingRef = useRef(false);                    // IME変換中フラグ（composition events）
             const chatCompEndRef = useRef(0);                          // 直近のcompositionend時刻（Enter確定の取りこぼし防止）
             // ライトボックス: PCの←→で前後、Escで閉じる
@@ -11175,17 +11180,20 @@
                                     {chatLightbox && (() => {
                                         const list = (chatLightbox.list || []).filter(Boolean);
                                         const i = Math.max(0, Math.min(chatLightbox.i || 0, list.length - 1));
-                                        const go = (d) => setChatLightbox(v => { const n = ((v.i || 0) + d + list.length) % list.length; return { ...v, i: n }; });
+                                        const go = (d) => { lbReset(); setChatLightbox(v => { const n = ((v.i || 0) + d + list.length) % list.length; return { ...v, i: n }; }); };
                                         return (
-                                            <div className="fixed inset-0 z-[95] bg-[#111827]/90 flex items-center justify-center select-none" onClick={() => setChatLightbox(null)}
-                                                onTouchStart={e => { chatSwipeRef.current = e.touches[0].clientX; }}
-                                                onTouchEnd={e => { const dx = (e.changedTouches[0].clientX - (chatSwipeRef.current || 0)); if (Math.abs(dx) > 45 && list.length > 1) { e.stopPropagation(); go(dx < 0 ? 1 : -1); } }}>
+                                            <div className="fixed inset-0 z-[95] bg-[#111827]/90 flex items-center justify-center select-none overflow-hidden" onClick={() => setChatLightbox(null)}>
                                                 <button onClick={e => { e.stopPropagation(); setChatLightbox(null); }} onTouchEnd={e => { e.preventDefault(); e.stopPropagation(); setChatLightbox(null); }} className="absolute top-5 right-3 w-12 h-12 rounded-full bg-white/20 hover:bg-white/30 active:bg-white/40 text-white flex items-center justify-center transition z-20"><X size={26} /></button>
                                                 <button onClick={e => { e.stopPropagation(); chatSaveMedia(chatImgSrc(list[i]), 'naoru-image'); }} onTouchEnd={e => { e.preventDefault(); e.stopPropagation(); chatSaveMedia(chatImgSrc(list[i]), 'naoru-image'); }} className="absolute top-5 right-[68px] w-12 h-12 rounded-full bg-white/20 hover:bg-white/30 active:bg-white/40 text-white flex items-center justify-center transition z-20" title="保存"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg></button>
                                                 {list.length > 1 && <div className="absolute top-5 left-1/2 -translate-x-1/2 text-white/80 text-[13px] font-semibold">{i + 1} / {list.length}</div>}
                                                 {list.length > 1 && <button onClick={e => { e.stopPropagation(); go(-1); }} className="absolute left-2 md:left-5 top-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-white/15 hover:bg-white/25 text-white flex items-center justify-center transition z-10"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg></button>}
                                                 {list.length > 1 && <button onClick={e => { e.stopPropagation(); go(1); }} className="absolute right-2 md:right-5 top-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-white/15 hover:bg-white/25 text-white flex items-center justify-center transition z-10"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6" /></svg></button>}
-                                                <img key={list[i]} src={chatImgSrc(list[i])} className="max-w-[92vw] max-h-[86vh] rounded-lg object-contain animate-fade-in" alt="拡大画像" onClick={e => e.stopPropagation()} />
+                                                <img ref={lbImgRef} key={list[i]} src={chatImgSrc(list[i])} draggable={false} className="max-w-[92vw] max-h-[86vh] rounded-lg object-contain animate-fade-in" style={{ transformOrigin: 'center center', willChange: 'transform', touchAction: 'none' }} alt="拡大画像"
+                                                    onClick={e => e.stopPropagation()}
+                                                    onDoubleClick={e => { e.stopPropagation(); const g = lbG.current; g.scale = g.scale > 1 ? 1 : 2.5; g.tx = 0; g.ty = 0; if (lbImgRef.current) { lbImgRef.current.style.transition = 'transform .18s'; lbApply(); setTimeout(() => { if (lbImgRef.current) lbImgRef.current.style.transition = 'none'; }, 200); } }}
+                                                    onTouchStart={e => { const g = lbG.current; if (e.touches.length === 2) { g.mode = 'pinch'; g.sdist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY) || 1; g.sscale = g.scale; } else if (e.touches.length === 1) { const t = e.touches[0]; const now = Date.now(); if (now - g.lastTap < 300) { g.scale = g.scale > 1 ? 1 : 2.5; g.tx = 0; g.ty = 0; g.lastTap = 0; g.mode = ''; lbApply(); } else { g.lastTap = now; if (g.scale > 1) { g.mode = 'pan'; g.psx = t.clientX; g.psy = t.clientY; g.ptx = g.tx; g.pty = g.ty; } else { g.mode = 'swipe'; g.sx = t.clientX; } } } }}
+                                                    onTouchMove={e => { const g = lbG.current; if (g.mode === 'pinch' && e.touches.length === 2) { const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); g.scale = Math.max(1, Math.min(5, g.sscale * (d / (g.sdist || d)))); lbApply(); } else if (g.mode === 'pan' && e.touches.length === 1) { const t = e.touches[0]; g.tx = g.ptx + (t.clientX - g.psx); g.ty = g.pty + (t.clientY - g.psy); lbApply(); } }}
+                                                    onTouchEnd={e => { const g = lbG.current; if (g.mode === 'swipe' && g.scale <= 1 && list.length > 1) { const dx = (e.changedTouches[0].clientX - g.sx); if (Math.abs(dx) > 45) { e.stopPropagation(); go(dx < 0 ? 1 : -1); g.mode = ''; return; } } if (g.scale <= 1) { g.tx = 0; g.ty = 0; lbApply(); } g.mode = ''; }} />
                                             </div>
                                         );
                                     })()}

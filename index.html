@@ -2561,16 +2561,25 @@
                     setChatDraft(prev => prev ? prev : t);
                 } finally { chatSendingRef.current = false; setChatSending(false); }
             };
+            // リアクションのトグル（1ユーザー1絵文字＝別絵文字は付け替え・同じ絵文字は解除）。lib/chat.js の toggleReaction と同じ挙動。
+            const reactToggleOne = (reactions, emoji, uid) => {
+                const src = reactions && typeof reactions === 'object' ? reactions : {};
+                const sid = String(uid);
+                const had = Array.isArray(src[emoji]) && src[emoji].map(String).includes(sid);
+                const r = {};
+                for (const key of Object.keys(src)) {
+                    const arr = (Array.isArray(src[key]) ? src[key] : []).map(String).filter(x => x !== sid);
+                    if (arr.length) r[key] = arr;
+                }
+                if (!had) r[emoji] = [...(Array.isArray(r[emoji]) ? r[emoji] : []), sid];
+                return r;
+            };
             const chatReact = async (msgId, emoji) => {
                 const rid = chatRoomId, uid = String(chatMyId);
                 // 楽観的にその場でトグル（サーバー往復・全再取得を待たない＝即反応）。次のポーリングでサーバーと一致。
                 setChatData(d => ({ ...d, messages: { ...d.messages, [rid]: (d.messages[rid] || []).map(m => {
                     if (!m || m.id !== msgId) return m;
-                    const r = { ...(m.reactions && typeof m.reactions === 'object' ? m.reactions : {}) };
-                    const cur = (r[emoji] || []).map(String);
-                    r[emoji] = cur.includes(uid) ? cur.filter(x => x !== uid) : [...cur, uid];
-                    if (r[emoji].length === 0) delete r[emoji];
-                    return { ...m, reactions: r };
+                    return { ...m, reactions: reactToggleOne(m.reactions, emoji, uid) };
                 }) } }));
                 try { await chatPost({ action: 'react', roomId: rid, msgId, emoji, staffId: uid }); } catch {}
             };
@@ -2592,11 +2601,7 @@
                 const rid = chatRoomId, uid = String(chatMyId);
                 setChatData(d => ({ ...d, notes: { ...(d.notes || {}), [rid]: ((d.notes || {})[rid] || []).map(x => {
                     if (!x || x.id !== noteId) return x;
-                    const r = { ...(x.reactions && typeof x.reactions === 'object' ? x.reactions : {}) };
-                    const cur = (r[emoji] || []).map(String);
-                    r[emoji] = cur.includes(uid) ? cur.filter(y => y !== uid) : [...cur, uid];
-                    if (r[emoji].length === 0) delete r[emoji];
-                    return { ...x, reactions: r };
+                    return { ...x, reactions: reactToggleOne(x.reactions, emoji, uid) };
                 }) } }));
                 try { await chatPost({ action: 'noteReact', roomId: rid, noteId, emoji, staffId: uid }); } catch {}
             };
@@ -2766,7 +2771,7 @@
             const boardPin = async (id, pinned) => { try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'pin', id, pinned }) }); await boardLoad(); } catch {} };
             const boardReact = async (id, emoji) => {
                 // 楽観更新（即トグル）→ サーバー反映
-                setBoardData(d => ({ ...d, posts: (d.posts || []).map(p => { if (!p || p.id !== id) return p; const r = { ...(p.reactions && typeof p.reactions === 'object' ? p.reactions : {}) }; const cur = (r[emoji] || []).map(String); r[emoji] = cur.includes(chatMyId) ? cur.filter(x => x !== chatMyId) : [...cur, chatMyId]; if (r[emoji].length === 0) delete r[emoji]; return { ...p, reactions: r }; }), reads: { ...(d.reads || {}), [chatMyId]: Math.max((d.reads || {})[chatMyId] || 0, Date.now()) } }));
+                setBoardData(d => ({ ...d, posts: (d.posts || []).map(p => { if (!p || p.id !== id) return p; return { ...p, reactions: reactToggleOne(p.reactions, emoji, chatMyId) }; }), reads: { ...(d.reads || {}), [chatMyId]: Math.max((d.reads || {})[chatMyId] || 0, Date.now()) } }));
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'react', id, emoji, staffId: chatMyId }) }); await boardLoad(); } catch {}
             };
             // ── お知らせハブ: コメント（返信・メンション対応） ──

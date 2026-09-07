@@ -90,6 +90,27 @@ describe('chat: toggleReaction', () => {
     r = toggleReaction(r, '👍', '4');
     expect(r['👍']).toBeUndefined(); // emptied → key removed
   });
+  it('allows only one emoji per user (switching replaces the previous)', () => {
+    let r = toggleReaction({}, '👍', '3');
+    // 別の絵文字を押すと前の👍が外れて🎉へ付け替え
+    r = toggleReaction(r, '🎉', '3');
+    expect(r['👍']).toBeUndefined();
+    expect(r['🎉']).toEqual(['3']);
+    // さらに別の絵文字へ付け替え
+    r = toggleReaction(r, '❤️', '3');
+    expect(r['🎉']).toBeUndefined();
+    expect(r['❤️']).toEqual(['3']);
+    // 同じ絵文字を再度押すと解除
+    r = toggleReaction(r, '❤️', '3');
+    expect(r['❤️']).toBeUndefined();
+  });
+  it('switching one user does not touch other users on that emoji', () => {
+    let r = { '👍': ['3', '4'], '🎉': ['5'] };
+    // 4 が👍→🎉へ付け替え。3 の👍と 5 の🎉は残る
+    r = toggleReaction(r, '🎉', '4');
+    expect(r['👍']).toEqual(['3']);
+    expect(r['🎉'].sort()).toEqual(['4', '5']);
+  });
 });
 
 describe('chat: groupRooms / dm helpers', () => {

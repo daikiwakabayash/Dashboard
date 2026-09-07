@@ -391,6 +391,10 @@
         /* スタンプ押下直後のポップ演出（押せたことを即確認できる） */
         @keyframes reactPop { 0% { transform: scale(0.4); opacity: 0.2; } 55% { transform: scale(1.18); opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
         .react-pop { animation: reactPop 0.34s cubic-bezier(0.34,1.56,0.64,1); }
+        /* 吹き出し/画像の長押し＝メニュー。iOSのネイティブ選択/ルーペ/calloutを子孫まで確実に無効化（複数行でもメニューが出る）。 */
+        .chat-noselect, .chat-noselect * { -webkit-user-select: none !important; user-select: none !important; -webkit-touch-callout: none !important; }
+        /* 「選択してコピー」中だけ本文を選択可能に戻す */
+        .chat-selectable, .chat-selectable * { -webkit-user-select: text !important; user-select: text !important; -webkit-touch-callout: default !important; }
         .splash-screen {
             position: fixed;
             inset: 0;
@@ -786,8 +790,17 @@
             }, [capMode, msgs]);
             const lpTimerRef = React.useRef(null);                  // 長押しタイマー
             const lpFiredRef = React.useRef(false);                 // 長押しでメニューを開いたか（直後のクリック抑止）
+            const lpPosRef = React.useRef({ x: 0, y: 0 });          // 長押し開始位置（微妙な指ブレでキャンセルしないため）
             // 長押し（タッチ）で操作メニューを開く。LINE同様、吹き出し／画像の長押し＝メニュー。isImg=画像側に表示。
-            const lpStart = (id, el, isImg) => { lpFiredRef.current = false; clearTimeout(lpTimerRef.current); lpTimerRef.current = setTimeout(() => { lpFiredRef.current = true; setMenuImgId(isImg ? id : null); try { if (navigator.vibrate) navigator.vibrate(8); } catch {} openMenu(id, el); }, 420); };
+            // 指が12px以上動いたらスクロール操作とみなしてキャンセル（1pxのブレでは開く）。
+            const lpStart = (id, el, isImg, e) => {
+                lpFiredRef.current = false;
+                const t = e && e.touches && e.touches[0];
+                lpPosRef.current = { x: t ? t.clientX : 0, y: t ? t.clientY : 0 };
+                clearTimeout(lpTimerRef.current);
+                lpTimerRef.current = setTimeout(() => { lpFiredRef.current = true; setMenuImgId(isImg ? id : null); try { if (navigator.vibrate) navigator.vibrate(8); } catch {} openMenu(id, el); }, 380);
+            };
+            const lpMove = (e) => { const t = e && e.touches && e.touches[0]; if (!t) return; if (Math.abs(t.clientX - lpPosRef.current.x) > 12 || Math.abs(t.clientY - lpPosRef.current.y) > 12) clearTimeout(lpTimerRef.current); };
             const lpCancel = () => { clearTimeout(lpTimerRef.current); };
             const [readOpen, setReadOpen] = React.useState(null);   // 既読者ポップオーバーを開いているメッセージID
             const [reactWho, setReactWho] = React.useState(null);   // リアクション押下者ポップ {msgId,emoji}
@@ -928,9 +941,9 @@
                                                             id={'chatbubble-' + m.id}
                                                             onContextMenu={e => { e.preventDefault(); setMenuImgId(null); openMenu(m.id, e.currentTarget); }}
                                                             onDoubleClick={e => { setMenuImgId(null); openMenu(m.id, e.currentTarget); }}
-                                                            onTouchStart={e => { if (selId === m.id) return; lpStart(m.id, e.currentTarget); }}
-                                                            onTouchMove={lpCancel} onTouchEnd={lpCancel} onTouchCancel={lpCancel}
-                                                            className={`group relative inline-block px-3 py-2 ${bubble} shadow-[0_1px_1px_rgba(16,24,40,0.06)]`} style={{ wordBreak: 'break-word', ...(selId === m.id ? {} : noSelCss), ...(mine ? { background: 'linear-gradient(135deg,#FF8A5C 0%,#F86E42 100%)' } : {}) }}>
+                                                            onTouchStart={e => { if (selId === m.id) return; lpStart(m.id, e.currentTarget, false, e); }}
+                                                            onTouchMove={lpMove} onTouchEnd={lpCancel} onTouchCancel={lpCancel}
+                                                            className={`group relative inline-block px-3 py-2 ${bubble} shadow-[0_1px_1px_rgba(16,24,40,0.06)] ${selId === m.id ? 'chat-selectable' : 'chat-noselect'}`} style={{ wordBreak: 'break-word', ...(mine ? { background: 'linear-gradient(135deg,#FF8A5C 0%,#F86E42 100%)' } : {}) }}>
                                                             {m.replyTo && m.replyTo.id && <div role="button" onClick={() => scrollToMsg(m.replyTo.id)} className={`mb-1 pl-2 border-l-[3px] rounded-r-md px-2 py-1 select-none cursor-pointer active:opacity-70 transition ${mine ? 'border-white/60 bg-white/15 hover:bg-white/25' : 'border-brand-300 bg-[#F6F7F9] hover:bg-[#EEF0F3]'}`} title="元のメッセージへ移動"><div className={`text-[11px] font-bold ${mine ? 'text-white/90' : 'text-brand-600'}`}>{m.replyTo.name || '返信'}</div><div className={`text-[11px] truncate max-w-[220px] ${mine ? 'text-white/70' : 'text-[#98A2B3]'}`}>{m.replyTo.text || '（画像）'}</div></div>}
                                                             {/* 本文。既定は選択不可＝長押しでメニュー。メニューの「選択してコピー」で選択可能に。 */}
                                                             {m.text && <div data-msgtext className={`text-[14px] leading-relaxed whitespace-pre-wrap break-words ${mine ? 'chat-bubble-mine' : ''} ${selId === m.id ? 'select-text' : 'select-none'}`} style={{ WebkitUserSelect: selId === m.id ? 'text' : 'none', userSelect: selId === m.id ? 'text' : 'none', WebkitTouchCallout: selId === m.id ? 'default' : 'none', cursor: selId === m.id ? 'text' : 'default' }}>{chatRenderText(m.text, (m.mentions || []).map(x => x && x.name).filter(Boolean))}</div>}
@@ -944,7 +957,7 @@
                                                 {/* 画像（LINE風に独立表示・長押し/右クリック/ダブルクリックで同メニュー）。テキスト無しなら既読/時刻をここに表示。 */}
                                                 {hasImgs && <div className={`mt-1 flex items-end gap-1.5 ${mine ? 'flex-row-reverse' : 'flex-row'}`}>
                                                     <div className={`relative flex flex-wrap gap-1.5 ${mine ? 'justify-end' : 'justify-start'}`}>{m.imgIds.map(id => (
-                                                        <div key={id} className="relative" style={noSelCss} onContextMenu={e => { e.preventDefault(); setMenuImgId(m.id); openMenu(m.id, e.currentTarget); }} onDoubleClick={e => { setMenuImgId(m.id); openMenu(m.id, e.currentTarget); }} onTouchStart={e => lpStart(m.id, e.currentTarget, true)} onTouchMove={lpCancel} onTouchEnd={lpCancel} onTouchCancel={lpCancel}>
+                                                        <div key={id} className="relative chat-noselect" onContextMenu={e => { e.preventDefault(); setMenuImgId(m.id); openMenu(m.id, e.currentTarget); }} onDoubleClick={e => { setMenuImgId(m.id); openMenu(m.id, e.currentTarget); }} onTouchStart={e => lpStart(m.id, e.currentTarget, true, e)} onTouchMove={lpMove} onTouchEnd={lpCancel} onTouchCancel={lpCancel}>
                                                             <ChatImage imgId={id} onClick={() => { if (lpFiredRef.current) { lpFiredRef.current = false; return; } onImageClick && onImageClick(allImgIds, imgIndexOf(id)); }} />
                                                         </div>
                                                     ))}{menuFor === m.id && menuImgId === m.id && msgMenu}</div>
@@ -2750,6 +2763,7 @@
             };
             // ── メッセージ操作（LINE風）: 転送 / アナウンス(上部固定) / キャプチャ ──
             const [chatForward, setChatForward] = useState(null);        // 転送するメッセージ（モーダル表示）
+            const [chatCaptureImg, setChatCaptureImg] = useState(null);  // キャプチャ画像のプレビュー（保存用オーバーレイ）
             const [chatForwardQ, setChatForwardQ] = useState('');        // 転送先ルーム検索
             const [chatForwardDone, setChatForwardDone] = useState([]);  // 送信済みルームID（モーダル内の完了表示）
             const chatPinMsg = async (m) => {
@@ -2790,13 +2804,15 @@
                     try { canvas = await h2c(wrap, { backgroundColor: '#ffffff', scale: 2, useCORS: true, logging: false }); }
                     finally { document.body.removeChild(wrap); }
                     if (!canvas) return;
+                    const dataUrl = canvas.toDataURL('image/png');
                     canvas.toBlob(async (blob) => {
-                        if (!blob) return;
-                        const file = new File([blob], 'naoru-chat-' + Date.now() + '.png', { type: 'image/png' });
-                        if (navigator.canShare && navigator.canShare({ files: [file] })) { try { await navigator.share({ files: [file] }); return; } catch {} }
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a'); a.href = url; a.download = file.name; document.body.appendChild(a); a.click(); a.remove();
-                        setTimeout(() => URL.revokeObjectURL(url), 5000);
+                        // まず共有シート（iOSは「画像を保存」で写真フォルダに保存できる）
+                        if (blob) {
+                            const file = new File([blob], 'naoru-chat-' + Date.now() + '.png', { type: 'image/png' });
+                            if (navigator.canShare && navigator.canShare({ files: [file] })) { try { await navigator.share({ files: [file] }); return; } catch {} }
+                        }
+                        // フォールバック：全画面プレビュー（iOSは画像を長押し→「写真に保存」／PCはダウンロード）
+                        setChatCaptureImg(dataUrl);
                     }, 'image/png');
                 } catch { try { alert('キャプチャに失敗しました。もう一度お試しください。'); } catch {} }
             };
@@ -10903,6 +10919,17 @@
                             </div>
                         );
                     })()}
+                    {/* キャプチャ画像の保存オーバーレイ（iOSは画像を長押し→「写真に保存」／PCはダウンロード） */}
+                    {chatCaptureImg && (
+                        <div className="fixed inset-0 z-[130] bg-black/90 flex flex-col items-center justify-center p-4" onClick={() => setChatCaptureImg(null)}>
+                            <div className="text-white text-[13px] font-semibold mb-3 text-center leading-relaxed">📸 画像を<b>長押し</b>して「<b>写真に保存</b>」を選んでください<br /><span className="text-white/60 text-[12px]">（PCは下の「ダウンロード」から保存）</span></div>
+                            <img src={chatCaptureImg} onClick={e => e.stopPropagation()} className="max-w-full max-h-[68vh] rounded-lg shadow-2xl object-contain bg-white" alt="キャプチャ" style={{ WebkitTouchCallout: 'default', WebkitUserSelect: 'auto', userSelect: 'auto' }} />
+                            <div className="flex gap-2 mt-4" onClick={e => e.stopPropagation()}>
+                                <a href={chatCaptureImg} download={`naoru-chat-${Date.now()}.png`} className="px-5 h-11 inline-flex items-center rounded-xl bg-white text-ink-900 font-bold text-[14px]">ダウンロード</a>
+                                <button onClick={() => setChatCaptureImg(null)} className="px-5 h-11 rounded-xl bg-white/20 text-white font-bold text-[14px]">閉じる</button>
+                            </div>
+                        </div>
+                    )}
                     {/* 転送（他のグループ/個人へコピー送信・画像/添付もそのまま） */}
                     {chatForward && (() => {
                         const me = chatMe;

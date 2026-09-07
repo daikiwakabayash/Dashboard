@@ -648,7 +648,9 @@ export default async function handler(req, res) {
         if (!(body.root || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
         const patch = {};
         if (typeof body.name === 'string') patch.name = body.name.slice(0, 60);
-        if (typeof body.icon === 'string') patch.icon = body.icon.slice(0, 16);
+        // アイコン: 絵文字(icon) と 画像(iconImg=画像ID) は排他。片方を設定するともう片方はクリア。
+        if (typeof body.icon === 'string') { patch.icon = body.icon.slice(0, 16); if (patch.icon) patch.iconImg = ''; }
+        if (typeof body.iconImg === 'string') { patch.iconImg = body.iconImg.slice(0, 64); if (patch.iconImg) patch.icon = ''; }
         const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, ...patch } : r);
         await save({ rooms: nextRooms });
         return res.status(200).json({ ok: true, room: { ...room, ...patch } });

@@ -10536,6 +10536,7 @@
                             const activeReadsMap = activeRoom ? Object.fromEntries(Object.entries(chatData.reads || {}).map(([sid, m]) => [sid, (m && typeof m === 'object') ? (Number(m[activeRoom.id]) || 0) : 0])) : {};
                             const canShowReads = !!activeRoom && (activeRoom.kind === 'group' || activeRoom.kind === 'dm') && activeMemberIds.length > 0;
                             const roomIcon = (r, active) => {
+                                if (r.kind === 'group' && r.iconImg) return <div className="w-9 h-9 rounded-xl overflow-hidden shrink-0 bg-[#F2F4F7]"><img src={chatImgSrc(r.iconImg)} className="w-full h-full object-cover" loading="lazy" alt="" /></div>;
                                 if (r.kind === 'dm') return <ChatAvatar name={roomTitle(r)} />;
                                 if (r.kind === 'store') return <ShopMark size={36} />;
                                 if (r.kind === 'group' && r.icon) return <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 text-[19px] leading-none ${active ? 'bg-brand-100' : 'bg-[#F2F4F7]'}`}>{r.icon}</div>;
@@ -10717,9 +10718,16 @@
                                                         {/* アイコン + 名前 */}
                                                         <div>
                                                             <div className="text-[12px] font-bold text-[#344054] mb-2">アイコン</div>
+                                                            {/* 写真アイコン（LINE風・自動縮小して別キー保存） */}
+                                                            <div className="flex items-center gap-2 mb-2.5">
+                                                                {roomIcon(activeRoom, false)}
+                                                                <label className="inline-flex items-center gap-1.5 px-3 h-9 rounded-lg border border-[#EAECF0] text-[13px] font-semibold text-[#344054] hover:bg-[#F8F9FB] cursor-pointer transition"><ImageIcon size={15} />写真を選ぶ<input type="file" accept="image/*" className="hidden" onChange={async e => { const f = (e.target.files || [])[0]; e.target.value = ''; if (!f) return; const up = await chatUploadImage(f); if (up) { chatImgCache[up.id] = up.dataUrl; chatSetRoom(activeRoom.id, { iconImg: up.id }); } }} /></label>
+                                                                {activeRoom.iconImg && <button onClick={() => chatSetRoom(activeRoom.id, { iconImg: '' })} className="px-3 h-9 rounded-lg text-[13px] font-semibold text-rose-600 hover:bg-rose-50 transition">写真を外す</button>}
+                                                            </div>
+                                                            <div className="text-[11px] text-[#98A2B3] mb-1.5">または絵文字を選ぶ</div>
                                                             <div className="flex flex-wrap gap-1.5">
                                                                 {CHAT_ROOM_ICONS.map(ic => <button key={ic} onClick={() => chatSetRoom(activeRoom.id, { icon: activeRoom.icon === ic ? '' : ic })} className={`w-9 h-9 rounded-lg flex items-center justify-center text-[18px] border transition ${activeRoom.icon === ic ? 'border-brand-400 bg-brand-50 ring-2 ring-brand-100' : 'border-[#EAECF0] hover:bg-[#F8F9FB]'}`}>{ic}</button>)}
-                                                                <button onClick={() => chatSetRoom(activeRoom.id, { icon: '' })} className={`w-9 h-9 rounded-lg flex items-center justify-center border transition ${!activeRoom.icon ? 'border-brand-400 bg-brand-50 text-brand-600' : 'border-[#EAECF0] text-[#98A2B3] hover:bg-[#F8F9FB]'}`} title="アイコンなし（既定）"><Users size={16} /></button>
+                                                                <button onClick={() => chatSetRoom(activeRoom.id, { icon: '', iconImg: '' })} className={`w-9 h-9 rounded-lg flex items-center justify-center border transition ${!activeRoom.icon && !activeRoom.iconImg ? 'border-brand-400 bg-brand-50 text-brand-600' : 'border-[#EAECF0] text-[#98A2B3] hover:bg-[#F8F9FB]'}`} title="アイコンなし（既定）"><Users size={16} /></button>
                                                             </div>
                                                         </div>
                                                         <div>

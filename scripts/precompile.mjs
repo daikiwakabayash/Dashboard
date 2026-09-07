@@ -8,17 +8,21 @@
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync } from 'fs';
 import { execSync } from 'child_process';
 import { transformSync } from 'esbuild';
+import { createHash } from 'crypto';
 
 const OUT = 'public';
 mkdirSync(OUT, { recursive: true });
 
 // ── Tailwind を事前ビルド（失敗しても Play CDN のまま動くようフォールバック） ──
 let tailwindOk = false;
+let tailwindVer = ''; // CSS内容のハッシュ（キャッシュバスター）。CSSが変わった時だけ変化。
 try {
   execSync(`npx tailwindcss -c tailwind.config.js -i styles/tailwind.css -o ${OUT}/tailwind.css --minify`, { stdio: 'inherit' });
-  if (existsSync(`${OUT}/tailwind.css`) && readFileSync(`${OUT}/tailwind.css`, 'utf8').length > 1000) {
+  const css = existsSync(`${OUT}/tailwind.css`) ? readFileSync(`${OUT}/tailwind.css`, 'utf8') : '';
+  if (css.length > 1000) {
     tailwindOk = true;
-    console.log(`[precompile] tailwind.css built (${Math.round(readFileSync(`${OUT}/tailwind.css`, 'utf8').length / 1024)}KB)`);
+    tailwindVer = createHash('sha1').update(css).digest('hex').slice(0, 10);
+    console.log(`[precompile] tailwind.css built (${Math.round(css.length / 1024)}KB, v=${tailwindVer})`);
   }
 } catch (e) {
   console.warn('[precompile] tailwind build failed; keeping Play CDN fallback:', (e && e.message) || e);
@@ -26,10 +30,12 @@ try {
 
 // Play CDN の <script src="cdn.tailwindcss.com"> と直後の inline tailwind.config を
 // 事前ビルドCSSへの <link> に置換。tailwindOk のときだけ実行。
+// ⚠️ href に内容ハッシュ(?v=)を付与＝CSSが変わるたびにURLが変わり、iOS/PWAのキャッシュを確実に更新
+//    （新しいユーティリティクラスが古いCSSに無くて未適用になる問題を防ぐ）。
 function swapTailwind(html) {
   if (!tailwindOk) return html;
   html = html.replace(/[ \t]*<script>\s*tailwind\.config[\s\S]*?<\/script>\n?/, '');
-  html = html.replace(/<script src="https:\/\/cdn\.tailwindcss\.com"><\/script>/, '<link rel="stylesheet" href="/tailwind.css">');
+  html = html.replace(/<script src="https:\/\/cdn\.tailwindcss\.com"><\/script>/, `<link rel="stylesheet" href="/tailwind.css?v=${tailwindVer}">`);
   return html;
 }
 

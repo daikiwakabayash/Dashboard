@@ -2220,6 +2220,15 @@
             const [chatMention, setChatMention] = useState(null);      // @メンション候補 {query, list:[{id,name}], index} or null
             const chatTaRef = useRef(null);                            // 本文textarea参照（メンション挿入後のカーソル復元）
             const chatSendingRef = useRef(false);                       // 二重送信ガード（同期・stateの遅延に依存しない）
+            // チャットの書き込みを直列化（共有ブロブの read-modify-write 競合による「送信が消える」不具合対策）。
+            // 送信/既読/ルーム作成/メンバー変更などの chat 書き込みを1本のPromiseチェーンで順番に実行する。
+            const chatWriteChain = useRef(Promise.resolve());
+            const chatPost = (payload) => {
+                const run = () => fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', ...payload }) });
+                const p = chatWriteChain.current.then(run, run);         // 直前の書き込み完了後に実行（成否問わず）
+                chatWriteChain.current = p.then(() => {}, () => {});     // チェーンを継続（例外を握りつぶす）
+                return p;
+            };
             const [chatStaged, setChatStaged] = useState([]);          // 送信前の画像 [{id,dataUrl}]
             const [chatListSearch, setChatListSearch] = useState('');
             // ルームのピン留め（端末ローカル・個人設定）。ピンしたルームは一覧の最上部「固定」に表示。
@@ -2342,7 +2351,7 @@
                 if (shops.length < 2 && staff.length < 2) return;
                 const sig = `${shops.length}:${staff.length}`;
                 if (chatEnsuredRef.current === sig) return; chatEnsuredRef.current = sig;
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'ensureRooms', shops, staff }) }); await chatLoad(); } catch {}
+                try { await chatPost({ action: 'ensureRooms', shops, staff }); await chatLoad(); } catch {}
             };
             // 画像をクライアント側で縮小(最大1400px・JPEG)してアップロード → id を返す（type='chat'|'board'）
             const chatUploadImageTo = (type, file) => new Promise((resolve) => {
@@ -2387,7 +2396,7 @@
                 const optimistic = { id: tmpId, roomId, fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions, replyTo: replyTo || null, reactions: {}, createdAt: new Date().toISOString(), _pending: true };
                 setChatData(d => ({ ...d, messages: { ...d.messages, [roomId]: [...(d.messages[roomId] || []), optimistic] } }));
                 try {
-                    await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'send', roomId, msg: { fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions, replyTo: replyTo || null } }) });
+                    await chatPost({ action: 'send', roomId, msg: { fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, mentions, replyTo: replyTo || null } });
                     await chatLoad();
                 } catch {
                     // 失敗時は仮メッセージを消して入力を復元（送信できていない）
@@ -2396,29 +2405,29 @@
                 } finally { chatSendingRef.current = false; setChatSending(false); }
             };
             const chatReact = async (msgId, emoji) => {
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'react', roomId: chatRoomId, msgId, emoji, staffId: chatMyId }) }); await chatLoad(); } catch {}
+                try { await chatPost({ action: 'react', roomId: chatRoomId, msgId, emoji, staffId: chatMyId }); await chatLoad(); } catch {}
             };
             // ── ノート（ルームの固定メモ） ──
             const chatNoteAdd = async () => {
                 const t = chatNoteDraft.trim(); const imgIds = chatNoteImgs.map(s => s.id);
                 if ((!t && !imgIds.length) || !chatRoomId) return;
                 chatNoteImgs.forEach(s => { if (s.id && s.dataUrl) chatImgCache[s.id] = s.dataUrl; });
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'noteAdd', roomId: chatRoomId, note: { fromStaffId: chatMyId, fromName: chatMyName, text: t, imgIds } }) }); setChatNoteDraft(''); setChatNoteImgs([]); await chatLoad(); } catch {}
+                try { await chatPost({ action: 'noteAdd', roomId: chatRoomId, note: { fromStaffId: chatMyId, fromName: chatMyName, text: t, imgIds } }); setChatNoteDraft(''); setChatNoteImgs([]); await chatLoad(); } catch {}
             };
             const chatNoteDelete = async (noteId) => {
                 if (!window.confirm('このノートを削除しますか？')) return;
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'noteDelete', roomId: chatRoomId, noteId, staffId: chatMyId, root: chatIsRoot }) }); await chatLoad(); } catch {}
+                try { await chatPost({ action: 'noteDelete', roomId: chatRoomId, noteId, staffId: chatMyId, root: chatIsRoot }); await chatLoad(); } catch {}
             };
             const chatMarkRead = async (roomId) => {
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'read', roomId, staffId: chatMyId, ts: Date.now() }) }); } catch {}
+                try { await chatPost({ action: 'read', roomId, staffId: chatMyId, ts: Date.now() }); } catch {}
             };
             const chatDeleteMsg = async (msgId) => {
                 if (!window.confirm('この投稿を削除しますか？')) return;
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'deleteMsg', roomId: chatRoomId, msgId, staffId: chatMyId, root: chatIsRoot }) }); await chatLoad(); } catch {}
+                try { await chatPost({ action: 'deleteMsg', roomId: chatRoomId, msgId, staffId: chatMyId, root: chatIsRoot }); await chatLoad(); } catch {}
             };
             const chatCreateRoom = async (room) => {
                 try {
-                    const r = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'createRoom', room: { ...room, createdBy: chatMyId } }) });
+                    const r = await chatPost({ action: 'createRoom', room: { ...room, createdBy: chatMyId } });
                     const j = await r.json().catch(() => ({}));
                     await chatLoad();
                     if (j.ok && j.room) { setChatRoomId(j.room.id); setChatNewRoom(null); }
@@ -2437,7 +2446,7 @@
             const chatMarkAllRead = async () => {
                 const now = Date.now();
                 const vis = (chatData.rooms || []).filter(r => chatRoomVisible(r, chatMe));
-                await Promise.all(vis.map(r => fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'read', roomId: r.id, staffId: chatMyId, ts: now }) }).catch(() => {})));
+                await Promise.all(vis.map(r => chatPost({ action: 'read', roomId: r.id, staffId: chatMyId, ts: now }).catch(() => {})));
                 await chatLoad();
             };
             // グループのメンバー変更（招待/退会）。楽観更新→サーバー反映。actorName+namesでシステムメッセージ生成。
@@ -2445,18 +2454,18 @@
                 setChatData(d => ({ ...d, rooms: (d.rooms || []).map(r => r && r.id === roomId ? { ...r, members: [...new Set(members.map(String))] } : r) }));
                 const room = (chatData.rooms || []).find(r => r && r.id === roomId);
                 const names = {}; [...new Set([...((room && room.members) || []).map(String), ...members.map(String)])].forEach(id => { names[id] = id === '__root__' ? '管理者' : (chatResolveName(id, '') || 'メンバー'); });
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'setMembers', roomId, members, staffId: chatMyId, root: chatIsRoot, actorName: chatMyName, names }) }); await chatLoad(); } catch {}
+                try { await chatPost({ action: 'setMembers', roomId, members, staffId: chatMyId, root: chatIsRoot, actorName: chatMyName, names }); await chatLoad(); } catch {}
             };
             // 自分がグループを退出（LINE風）。システムメッセージ「〇〇が退出しました」。
             const chatLeaveGroup = async (roomId) => {
                 if (!window.confirm('このグループを退出しますか？')) return;
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'leave', roomId, staffId: chatMyId, name: chatMyName }) }); } catch {}
+                try { await chatPost({ action: 'leave', roomId, staffId: chatMyId, name: chatMyName }); } catch {}
                 setChatPanel(null); setChatRoomId(null); await chatLoad();
             };
             // グループ名・アイコン変更。楽観更新→サーバー反映。
             const chatSetRoom = async (roomId, patch) => {
                 setChatData(d => ({ ...d, rooms: (d.rooms || []).map(r => r && r.id === roomId ? { ...r, ...patch } : r) }));
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'setRoom', roomId, ...patch, staffId: chatMyId, root: chatIsRoot }) }); await chatLoad(); } catch {}
+                try { await chatPost({ action: 'setRoom', roomId, ...patch, staffId: chatMyId, root: chatIsRoot }); await chatLoad(); } catch {}
             };
             const [chatPanel, setChatPanel] = useState('');       // '' | 'members' | 'settings'（会話ヘッダーのパネル）
             const [chatMemberQ, setChatMemberQ] = useState('');   // メンバー招待の検索
@@ -2761,8 +2770,8 @@
                         // 既存: 名前更新＋メンバー統合（責任者・作成者を必ず含める）
                         const room = evRoomOf(cells.roomId);
                         const merged = [...new Set([...(room.members || []).map(String), ...members])];
-                        await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'setRoom', roomId: cells.roomId, name: title, staffId: chatMyId, root: chatIsRoot }) });
-                        await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'setMembers', roomId: cells.roomId, members: merged, staffId: chatMyId, root: chatIsRoot }) });
+                        await chatPost({ action: 'setRoom', roomId: cells.roomId, name: title, staffId: chatMyId, root: chatIsRoot });
+                        await chatPost({ action: 'setMembers', roomId: cells.roomId, members: merged, staffId: chatMyId, root: chatIsRoot });
                         const nextRow = { ...row, cells: { ...cells, chatTitle: title } };
                         setEvData(d => ({ ...d, sections: { ...d.sections, [section]: (d.sections[section] || []).map(r => r.id === row.id ? nextRow : r) } }));
                         await evUpsertRow(section, nextRow);
@@ -2783,7 +2792,7 @@
             const evJoinChat = async (roomId) => {
                 if (!roomId) return;
                 setEvChatBusy(roomId);
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'join', roomId, staffId: chatMyId, name: chatMyName }) }); } catch {}
+                try { await chatPost({ action: 'join', roomId, staffId: chatMyId, name: chatMyName }); } catch {}
                 await chatLoad();
                 setEvChatBusy(''); setChatRoomId(roomId); setCurrentPage('chat');
             };
@@ -10619,7 +10628,7 @@
                                                                     </button>
                                                                 )}
                                                                 {(activeRoom.kind === 'group' || activeRoom.kind === 'dm') && (chatIsRoot || String(activeRoom.createdBy) === chatMyId) && (
-                                                                    <button onClick={async () => { if (window.confirm('このルームを削除しますか？')) { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', action: 'deleteRoom', roomId: activeRoom.id, staffId: chatMyId, root: chatIsRoot }) }).catch(() => {}); setChatRoomId(null); await chatLoad(); } }} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3] hover:text-rose-500" title="ルーム削除"><Trash2 size={15} /></button>
+                                                                    <button onClick={async () => { if (window.confirm('このルームを削除しますか？')) { await chatPost({ action: 'deleteRoom', roomId: activeRoom.id, staffId: chatMyId, root: chatIsRoot }).catch(() => {}); setChatRoomId(null); await chatLoad(); } }} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3] hover:text-rose-500" title="ルーム削除"><Trash2 size={15} /></button>
                                                                 )}
                                                             </div>
                                                         </div>

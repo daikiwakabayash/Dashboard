@@ -736,7 +736,7 @@
         };
 
         // 会話のメッセージ一覧（日付区切り・未読区切り・スタンプ・自動スクロール）
-        const ChatMessageList = ({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, onReply, stamps, onImageClick, readMembers, roomReads, resolveName, resolveShop }) => {
+        const ChatMessageList = ({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, onReply, stamps, onImageClick, readMembers, roomReads, resolveName, resolveShop, roomId }) => {
             // ルーム内の全画像ID（アルバム/ライトボックスのスライド用）と各IDの位置
             const allImgIds = []; (msgs || []).forEach(m => (m.imgIds || []).forEach(id => allImgIds.push(id)));
             const imgIndexOf = (id) => allImgIds.indexOf(id);
@@ -745,7 +745,17 @@
             const [pickFor, setPickFor] = React.useState(null);
             const [readOpen, setReadOpen] = React.useState(null);   // 既読者ポップオーバーを開いているメッセージID
             const [menuFor, setMenuFor] = React.useState(null);     // メニュー(返信/スタンプ/コピー/削除)を開いているメッセージID。モバイルは⋯ボタン、PCはホバー/右クリックで開く（本文の長押しはネイティブ選択＝部分コピーに使う）
-            React.useEffect(() => { if (msgs.length !== lenRef.current) { lenRef.current = msgs.length; if (endRef.current) endRef.current.scrollIntoView({ block: 'end' }); } }, [msgs.length]);
+            const scrollToEnd = React.useCallback((smooth) => { const el = endRef.current; if (!el) return; try { el.scrollIntoView({ block: 'end', behavior: smooth ? 'smooth' : 'auto' }); } catch { try { el.scrollIntoView(false); } catch {} } }, []);
+            // 新着（件数変化）で一番下へ
+            React.useEffect(() => { if (msgs.length !== lenRef.current) { lenRef.current = msgs.length; scrollToEnd(false); } }, [msgs.length]);
+            // ルームを開いたら必ず最新（一番下）へスクロール（LINEと同じ）。画像読み込みで高さが変わるため複数回実行。
+            React.useEffect(() => {
+                lenRef.current = msgs.length;
+                scrollToEnd(false);
+                const t1 = setTimeout(() => scrollToEnd(false), 60);
+                const t2 = setTimeout(() => scrollToEnd(false), 250);
+                return () => { clearTimeout(t1); clearTimeout(t2); };
+            }, [roomId]);
             const fmtTime = (iso) => { const d = new Date(iso); const now = new Date(); const hm = `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; return d.toDateString() === now.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`; };
             const WD = ['日', '月', '火', '水', '木', '金', '土'];
             const fmtDay = (iso) => { const d = new Date(iso); const now = new Date(); const t = new Date(now); const y = new Date(now); y.setDate(now.getDate() - 1); if (d.toDateString() === t.toDateString()) return '今日'; if (d.toDateString() === y.toDateString()) return '昨日'; return `${d.getMonth() + 1}月${d.getDate()}日(${WD[d.getDay()]})`; };
@@ -10663,7 +10673,7 @@
                                                             </div>
                                                         </div>
 
-                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(list, i) => openLightbox(list, i)} onReply={(msg) => { setChatReplyTo(msg); requestAnimationFrame(() => { try { chatTaRef.current && chatTaRef.current.focus(); } catch {} }); }} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} resolveShop={chatResolveShop} />
+                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(list, i) => openLightbox(list, i)} onReply={(msg) => { setChatReplyTo(msg); requestAnimationFrame(() => { try { chatTaRef.current && chatTaRef.current.focus(); } catch {} }); }} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} resolveShop={chatResolveShop} roomId={activeRoom ? activeRoom.id : ''} />
 
                                                         {/* コンポーザー（ChatGPT/Slack風の一体型）。スマホは全画面なのでホームバー分の余白を確保 */}
                                                         <div className="px-3 md:px-4 pt-1 pb-[max(env(safe-area-inset-bottom,0px),12px)] shrink-0">

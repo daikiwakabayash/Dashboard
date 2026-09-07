@@ -36,7 +36,7 @@ self.addEventListener('message', (event) => {
 self.addEventListener('push', (event) => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch (_) { data = { title: 'NAORU', body: (event.data && event.data.text()) || '' }; }
-  const title = data.title || 'NAORU ダッシュボード';
+  const title = data.title || 'NAORU';
   const options = {
     body: data.body || '',
     icon: '/icon-192.png',

@@ -397,7 +397,7 @@ export default async function handler(req, res) {
         const nextPosts = [rec, ...posts].slice(0, BOARD_POST_CAP);
         await blobSet(BOARD_KEY, { posts: nextPosts, reads: { ...reads, [rec.authorId]: Date.now() } }, hasKV, hasSB, gas);
         // 全員へプッシュ（購読者全員）
-        sendPush(hasKV, hasSB, gas, { kind: 'board', title: `${rec.important ? '❗' : '📣'} ${title || rec.authorName || 'お知らせ'}`, body: (title ? text : text).slice(0, 120) || '新しい掲示があります', url: '/?tab=board' });
+        sendPush(hasKV, hasSB, gas, { kind: 'board', title: 'NAORU', body: `${rec.important ? '❗' : '📣'} 重要掲示板／${title || rec.authorName || 'お知らせ'}：${text}`.slice(0, 150) || '新しい掲示があります', url: '/?tab=board' });
         return res.status(200).json({ ok: true, post: rec });
       }
       if (action === 'uploadImage' && body.dataUrl) {
@@ -455,7 +455,7 @@ export default async function handler(req, res) {
         if (rec.parentId) { const parent = (target.comments || []).find(x => x.id === rec.parentId); if (parent && parent.fromStaffId && String(parent.fromStaffId) !== rec.fromStaffId) set.add(String(parent.fromStaffId)); }
         const hasAll = rec.mentions.some(m => m.id === '__all__');
         const list = hasAll ? null : [...set];
-        if (!(Array.isArray(list) && list.length === 0)) sendPush(hasKV, hasSB, gas, { kind: 'board', title: `💬 ${rec.fromName} さんがコメント`, body: `${(target.title || 'お知らせ')}: ${text}`.slice(0, 120), url: '/?tab=board' }, list);
+        if (!(Array.isArray(list) && list.length === 0)) sendPush(hasKV, hasSB, gas, { kind: 'board', title: 'NAORU', body: `💬 ${(target.title || 'お知らせ')}／${rec.fromName}：${text}`.slice(0, 150), url: '/?tab=board' }, list);
         return res.status(200).json({ ok: true, comment: rec });
       }
       if (action === 'deleteComment' && body.id && body.commentId) {
@@ -850,15 +850,18 @@ export default async function handler(req, res) {
         const mediaLabel = rec.media && rec.media.length ? (rec.media[0].kind === 'video' ? '🎬 動画' : '📎 ファイル') : '';
         const bodyText = (rec.text || (rec.imgIds.length ? '📷 画像' : (mediaLabel || '新着メッセージ'))).slice(0, 120);
         if (room && (room.kind === 'group' || room.kind === 'dm' || room.kind === 'announce')) {
-          const title = room.kind === 'dm' ? `💬 ${rec.fromName}` : `💬 ${room.name}`;
+          // ⚠️ iOSのWebプッシュは「タイトルがアプリ名と異なる」と自動で "from NAORU" を付ける。
+          //    タイトルをアプリ名(NAORU)に合わせ、送信者名/ルーム名は本文に入れて "from NAORU" 行を消す検証。
+          const title = 'NAORU';
+          const body = room.kind === 'dm' ? `${rec.fromName}：${bodyText}` : `${room.name}／${rec.fromName}：${bodyText}`;
           const targets = (room.kind === 'announce') ? null // 全員
             : (room.members || []).map(String).filter(id => id !== rec.fromStaffId); // 送信者以外のメンバー
           if (!(Array.isArray(targets) && targets.length === 0)) {
-            sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: rid, title, body: bodyText, url: '/?tab=chat' }, targets, { mentionIds, mentionAll });
+            sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: rid, title, body: body.slice(0, 150), url: '/?tab=chat' }, targets, { mentionIds, mentionAll });
           }
         } else if (room && room.kind === 'store' && mentionIds.length) {
           // 店舗ルームは通常のルーム通知はしない（スパム回避）が、名指しされた本人にだけ1通届ける。
-          sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: rid, title: `🔔 ${rec.fromName} さんがメンション`, body: `${room.name || 'チャット'}: ${bodyText}`, url: '/?tab=chat' }, mentionIds, { mentionIds, mentionAll });
+          sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: rid, title: 'NAORU', body: `🔔 ${room.name || 'チャット'}／${rec.fromName}：${bodyText}`.slice(0, 150), url: '/?tab=chat' }, mentionIds, { mentionIds, mentionAll });
         }
         return res.status(200).json({ ok: true, message: rec });
       }
@@ -917,11 +920,11 @@ export default async function handler(req, res) {
       // ノート更新をメンバーへ通知（📌）。add/edit 共通。
       const notifyNote = (room, rec, verb) => {
         if (!room) return;
-        const title = `📌 ${room.name || (room.kind === 'dm' ? rec.fromName : 'ノート')}`;
+        const roomLabel = room.name || (room.kind === 'dm' ? rec.fromName : 'ノート');
         const targets = room.kind === 'announce' ? null : (room.members || []).map(String).filter(id => id !== String(rec.fromStaffId));
         if (Array.isArray(targets) && targets.length === 0) return;
         const snippet = (rec.text || '📷 画像').slice(0, 80);
-        sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: room.id, title, body: `📌 ノートが${verb}されました: ${snippet}`, url: '/?tab=chat' }, targets, {});
+        sendPush(hasKV, hasSB, gas, { kind: 'chat', roomId: room.id, title: 'NAORU', body: `📌 ${roomLabel}／ノートが${verb}されました: ${snippet}`.slice(0, 150), url: '/?tab=chat' }, targets, {});
       };
       // ノート追加（ルームの固定メモ。テキスト＋画像＋リンク＋リアクション）。ルームメンバー or root。
       if (action === 'noteAdd' && body.roomId && body.note) {

@@ -2011,9 +2011,8 @@
             const [currentPage, setCurrentPage] = useState(() => {
                 // プッシュ通知/PWAからの深いリンク（/?tab=board|chat）を最優先で開く
                 try { const t = new URLSearchParams(window.location.search).get('tab'); if (t && ['board', 'chat'].includes(t)) return t; } catch (e) {}
-                // 読み込み直したときの入口は「チャット」（チャットを使える本部/管理者のみ。
-                // 使えないアカウントは全体管理シート）。前回のタブは復元せず、毎回この入口から。
-                return authState.root ? 'chat' : 'zenkanri';
+                // 読み込み直したときの入口は「チャット」（全ロール共通）。前回のタブは復元せず、毎回この入口から。
+                return 'chat';
             });
             // サイドバー折りたたみ（画面を広く使う。localStorageで記憶）
             const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
@@ -2028,8 +2027,8 @@
                 if (!authState.authenticated) return;
                 if (!authState.root && currentPage === 'settings') setCurrentPage('salonone');
                 if (authRole === 'staff' && currentPage === 'settlement') setCurrentPage('salonone');
-                // コミュニケーション4機能（チャット/お知らせ/勉強会/組織図）は当面 本部(hq)・管理者(root) のみ。
-                if (!authState.root && ['chat', 'board', 'events', 'org'].includes(currentPage)) setCurrentPage('salonone');
+                // チャットは全ロール可。お知らせ/勉強会/組織図は当面 本部(hq)・管理者(root) のみ。
+                if (!authState.root && ['board', 'events', 'org'].includes(currentPage)) setCurrentPage('chat');
             }, [authState.authenticated, authState.root, authRole, currentPage]);
             const [rawData, setRawData] = useState(() => {
                 try {
@@ -21868,10 +21867,10 @@
         const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authIsHq = false, authOwner = '', authRole = 'root', authStaffName = '', collapsed = false, setCollapsed = () => {}, chatUnread = 0, boardUnread = 0, eventsUnread = 0, mobileNavOpen = false, setMobileNavOpen = () => {} }) => {
             // カテゴリー別にグルーピング（見やすさ・高級感のため）
             const navSections = [
-                // ⚠️ コミュニケーション4機能は当面「本部(hq)・管理者(root)」のみに表示（rootOnly）。
+                // ⚠️ チャットは全ロール表示。お知らせ/勉強会/組織図は当面「本部(hq)・管理者(root)」のみ（rootOnly）。
                 //    問題なければ rootOnly を外して全ロールに開放する。チャットを一番上に配置。
                 { label: 'コミュニケーション', items: [
-                    { id: 'chat', label: 'チャット', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, badge: chatUnread, rootOnly: true },
+                    { id: 'chat', label: 'チャット', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, badge: chatUnread },
                     { id: 'board', label: '重要掲示板', icon: <Megaphone size={18} />, mobileIcon: <Megaphone size={18} />, badge: boardUnread, rootOnly: true },
                     { id: 'events', label: '勉強会・イベント', icon: <Calendar size={18} />, mobileIcon: <Calendar size={18} />, badge: eventsUnread, rootOnly: true },
                     { id: 'org', label: '組織図', icon: <Users size={18} />, mobileIcon: <Users size={18} />, rootOnly: true },

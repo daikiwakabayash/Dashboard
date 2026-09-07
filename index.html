@@ -10990,17 +10990,27 @@
                                                 {rel(p.createdAt) && <div className="text-[11px] text-[#B0B7C3]">{rel(p.createdAt)}</div>}
                                             </div>
                                         </div>
-                                        {p.title && <div className="text-[16px] font-bold text-[#111827] mt-2.5 leading-snug break-words" style={{ wordBreak: 'break-word' }}>{p.title}</div>}
+                                        {p.title && <div onClick={full ? undefined : e => { e.stopPropagation(); openBoardPost(p); }} className={`text-[16px] font-bold text-[#111827] mt-2.5 leading-snug break-words ${full ? '' : 'cursor-pointer'}`} style={{ wordBreak: 'break-word' }}>{p.title}</div>}
                                         {p.text && <div className={`${p.title ? 'mt-1.5' : 'mt-2.5'}`}>
                                             <div className={`text-[14px] text-[#475467] leading-relaxed whitespace-pre-wrap break-words ${longText ? 'line-clamp-6' : ''}`} style={{ wordBreak: 'break-word' }}>{chatLinkify(p.text)}</div>
                                             {longText && <button onClick={e => { e.stopPropagation(); openBoardPost(p); }} className="mt-1 text-[13px] font-bold text-brand-600 hover:underline">…もっと見る</button>}
                                         </div>}
-                                        {p.link && <a href={p.link} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="mt-2.5 inline-flex items-center gap-1.5 text-[13px] text-brand-600 hover:underline break-all">🔗 {p.link}</a>}
-                                        {Array.isArray(p.imgIds) && p.imgIds.length > 0 && <div className="mt-2.5 flex flex-wrap gap-2">{p.imgIds.map((id, i) => <ChatImage key={id} imgId={id} onClick={() => openLightbox(p.imgIds, i)} />)}</div>}
-                                        {vid && (vid.kind === 'youtube' || vid.kind === 'vimeo') && <div className="mt-2.5 rounded-lg overflow-hidden border border-[#EAECF0]" style={{ aspectRatio: '16 / 9' }}><iframe src={vid.embedUrl} className="w-full h-full" frameBorder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen title="video" /></div>}
-                                        {vid && vid.kind === 'file' && <video src={vid.src} controls className="mt-2.5 w-full max-h-[360px] rounded-lg border border-[#EAECF0] bg-black" />}
-                                        {vid && vid.kind === 'link' && <a href={vid.src} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="mt-2.5 inline-block text-[13px] text-brand-600 hover:underline break-all">🔗 {vid.src}</a>}
-                                        {Array.isArray(p.files) && p.files.length > 0 && <div className="mt-2.5 flex flex-wrap gap-2">{p.files.map(f => <BoardFile key={f.id} file={f} />)}</div>}
+                                        {/* リンク・画像・動画・ファイルは全画面表示でのみ展開。一覧は「表示」チップに集約してコンパクトに。 */}
+                                        {full ? (<>
+                                            {p.link && <a href={p.link} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="mt-2.5 inline-flex items-center gap-1.5 text-[13px] text-brand-600 hover:underline break-all">🔗 {p.link}</a>}
+                                            {Array.isArray(p.imgIds) && p.imgIds.length > 0 && <div className="mt-2.5 flex flex-wrap gap-2">{p.imgIds.map((id, i) => <ChatImage key={id} imgId={id} onClick={() => openLightbox(p.imgIds, i)} />)}</div>}
+                                            {vid && (vid.kind === 'youtube' || vid.kind === 'vimeo') && <div className="mt-2.5 rounded-lg overflow-hidden border border-[#EAECF0]" style={{ aspectRatio: '16 / 9' }}><iframe src={vid.embedUrl} className="w-full h-full" frameBorder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen title="video" /></div>}
+                                            {vid && vid.kind === 'file' && <video src={vid.src} controls className="mt-2.5 w-full max-h-[360px] rounded-lg border border-[#EAECF0] bg-black" />}
+                                            {vid && vid.kind === 'link' && <a href={vid.src} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="mt-2.5 inline-block text-[13px] text-brand-600 hover:underline break-all">🔗 {vid.src}</a>}
+                                            {Array.isArray(p.files) && p.files.length > 0 && <div className="mt-2.5 flex flex-wrap gap-2">{p.files.map(f => <BoardFile key={f.id} file={f} />)}</div>}
+                                        </>) : (() => {
+                                            const parts = [];
+                                            if (p.link || (vid && vid.kind === 'link')) parts.push('🔗 リンク');
+                                            const nImg = Array.isArray(p.imgIds) ? p.imgIds.length : 0; if (nImg) parts.push(`📷 画像${nImg}`);
+                                            if (vid && (vid.kind === 'youtube' || vid.kind === 'vimeo' || vid.kind === 'file')) parts.push('🎬 動画');
+                                            const nFile = Array.isArray(p.files) ? p.files.length : 0; if (nFile) parts.push(`📎 ファイル${nFile}`);
+                                            return parts.length ? <button onClick={e => { e.stopPropagation(); openBoardPost(p); }} className="mt-2.5 inline-flex items-center gap-1.5 text-[12px] font-semibold text-[#475467] bg-[#F6F7F9] hover:bg-[#EEF0F3] rounded-full px-3 py-1.5 transition">{parts.join('・')}<span className="text-brand-600">を表示</span></button> : null;
+                                        })()}
                                         {/* リアクション（既読の代わりに「読んだらスタンプ」） */}
                                         {(reactEntries.length > 0 || boardPickId === p.id) && (
                                             <div className="flex items-center gap-1.5 mt-3 flex-wrap">

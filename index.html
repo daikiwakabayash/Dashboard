@@ -2693,6 +2693,18 @@
                 // SWへ最新の合計を通知（閉じている間のプッシュ増分の基準にする）
                 try { if (navigator.serviceWorker && navigator.serviceWorker.controller) navigator.serviceWorker.controller.postMessage({ type: 'badge', count: total }); } catch {}
             }, [authState.authenticated, chatUnreadTotal, boardUnreadTotal]);
+            // 通知クリック時：SWからのタブ切替依頼を受けてページ内で移動（reloadしない＝読み込み直しにならない）
+            useEffect(() => {
+                if (!('serviceWorker' in navigator)) return;
+                const onMsg = (e) => {
+                    const d = (e && e.data) || {};
+                    if (d.type === 'notif-nav' && typeof d.url === 'string') {
+                        try { const u = new URL(d.url, location.origin); const tab = u.searchParams.get('tab'); if (tab && ['chat', 'board', 'events', 'org'].includes(tab)) { setCurrentPage(tab); setMobileNavOpen(false); } } catch {}
+                    }
+                };
+                navigator.serviceWorker.addEventListener('message', onMsg);
+                return () => { try { navigator.serviceWorker.removeEventListener('message', onMsg); } catch {} };
+            }, []);
             const boardLoad = async () => {
                 try { const r = await fetch('/api/plan-store?type=board'); const j = await r.json().catch(() => ({})); setBoardData({ posts: Array.isArray(j.posts) ? j.posts : [], reads: (j.reads && typeof j.reads === 'object') ? j.reads : {}, configured: j.configured !== false, loaded: true }); }
                 catch { setBoardData(d => ({ ...d, loaded: true })); }

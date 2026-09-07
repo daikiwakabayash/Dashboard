@@ -59,7 +59,8 @@ self.addEventListener('notificationclick', (event) => {
   event.waitUntil((async () => {
     const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const c of all) {
-      if ('focus' in c) { try { await c.focus(); if ('navigate' in c && url) c.navigate(url); } catch (_) {} return; }
+      // 既に開いているアプリはフォーカスするだけ＋タブ切替を postMessage で依頼（reloadしない＝読み込み直しにならない）
+      if ('focus' in c) { try { await c.focus(); c.postMessage({ type: 'notif-nav', url }); } catch (_) {} return; }
     }
     if (self.clients.openWindow) await self.clients.openWindow(url);
   })());

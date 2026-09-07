@@ -761,7 +761,7 @@
             String(a.readMembers) === String(b.readMembers) &&
             JSON.stringify(a.roomReads) === JSON.stringify(b.roomReads)
         );
-        const ChatMessageList = React.memo(({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, onReply, stamps, onImageClick, readMembers, roomReads, resolveName, resolveShop, roomId, onSaveMedia, resolveAvatar, onOpenProfile, onForward, onPin, onCapture, pinnedId }) => {
+        const ChatMessageList = React.memo(({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, onReply, stamps, onImageClick, readMembers, roomReads, resolveName, resolveShop, roomId, onSaveMedia, resolveAvatar, onOpenProfile, onForward, onPin, onCaptureRange, pinnedId }) => {
             // ルーム内の全画像ID（アルバム/ライトボックスのスライド用）と各IDの位置
             const allImgIds = []; (msgs || []).forEach(m => (m.imgIds || []).forEach(id => allImgIds.push(id)));
             const imgIndexOf = (id) => allImgIds.indexOf(id);
@@ -773,6 +773,17 @@
             const [pickFor, setPickFor] = React.useState(null);
             const [selId, setSelId] = React.useState(null);         // 「選択してコピー」中のメッセージ（本文を選択可能にする）
             const [menuImgId, setMenuImgId] = React.useState(null);  // メニューを画像側に表示するか（長押し元が画像のとき）
+            const [capMode, setCapMode] = React.useState(null);      // キャプチャ範囲選択中 {a:開始msgId, b:終了msgId}
+            const startCapture = (id) => setCapMode({ a: id, b: id });
+            // 現在の選択範囲に含まれるメッセージID集合
+            const capIds = React.useMemo(() => {
+                if (!capMode) return null;
+                const ia = msgs.findIndex(x => x && x.id === capMode.a);
+                const ib = msgs.findIndex(x => x && x.id === capMode.b);
+                if (ia < 0 || ib < 0) return new Set();
+                const lo = Math.min(ia, ib), hi = Math.max(ia, ib);
+                return new Set(msgs.slice(lo, hi + 1).map(x => x.id));
+            }, [capMode, msgs]);
             const lpTimerRef = React.useRef(null);                  // 長押しタイマー
             const lpFiredRef = React.useRef(false);                 // 長押しでメニューを開いたか（直後のクリック抑止）
             // 長押し（タッチ）で操作メニューを開く。LINE同様、吹き出し／画像の長押し＝メニュー。isImg=画像側に表示。
@@ -815,7 +826,7 @@
             React.useLayoutEffect(() => {
                 stickRef.current = true;
                 lenRef.current = msgs.length;
-                setSelId(null); setMenuFor(null); setMenuImgId(null);
+                setSelId(null); setMenuFor(null); setMenuImgId(null); setCapMode(null);
                 scrollToEnd(false);
             }, [roomId]);
             // スクロール位置を監視し「最下部に居るか」を記録（張り付き判定）。
@@ -833,6 +844,9 @@
             const fmtDay = (iso) => { const d = new Date(iso); const now = new Date(); const t = new Date(now); const y = new Date(now); y.setDate(now.getDate() - 1); if (d.toDateString() === t.toDateString()) return '今日'; if (d.toDateString() === y.toDateString()) return '昨日'; return `${d.getMonth() + 1}月${d.getDate()}日(${WD[d.getDay()]})`; };
             let lastDay = ''; let unreadShown = false;
             return (
+              <>
+                {/* キャプチャ範囲選択の案内バー（上部） */}
+                {capMode && <div className="shrink-0 flex items-center gap-2 px-3 py-2 bg-brand-600 text-white text-[12px] font-bold"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2" /></svg><span className="min-w-0 flex-1">保存したいトークをタップして範囲を選んでください（{capIds ? capIds.size : 0}件）</span></div>}
                 <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto px-2 md:px-3 py-3" style={{ background: '#FFFFFF', overscrollBehavior: 'contain', overflowAnchor: 'none' }}>
                   <div ref={contentRef}>
                     {msgs.length === 0 && <div className="text-center text-[#98A2B3] text-sm py-16">まだメッセージはありません。<br />最初のひとことを送ってみましょう。</div>}
@@ -893,54 +907,57 @@
                                             {m.text && <button onClick={() => { doSelectCopy(); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h6m4 0h-4m4 0a2 2 0 0 1 2 2v4m0 6v4a2 2 0 0 1-2 2h-4m-6 0H5a2 2 0 0 1-2-2v-4" /></svg>選択してコピー</button>}
                                             <button onClick={() => { onForward && onForward(m); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 17 20 12 15 7" /><path d="M4 18v-2a4 4 0 0 1 4-4h12" /></svg>転送</button>
                                             <button onClick={() => { onPin && onPin(m); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></svg>{pinnedId === m.id ? 'アナウンス解除' : 'アナウンス（上部に固定）'}</button>
-                                            <button onClick={() => { onCapture && onCapture(m.id); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2" /></svg>キャプチャ（画像保存）</button>
+                                            <button onClick={() => { startCapture(m.id); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2" /></svg>キャプチャ（範囲を選んで保存）</button>
                                             {(mine || isRoot) && <button onClick={() => { onDelete(m.id); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-rose-600 hover:bg-rose-50 border-t border-[#F2F4F7] mt-1 pt-2"><Trash2 size={15} />{mine ? '送信を取り消す' : '削除'}</button>}
                                         </div>
                                     </>);
+                                    const hasBubble = !!(m.text || (m.replyTo && m.replyTo.id));   // 吹き出しを出すか（テキスト/返信あり）
+                                    const hasImgs = Array.isArray(m.imgIds) && m.imgIds.length > 0;
+                                    const noSelCss = { WebkitTouchCallout: 'none', WebkitUserSelect: 'none', userSelect: 'none' }; // iOSの長押しメニュー抑止
+                                    const inCap = !!(capIds && capIds.has(m.id)); // キャプチャ選択範囲に含まれるか
                                     return (
-                                        <div id={'chatmsg-' + m.id} className={`flex items-end gap-2 px-1.5 py-[3px] md:py-[7px] rounded-xl ${mine ? 'flex-row-reverse' : 'flex-row'}`}>
+                                        <div id={'chatmsg-' + m.id} onClick={capMode ? (e => { e.stopPropagation(); setCapMode(c => ({ ...c, b: m.id })); }) : undefined} className={`flex items-end gap-2 px-1.5 py-[3px] md:py-[7px] rounded-xl transition-colors ${mine ? 'flex-row-reverse' : 'flex-row'} ${capMode ? 'cursor-pointer' : ''} ${capMode ? (inCap ? 'bg-brand-50 ring-1 ring-brand-200' : 'opacity-40') : ''}`}>
                                             <div className={`flex flex-col max-w-[88%] md:max-w-[82%] ${mine ? 'items-end' : 'items-start'}`}>
                                                 {/* 送信者：アイコン＋名前（タップでプロフィール）。ロゴ/認証バッジは無し。 */}
                                                 {!mine && <button onClick={() => onOpenProfile && onOpenProfile(m.fromStaffId, authorName)} className="flex items-center gap-1.5 mb-0.5 pl-0.5 hover:opacity-80 active:opacity-70 transition text-left"><ChatAvatar name={authorName} size="sm" img={resolveAvatar ? resolveAvatar(m.fromStaffId) : ''} /><span className="text-[13px] font-semibold text-[#344054]">{authorName}</span>{shop && <span className="text-[10px] text-[#98A2B3]">{shop}</span>}</button>}
+                                                {hasBubble && (
                                                 <div className={`flex items-end gap-1.5 ${mine ? 'flex-row-reverse' : 'flex-row'} max-w-full`}>
                                                     {/* 吹き出し */}
                                                     <div className="relative min-w-0 group/msg">
                                                         <div
                                                             id={'chatbubble-' + m.id}
                                                             onContextMenu={e => { e.preventDefault(); setMenuImgId(null); openMenu(m.id, e.currentTarget); }}
+                                                            onDoubleClick={e => { setMenuImgId(null); openMenu(m.id, e.currentTarget); }}
                                                             onTouchStart={e => { if (selId === m.id) return; lpStart(m.id, e.currentTarget); }}
                                                             onTouchMove={lpCancel} onTouchEnd={lpCancel} onTouchCancel={lpCancel}
-                                                            className={`group relative inline-block px-3 py-2 ${bubble} shadow-[0_1px_1px_rgba(16,24,40,0.06)]`} style={{ wordBreak: 'break-word', ...(mine ? { background: 'linear-gradient(135deg,#FF8A5C 0%,#F86E42 100%)' } : {}) }}>
+                                                            className={`group relative inline-block px-3 py-2 ${bubble} shadow-[0_1px_1px_rgba(16,24,40,0.06)]`} style={{ wordBreak: 'break-word', ...(selId === m.id ? {} : noSelCss), ...(mine ? { background: 'linear-gradient(135deg,#FF8A5C 0%,#F86E42 100%)' } : {}) }}>
                                                             {m.replyTo && m.replyTo.id && <div role="button" onClick={() => scrollToMsg(m.replyTo.id)} className={`mb-1 pl-2 border-l-[3px] rounded-r-md px-2 py-1 select-none cursor-pointer active:opacity-70 transition ${mine ? 'border-white/60 bg-white/15 hover:bg-white/25' : 'border-brand-300 bg-[#F6F7F9] hover:bg-[#EEF0F3]'}`} title="元のメッセージへ移動"><div className={`text-[11px] font-bold ${mine ? 'text-white/90' : 'text-brand-600'}`}>{m.replyTo.name || '返信'}</div><div className={`text-[11px] truncate max-w-[220px] ${mine ? 'text-white/70' : 'text-[#98A2B3]'}`}>{m.replyTo.text || '（画像）'}</div></div>}
                                                             {/* 本文。既定は選択不可＝長押しでメニュー。メニューの「選択してコピー」で選択可能に。 */}
                                                             {m.text && <div data-msgtext className={`text-[14px] leading-relaxed whitespace-pre-wrap break-words ${mine ? 'chat-bubble-mine' : ''} ${selId === m.id ? 'select-text' : 'select-none'}`} style={{ WebkitUserSelect: selId === m.id ? 'text' : 'none', userSelect: selId === m.id ? 'text' : 'none', WebkitTouchCallout: selId === m.id ? 'default' : 'none', cursor: selId === m.id ? 'text' : 'default' }}>{chatRenderText(m.text, (m.mentions || []).map(x => x && x.name).filter(Boolean))}</div>}
-                                                            {/* 長押し/右クリックメニュー（LINE風・吹き出し側） */}
+                                                            {/* 長押し/右クリック/ダブルクリックメニュー（LINE風・吹き出し側） */}
                                                             {menuFor === m.id && menuImgId !== m.id && msgMenu}
-                                                        </div>
-                                                        {/* PCホバー操作バー（LINE PC風: 返信・スタンプ・送信取消） */}
-                                                        <div className={`hidden md:flex opacity-0 group-hover/msg:opacity-100 transition-opacity items-center gap-0.5 absolute top-0 ${mine ? 'right-full mr-1.5' : 'left-full ml-1.5'} bg-white border border-[#EAECF0] rounded-full shadow-md px-1 py-0.5 z-10`}>
-                                                            <button onClick={doReply} title="返信" className="w-7 h-7 flex items-center justify-center rounded-full text-[#667085] hover:text-brand-600 hover:bg-[#F2F4F7] transition"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 17 4 12 9 7" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" /></svg></button>
-                                                            {!mine && <button onClick={() => setPickFor(pickFor === m.id ? null : m.id)} title="スタンプ" className="w-7 h-7 flex items-center justify-center rounded-full text-[15px] leading-none hover:bg-[#F2F4F7] transition">😊</button>}
-                                                            {m.text && <button onClick={doCopy} title="コピー" className="w-7 h-7 flex items-center justify-center rounded-full text-[#667085] hover:text-brand-600 hover:bg-[#F2F4F7] transition"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg></button>}
-                                                            {(mine || isRoot) && <button onClick={() => onDelete(m.id)} title={mine ? '送信を取り消す' : '削除'} className="w-7 h-7 flex items-center justify-center rounded-full text-[#98A2B3] hover:text-rose-600 hover:bg-[#F2F4F7] transition"><Trash2 size={13} /></button>}
                                                         </div>
                                                     </div>
                                                     {meta}
                                                 </div>
-                                                {/* 画像（吹き出しの下・LINE風に独立表示） */}
-                                                {Array.isArray(m.imgIds) && m.imgIds.length > 0 && <div className={`relative mt-1 flex flex-wrap gap-1.5 ${mine ? 'justify-end' : 'justify-start'}`}>{m.imgIds.map(id => (
-                                                    <div key={id} className="relative" onContextMenu={e => { e.preventDefault(); setMenuImgId(m.id); openMenu(m.id, e.currentTarget); }} onTouchStart={e => lpStart(m.id, e.currentTarget, true)} onTouchMove={lpCancel} onTouchEnd={lpCancel} onTouchCancel={lpCancel}>
-                                                        <ChatImage imgId={id} onClick={() => { if (lpFiredRef.current) { lpFiredRef.current = false; return; } onImageClick && onImageClick(allImgIds, imgIndexOf(id)); }} />
-                                                    </div>
-                                                ))}{menuFor === m.id && menuImgId === m.id && msgMenu}</div>}
+                                                )}
+                                                {/* 画像（LINE風に独立表示・長押し/右クリック/ダブルクリックで同メニュー）。テキスト無しなら既読/時刻をここに表示。 */}
+                                                {hasImgs && <div className={`mt-1 flex items-end gap-1.5 ${mine ? 'flex-row-reverse' : 'flex-row'}`}>
+                                                    <div className={`relative flex flex-wrap gap-1.5 ${mine ? 'justify-end' : 'justify-start'}`}>{m.imgIds.map(id => (
+                                                        <div key={id} className="relative" style={noSelCss} onContextMenu={e => { e.preventDefault(); setMenuImgId(m.id); openMenu(m.id, e.currentTarget); }} onDoubleClick={e => { setMenuImgId(m.id); openMenu(m.id, e.currentTarget); }} onTouchStart={e => lpStart(m.id, e.currentTarget, true)} onTouchMove={lpCancel} onTouchEnd={lpCancel} onTouchCancel={lpCancel}>
+                                                            <ChatImage imgId={id} onClick={() => { if (lpFiredRef.current) { lpFiredRef.current = false; return; } onImageClick && onImageClick(allImgIds, imgIndexOf(id)); }} />
+                                                        </div>
+                                                    ))}{menuFor === m.id && menuImgId === m.id && msgMenu}</div>
+                                                    {!hasBubble && meta}
+                                                </div>}
                                                 {/* 動画/PDF/ファイル添付（Vercel Blob）。タップで保存（iOSは共有シート）。 */}
-                                                {Array.isArray(m.media) && m.media.length > 0 && <div className={`mt-1 flex flex-col gap-1.5 ${mine ? 'items-end' : 'items-start'}`}>{m.media.map((md, i) => (
+                                                {Array.isArray(m.media) && m.media.length > 0 && <div className={`mt-1 flex items-end gap-1.5 ${mine ? 'flex-row-reverse' : 'flex-row'}`}><div className={`flex flex-col gap-1.5 ${mine ? 'items-end' : 'items-start'}`}>{m.media.map((md, i) => (
                                                     md.kind === 'video'
                                                         ? <div key={i} className="relative max-w-[260px]"><video src={md.url} controls playsInline preload="metadata" className="rounded-xl max-w-full max-h-[320px] bg-black" /><button onClick={() => onSaveMedia && onSaveMedia(md.url, md.name)} className="absolute top-1.5 right-1.5 px-2 py-1 rounded-md bg-black/55 hover:bg-black/70 text-white text-[11px] font-bold">保存</button></div>
                                                         : md.kind === 'image'
                                                             ? <div key={i} className="relative max-w-[260px]"><img src={md.url} className="rounded-xl max-w-full max-h-[320px] object-cover" alt={md.name || ''} loading="lazy" /><button onClick={() => onSaveMedia && onSaveMedia(md.url, md.name)} className="absolute top-1.5 right-1.5 px-2 py-1 rounded-md bg-black/55 hover:bg-black/70 text-white text-[11px] font-bold">保存</button></div>
                                                             : <button key={i} onClick={() => onSaveMedia && onSaveMedia(md.url, md.name)} className="flex items-center gap-2 px-3 py-2 rounded-xl border border-[#EAECF0] bg-white max-w-[260px] hover:bg-[#F8F9FB] transition text-left"><span className="w-8 h-8 rounded-lg bg-[#F2F4F7] flex items-center justify-center shrink-0 text-[16px]">{/pdf/i.test(md.type) ? '📄' : '📎'}</span><span className="min-w-0"><span className="block text-[13px] font-semibold text-[#111827] truncate">{md.name || 'ファイル'}</span><span className="block text-[11px] text-[#98A2B3]">タップで保存{md.size ? ` ・ ${Math.round(md.size / 1024 / 1024 * 10) / 10}MB` : ''}</span></span></button>
-                                                ))}</div>}
+                                                ))}</div>{!hasBubble && !hasImgs && meta}</div>}
                                                 {/* リアクション */}
                                                 {(Object.keys(reactions).length > 0 || pickFor === m.id) && (
                                                     <div data-react-row className={`flex items-center gap-1 mt-0.5 flex-wrap ${mine ? 'justify-end' : 'justify-start'}`}>
@@ -950,7 +967,7 @@
                                                             return (
                                                                 <div key={emo} className="relative">
                                                                     {/* タップで誰が押したか表示（LINE風）。縦を詰めてコンパクトに。 */}
-                                                                    <button onClick={e => { if (open) { setReactWho(null); return; } setReadDir(calcDir(e.currentTarget)); setReactWho({ msgId: m.id, emoji: emo }); }} style={{ lineHeight: 1 }} className={`inline-flex items-center gap-0.5 px-1.5 md:px-2 py-0 md:py-0.5 rounded-full text-[8px] md:text-[11px] font-bold border transition ${on ? 'bg-brand-50 border-brand-200 text-brand-700' : 'bg-white border-[#EAECF0] text-[#475467] hover:bg-[#F8F9FB]'}`}><span className="text-[10px] md:text-[14px] leading-none">{emo}</span>{(ids || []).length}</button>
+                                                                    <button onClick={e => { if (open) { setReactWho(null); return; } setReadDir(calcDir(e.currentTarget)); setReactWho({ msgId: m.id, emoji: emo }); }} style={{ lineHeight: 1 }} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold border transition ${on ? 'bg-brand-50 border-brand-200 text-brand-700' : 'bg-white border-[#EAECF0] text-[#475467] hover:bg-[#F8F9FB]'}`}><span className="text-[14px] leading-none">{emo}</span>{(ids || []).length}</button>
                                                                     {open && (<>
                                                                         <div className="fixed inset-0 z-20" onClick={e => { e.stopPropagation(); setReactWho(null); }} />
                                                                         <div className={`absolute z-30 ${readDir === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'} ${mine ? 'right-0' : 'left-0'} w-[180px] max-w-[70vw] max-h-56 overflow-y-auto bg-white border border-[#EAECF0] rounded-xl shadow-xl p-2`} onClick={e => e.stopPropagation()}>
@@ -975,6 +992,12 @@
                     <div ref={endRef} />
                   </div>
                 </div>
+                {/* キャプチャ操作バー（下部） */}
+                {capMode && <div className="shrink-0 flex items-center gap-2 px-3 py-2.5 border-t border-[#EAECF0] bg-white pb-[max(env(safe-area-inset-bottom,0px),10px)]">
+                    <button onClick={() => setCapMode(null)} className="flex-1 h-11 rounded-xl border border-[#EAECF0] text-[14px] font-semibold text-ink-700 hover:bg-[#F8F9FB] transition">キャンセル</button>
+                    <button onClick={() => { const ids = capIds ? [...capIds] : []; if (ids.length && onCaptureRange) onCaptureRange(ids); setCapMode(null); }} disabled={!capIds || capIds.size === 0} className="flex-1 h-11 rounded-xl bg-brand-500 hover:bg-brand-600 disabled:bg-[#EAECF0] disabled:text-[#98A2B3] text-white text-[14px] font-bold transition">この範囲を画像で保存</button>
+                </div>}
+              </>
             );
         }, chatMsgListEqual);
 
@@ -2751,12 +2774,22 @@
                 s.onload = () => resolve(window.html2canvas); s.onerror = reject;
                 document.head.appendChild(s);
             });
-            const chatCapture = async (msgId) => {
+            // 選択したトーク範囲を画像化して保存/共有。範囲メッセージを画面外にクローンして html2canvas。
+            const chatCaptureRange = async (ids) => {
                 try {
+                    if (!Array.isArray(ids) || ids.length === 0) return;
                     const h2c = await chatCaptureLib();
-                    const el = document.getElementById('chatmsg-' + msgId);
-                    if (!el || !h2c) return;
-                    const canvas = await h2c(el, { backgroundColor: '#ffffff', scale: 2, useCORS: true, logging: false });
+                    const els = ids.map(id => document.getElementById('chatmsg-' + id)).filter(Boolean);
+                    if (!els.length || !h2c) return;
+                    const width = els[0].parentElement ? els[0].parentElement.clientWidth : els[0].clientWidth;
+                    const wrap = document.createElement('div');
+                    wrap.style.cssText = `position:fixed;left:-99999px;top:0;width:${width}px;background:#fff;padding:10px 8px;box-sizing:border-box;`;
+                    els.forEach(e => { const c = e.cloneNode(true); c.style.opacity = '1'; wrap.appendChild(c); });
+                    document.body.appendChild(wrap);
+                    let canvas;
+                    try { canvas = await h2c(wrap, { backgroundColor: '#ffffff', scale: 2, useCORS: true, logging: false }); }
+                    finally { document.body.removeChild(wrap); }
+                    if (!canvas) return;
                     canvas.toBlob(async (blob) => {
                         if (!blob) return;
                         const file = new File([blob], 'naoru-chat-' + Date.now() + '.png', { type: 'image/png' });
@@ -11176,7 +11209,7 @@
                                                             </div>
                                                         )}
 
-                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(list, i) => openLightbox(list, i)} onReply={(msg) => { setChatReplyTo(msg); requestAnimationFrame(() => { try { chatTaRef.current && chatTaRef.current.focus(); } catch {} }); }} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} resolveShop={chatResolveShop} roomId={activeRoom ? activeRoom.id : ''} onSaveMedia={chatSaveMedia} resolveAvatar={chatAvatarImg} onOpenProfile={chatOpenProfile} onForward={setChatForward} onPin={chatPinMsg} onCapture={chatCapture} pinnedId={activeRoom && activeRoom.pinned ? activeRoom.pinned.id : ''} />
+                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(list, i) => openLightbox(list, i)} onReply={(msg) => { setChatReplyTo(msg); requestAnimationFrame(() => { try { chatTaRef.current && chatTaRef.current.focus(); } catch {} }); }} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} resolveShop={chatResolveShop} roomId={activeRoom ? activeRoom.id : ''} onSaveMedia={chatSaveMedia} resolveAvatar={chatAvatarImg} onOpenProfile={chatOpenProfile} onForward={setChatForward} onPin={chatPinMsg} onCaptureRange={chatCaptureRange} pinnedId={activeRoom && activeRoom.pinned ? activeRoom.pinned.id : ''} />
 
                                                         {/* コンポーザー（ChatGPT/Slack風の一体型）。スマホは全画面なのでホームバー分の余白を確保 */}
                                                         <div className="px-3 md:px-4 pt-1 pb-[max(env(safe-area-inset-bottom,0px),12px)] shrink-0">
@@ -11504,7 +11537,7 @@
                                                                         return (
                                                                             <div key={emo} className="relative">
                                                                                 {/* タップで誰が押したか表示 */}
-                                                                                <button onClick={() => setNoteReactWho(open ? null : { noteId: n.id, emoji: emo })} style={{ lineHeight: 1 }} className={`inline-flex items-center gap-0.5 px-1.5 md:px-2 py-0 md:py-0.5 rounded-full text-[8px] md:text-[11px] font-bold border transition ${on ? 'bg-brand-50 border-brand-200 text-brand-700' : 'bg-white border-[#EAECF0] text-[#475467] hover:bg-[#F8F9FB]'}`}><span className="text-[10px] md:text-[14px] leading-none">{emo}</span>{(ids || []).length}</button>
+                                                                                <button onClick={() => setNoteReactWho(open ? null : { noteId: n.id, emoji: emo })} style={{ lineHeight: 1 }} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold border transition ${on ? 'bg-brand-50 border-brand-200 text-brand-700' : 'bg-white border-[#EAECF0] text-[#475467] hover:bg-[#F8F9FB]'}`}><span className="text-[14px] leading-none">{emo}</span>{(ids || []).length}</button>
                                                                                 {open && (<>
                                                                                     <div className="fixed inset-0 z-20" onClick={e => { e.stopPropagation(); setNoteReactWho(null); }} />
                                                                                     <div className="absolute z-30 bottom-full mb-1 left-0 w-[190px] max-w-[75vw] max-h-56 overflow-y-auto bg-white border border-[#EAECF0] rounded-xl shadow-xl p-2" onClick={e => e.stopPropagation()}>
@@ -21672,13 +21705,14 @@
                 <>
                     {/* Desktop Sidebar */}
                     <div className={`hidden md:flex md:flex-col shrink-0 h-[100dvh] overflow-y-auto bg-gradient-to-b from-white via-white to-ink-50/50 border-r border-ink-100/70 relative transition-all duration-200 ${collapsed ? 'w-20 p-3' : 'w-60 p-4'}`}>
-                        {/* 折りたたみトグル（右端のタブ） */}
+                        {/* 折りたたみトグル（右端のタブ・上下中央でハッキリ表示） */}
                         <button
                             onClick={() => setCollapsed(!collapsed)}
                             title={collapsed ? 'サイドバーを開く' : 'サイドバーを隠す'}
-                            className="absolute -right-3 top-7 z-20 w-6 h-6 flex items-center justify-center bg-white border border-[#EAECF0] rounded-full shadow-sm text-[#98A2B3] hover:text-brand-600 hover:border-brand-300 transition-all"
+                            aria-label={collapsed ? 'サイドバーを開く' : 'サイドバーを隠す'}
+                            className="absolute -right-3.5 top-1/2 -translate-y-1/2 z-20 w-7 h-9 flex items-center justify-center bg-white border border-[#E4E7EC] rounded-full shadow-[0_2px_8px_rgba(16,24,40,0.12)] text-[#475467] hover:text-white hover:bg-brand-500 hover:border-brand-500 active:scale-95 transition-all"
                         >
-                            <ChevronRight size={14} className={collapsed ? '' : 'rotate-180'} />
+                            <ChevronRight size={16} className={collapsed ? '' : 'rotate-180'} />
                         </button>
                         {/* Logo/Title + Alert Bell */}
                         <div className={`mb-6 px-1 flex items-center ${collapsed ? 'justify-center' : 'justify-between'}`}>

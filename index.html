@@ -10515,7 +10515,13 @@
                                 setChatDraft(r.value); setChatMention(null);
                                 requestAnimationFrame(() => { if (ta) { ta.focus(); try { ta.setSelectionRange(r.caret, r.caret); } catch {} } });
                             };
-                            const dirStaff = (chatData.dir.staff || []).filter(s => String(s.id) !== chatMyId);
+                            // メンバー候補: SalonOneディレクトリ＋本部(hq)メンバー（チャットID=staffId or owner）。自分は除外し、id重複は排除。
+                            const dirStaff = (() => {
+                                const base = (chatData.dir.staff || []).map(s => ({ ...s, id: String(s.id) }));
+                                const seen = new Set(base.map(s => s.id));
+                                (orgHq || []).forEach(m => { const id = (m.staffId && /^\d+$/.test(m.staffId)) ? String(m.staffId) : String(m.owner); if (!id || seen.has(id)) return; seen.add(id); base.push({ id, name: m.name || id, shop: '本部' }); });
+                                return base.filter(s => s.id !== chatMyId);
+                            })();
                             // 既読集計: このルームの各メンバーの既読ポインタ（reads[staffId][roomId]）
                             const activeMemberIds = activeRoom ? (Array.isArray(activeRoom.members) ? activeRoom.members.map(String) : []) : [];
                             const activeReadsMap = activeRoom ? Object.fromEntries(Object.entries(chatData.reads || {}).map(([sid, m]) => [sid, (m && typeof m === 'object') ? (Number(m[activeRoom.id]) || 0) : 0])) : {};

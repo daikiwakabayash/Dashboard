@@ -639,6 +639,8 @@
         const ImageIcon = (props) => <Icon {...props}><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></Icon>;
         const Crop = (props) => <Icon {...props}><path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/></Icon>;
         const MoreHorizontal = (props) => <Icon {...props}><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></Icon>;
+        const Maximize2 = (props) => <Icon {...props}><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></Icon>;
+        const RotateCcw = (props) => <Icon {...props}><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></Icon>;
         // マウス主体のPC（hover可＋精密ポインタ）判定。PCでは本文を通常サイト同様にドラッグ選択→コピー可能にする。
         const IS_DESKTOP = (typeof window !== 'undefined') && !!(window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches);
         const Layers = (props) => <Icon {...props}><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></Icon>;
@@ -3076,6 +3078,7 @@
             const [profileShopQ, setProfileShopQ] = useState(''); // 編集モーダルの担当店舗検索
             const [profileCrop, setProfileCrop] = useState(null); // 写真トリミング中: { srcId } or null
             const [profileCropBusy, setProfileCropBusy] = useState(false);
+            const [profileImgView, setProfileImgView] = useState(null); // 適用後の写真を拡大確認: imgId or null
             // 本人の識別子: SSO/staffは staffId、オーナー(settlementアカウント)は owner:<名前>
             const myPid = String(authState.staffId || '') || (authState.owner && authState.owner !== '__root__' ? `owner:${authState.owner}` : '');
             // チャットの送信者名/アイコンをタップ → その人のプロフィールを表示（staff=数値ID、owner/hq=owner:<id>）。
@@ -12450,9 +12453,16 @@
                                                                 <div className="mt-3 p-2.5 rounded-lg bg-[#F8F9FB] border border-[#EAECF0]">
                                                                     <div className="text-[11px] font-bold text-[#667085] mb-1.5">プロフィール写真の切り抜き（正方形で見せたい範囲に）</div>
                                                                     <div className="flex items-center gap-3">
-                                                                        <div className="w-20 h-20 rounded-lg overflow-hidden bg-[#F2F4F7] border border-[#EAECF0] shrink-0"><img src={chatImgSrc(d.mainImg)} className="w-full h-full object-cover" alt="プレビュー" /></div>
-                                                                        <button onClick={() => setProfileCrop({ srcId: d.mainImgRaw || d.mainImg })} className="inline-flex items-center gap-1.5 h-9 px-3.5 rounded-lg border border-[#EAECF0] bg-white text-[13px] font-semibold text-[#344054] hover:bg-[#F2F4F7] transition"><Crop size={15} />範囲を切り抜く</button>
+                                                                        <button type="button" onClick={() => setProfileImgView(d.mainImg)} title="タップで拡大して確認" className="relative w-20 h-20 rounded-lg overflow-hidden bg-[#F2F4F7] border border-[#EAECF0] shrink-0 group/thumb">
+                                                                            <img src={chatImgSrc(d.mainImg)} className="w-full h-full object-cover" alt="プレビュー" />
+                                                                            <span className="absolute inset-0 bg-black/0 group-hover/thumb:bg-black/25 active:bg-black/30 transition flex items-center justify-center opacity-0 group-hover/thumb:opacity-100"><Maximize2 size={16} className="text-white drop-shadow" /></span>
+                                                                        </button>
+                                                                        <div className="flex-1 flex flex-col gap-1.5 min-w-0">
+                                                                            <button onClick={() => setProfileCrop({ srcId: d.mainImgRaw || d.mainImg })} className="inline-flex items-center justify-center gap-1.5 h-9 px-3.5 rounded-lg border border-[#EAECF0] bg-white text-[13px] font-semibold text-[#344054] hover:bg-[#F2F4F7] transition"><Crop size={15} />{d.mainImgRaw ? '切り抜きを編集' : '範囲を切り抜く'}</button>
+                                                                            {d.mainImgRaw && <button onClick={() => setProfileEdit(v => v ? { ...v, mainImg: v.mainImgRaw, mainImgRaw: '', mainPos: '' } : v)} className="inline-flex items-center justify-center gap-1.5 h-9 px-3.5 rounded-lg border border-[#EAECF0] bg-white text-[13px] font-semibold text-[#667085] hover:bg-[#F2F4F7] transition"><RotateCcw size={14} />元の写真に戻す</button>}
+                                                                        </div>
                                                                     </div>
+                                                                    <p className="text-[11px] text-[#98A2B3] mt-1.5">写真をタップすると拡大して確認できます。</p>
                                                                 </div>
                                                             )}
                                                         </div>
@@ -12522,6 +12532,15 @@
                                                 } finally { setProfileCropBusy(false); }
                                             }}
                                         />
+                                    )}
+                                    {profileImgView && (
+                                        <div className="fixed inset-0 z-[130] bg-black/85 flex items-center justify-center p-6 select-none" onClick={() => setProfileImgView(null)}>
+                                            <button onClick={e => { e.stopPropagation(); setProfileImgView(null); }} className="absolute top-5 right-4 w-11 h-11 rounded-full bg-white/20 hover:bg-white/30 text-white flex items-center justify-center transition"><X size={24} /></button>
+                                            <img src={chatImgSrc(profileImgView)} onClick={e => e.stopPropagation()} className="max-w-[92vw] max-h-[80vh] rounded-xl object-contain shadow-2xl" alt="プロフィール写真" />
+                                            <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex gap-2">
+                                                <button onClick={e => { e.stopPropagation(); const src = (profileEdit && (profileEdit.mainImgRaw || profileEdit.mainImg)) || profileImgView; setProfileImgView(null); setProfileCrop({ srcId: src }); }} className="inline-flex items-center gap-1.5 h-10 px-4 rounded-lg bg-white/95 hover:bg-white text-[13px] font-bold text-[#344054] transition shadow"><Crop size={15} />切り抜きを編集</button>
+                                            </div>
+                                        </div>
                                     )}
                                 </div>
                             );

@@ -1850,6 +1850,8 @@
                 if (!authState.authenticated) return;
                 if (!authState.root && currentPage === 'settings') setCurrentPage('salonone');
                 if (authRole === 'staff' && currentPage === 'settlement') setCurrentPage('salonone');
+                // コミュニケーション4機能（チャット/お知らせ/勉強会/組織図）は当面 本部(hq)・管理者(root) のみ。
+                if (!authState.root && ['chat', 'board', 'events', 'org'].includes(currentPage)) setCurrentPage('salonone');
             }, [authState.authenticated, authState.root, authRole, currentPage]);
             const [rawData, setRawData] = useState(() => {
                 try {
@@ -10439,14 +10441,15 @@
                                         </div>
                                     </div>
                                     <div className="px-3 py-2">
-                                        <button onClick={() => { setMobileAcctOpen(false); setCurrentPage('org'); }} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-[14px] font-semibold text-ink-800 hover:bg-ink-50 active:bg-ink-50 transition">
+                                        {/* コミュニケーション導線は当面 本部(hq)・管理者(root) のみ */}
+                                        {authState.root && <button onClick={() => { setMobileAcctOpen(false); setCurrentPage('org'); }} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-[14px] font-semibold text-ink-800 hover:bg-ink-50 active:bg-ink-50 transition">
                                             <span className="w-9 h-9 rounded-lg bg-ink-50 text-ink-600 flex items-center justify-center shrink-0"><Users size={18} /></span>
                                             マイプロフィール / 組織図
-                                        </button>
-                                        <button onClick={() => { setMobileAcctOpen(false); setCurrentPage('board'); }} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-[14px] font-semibold text-ink-800 hover:bg-ink-50 active:bg-ink-50 transition">
+                                        </button>}
+                                        {authState.root && <button onClick={() => { setMobileAcctOpen(false); setCurrentPage('board'); }} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-[14px] font-semibold text-ink-800 hover:bg-ink-50 active:bg-ink-50 transition">
                                             <span className="w-9 h-9 rounded-lg bg-ink-50 text-ink-600 flex items-center justify-center shrink-0"><Megaphone size={18} /></span>
                                             お知らせハブ
-                                        </button>
+                                        </button>}
                                         {/* 通知のON/OFF（スマホはここから設定できる） */}
                                         <button onClick={() => { if (pushState.subscribed) { pushUnsubscribe(); } else { pushSubscribe(); } }} disabled={pushState.busy} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-[14px] font-semibold text-ink-800 hover:bg-ink-50 active:bg-ink-50 transition disabled:opacity-60">
                                             <span className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${pushState.subscribed ? 'bg-emerald-50 text-emerald-600' : 'bg-ink-50 text-ink-600'}`}><Bell size={18} /></span>
@@ -20957,11 +20960,13 @@
                     { id: 'square', label: 'サブスク分析', icon: <CreditCard size={18} />, mobileIcon: <CreditCard size={18} /> },
                     { id: 'planning', label: '事業計画', icon: <Target size={18} />, mobileIcon: <Target size={18} /> },
                 ] },
+                // ⚠️ コミュニケーション4機能は当面「本部(hq)・管理者(root)」のみに表示（rootOnly）。
+                //    問題なければ rootOnly を外して全ロールに開放する。
                 { label: 'コミュニケーション', items: [
-                    { id: 'chat', label: 'チャット', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, badge: chatUnread },
-                    { id: 'board', label: 'お知らせハブ', icon: <Megaphone size={18} />, mobileIcon: <Megaphone size={18} />, badge: boardUnread },
-                    { id: 'events', label: '勉強会・イベント', icon: <Calendar size={18} />, mobileIcon: <Calendar size={18} /> },
-                    { id: 'org', label: '組織図', icon: <Users size={18} />, mobileIcon: <Users size={18} /> },
+                    { id: 'chat', label: 'チャット', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, badge: chatUnread, rootOnly: true },
+                    { id: 'board', label: 'お知らせハブ', icon: <Megaphone size={18} />, mobileIcon: <Megaphone size={18} />, badge: boardUnread, rootOnly: true },
+                    { id: 'events', label: '勉強会・イベント', icon: <Calendar size={18} />, mobileIcon: <Calendar size={18} />, rootOnly: true },
+                    { id: 'org', label: '組織図', icon: <Users size={18} />, mobileIcon: <Users size={18} />, rootOnly: true },
                 ] },
                 { label: '店舗運営', items: [
                     { id: 'settlement', label: '返金明細書', icon: <Banknote size={18} />, mobileIcon: <Banknote size={18} />, hideForStaff: true },

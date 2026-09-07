@@ -797,23 +797,21 @@
                 lenRef.current = msgs.length;
                 scrollToEnd(false); // 描画前に即・最下部
             }, [roomId]);
+            // 開いた直後の約2.5秒は「最下部にピン留め」し続ける（アバター/画像/名前解決で高さが
+            // 後から伸びても確実に一番下に到達）。ユーザーが自分で上へスクロールしたら即解除。
             React.useEffect(() => {
-                scrollToEnd(false);
-                requestAnimationFrame(() => { scrollToEnd(false); requestAnimationFrame(() => scrollToEnd(false)); });
-                const ts = [30, 120, 300, 600, 1000, 1600].map(ms => setTimeout(() => scrollToEnd(false), ms));
-                return () => ts.forEach(clearTimeout);
-            }, [roomId]);
-            // ルーム内の画像が読み込まれて高さが変わったら、最下部付近にいる場合のみ追従して最下部へ。
-            React.useEffect(() => {
-                const root = endRef.current && endRef.current.parentElement;
-                if (!root) return;
-                const onLoad = (e) => {
-                    if (!e.target || e.target.tagName !== 'IMG') return;
-                    const nearBottom = root.scrollHeight - root.scrollTop - root.clientHeight < 220;
-                    if (nearBottom) scrollToEnd(false);
-                };
-                root.addEventListener('load', onLoad, true);
-                return () => root.removeEventListener('load', onLoad, true);
+                const c = endRef.current && endRef.current.parentElement;
+                if (!c) return;
+                let stopped = false;
+                const pin = () => { if (!stopped) { try { c.scrollTop = c.scrollHeight; } catch {} } };
+                pin();
+                requestAnimationFrame(pin);
+                const iv = setInterval(pin, 80);
+                const onUser = () => { if (c.scrollHeight - c.scrollTop - c.clientHeight > 140) { stopped = true; clearInterval(iv); } };
+                c.addEventListener('wheel', onUser, { passive: true });
+                c.addEventListener('touchmove', onUser, { passive: true });
+                const done = setTimeout(() => { stopped = true; clearInterval(iv); }, 2500);
+                return () => { stopped = true; clearInterval(iv); clearTimeout(done); c.removeEventListener('wheel', onUser); c.removeEventListener('touchmove', onUser); };
             }, [roomId]);
             const fmtTime = (iso) => { const d = new Date(iso); const now = new Date(); const hm = `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; return d.toDateString() === now.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`; };
             const WD = ['日', '月', '火', '水', '木', '金', '土'];
@@ -851,11 +849,8 @@
                                     const doCopy = () => { const txt = m.text || ''; if (!txt) return; try { if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(txt); } else { const ta = document.createElement('textarea'); ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); } } catch {} };
                                     const meta = (
                                         <div className={`flex flex-col ${mine ? 'items-end' : 'items-start'} justify-end shrink-0 pb-0.5`}>
-                                            {/* モバイル用アクション（返信/スタンプ/コピー/削除）。本文の長押しはネイティブ選択に使うため別ボタンに。 */}
-                                            <button onClick={e => menuFor === m.id ? setMenuFor(null) : openMenu(m.id, e.currentTarget)} className="md:hidden text-[13px] leading-none text-[#C0C6CF] hover:text-brand-600 px-1 -mb-0.5" title="メニュー" aria-label="メニュー">⋯</button>
-                                            <span className="text-[10px] text-[#B0B7C3] whitespace-nowrap">{m._pending ? '送信中…' : fmtTime(m.createdAt)}</span>
                                             {mine && Array.isArray(readMembers) && readers.length > 0 && (
-                                                <div className="relative group/rd mt-0.5">
+                                                <div className="relative group/rd mb-0.5">
                                                     <button onClick={e => { if (readOpen === m.id) { setReadOpen(null); return; } setReadDir(calcDir(e.currentTarget)); setReadOpen(m.id); }} onMouseEnter={e => setReadDir(calcDir(e.currentTarget))} className="text-[10px] text-[#98A2B3] font-medium hover:text-brand-600" title="既読した人を表示">既読{readers.length}{readMembers.length > 1 ? `/${readMembers.length - 1}` : ''}</button>
                                                     {readOpen === m.id && <div className="fixed inset-0 z-20" onClick={e => { e.stopPropagation(); setReadOpen(null); }} />}
                                                     <div className={`${readOpen === m.id ? 'block' : 'hidden'} md:group-hover/rd:block absolute z-30 ${readDir === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'} left-0 w-[180px] max-w-[70vw] max-h-56 overflow-y-auto bg-white border border-[#EAECF0] rounded-xl shadow-xl p-2`} onClick={e => e.stopPropagation()}>
@@ -864,6 +859,11 @@
                                                     </div>
                                                 </div>
                                             )}
+                                            {/* 時刻＋「⋯」を1行に（縦積みで吹き出しの上にはみ出すのを防止）。⋯は返信/コピー/削除メニュー。 */}
+                                            <div className={`flex items-center gap-1 ${mine ? 'flex-row-reverse' : 'flex-row'}`}>
+                                                <span className="text-[10px] text-[#B0B7C3] whitespace-nowrap">{m._pending ? '送信中…' : fmtTime(m.createdAt)}</span>
+                                                <button onClick={e => menuFor === m.id ? setMenuFor(null) : openMenu(m.id, e.currentTarget)} className="md:hidden text-[13px] leading-none text-[#C0C6CF] hover:text-brand-600 px-0.5" title="メニュー" aria-label="メニュー">⋯</button>
+                                            </div>
                                         </div>
                                     );
                                     return (
@@ -884,9 +884,9 @@
                                                             {menuFor === m.id && (<>
                                                                 <div className="fixed inset-0 z-30" onClick={() => setMenuFor(null)} />
                                                                 <div className={`absolute z-40 ${menuDir === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'} ${mine ? 'right-0' : 'left-0'} bg-white border border-[#EAECF0] rounded-2xl shadow-xl p-1.5 w-max`} onClick={e => e.stopPropagation()}>
-                                                                    <div className="flex items-center flex-wrap gap-0.5 px-1 pb-1.5 mb-1 border-b border-[#F2F4F7] max-w-[280px]">
+                                                                    {!mine && <div className="flex items-center flex-wrap gap-0.5 px-1 pb-1.5 mb-1 border-b border-[#F2F4F7] max-w-[280px]">
                                                                         {stamps.map(s => <button key={s} onClick={() => { onReact(m.id, s); setMenuFor(null); }} className="w-8 h-8 flex items-center justify-center text-[18px] rounded-full hover:bg-[#F2F4F7] active:scale-95 transition">{s}</button>)}
-                                                                    </div>
+                                                                    </div>}
                                                                     <button onClick={() => { doReply(); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 17 4 12 9 7" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" /></svg>返信</button>
                                                                     {m.text && <button onClick={() => { doCopy(); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>コピー</button>}
                                                                     {(mine || isRoot) && <button onClick={() => { onDelete(m.id); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-rose-600 hover:bg-rose-50"><Trash2 size={15} />{mine ? '送信を取り消す' : '削除'}</button>}
@@ -896,7 +896,7 @@
                                                         {/* PCホバー操作バー（LINE PC風: 返信・スタンプ・送信取消） */}
                                                         <div className={`hidden md:flex opacity-0 group-hover/msg:opacity-100 transition-opacity items-center gap-0.5 absolute top-0 ${mine ? 'right-full mr-1.5' : 'left-full ml-1.5'} bg-white border border-[#EAECF0] rounded-full shadow-md px-1 py-0.5 z-10`}>
                                                             <button onClick={doReply} title="返信" className="w-7 h-7 flex items-center justify-center rounded-full text-[#667085] hover:text-brand-600 hover:bg-[#F2F4F7] transition"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 17 4 12 9 7" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" /></svg></button>
-                                                            <button onClick={() => setPickFor(pickFor === m.id ? null : m.id)} title="スタンプ" className="w-7 h-7 flex items-center justify-center rounded-full text-[15px] leading-none hover:bg-[#F2F4F7] transition">😊</button>
+                                                            {!mine && <button onClick={() => setPickFor(pickFor === m.id ? null : m.id)} title="スタンプ" className="w-7 h-7 flex items-center justify-center rounded-full text-[15px] leading-none hover:bg-[#F2F4F7] transition">😊</button>}
                                                             {m.text && <button onClick={doCopy} title="コピー" className="w-7 h-7 flex items-center justify-center rounded-full text-[#667085] hover:text-brand-600 hover:bg-[#F2F4F7] transition"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg></button>}
                                                             {(mine || isRoot) && <button onClick={() => onDelete(m.id)} title={mine ? '送信を取り消す' : '削除'} className="w-7 h-7 flex items-center justify-center rounded-full text-[#98A2B3] hover:text-rose-600 hover:bg-[#F2F4F7] transition"><Trash2 size={13} /></button>}
                                                         </div>

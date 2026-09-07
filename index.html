@@ -654,8 +654,10 @@
         // アバターの色（名前ハッシュで一定・落ち着いたトーン: 薄い背景＋濃い文字）
         const CHAT_AV_COLORS = ['bg-slate-100 text-slate-600', 'bg-orange-50 text-orange-700', 'bg-teal-50 text-teal-700', 'bg-indigo-50 text-indigo-600', 'bg-rose-50 text-rose-600', 'bg-emerald-50 text-emerald-700', 'bg-sky-50 text-sky-700', 'bg-violet-50 text-violet-600'];
         const chatAvatarColor = (s) => { const str = String(s || ''); let h = 0; for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0; return CHAT_AV_COLORS[h % CHAT_AV_COLORS.length]; };
-        const ChatAvatar = ({ name, size = 'md' }) => {
+        const ChatAvatar = ({ name, size = 'md', img = '' }) => {
             const cls = size === 'sm' ? 'w-7 h-7 text-[11px]' : 'w-9 h-9 text-[13px]';
+            // プロフィール画像（マイページ/組織図で設定）があればそれを表示。無ければ頭文字。
+            if (img) return <div className={`${cls} rounded-full overflow-hidden shrink-0 bg-[#F2F4F7]`}><img src={img} className="w-full h-full object-cover" loading="lazy" alt={name || ''} /></div>;
             return <div className={`${cls} ${chatAvatarColor(name)} rounded-full flex items-center justify-center font-semibold shrink-0`}>{String(name || '？').trim().charAt(0) || '？'}</div>;
         };
         // 店舗マーク（# の代わりにNAORUハートロゴ。読み込み失敗時はハート絵文字にフォールバック）
@@ -753,7 +755,7 @@
             String(a.readMembers) === String(b.readMembers) &&
             JSON.stringify(a.roomReads) === JSON.stringify(b.roomReads)
         );
-        const ChatMessageList = React.memo(({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, onReply, stamps, onImageClick, readMembers, roomReads, resolveName, resolveShop, roomId, onSaveMedia }) => {
+        const ChatMessageList = React.memo(({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, onReply, stamps, onImageClick, readMembers, roomReads, resolveName, resolveShop, roomId, onSaveMedia, resolveAvatar }) => {
             // ルーム内の全画像ID（アルバム/ライトボックスのスライド用）と各IDの位置
             const allImgIds = []; (msgs || []).forEach(m => (m.imgIds || []).forEach(id => allImgIds.push(id)));
             const imgIndexOf = (id) => allImgIds.indexOf(id);
@@ -836,7 +838,7 @@
                                     );
                                     return (
                                         <div id={'chatmsg-' + m.id} className={`flex items-end gap-2 px-1.5 py-1 rounded-xl ${mine ? 'flex-row-reverse' : 'flex-row'}`}>
-                                            {!mine && <div className="shrink-0 self-end"><ChatAvatar name={authorName} size="sm" /></div>}
+                                            {!mine && <div className="shrink-0 self-end"><ChatAvatar name={authorName} size="sm" img={resolveAvatar ? resolveAvatar(m.fromStaffId) : ''} /></div>}
                                             <div className={`flex flex-col max-w-[80%] md:max-w-[72%] ${mine ? 'items-end' : 'items-start'}`}>
                                                 {!mine && <div className="flex items-center gap-1.5 mb-0.5 pl-1"><span className="text-[12px] font-semibold text-[#344054]">{authorName}</span>{shop && <span className="text-[10px] text-[#98A2B3]">{shop}</span>}</div>}
                                                 <div className={`flex items-end gap-1.5 ${mine ? 'flex-row-reverse' : 'flex-row'} max-w-full`}>
@@ -2383,6 +2385,8 @@
             // 名前の横の店舗: 本人が設定したプロフィールの担当店舗（先頭）を優先。未設定はSalonOne所属。
             // ※表示時に解決（profileData読み出し）。ここでは呼ばない＝profileData未宣言時のTDZ回避。
             const chatResolveShop = (id, fallback) => { const p = (profileData.profiles || {})[String(id)]; return (p && Array.isArray(p.shops) && p.shops[0]) || fallback || ''; };
+            // チャットアイコン画像：マイページ/組織図で設定したプロフィール写真(mainImg)があればそのsrcを返す。
+            const chatAvatarImg = (id) => { const sid = String(id || ''); if (!sid || sid === '__root__' || sid === '__all__') return ''; const profs = profileData.profiles || {}; const p = profs[sid] || profs['owner:' + sid]; return (p && p.mainImg) ? chatImgSrc(p.mainImg) : ''; };
             const chatMyShop = (Array.isArray(authState.shops) && authState.shops[0]) || '';
             const chatIsRoot = !!authState.root;
             // @メンション候補（{id,name}）。グループ/DMはメンバー、店舗/全社は全スタッフ。先頭に「全員」。自分は除外。
@@ -10819,7 +10823,7 @@
                             const canShowReads = !!activeRoom && (activeRoom.kind === 'group' || activeRoom.kind === 'dm') && activeMemberIds.length > 0;
                             const roomIcon = (r, active) => {
                                 if (r.kind === 'group' && r.iconImg) return <div className="w-9 h-9 rounded-xl overflow-hidden shrink-0 bg-[#F2F4F7]"><img src={chatImgSrc(r.iconImg)} className="w-full h-full object-cover" loading="lazy" alt="" /></div>;
-                                if (r.kind === 'dm') return <ChatAvatar name={roomTitle(r)} />;
+                                if (r.kind === 'dm') { const partner = (r.members || []).map(String).find(x => x !== chatMyId); return <ChatAvatar name={roomTitle(r)} img={chatAvatarImg(partner)} />; }
                                 if (r.kind === 'store') return <ShopMark size={36} />;
                                 if (r.kind === 'group' && r.icon) return <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 text-[19px] leading-none ${active ? 'bg-brand-100' : 'bg-[#F2F4F7]'}`}>{r.icon}</div>;
                                 const Ico = r.kind === 'announce' ? Megaphone : Users;
@@ -10921,7 +10925,7 @@
                                                             </div>
                                                         </div>
 
-                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(list, i) => openLightbox(list, i)} onReply={(msg) => { setChatReplyTo(msg); requestAnimationFrame(() => { try { chatTaRef.current && chatTaRef.current.focus(); } catch {} }); }} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} resolveShop={chatResolveShop} roomId={activeRoom ? activeRoom.id : ''} onSaveMedia={chatSaveMedia} />
+                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(list, i) => openLightbox(list, i)} onReply={(msg) => { setChatReplyTo(msg); requestAnimationFrame(() => { try { chatTaRef.current && chatTaRef.current.focus(); } catch {} }); }} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} resolveShop={chatResolveShop} roomId={activeRoom ? activeRoom.id : ''} onSaveMedia={chatSaveMedia} resolveAvatar={chatAvatarImg} />
 
                                                         {/* コンポーザー（ChatGPT/Slack風の一体型）。スマホは全画面なのでホームバー分の余白を確保 */}
                                                         <div className="px-3 md:px-4 pt-1 pb-[max(env(safe-area-inset-bottom,0px),12px)] shrink-0">
@@ -11302,7 +11306,7 @@
                                     <article key={p.id} onClick={() => unread && boardMarkReadUpTo(p)} className={`relative bg-white rounded-2xl border p-4 md:p-5 transition-shadow ${p.important ? 'border-rose-200 border-l-[4px] border-l-rose-400' : p.authorRoot ? 'border-[#EAECF0] border-l-[4px] border-l-brand-300' : 'border-[#EAECF0]'} ${unread ? 'ring-1 ring-brand-200 shadow-[0_1px_6px_rgba(243,112,33,0.10)]' : 'shadow-[0_1px_2px_rgba(16,24,40,0.03)]'}`}>
                                         {unread && <span className="absolute -top-2 -left-2 min-w-[20px] h-5 px-1.5 flex items-center justify-center bg-brand-500 text-white text-[11px] font-bold rounded-full shadow z-10">1</span>}
                                         <div className="flex items-start gap-2.5">
-                                            <ChatAvatar name={authorName} size="sm" />
+                                            <ChatAvatar name={authorName} size="sm" img={chatAvatarImg(p.authorId)} />
                                             <div className="min-w-0 flex-1">
                                                 <div className="flex items-center gap-2 flex-wrap">
                                                     <span className="text-[14px] font-semibold text-[#111827]">{authorName}</span>

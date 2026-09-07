@@ -736,7 +736,15 @@
         };
 
         // 会話のメッセージ一覧（日付区切り・未読区切り・スタンプ・自動スクロール）
-        const ChatMessageList = ({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, onReply, stamps, onImageClick, readMembers, roomReads, resolveName, resolveShop, roomId }) => {
+        // 出力に影響するデータ系propだけ比較（コールバックの識別変化では再描画しない）。
+        // 入力欄でのタイピング（chatDraft更新）ごとに重いメッセージ一覧が再描画されてIME/変換が重くなるのを防ぐ。
+        const chatMsgListEqual = (a, b) => (
+            a.msgs === b.msgs && a.roomId === b.roomId && a.myId === b.myId &&
+            a.openReadTs === b.openReadTs && a.isRoot === b.isRoot &&
+            String(a.readMembers) === String(b.readMembers) &&
+            JSON.stringify(a.roomReads) === JSON.stringify(b.roomReads)
+        );
+        const ChatMessageList = React.memo(({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, onReply, stamps, onImageClick, readMembers, roomReads, resolveName, resolveShop, roomId }) => {
             // ルーム内の全画像ID（アルバム/ライトボックスのスライド用）と各IDの位置
             const allImgIds = []; (msgs || []).forEach(m => (m.imgIds || []).forEach(id => allImgIds.push(id)));
             const imgIndexOf = (id) => allImgIds.indexOf(id);
@@ -863,7 +871,7 @@
                     <div ref={endRef} />
                 </div>
             );
-        };
+        }, chatMsgListEqual);
 
         // 勉強会・イベントの「責任者」ユーザー選択（検索付きプルダウン）。トップレベル定義で再描画時の状態消失を防ぐ。
         const EvUserSelect = ({ value, name, users, onPick, onOpenChange, past }) => {
@@ -2365,7 +2373,16 @@
                             if (!list.some(x => x.id === m.id)) messages[rid] = [...list, m];
                         });
                     }
-                    setChatData({ rooms: Array.isArray(j.rooms) ? j.rooms : [], messages, reads: (j.reads && typeof j.reads === 'object') ? j.reads : {}, dir: (j.dir && typeof j.dir === 'object') ? { staff: Array.isArray(j.dir.staff) ? j.dir.staff : [] } : { staff: [] }, notes: (j.notes && typeof j.notes === 'object') ? j.notes : {}, configured: j.configured !== false, loaded: true });
+                    const serverReads = (j.reads && typeof j.reads === 'object') ? j.reads : {};
+                    setChatData(d => {
+                        // 自分の既読は「サーバー or 直近ローカル」の新しい方を採用（ポーリングで既読が巻き戻り＝未読復活するのを防ぐ）
+                        const myPrev = (d.reads || {})[chatMyId] || {};
+                        const myServer = serverReads[chatMyId] || {};
+                        const myMerged = { ...myServer };
+                        for (const rid in myPrev) myMerged[rid] = Math.max(Number(myPrev[rid]) || 0, Number(myServer[rid]) || 0);
+                        const reads = { ...serverReads, [chatMyId]: myMerged };
+                        return { rooms: Array.isArray(j.rooms) ? j.rooms : [], messages, reads, dir: (j.dir && typeof j.dir === 'object') ? { staff: Array.isArray(j.dir.staff) ? j.dir.staff : [] } : { staff: [] }, notes: (j.notes && typeof j.notes === 'object') ? j.notes : {}, configured: j.configured !== false, loaded: true };
+                    });
                 } catch { setChatData(d => ({ ...d, loaded: true })); }
             };
             const chatEnsuredRef = useRef('');
@@ -2447,7 +2464,10 @@
                 try { await chatPost({ action: 'noteDelete', roomId: chatRoomId, noteId, staffId: chatMyId, root: chatIsRoot }); await chatLoad(); } catch {}
             };
             const chatMarkRead = async (roomId) => {
-                try { await chatPost({ action: 'read', roomId, staffId: chatMyId, ts: Date.now() }); } catch {}
+                const ts = Date.now();
+                // 楽観更新：ローカルの既読を即進める（未読バッジ/区切りがすぐ消える。ポーリング待ちで残る問題を解消）
+                setChatData(d => ({ ...d, reads: { ...(d.reads || {}), [chatMyId]: { ...((d.reads || {})[chatMyId] || {}), [roomId]: ts } } }));
+                try { await chatPost({ action: 'read', roomId, staffId: chatMyId, ts }); } catch {}
             };
             const chatDeleteMsg = async (msgId) => {
                 if (!window.confirm('この投稿を削除しますか？')) return;

@@ -2281,6 +2281,15 @@
             const [chatMention, setChatMention] = useState(null);      // @メンション候補 {query, list:[{id,name}], index} or null
             const chatTaRef = useRef(null);                            // 本文textarea参照（メンション挿入後のカーソル復元）
             const chatSendingRef = useRef(false);                       // 二重送信ガード（同期・stateの遅延に依存しない）
+            // 検索結果クリック時：ルームを開いた後に該当メッセージまでスクロール＆ハイライト（描画待ちのため遅延）
+            const chatJumpToMsg = (id, tries) => {
+                if (!id) return; tries = tries || 0;
+                setTimeout(() => {
+                    const el = document.getElementById('chatmsg-' + id);
+                    if (el) { try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch { el.scrollIntoView(); } el.classList.add('chat-flash'); setTimeout(() => el.classList.remove('chat-flash'), 1600); }
+                    else if (tries < 8) chatJumpToMsg(id, tries + 1);   // まだ描画されていなければ再試行
+                }, tries === 0 ? 360 : 200);
+            };
             // チャットの書き込みを直列化（共有ブロブの read-modify-write 競合による「送信が消える」不具合対策）。
             // 送信/既読/ルーム作成/メンバー変更などの chat 書き込みを1本のPromiseチェーンで順番に実行する。
             const chatWriteChain = useRef(Promise.resolve());
@@ -10771,7 +10780,7 @@
                                     : <span className="text-[12px] text-[#667085] truncate">{lm ? `${lm.fromName ? lm.fromName + ': ' : ''}${lm.text || (lm.imgIds && lm.imgIds.length ? '📷 画像' : '')}` : roomSub(r)}</span>;
                                 return (
                                     <div key={r.id} className={`group/room w-full flex items-center gap-2.5 px-2 py-2 rounded-lg transition-colors ${active ? 'bg-brand-50' : 'hover:bg-[#F2F4F7]'}`}>
-                                        <button onClick={() => setChatRoomId(r.id)} className="flex items-center gap-2.5 min-w-0 flex-1 text-left">
+                                        <button onClick={() => { const jump = hit; setChatRoomId(r.id); if (q) { setChatListSearch(''); if (jump) chatJumpToMsg(jump.id); } try { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch {} }} className="flex items-center gap-2.5 min-w-0 flex-1 text-left">
                                             {roomIcon(r, active)}
                                             <div className="min-w-0 flex-1">
                                                 <div className="flex items-center gap-2"><span className={`text-[14px] truncate ${active ? 'font-semibold text-brand-700' : 'font-semibold text-[#111827]'}`}>{roomTitle(r)}</span><span className="text-[11px] text-[#98A2B3] ml-auto shrink-0">{lm ? relTime(lm.createdAt) : ''}</span></div>

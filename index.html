@@ -2248,8 +2248,10 @@
             // 本部(hq)は root権限だが、チャット/掲示板の表示は「管理者」ではなく本人名で行う（＝個人アカウント）。
             const authIsHq = isHqRole(authState.role);
             const chatMyId = (authState.root && !authIsHq) ? '__root__' : String(authState.staffId || authState.owner || '');
+            const [orgHq, setOrgHq] = useState([]); // 本部メンバー [{owner, name, staffId}]（accountmetaのrole==='hq'）。名前解決にも使う
             // 表示名は SalonOneロスターの本名（漢字フルネーム）を優先。staffName空/ログインID化け(staff691等)でも本名で表示。
-            const chatResolveName = (id, fallback) => { const sid = String(id || ''); const s = (soStaffs || []).find(x => String(x.id) === sid); if (s && s.name) return s.name; const d = ((chatData.dir && chatData.dir.staff) || []).find(x => String(x.id) === sid); if (d && d.name) return d.name; return fallback || ''; };
+            // 本部(hq)メンバー（チャットIDが owner か staffId）も名前解決の対象に含める。
+            const chatResolveName = (id, fallback) => { const sid = String(id || ''); const s = (soStaffs || []).find(x => String(x.id) === sid); if (s && s.name) return s.name; const d = ((chatData.dir && chatData.dir.staff) || []).find(x => String(x.id) === sid); if (d && d.name) return d.name; const h = (orgHq || []).find(x => String(x.staffId) === sid || String(x.owner) === sid); if (h && h.name) return h.name; return fallback || ''; };
             const chatMyName = (authState.root && !authIsHq) ? '管理者' : (chatResolveName(chatMyId, authState.staffName || authState.owner) || 'スタッフ');
             // 名前の横の店舗: 本人が設定したプロフィールの担当店舗（先頭）を優先。未設定はSalonOne所属。
             // ※表示時に解決（profileData読み出し）。ここでは呼ばない＝profileData未宣言時のTDZ回避。
@@ -2619,7 +2621,6 @@
             ];
             const [evData, setEvData] = useState({ sections: {}, configured: true, loaded: false });
             const [orgSearch, setOrgSearch] = useState('');
-            const [orgHq, setOrgHq] = useState([]); // 本部メンバー [{owner, name, staffId}]（accountmetaのrole==='hq'）
             // 組織図: 月選択＋その月に売上のあるスタッフ（SalonOne売上と同じ考え方）
             const [orgMonth, setOrgMonth] = useState(() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}`; });
             const [orgSales, setOrgSales] = useState({});   // { `${shopId}__${YYYY-MM}`: [{id,name,gross}] }
@@ -3415,9 +3416,9 @@
             useEffect(() => {
                 if (((currentPage === 'settlement' && stAdminOpen) || currentPage === 'settings') && stAccounts === null) stLoadAccounts();
             }, [currentPage, stAdminOpen]);
-            // 組織図/チャットを開いたら本部メンバー（accountmetaのrole==='hq'）を読み込む（DM相手表示名の解決にも使う・plan-storeは未認証GET）
+            // ログイン後に本部メンバー（accountmetaのrole==='hq'）を読み込む（組織図・チャットDM名・イベント参加者名の解決に使う・plan-storeは未認証GET）
             useEffect(() => {
-                if (currentPage !== 'org' && currentPage !== 'chat') return;
+                if (!authState.authenticated) return;
                 loadAcctMeta().then(meta => {
                     const raw = Object.entries(meta || {})
                         .filter(([, m]) => m && m.role === 'hq')
@@ -3428,7 +3429,7 @@
                     const list = [...byName.values()].sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
                     setOrgHq(list);
                 }).catch(() => {});
-            }, [currentPage]);
+            }, [authState.authenticated]);
             // 選択・月が変わったら選択店舗のデータを再取得
             useEffect(() => {
                 if (currentPage !== 'settlement') return;

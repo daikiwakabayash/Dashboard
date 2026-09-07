@@ -93,6 +93,22 @@ async function kvSet(key, value) {
   if (!r.ok) throw new Error(`KV set ${r.status}`);
   return true;
 }
+// Luaスクリプトをサーバー側でアトミックに実行（Upstash EVAL）。
+async function kvEval(script, keys, args) {
+  const r = await fetch(KV_URL(), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${KV_TOKEN()}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(['EVAL', script, String(keys.length), ...keys, ...args]),
+  });
+  if (!r.ok) throw new Error(`KV eval ${r.status}`);
+  const j = await r.json().catch(() => ({}));
+  return j.result;
+}
+// JSON配列キーに1要素をアトミックに追記し、末尾cap件へトリム（read-modify-writeの競合＝同時送信で消えるのを防ぐ）。
+const KV_APPEND_LUA = "local raw=redis.call('GET',KEYS[1]) local arr if raw then arr=cjson.decode(raw) else arr={} end arr[#arr+1]=cjson.decode(ARGV[1]) local cap=tonumber(ARGV[2]) if #arr>cap then local res={} local s=#arr-cap+1 for i=s,#arr do res[#res+1]=arr[i] end arr=res end redis.call('SET',KEYS[1],cjson.encode(arr)) return #arr";
+async function kvAppendJson(key, item, cap) {
+  return await kvEval(KV_APPEND_LUA, [key], [JSON.stringify(item), String(cap)]);
+}
 // 複数キーを1リクエストで取得（Upstash MGET）。索引を使わずルーム別キーをまとめて読むために使用。
 async function kvMGet(keys) {
   if (!keys || !keys.length) return [];
@@ -733,9 +749,14 @@ export default async function handler(req, res) {
           reactions: {},
           createdAt: new Date().toISOString(),
         };
-        const arr = (await getRoomMsgs(rid)).concat(rec).slice(-CHAT_MSG_CAP);
         const nextReads = { ...reads, [rec.fromStaffId]: { ...(reads[rec.fromStaffId] || {}), [rid]: Date.parse(rec.createdAt) } };
-        await saveRoomMsgs(rid, arr);                  // このルームのメッセージのみ書込（他ルーム送信と競合しない）
+        // このルームのメッセージのみ書込。KVはアトミック追記（同時送信でも消えない）。失敗時は読込→追記→書込へフォールバック。
+        if (hasKV) {
+          try { await kvAppendJson(CHAT_MSG_PREFIX + rid, rec, CHAT_MSG_CAP); }
+          catch { await saveRoomMsgs(rid, (await getRoomMsgs(rid)).concat(rec).slice(-CHAT_MSG_CAP)); }
+        } else {
+          await saveRoomMsgs(rid, (await getRoomMsgs(rid)).concat(rec).slice(-CHAT_MSG_CAP));
+        }
         await saveReads(nextReads);                    // 送信者の既読を更新（別キー）
         // プッシュ通知: グループ/DM/全社アナウンスの新着を対象者へ（店舗ルームはスパム回避のため送らない）
         const room = rooms.find(r => r && r.id === rid);

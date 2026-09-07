@@ -10921,7 +10921,7 @@
                                         <div className="w-9 md:hidden" /><span className="md:hidden w-10 h-1 rounded-full bg-ink-100" />
                                         <button onClick={() => setProfileView(null)} className="w-9 h-9 flex items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F2F4F7]"><X size={18} /></button>
                                     </div>
-                                    {pics.length > 0 && <div className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-[#F2F4F7] mb-2.5"><img src={chatImgSrc(pics[0])} className="w-full h-full object-cover" loading="lazy" alt="" /></div>}
+                                    {pics.length > 0 && <div className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-[#F2F4F7] mb-2.5"><img src={chatImgSrc(pics[0])} className="w-full h-full object-cover" style={{ objectPosition: (prof && prof.mainPos) || 'center' }} loading="lazy" alt="" /></div>}
                                     <div className="flex items-center gap-2 flex-wrap">
                                         {pics.length === 0 && <span className={`w-11 h-11 rounded-full ${chatAvatarColor(dispNm)} inline-flex items-center justify-center text-[17px] font-semibold`}>{String(dispNm || '？').charAt(0)}</span>}
                                         <span className="text-[18px] font-bold text-[#111827]">{dispNm}</span>
@@ -12121,7 +12121,7 @@
                                 setProfileEdit({
                                     pid, kind: p.kind || fallbackKind || 'therapist',
                                     nameKanji: p.nameKanji || fallbackName || '', nameKana: p.nameKana || '', bio: p.bio || '',
-                                    mainImg: p.mainImg || '', subImgs: Array.isArray(p.subImgs) ? [...p.subImgs] : [],
+                                    mainImg: p.mainImg || '', mainPos: p.mainPos || '', subImgs: Array.isArray(p.subImgs) ? [...p.subImgs] : [],
                                     sns: { instagram: '', x: '', youtube: '', tiktok: '', ...(p.sns || {}) },
                                     shops: Array.isArray(p.shops) ? [...p.shops] : [],
                                     birthday: p.birthday || '',
@@ -12167,7 +12167,7 @@
                                             if (!pics.length) return null;
                                             const sel = Math.min(Math.max(0, profPicIdx[pid] || 0), pics.length - 1);
                                             return (<>
-                                                <div className={`w-full aspect-[4/3] rounded-xl overflow-hidden bg-[#F2F4F7] mb-2.5 ${bday ? 'ring-2 ring-pink-300' : ''}`}><img src={chatImgSrc(pics[sel])} className="w-full h-full object-cover transition-opacity" loading="lazy" alt="" /></div>
+                                                <div className={`w-full aspect-[4/3] rounded-xl overflow-hidden bg-[#F2F4F7] mb-2.5 ${bday ? 'ring-2 ring-pink-300' : ''}`}><img src={chatImgSrc(pics[sel])} className="w-full h-full object-cover transition-opacity" style={{ objectPosition: (sel === 0 && prof.mainPos) ? prof.mainPos : 'center' }} loading="lazy" alt="" /></div>
                                                 {pics.length > 1 && <div className="flex gap-1.5 mb-3">{pics.map((id, i) => <button key={id} onClick={() => setProfPicIdx(m => ({ ...m, [pid]: i }))} className={`${big ? 'w-16 h-16' : 'w-12 h-12'} rounded-lg overflow-hidden bg-[#F2F4F7] transition ${i === sel ? 'ring-2 ring-brand-500' : 'opacity-60 hover:opacity-100'}`}><img src={chatImgSrc(id)} className="w-full h-full object-cover" loading="lazy" alt="" /></button>)}</div>}
                                             </>);
                                         })()}
@@ -12354,6 +12354,19 @@
                                                                     <p className="text-[11px] text-[#98A2B3] mt-1.5">タップして画像を選択（自動で縮小されます）</p>
                                                                 </div>
                                                             </div>
+                                                            {/* メイン写真の表示位置調整（プロフィールで切れる場合、使う範囲を選ぶ） */}
+                                                            {d.mainImg && (() => {
+                                                                const [px, py] = String(d.mainPos || '50% 50%').split(' ').map(s => parseInt(s) || 50);
+                                                                return (
+                                                                    <div className="mt-3 p-2.5 rounded-lg bg-[#F8F9FB] border border-[#EAECF0]">
+                                                                        <div className="text-[11px] font-bold text-[#667085] mb-1.5">表示位置の調整（プロフィールで切れる場合に、見せたい範囲へ）</div>
+                                                                        <div className="w-full aspect-[4/3] rounded-lg overflow-hidden bg-[#F2F4F7] border border-[#EAECF0] mb-2"><img src={chatImgSrc(d.mainImg)} className="w-full h-full object-cover" style={{ objectPosition: `${px}% ${py}%` }} alt="プレビュー" /></div>
+                                                                        <div className="flex items-center gap-2 mb-1.5"><span className="text-[10px] font-bold text-[#98A2B3] w-8 shrink-0">左右</span><input type="range" min="0" max="100" value={px} onChange={e => setD({ mainPos: `${e.target.value}% ${py}%` })} className="flex-1 accent-brand-500" /></div>
+                                                                        <div className="flex items-center gap-2"><span className="text-[10px] font-bold text-[#98A2B3] w-8 shrink-0">上下</span><input type="range" min="0" max="100" value={py} onChange={e => setD({ mainPos: `${px}% ${e.target.value}%` })} className="flex-1 accent-brand-500" /></div>
+                                                                        {d.mainPos && <button onClick={() => setD({ mainPos: '' })} className="mt-1.5 text-[11px] font-semibold text-[#98A2B3] hover:text-brand-600">中央に戻す</button>}
+                                                                    </div>
+                                                                );
+                                                            })()}
                                                         </div>
                                                         {/* 名前 */}
                                                         <div className="grid grid-cols-2 gap-2">

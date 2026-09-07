@@ -2516,6 +2516,13 @@
             // 本部(hq)メンバー（チャットIDが owner か staffId）も名前解決の対象に含める。
             const chatResolveName = (id, fallback) => { const sid = String(id || ''); const s = (soStaffs || []).find(x => String(x.id) === sid); if (s && s.name) return s.name; const d = ((chatData.dir && chatData.dir.staff) || []).find(x => String(x.id) === sid); if (d && d.name) return d.name; const h = (orgHq || []).find(x => String(x.staffId) === sid || String(x.owner) === sid); if (h && h.name) return h.name; return fallback || ''; };
             const chatMyName = (authState.root && !authIsHq) ? '管理者' : (chatResolveName(chatMyId, authState.staffName || authState.owner) || 'スタッフ');
+            // 画面に出すアカウント表示名。ログインID(staff691等)ではなく、登録された本名（プロフィールの漢字→SalonOneロスター→staffName）を優先。
+            const acctDisplayName = (authState.root && !authIsHq) ? '管理者' : (() => {
+                const sid = String(authState.staffId || '');
+                const p = sid && (profileData.profiles || {})[sid];
+                return (p && p.nameKanji) || (sid && chatResolveName(sid, '')) || authState.staffName || authState.owner || 'アカウント';
+            })();
+            const acctInitial = String(acctDisplayName || 'A').trim().charAt(0) || 'A';
             // 名前の横の店舗: 本人が設定したプロフィールの担当店舗（先頭）を優先。未設定はSalonOne所属。
             // ※表示時に解決（profileData読み出し）。ここでは呼ばない＝profileData未宣言時のTDZ回避。
             const chatResolveShop = (id, fallback) => { const p = (profileData.profiles || {})[String(id)]; return (p && Array.isArray(p.shops) && p.shops[0]) || fallback || ''; };
@@ -11000,7 +11007,7 @@
             return (
                 <div className="h-[100dvh] overflow-hidden bg-gradient-to-br from-ink-50 via-[#F8F9FB] to-brand-50/40 flex">
                     {/* Sidebar */}
-                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} authRoot={authState.root} authIsHq={authIsHq} authOwner={authState.owner} authRole={authRole} authStaffName={authState.staffName} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} chatUnread={chatUnreadTotal} boardUnread={boardUnreadTotal} eventsUnread={evUnreadTotal} mobileNavOpen={mobileNavOpen} setMobileNavOpen={setMobileNavOpen} />
+                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} authRoot={authState.root} authIsHq={authIsHq} authOwner={authState.owner} authRole={authRole} authStaffName={authState.staffName} authDisplayName={acctDisplayName} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} chatUnread={chatUnreadTotal} boardUnread={boardUnreadTotal} eventsUnread={evUnreadTotal} mobileNavOpen={mobileNavOpen} setMobileNavOpen={setMobileNavOpen} />
                     {/* ルーム削除の確認（スマホ/PC共通の確実なポップアップ） */}
                     {chatDeleteAsk && (
                         <div className="fixed inset-0 z-[120] bg-black/45 flex items-center justify-center p-4" onClick={() => setChatDeleteAsk(null)}>
@@ -11134,8 +11141,8 @@
                             </button>
                             <img src="/logo.png" alt="NAORU" className="h-8 w-auto object-contain" />
                             <button onClick={() => setMobileAcctOpen(true)} className="ml-auto flex items-center gap-2 pl-1 pr-2.5 py-1 rounded-full border border-ink-100 bg-white active:scale-95 transition">
-                                <span className="w-7 h-7 rounded-full bg-gradient-to-br from-ink-600 to-ink-800 text-white flex items-center justify-center font-semibold text-[12px] shrink-0">{((authState.root && !authIsHq) ? '管' : (authState.staffName || authState.owner || 'A')).trim().charAt(0)}</span>
-                                <span className="text-[12px] font-semibold text-ink-700 max-w-[90px] truncate">{(authState.root && !authIsHq) ? '管理者' : (authState.staffName || authState.owner || 'アカウント')}</span>
+                                <span className="w-7 h-7 rounded-full bg-gradient-to-br from-ink-600 to-ink-800 text-white flex items-center justify-center font-semibold text-[12px] shrink-0">{acctInitial}</span>
+                                <span className="text-[12px] font-semibold text-ink-700 max-w-[90px] truncate">{acctDisplayName}</span>
                                 <ChevronDown size={14} className="text-ink-300" />
                             </button>
                         </div>
@@ -11145,9 +11152,9 @@
                                 <div className="bg-white w-full rounded-t-2xl shadow-2xl pb-[max(env(safe-area-inset-bottom),12px)]" onClick={e => e.stopPropagation()}>
                                     <div className="flex justify-center pt-2.5"><span className="w-9 h-1 rounded-full bg-ink-100" /></div>
                                     <div className="flex items-center gap-3 px-5 py-4 border-b border-[#F2F4F7]">
-                                        <span className="w-11 h-11 rounded-xl bg-gradient-to-br from-ink-600 to-ink-800 text-white flex items-center justify-center font-semibold text-[16px] shrink-0 shadow-sm">{((authState.root && !authIsHq) ? '管' : (authState.staffName || authState.owner || 'A')).trim().charAt(0)}</span>
+                                        <span className="w-11 h-11 rounded-xl bg-gradient-to-br from-ink-600 to-ink-800 text-white flex items-center justify-center font-semibold text-[16px] shrink-0 shadow-sm">{acctInitial}</span>
                                         <div className="min-w-0">
-                                            <div className="text-[15px] font-bold text-ink-900 truncate">{(authState.root && !authIsHq) ? '管理者' : (authState.staffName || authState.owner || 'アカウント')}</div>
+                                            <div className="text-[15px] font-bold text-ink-900 truncate">{acctDisplayName}</div>
                                             <div className="text-[12px] text-[#98A2B3]">{authIsHq ? '本部・全店舗' : authState.root ? '管理者・全店舗' : authRole === 'owner' ? 'オーナー' : authRole === 'staff' ? 'スタッフ' : 'ログイン中'}</div>
                                         </div>
                                     </div>
@@ -21865,7 +21872,9 @@
             );
         };
 
-        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authIsHq = false, authOwner = '', authRole = 'root', authStaffName = '', collapsed = false, setCollapsed = () => {}, chatUnread = 0, boardUnread = 0, eventsUnread = 0, mobileNavOpen = false, setMobileNavOpen = () => {} }) => {
+        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authIsHq = false, authOwner = '', authRole = 'root', authStaffName = '', authDisplayName = '', collapsed = false, setCollapsed = () => {}, chatUnread = 0, boardUnread = 0, eventsUnread = 0, mobileNavOpen = false, setMobileNavOpen = () => {} }) => {
+            const acctName = authDisplayName || ((authRoot && !authIsHq) ? '管理者' : (authStaffName || authOwner || 'アカウント'));
+            const acctInit = String(acctName || 'A').trim().charAt(0) || 'A';
             // カテゴリー別にグルーピング（見やすさ・高級感のため）
             const navSections = [
                 // ⚠️ コミュニケーション4機能は当面「本部(hq)・管理者(root)」のみに表示（rootOnly）。
@@ -22005,9 +22014,9 @@
                         <div className={`mt-auto pt-4 border-t border-[#EAECF0] space-y-1 ${collapsed ? 'px-0' : ''}`}>
                             {!collapsed && (
                             <div className="flex items-center gap-2.5 px-2 py-2">
-                                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-ink-600 to-ink-800 text-white flex items-center justify-center font-semibold text-[13px] shrink-0 shadow-sm">{((authRoot && !authIsHq) ? '管' : (authStaffName || authOwner || 'A')).trim().charAt(0)}</div>
+                                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-ink-600 to-ink-800 text-white flex items-center justify-center font-semibold text-[13px] shrink-0 shadow-sm">{acctInit}</div>
                                 <div className="min-w-0">
-                                    <div className="text-[13px] font-semibold text-[#111827] truncate leading-tight">{(authRoot && !authIsHq) ? '管理者' : (authStaffName || authOwner || 'アカウント')}</div>
+                                    <div className="text-[13px] font-semibold text-[#111827] truncate leading-tight">{acctName}</div>
                                     <div className="text-[11px] text-[#98A2B3] leading-tight">{authIsHq ? '本部・全店舗' : authRoot ? '全店舗' : 'ログイン中'}</div>
                                 </div>
                             </div>
@@ -22071,8 +22080,8 @@
                                     <button onClick={() => setMobileNavOpen(false)} className="w-9 h-9 flex items-center justify-center rounded-lg text-ink-400 hover:bg-ink-50"><X size={20} /></button>
                                 </div>
                                 <div className="flex items-center gap-2.5 px-4 py-3 border-b border-ink-100">
-                                    <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-ink-600 to-ink-800 text-white flex items-center justify-center font-semibold text-[14px] shrink-0 shadow-sm">{((authRoot && !authIsHq) ? '管' : (authStaffName || authOwner || 'A')).trim().charAt(0)}</div>
-                                    <div className="min-w-0"><div className="text-[14px] font-bold text-ink-900 truncate leading-tight">{(authRoot && !authIsHq) ? '管理者' : (authStaffName || authOwner || 'アカウント')}</div><div className="text-[11px] text-[#98A2B3] leading-tight">{authIsHq ? '本部・全店舗' : authRoot ? '管理者・全店舗' : authRole === 'owner' ? 'オーナー' : authRole === 'staff' ? 'スタッフ' : 'ログイン中'}</div></div>
+                                    <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-ink-600 to-ink-800 text-white flex items-center justify-center font-semibold text-[14px] shrink-0 shadow-sm">{acctInit}</div>
+                                    <div className="min-w-0"><div className="text-[14px] font-bold text-ink-900 truncate leading-tight">{acctName}</div><div className="text-[11px] text-[#98A2B3] leading-tight">{authIsHq ? '本部・全店舗' : authRoot ? '管理者・全店舗' : authRole === 'owner' ? 'オーナー' : authRole === 'staff' ? 'スタッフ' : 'ログイン中'}</div></div>
                                 </div>
                                 <nav className="flex-1 overflow-y-auto px-3 py-3">
                                     {visSections.map((sec, si) => (

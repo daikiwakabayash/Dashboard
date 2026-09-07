@@ -789,6 +789,29 @@ export default async function handler(req, res) {
         await save({ notes: { ...notes, [rid]: arr } });
         return res.status(200).json({ ok: true });
       }
+      // 管理: あるユーザーID(fromId)のチャット所属・発言・既読を別ID(toId)へ付け替える（root専用）。
+      // 重複アカウント削除時に、旧IDで参加/受信していたルームを現アカウントに引き継ぐための復旧用。
+      if (action === 'remapUser' && body.root && body.fromId && body.toId) {
+        const from = String(body.fromId), to = String(body.toId);
+        let changed = 0;
+        const nextRooms = rooms.map(r => {
+          if (!r) return r;
+          const mem = (Array.isArray(r.members) ? r.members : []).map(String);
+          const hit = mem.includes(from);
+          const nm = [...new Set(mem.map(x => (x === from ? to : x)))];
+          const cb = String(r.createdBy) === from ? to : r.createdBy;
+          if (hit || cb !== r.createdBy) changed++;
+          return { ...r, members: nm, createdBy: cb };
+        });
+        const nextMessages = {};
+        for (const [rid, arr] of Object.entries(messages)) {
+          nextMessages[rid] = (Array.isArray(arr) ? arr : []).map(m => (m && String(m.fromStaffId) === from ? { ...m, fromStaffId: to } : m));
+        }
+        const nextReads = { ...reads };
+        if (nextReads[from]) { nextReads[to] = { ...(nextReads[to] || {}), ...nextReads[from] }; delete nextReads[from]; }
+        await blobSet(CHAT_KEY, { rooms: nextRooms, messages: nextMessages, reads: nextReads, dir, notes }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, remapped: { from, to }, roomsChanged: changed });
+      }
 
       return res.status(400).json({ ok: false, error: 'invalid chat action' });
     } catch (err) {

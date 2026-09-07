@@ -17394,14 +17394,23 @@
                             const list = votes.filter(v => !rankPeriod || v.period === rankPeriod);
                             const map = {};
                             for (const v of list) {
-                                const k = String(v.toStaffId);
-                                if (!map[k]) map[k] = { id: k, name: v.toStaffName || '', shop: v.toShop || '', points: 0, voters: [] };
+                                // 同一人物は氏名で集約（SalonOneは店舗ごとにstaffIdが分かれるため、
+                                // 例: 宇良大地が千種院と八事院の2枠 → 合算して1人にまとめる）。
+                                const nm = String(v.toStaffName || '').replace(/\s/g, '');
+                                const k = nm || ('id:' + String(v.toStaffId));
+                                if (!map[k]) map[k] = { id: String(v.toStaffId), name: v.toStaffName || '', shop: v.toShop || '', points: 0, voters: [], _shopPts: {} };
                                 map[k].points += 1;
                                 if (v.toStaffName) map[k].name = v.toStaffName;
-                                if (v.toShop) map[k].shop = v.toShop;
+                                const sh = v.toShop || '';
+                                if (sh) map[k]._shopPts[sh] = (map[k]._shopPts[sh] || 0) + 1;
                                 map[k].voters.push({ name: resolveVoterName(v), shop: v.fromShop || '', comment: v.comment || '', period: v.period });
                             }
-                            return Object.values(map).sort((a, b) => b.points - a.points || String(a.name).localeCompare(String(b.name), 'ja'));
+                            // 代表店舗＝最も得票の多い店舗（例: 千種8 > 八事2 → 千種）。
+                            return Object.values(map).map(e => {
+                                let bestShop = e.shop, best = -1;
+                                for (const [s, p] of Object.entries(e._shopPts)) { if (p > best) { best = p; bestShop = s; } }
+                                const { _shopPts, ...rest } = e; return { ...rest, shop: bestShop || e.shop };
+                            }).sort((a, b) => b.points - a.points || String(a.name).localeCompare(String(b.name), 'ja'));
                         })();
                         // 相手候補: その店舗の【在籍セラピスト全員】。売上0でも感謝は送れるべきなので売上フィルタはしない。
                         // ソース＝在籍ロスター(soStaffs) ＋ 共有ディレクトリ(他店/SSOスコープ外の補完) ＋ 当月稼働(by_staff) をマージ。

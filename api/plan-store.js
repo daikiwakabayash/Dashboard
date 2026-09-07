@@ -786,6 +786,24 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, room: { ...room, ...patch } });
       }
 
+      // メッセージをルーム上部に固定（アナウンス）／解除。room.pinned にスナップショットを保持。
+      if (action === 'pinMsg' && body.roomId) {
+        const rid = String(body.roomId);
+        const room = rooms.find(r => r && r.id === rid);
+        if (!room) return res.status(400).json({ ok: false, error: 'no_room' });
+        const p = body.pinned;
+        const pinned = p ? {
+          id: String(p.id || '').slice(0, 40),
+          text: String(p.text || '').slice(0, 300),
+          fromName: String(p.fromName || '').slice(0, 80),
+          by: String(body.staffId || '').slice(0, 64),
+          createdAt: String(p.createdAt || '').slice(0, 40) || new Date().toISOString(),
+        } : null;
+        const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, pinned } : r);
+        await save({ rooms: nextRooms });
+        return res.status(200).json({ ok: true, pinned });
+      }
+
       // メッセージ送信（画像は先に uploadImage で入れて imgIds を渡す）
       if (action === 'send' && body.roomId && body.msg) {
         const rid = String(body.roomId);

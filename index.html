@@ -763,6 +763,9 @@
             const allImgIds = []; (msgs || []).forEach(m => (m.imgIds || []).forEach(id => allImgIds.push(id)));
             const imgIndexOf = (id) => allImgIds.indexOf(id);
             const endRef = React.useRef(null);
+            const scrollRef = React.useRef(null);   // スクロールコンテナ
+            const contentRef = React.useRef(null);  // メッセージ内容ラッパー（高さ変化を監視）
+            const stickRef = React.useRef(true);     // 「最下部に張り付く」状態か（ユーザーが上を見ている間は false）
             const lenRef = React.useRef(-1);
             const [pickFor, setPickFor] = React.useState(null);
             const [readOpen, setReadOpen] = React.useState(null);   // 既読者ポップオーバーを開いているメッセージID
@@ -772,12 +775,15 @@
             const openMenu = (id, el) => { let up = true; try { const r = el.getBoundingClientRect(); up = r.top > (window.innerHeight * 0.42); } catch {} setMenuDir(up ? 'up' : 'down'); setMenuFor(id); };
             const [readDir, setReadDir] = React.useState('up');     // 既読ポップの開く向き（上部メッセージは下向きにしてはみ出し防止）
             const calcDir = (el) => { try { const r = el.getBoundingClientRect(); return r.top > (window.innerHeight * 0.42) ? 'up' : 'down'; } catch { return 'up'; } };
-            // 最下部へ。スクロールコンテナの scrollTop を直接最大化する方式（scrollIntoView より確実・即時）。
+            // 最下部へ（コンテナの scrollTop を直接最大化＝即時・確実。既定はアニメ無しで“ガタつき”を防ぐ）。
             const scrollToEnd = React.useCallback((smooth) => {
-                const el = endRef.current; if (!el) return;
-                const c = el.parentElement; // メッセージ一覧のスクロールコンテナ
-                if (c && c.scrollHeight != null) { try { c.scrollTo ? c.scrollTo({ top: c.scrollHeight, behavior: smooth ? 'smooth' : 'auto' }) : (c.scrollTop = c.scrollHeight); return; } catch {} }
-                try { el.scrollIntoView({ block: 'end', behavior: smooth ? 'smooth' : 'auto' }); } catch {}
+                const c = scrollRef.current || (endRef.current && endRef.current.parentElement);
+                if (!c) return;
+                try { if (smooth && c.scrollTo) c.scrollTo({ top: c.scrollHeight, behavior: 'smooth' }); else c.scrollTop = c.scrollHeight; } catch { try { c.scrollTop = c.scrollHeight; } catch {} }
+            }, []);
+            const isNearBottom = React.useCallback(() => {
+                const c = scrollRef.current; if (!c) return true;
+                return c.scrollHeight - c.scrollTop - c.clientHeight < 80;
             }, []);
             // リプライ元へジャンプ（引用タップ）。該当メッセージへスクロールして一瞬ハイライト（LINE同様）。
             const scrollToMsg = React.useCallback((id) => {
@@ -788,37 +794,36 @@
                 el.classList.add('chat-flash');
                 setTimeout(() => el.classList.remove('chat-flash'), 1600);
             }, []);
-            // 新着（件数変化）で一番下へ
-            React.useEffect(() => { if (msgs.length !== lenRef.current) { lenRef.current = msgs.length; scrollToEnd(false); } }, [msgs.length]);
-            // ルームを開いたら必ず最新（一番下）へスクロール（LINEと同じ）。
-            // useLayoutEffect＝描画前に最下部へ置くので「一瞬上が見える」チラつきが無い。
-            // アバター/画像/名前解決で高さが後から変わるため、複数回＋描画後(rAF)にも実行して確実に最下部へ。
-            React.useLayoutEffect(() => {
-                lenRef.current = msgs.length;
-                scrollToEnd(false); // 描画前に即・最下部
-            }, [roomId]);
-            // 開いた直後の約2.5秒は「最下部にピン留め」し続ける（アバター/画像/名前解決で高さが
-            // 後から伸びても確実に一番下に到達）。ユーザーが自分で上へスクロールしたら即解除。
+            // 新着（件数変化）：最下部に張り付いている時だけ追従（読んでいる途中なら動かさない）。
             React.useEffect(() => {
-                const c = endRef.current && endRef.current.parentElement;
-                if (!c) return;
-                let stopped = false;
-                const pin = () => { if (!stopped) { try { c.scrollTop = c.scrollHeight; } catch {} } };
-                pin();
-                requestAnimationFrame(pin);
-                const iv = setInterval(pin, 80);
-                const onUser = () => { if (c.scrollHeight - c.scrollTop - c.clientHeight > 140) { stopped = true; clearInterval(iv); } };
-                c.addEventListener('wheel', onUser, { passive: true });
-                c.addEventListener('touchmove', onUser, { passive: true });
-                const done = setTimeout(() => { stopped = true; clearInterval(iv); }, 2500);
-                return () => { stopped = true; clearInterval(iv); clearTimeout(done); c.removeEventListener('wheel', onUser); c.removeEventListener('touchmove', onUser); };
+                if (msgs.length !== lenRef.current) {
+                    lenRef.current = msgs.length;
+                    if (stickRef.current) scrollToEnd(false); // 最下部にいる時だけ追従（履歴閲覧中は動かさない）
+                }
+            }, [msgs.length]);
+            // ルームを開いたら最新（最下部）へ。描画前(useLayoutEffect)に置くのでチラつかない。
+            React.useLayoutEffect(() => {
+                stickRef.current = true;
+                lenRef.current = msgs.length;
+                scrollToEnd(false);
+            }, [roomId]);
+            // スクロール位置を監視し「最下部に居るか」を記録（張り付き判定）。
+            const onScroll = React.useCallback(() => { stickRef.current = isNearBottom(); }, [isNearBottom]);
+            // 内容の高さが後から変わっても（画像/アバター/名前解決）＝“張り付き中だけ”静かに最下部へ。
+            // ResizeObserver は「実際に高さが変わった時」だけ発火するので、80msポーリングのようなガタつきが無い。
+            React.useEffect(() => {
+                const content = contentRef.current; if (!content || typeof ResizeObserver === 'undefined') return;
+                const ro = new ResizeObserver(() => { if (stickRef.current) scrollToEnd(false); });
+                ro.observe(content);
+                return () => ro.disconnect();
             }, [roomId]);
             const fmtTime = (iso) => { const d = new Date(iso); const now = new Date(); const hm = `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; return d.toDateString() === now.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`; };
             const WD = ['日', '月', '火', '水', '木', '金', '土'];
             const fmtDay = (iso) => { const d = new Date(iso); const now = new Date(); const t = new Date(now); const y = new Date(now); y.setDate(now.getDate() - 1); if (d.toDateString() === t.toDateString()) return '今日'; if (d.toDateString() === y.toDateString()) return '昨日'; return `${d.getMonth() + 1}月${d.getDate()}日(${WD[d.getDay()]})`; };
             let lastDay = ''; let unreadShown = false;
             return (
-                <div className="flex-1 overflow-y-auto px-2 md:px-3 py-3" style={{ background: '#FFFFFF' }}>
+                <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto px-2 md:px-3 py-3" style={{ background: '#FFFFFF', overscrollBehavior: 'contain' }}>
+                  <div ref={contentRef}>
                     {msgs.length === 0 && <div className="text-center text-[#98A2B3] text-sm py-16">まだメッセージはありません。<br />最初のひとことを送ってみましょう。</div>}
                     {msgs.map((m) => {
                         const dayKey = new Date(m.createdAt).toDateString();
@@ -945,6 +950,7 @@
                         );
                     })}
                     <div ref={endRef} />
+                  </div>
                 </div>
             );
         }, chatMsgListEqual);

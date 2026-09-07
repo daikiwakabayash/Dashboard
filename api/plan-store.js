@@ -434,7 +434,7 @@ export default async function handler(req, res) {
         const p = body.profile;
         const clean = {
           pid,
-          kind: p.kind === 'owner' ? 'owner' : 'therapist',
+          kind: (p.kind === 'owner' || p.kind === 'hq') ? p.kind : 'therapist',
           nameKanji: String(p.nameKanji || '').slice(0, 60),
           nameKana: String(p.nameKana || '').slice(0, 60),
           bio: String(p.bio || '').slice(0, 2000),

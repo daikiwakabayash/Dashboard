@@ -10700,15 +10700,21 @@
                             const lastMsg = (r) => { const a = chatData.messages[r.id] || []; return a[a.length - 1] || null; };
                             const relTime = (iso) => { if (!iso) return ''; const d = new Date(iso), now = new Date(); const diff = (now - d) / 1000; if (diff < 60) return 'たった今'; if (diff < 3600) return `${Math.floor(diff / 60)}分前`; if (d.toDateString() === now.toDateString()) return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; const y = new Date(now); y.setDate(now.getDate() - 1); if (d.toDateString() === y.toDateString()) return '昨日'; return `${d.getMonth() + 1}/${d.getDate()}`; };
                             const q = chatListSearch.trim();
-                            const ql = q.toLowerCase();
-                            // 検索: ルーム名/相手名に加え、ルーム内の全メッセージ本文・送信者名も対象（LINE風の候補表示）。
+                            // 検索の正規化：全角↔半角(NFKC)・大文字小文字・カタカナ→ひらがな を吸収して拾いやすくする。
+                            const chatNorm = (s) => { let t = String(s || '').normalize('NFKC').toLowerCase(); t = t.replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60)); return t; };
+                            const ql = chatNorm(q);
+                            // 検索: ルーム名/相手名に加え、ルーム内の全メッセージ本文・送信者名・添付ファイル名も対象（LINE風の候補表示）。
                             const searchHit = (r) => {
                                 if (!q) return null;
                                 const msgs = chatData.messages[r.id] || [];
-                                for (let i = msgs.length - 1; i >= 0; i--) { const m = msgs[i]; const txt = String(m.text || ''); if (txt.toLowerCase().includes(ql) || String(m.fromName || '').toLowerCase().includes(ql)) return m; }
+                                for (let i = msgs.length - 1; i >= 0; i--) {
+                                    const m = msgs[i];
+                                    const hay = chatNorm(m.text) + ' ' + chatNorm(m.fromName) + ' ' + (Array.isArray(m.media) ? m.media.map(x => chatNorm(x && x.name)).join(' ') : '') + ' ' + (m.replyTo ? chatNorm(m.replyTo.text) : '');
+                                    if (hay.includes(ql)) return m;
+                                }
                                 return null;
                             };
-                            const matchRoom = (r) => !q || roomTitle(r).toLowerCase().includes(ql) || (r.name || '').toLowerCase().includes(ql) || !!searchHit(r);
+                            const matchRoom = (r) => !q || chatNorm(roomTitle(r)).includes(ql) || chatNorm(r.name).includes(ql) || !!searchHit(r);
                             // メッセージのある最新のルームを上に（LINE風）。未使用ルーム（メッセージ無し）は下へ・名前順。
                             const lastMsgTs = (r) => { const arr = chatData.messages[r.id] || []; const m = arr[arr.length - 1]; return m ? (Date.parse(m.createdAt || '') || 0) : 0; };
                             const sortByActivity = (arr) => arr.slice().sort((a, b) => { const ta = lastMsgTs(a), tb = lastMsgTs(b); if ((tb > 0) !== (ta > 0)) return tb > 0 ? 1 : -1; if (tb !== ta) return tb - ta; return String(roomTitle(a) || '').localeCompare(String(roomTitle(b) || ''), 'ja'); });

@@ -784,13 +784,25 @@
             }, []);
             // 新着（件数変化）で一番下へ
             React.useEffect(() => { if (msgs.length !== lenRef.current) { lenRef.current = msgs.length; scrollToEnd(false); } }, [msgs.length]);
-            // ルームを開いたら必ず最新（一番下）へスクロール（LINEと同じ）。画像読み込みで高さが変わるため複数回実行。
+            // ルームを開いたら必ず最新（一番下）へスクロール（LINEと同じ）。
+            // アバター/画像/名前解決で高さが後から変わるため、複数回＋描画後(rAF)に実行して確実に最下部へ。
             React.useEffect(() => {
                 lenRef.current = msgs.length;
-                scrollToEnd(false);
-                const t1 = setTimeout(() => scrollToEnd(false), 60);
-                const t2 = setTimeout(() => scrollToEnd(false), 250);
-                return () => { clearTimeout(t1); clearTimeout(t2); };
+                requestAnimationFrame(() => { scrollToEnd(false); requestAnimationFrame(() => scrollToEnd(false)); });
+                const ts = [30, 120, 300, 600, 1000, 1600].map(ms => setTimeout(() => scrollToEnd(false), ms));
+                return () => ts.forEach(clearTimeout);
+            }, [roomId]);
+            // ルーム内の画像が読み込まれて高さが変わったら、最下部付近にいる場合のみ追従して最下部へ。
+            React.useEffect(() => {
+                const root = endRef.current && endRef.current.parentElement;
+                if (!root) return;
+                const onLoad = (e) => {
+                    if (!e.target || e.target.tagName !== 'IMG') return;
+                    const nearBottom = root.scrollHeight - root.scrollTop - root.clientHeight < 220;
+                    if (nearBottom) scrollToEnd(false);
+                };
+                root.addEventListener('load', onLoad, true);
+                return () => root.removeEventListener('load', onLoad, true);
             }, [roomId]);
             const fmtTime = (iso) => { const d = new Date(iso); const now = new Date(); const hm = `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; return d.toDateString() === now.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`; };
             const WD = ['日', '月', '火', '水', '木', '金', '土'];
@@ -878,6 +890,8 @@
                                                             {(mine || isRoot) && <button onClick={() => onDelete(m.id)} title={mine ? '送信を取り消す' : '削除'} className="w-7 h-7 flex items-center justify-center rounded-full text-[#98A2B3] hover:text-rose-600 hover:bg-[#F2F4F7] transition"><Trash2 size={13} /></button>}
                                                         </div>
                                                     </div>
+                                                    {/* モバイル用スタンプ起点（PCはホバーバー。iOSは長押し=本文選択なので専用ボタンが必要） */}
+                                                    <button onClick={() => setPickFor(pickFor === m.id ? null : m.id)} className={`md:hidden shrink-0 self-end mb-0.5 w-6 h-6 flex items-center justify-center rounded-full border border-[#EAECF0] bg-white text-[13px] leading-none text-[#98A2B3] active:scale-90 active:bg-[#F2F4F7] transition ${pickFor === m.id ? 'ring-2 ring-brand-200 text-brand-500' : ''}`} aria-label="スタンプ">☺️</button>
                                                     {meta}
                                                 </div>
                                                 {/* 画像（吹き出しの下・LINE風に独立表示） */}
@@ -911,7 +925,7 @@
                                                                 </div>
                                                             );
                                                         })}
-                                                        {pickFor === m.id && <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[#F8F9FB] border border-[#EAECF0]">{stamps.map(s => <button key={s} onClick={() => { onReact(m.id, s); setPickFor(null); }} className="text-base hover:scale-125 transition-transform leading-none">{s}</button>)}</span>}
+                                                        {pickFor === m.id && <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded-full bg-white border border-[#EAECF0] shadow-sm overflow-x-auto no-scrollbar max-w-[248px]">{stamps.map(s => <button key={s} onClick={() => { onReact(m.id, s); setPickFor(null); }} className="shrink-0 w-7 h-7 flex items-center justify-center text-[19px] leading-none rounded-full active:scale-90 active:bg-[#F2F4F7] hover:bg-[#F2F4F7] transition">{s}</button>)}</span>}
                                                     </div>
                                                 )}
                                             </div>
@@ -2611,7 +2625,11 @@
                     setChatNoteDraft(''); setChatNoteImgs([]); setChatNoteEditId(null); await chatLoad();
                 } catch {}
             };
-            const chatNoteEditStart = (n) => { setChatNoteEditId(n.id); setChatNoteDraft(n.text || ''); setChatNoteImgs((n.imgIds || []).map(id => ({ id, dataUrl: chatImgCache[id] || chatImgSrc(id) }))); };
+            const chatNoteEditStart = (n) => {
+                setChatNoteEditId(n.id); setChatNoteDraft(n.text || ''); setChatNoteImgs((n.imgIds || []).map(id => ({ id, dataUrl: chatImgCache[id] || chatImgSrc(id) })));
+                // 編集フォームは上部にあるため、確実に見える位置へスクロール＋フォーカス（PCで「編集できない」ように見える問題対策）
+                requestAnimationFrame(() => { try { const ta = document.getElementById('chat-note-input'); if (ta) { ta.scrollIntoView({ block: 'center', behavior: 'smooth' }); ta.focus(); } } catch {} });
+            };
             const chatNoteEditCancel = () => { setChatNoteEditId(null); setChatNoteDraft(''); setChatNoteImgs([]); };
             const chatNoteReact = async (noteId, emoji) => {
                 const rid = chatRoomId, uid = String(chatMyId);
@@ -11255,7 +11273,7 @@
                                                     {/* 作成 */}
                                                     <div className="px-4 pt-3 pb-2 border-b border-[#F2F4F7] shrink-0">
                                                         {chatNoteImgs.length > 0 && <div className="flex gap-2 flex-wrap mb-2">{chatNoteImgs.map((s, i) => <div key={s.id || i} className="relative"><img src={s.dataUrl} className="w-14 h-14 rounded-lg object-cover border border-[#EAECF0]" alt="" /><button onClick={() => setChatNoteImgs(prev => prev.filter((_, j) => j !== i))} className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-[#111827] text-white rounded-full flex items-center justify-center"><X size={11} /></button></div>)}</div>}
-                                                        <textarea value={chatNoteDraft} onChange={e => setChatNoteDraft(e.target.value)} rows={2} placeholder="共有メモを残す（決定事項・リンク・持ち物など）" className="w-full resize-none rounded-lg border border-[#EAECF0] bg-white px-3 py-2 text-[13px] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
+                                                        <textarea id="chat-note-input" value={chatNoteDraft} onChange={e => setChatNoteDraft(e.target.value)} rows={2} placeholder="共有メモを残す（決定事項・リンク・持ち物など）" className="w-full resize-none rounded-lg border border-[#EAECF0] bg-white px-3 py-2 text-[13px] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
                                                         <div className="flex items-center gap-1 mt-1.5">
                                                             {chatNoteEditId && <span className="text-[11px] font-bold text-brand-600 mr-1">編集中</span>}
                                                             <label className="w-8 h-8 flex items-center justify-center rounded-md text-[#667085] hover:bg-[#F2F4F7] cursor-pointer transition" title="画像を添付"><ImageIcon size={17} /><input type="file" accept="image/*" multiple className="hidden" onChange={async e => { const files = [...(e.target.files || [])].slice(0, 6); e.target.value = ''; for (const f of files) { const up = await chatUploadImage(f); if (up) { chatImgCache[up.id] = up.dataUrl; setChatNoteImgs(prev => [...prev, up]); } } }} /></label>
@@ -11299,8 +11317,8 @@
                                                                             </div>
                                                                         );
                                                                     })}
-                                                                    <button onClick={() => setChatNotePick(chatNotePick === n.id ? null : n.id)} className="w-6 h-6 flex items-center justify-center rounded-full text-[13px] leading-none text-[#98A2B3] hover:bg-[#F2F4F7] transition" title="スタンプを追加">😊</button>
-                                                                    {chatNotePick === n.id && <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[#F8F9FB] border border-[#EAECF0]">{CHAT_STAMPS.map(s => <button key={s} onClick={() => { chatNoteReact(n.id, s); setChatNotePick(null); }} className="text-base hover:scale-125 transition-transform leading-none">{s}</button>)}</span>}
+                                                                    <button onClick={() => setChatNotePick(chatNotePick === n.id ? null : n.id)} className={`inline-flex items-center gap-1 h-[22px] px-2 rounded-full border text-[11px] font-bold leading-none transition ${chatNotePick === n.id ? 'border-brand-300 bg-brand-50 text-brand-600' : 'border-[#EAECF0] bg-white text-[#667085] hover:bg-[#F8F9FB]'}`} title="スタンプを追加"><span className="text-[13px] leading-none">☺️</span>スタンプ</button>
+                                                                    {chatNotePick === n.id && <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded-full bg-white border border-[#EAECF0] shadow-sm overflow-x-auto no-scrollbar max-w-[248px]">{CHAT_STAMPS.map(s => <button key={s} onClick={() => { chatNoteReact(n.id, s); setChatNotePick(null); }} className="shrink-0 w-7 h-7 flex items-center justify-center text-[19px] leading-none rounded-full active:scale-90 active:bg-[#F2F4F7] hover:bg-[#F2F4F7] transition">{s}</button>)}</span>}
                                                                 </div>
                                                             </div>
                                                         ); })}

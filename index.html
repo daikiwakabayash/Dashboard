@@ -3415,14 +3415,17 @@
             useEffect(() => {
                 if (((currentPage === 'settlement' && stAdminOpen) || currentPage === 'settings') && stAccounts === null) stLoadAccounts();
             }, [currentPage, stAdminOpen]);
-            // 組織図を開いたら本部メンバー（accountmetaのrole==='hq'）を読み込む（全ロールで閲覧可・plan-storeは未認証GET）
+            // 組織図/チャットを開いたら本部メンバー（accountmetaのrole==='hq'）を読み込む（DM相手表示名の解決にも使う・plan-storeは未認証GET）
             useEffect(() => {
-                if (currentPage !== 'org') return;
+                if (currentPage !== 'org' && currentPage !== 'chat') return;
                 loadAcctMeta().then(meta => {
-                    const list = Object.entries(meta || {})
+                    const raw = Object.entries(meta || {})
                         .filter(([, m]) => m && m.role === 'hq')
-                        .map(([owner, m]) => ({ owner, name: (m.staffName || owner), staffId: String(m.staffId || '') }))
-                        .sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
+                        .map(([owner, m]) => ({ owner, name: (m.staffName || owner), staffId: String(m.staffId || '') }));
+                    // 同一人物（表示名が同じ）の重複アカウントを1つに集約。数字staffIdを持つ方を優先（DM/プロフィール解決のため）。
+                    const byName = new Map();
+                    raw.forEach(e => { const prev = byName.get(e.name); if (!prev) byName.set(e.name, e); else if (!/^\d+$/.test(prev.staffId) && /^\d+$/.test(e.staffId)) byName.set(e.name, e); });
+                    const list = [...byName.values()].sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
                     setOrgHq(list);
                 }).catch(() => {});
             }, [currentPage]);
@@ -10473,6 +10476,8 @@
                             const chatDmName = (r) => {
                                 const partner = (r.members || []).map(String).find(x => x !== chatMyId);
                                 if (partner === '__root__') return '管理者';
+                                const hq = (orgHq || []).find(m => String(m.staffId) === partner || String(m.owner) === partner);
+                                if (hq) return hq.name;
                                 const p = (profileData.profiles || {})[partner];
                                 return (p && p.nameKanji) || chatResolveName(partner, '') || chatStaffName(partner) || 'ダイレクト';
                             };
@@ -11399,6 +11404,10 @@
                                 const isMe = !!myPid && pid === myPid;
                                 const canEdit = isMe || isRoot;
                                 const numericId = /^\d+$/.test(String(pid));
+                                // DM相手のチャットID: 数字staffId＝そのID／owner:xxx＝xxx（本部/オーナーはownerがチャットID）。
+                                const isHqPerson = (orgHq || []).some(m => (m.staffId && String(m.staffId) === String(pid)) || `owner:${m.owner}` === String(pid));
+                                const dmTarget = numericId ? String(pid) : (String(pid).startsWith('owner:') ? String(pid).slice(6) : '');
+                                const canDm = !!dmTarget && dmTarget !== chatMyId && !isMe && (numericId || isHqPerson);
                                 const dispNm = (prof && prof.nameKanji) || fallbackName || 'スタッフ';
                                 const snsList = prof && prof.sns ? Object.entries(prof.sns).filter(([, v]) => v) : [];
                                 const bday = isBirthdayToday(prof);
@@ -11423,7 +11432,7 @@
                                         </div>
                                     )}
                                     <div className="flex items-center gap-1.5 mt-4 pt-3.5 border-t border-[#F2F4F7]">
-                                        {numericId && !isMe && <button onClick={() => { setProfileView(null); startDm(pid, dispNm); }} className="flex-1 inline-flex items-center justify-center gap-1.5 h-10 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-semibold transition"><MessageSquare size={14} />メッセージ</button>}
+                                        {canDm && <button onClick={() => { setProfileView(null); startDm(dmTarget, dispNm); }} className="flex-1 inline-flex items-center justify-center gap-1.5 h-10 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-semibold transition"><MessageSquare size={14} />メッセージ</button>}
                                         {canEdit && <button onClick={() => openProfileEditor(pid, dispNm, fallbackKind)} className="flex-1 inline-flex items-center justify-center gap-1.5 h-10 px-3 rounded-lg border border-[#EAECF0] text-[13px] font-semibold text-[#344054] hover:bg-[#F8F9FB] transition">{isMe ? '編集' : '本部編集'}</button>}
                                         {isRoot && <button onClick={() => orgRemove(pid, dispNm)} title="組織図から削除" className="inline-flex items-center justify-center w-10 h-10 rounded-lg border border-[#EAECF0] text-[#98A2B3] hover:text-rose-600 hover:bg-rose-50 transition shrink-0"><Trash2 size={14} /></button>}
                                     </div>

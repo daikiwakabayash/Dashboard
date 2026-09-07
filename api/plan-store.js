@@ -31,6 +31,7 @@ const ZKTHERAPIST_KEY = 'naoru:zktherapist:v1'; // { 'shopName|YYYY-MM': count }
 const THANKSGIFT_KEY = 'naoru:thanksgift:v1'; // { votes:[{id,period,fromStaffId,fromStaffName,fromShop,toStaffId,toStaffName,toShop,comment,createdAt}] } サンクスギフト投票
 const CHAT_KEY = 'naoru:chat:v1';             // { rooms:[...], messages:{roomId:[...]}, dir:{staff:[...]}, notes:{...} } 社内チャット
 const CHAT_READS_KEY = 'naoru:chat:reads:v1'; // 既読ポインタ { staffId:{roomId:ms} } を別キーに分離（頻繁なread書込がmessagesを巻き込んで消す競合を防止）
+const CHAT_MSGS_KEY = 'naoru:chat:msgs:v1';   // メッセージ本体 { roomId:[...] } を別キーに分離（rooms/既読/ノート等の書込がメッセージを巻き込んで消す競合を防止）
 const CHAT_IMG_PREFIX = 'naoru:chat:img:';    // 画像は1枚1キーで別保存（blob肥大化を避ける）
 const CHAT_MSG_CAP = 400;                     // 1ルームあたり保持する最大メッセージ数（古いものから破棄）
 const BOARD_KEY = 'naoru:board:v1';           // { posts:[...], reads:{staffId:ms} } 掲示板（全社発信）
@@ -537,15 +538,20 @@ export default async function handler(req, res) {
       }
       const cur = (await blobGet(CHAT_KEY, hasKV, hasSB, gas)) || {};
       const rooms = Array.isArray(cur.rooms) ? cur.rooms : [];
-      const messages = (cur.messages && typeof cur.messages === 'object') ? cur.messages : {};
-      // 既読は別キー(CHAT_READS_KEY)に分離。無ければ旧データ(cur.reads)から移行。
+      // メッセージ・既読は別キーに分離（rooms/notes/既読の頻繁な書込がメッセージを巻き込んで消す競合を防止）。
+      // 無ければ旧データ(CHAT_KEY内)から移行。
+      const msgsCur = await blobGet(CHAT_MSGS_KEY, hasKV, hasSB, gas);
+      let msgsInit = !!(msgsCur && typeof msgsCur === 'object');
+      const messages = msgsInit ? msgsCur : ((cur.messages && typeof cur.messages === 'object') ? cur.messages : {});
       const readsCur = await blobGet(CHAT_READS_KEY, hasKV, hasSB, gas);
       const reads = (readsCur && typeof readsCur === 'object') ? readsCur : ((cur.reads && typeof cur.reads === 'object') ? cur.reads : {});
       const dir = (cur.dir && typeof cur.dir === 'object') ? { staff: Array.isArray(cur.dir.staff) ? cur.dir.staff : [], updatedAt: cur.dir.updatedAt || '' } : { staff: [], updatedAt: '' };
       const notes = (cur.notes && typeof cur.notes === 'object') ? cur.notes : {};   // { [roomId]: [{id,fromStaffId,fromName,text,imgIds,createdAt}] } ノート
-      // save は messages/rooms/dir/notes のみ書き込み（reads は含めない＝read書込と競合しない）。
-      const save = (patch) => blobSet(CHAT_KEY, { rooms, messages, dir, notes, ...patch }, hasKV, hasSB, gas);
+      const saveMsgs = (m) => { msgsInit = true; return blobSet(CHAT_MSGS_KEY, m, hasKV, hasSB, gas); };
       const saveReads = (r) => blobSet(CHAT_READS_KEY, r, hasKV, hasSB, gas);
+      // save は rooms/dir/notes のみ書き込む（messages/reads は含めない＝それらの書込と競合しない）。
+      // 旧データ移行: messages がまだ別キーに無ければ、CHAT_KEY を書き換える前に退避してから書く。
+      const save = async (patch) => { if (!msgsInit) await saveMsgs(messages); return blobSet(CHAT_KEY, { rooms, dir, notes, ...patch }, hasKV, hasSB, gas); };
 
       if (req.method === 'GET') {
         return res.status(200).json({ rooms, messages, reads, dir, notes, configured: true });
@@ -611,7 +617,7 @@ export default async function handler(req, res) {
             nextMessages = { ...messages, [rid]: arr };
           }
         }
-        await save({ rooms: nextRooms, messages: nextMessages });
+        await save({ rooms: nextRooms }); await saveMsgs(nextMessages);
         return res.status(200).json({ ok: true, members });
       }
 
@@ -624,7 +630,7 @@ export default async function handler(req, res) {
         const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, members } : r);
         const rec = { id: genId('m'), roomId: rid, system: true, text: `${String(body.name || 'メンバー')} が退出しました`, createdAt: new Date().toISOString() };
         const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).concat(rec).slice(-CHAT_MSG_CAP);
-        await save({ rooms: nextRooms, messages: { ...messages, [rid]: arr } });
+        await save({ rooms: nextRooms }); await saveMsgs({ ...messages, [rid]: arr });
         return res.status(200).json({ ok: true, members });
       }
 
@@ -641,7 +647,7 @@ export default async function handler(req, res) {
           const rec = { id: genId('m'), roomId: rid, system: true, text: `${String(body.name)} が参加しました`, createdAt: new Date().toISOString() };
           nextMessages = { ...messages, [rid]: (Array.isArray(messages[rid]) ? messages[rid] : []).concat(rec).slice(-CHAT_MSG_CAP) };
         }
-        await save({ rooms: nextRooms, messages: nextMessages });
+        await save({ rooms: nextRooms }); await saveMsgs(nextMessages);
         return res.status(200).json({ ok: true, members });
       }
 
@@ -687,7 +693,7 @@ export default async function handler(req, res) {
         const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).concat(rec).slice(-CHAT_MSG_CAP);
         const nextMessages = { ...messages, [rid]: arr };
         const nextReads = { ...reads, [rec.fromStaffId]: { ...(reads[rec.fromStaffId] || {}), [rid]: Date.parse(rec.createdAt) } };
-        await save({ messages: nextMessages });       // メッセージ本体（reads と別キー＝read書込に消されない）
+        await saveMsgs(nextMessages);                  // メッセージ本体（別キー＝他の書込に消されない）
         await saveReads(nextReads);                    // 送信者の既読を更新（別キー）
         // プッシュ通知: グループ/DM/全社アナウンスの新着を対象者へ（店舗ルームはスパム回避のため送らない）
         const room = rooms.find(r => r && r.id === rid);
@@ -734,7 +740,7 @@ export default async function handler(req, res) {
         const arr = (Array.isArray(messages[rid]) ? messages[rid] : []).map(msg =>
           msg && msg.id === String(body.msgId) ? { ...msg, reactions: toggleReaction(msg.reactions, String(body.emoji), String(body.staffId)) } : msg
         );
-        await save({ messages: { ...messages, [rid]: arr } });
+        await saveMsgs({ ...messages, [rid]: arr });
         return res.status(200).json({ ok: true });
       }
 
@@ -754,7 +760,7 @@ export default async function handler(req, res) {
           if (!msg || msg.id !== String(body.msgId)) return true;
           return !(body.root || String(msg.fromStaffId) === String(body.staffId)); // 本人/rootのみ削除可
         });
-        await save({ messages: { ...messages, [rid]: arr } });
+        await saveMsgs({ ...messages, [rid]: arr });
         return res.status(200).json({ ok: true });
       }
 
@@ -766,7 +772,7 @@ export default async function handler(req, res) {
         if (!(body.root || String(target.createdBy) === String(body.staffId))) return res.status(403).json({ ok: false, error: 'forbidden' });
         const nextRooms = rooms.filter(r => r && r.id !== rid);
         const nextMessages = { ...messages }; delete nextMessages[rid];
-        await save({ rooms: nextRooms, messages: nextMessages });
+        await save({ rooms: nextRooms }); await saveMsgs(nextMessages);
         return res.status(200).json({ ok: true });
       }
 
@@ -815,11 +821,16 @@ export default async function handler(req, res) {
         }
         const nextReads = { ...reads };
         if (nextReads[from]) { nextReads[to] = { ...(nextReads[to] || {}), ...nextReads[from] }; delete nextReads[from]; }
-        await blobSet(CHAT_KEY, { rooms: nextRooms, messages: nextMessages, dir, notes }, hasKV, hasSB, gas);
+        await save({ rooms: nextRooms }); await saveMsgs(nextMessages);
         await saveReads(nextReads);
         return res.status(200).json({ ok: true, remapped: { from, to }, roomsChanged: changed });
       }
 
+      // 管理: メッセージを別キー(CHAT_MSGS_KEY)へ即時移行（デプロイ直後に一度呼ぶ・root専用）
+      if (action === 'migrateMsgs' && body.root) {
+        await saveMsgs(messages);
+        return res.status(200).json({ ok: true, rooms: Object.keys(messages).length });
+      }
       return res.status(400).json({ ok: false, error: 'invalid chat action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });

@@ -765,6 +765,8 @@
             const [readOpen, setReadOpen] = React.useState(null);   // 既読者ポップオーバーを開いているメッセージID
             const [reactWho, setReactWho] = React.useState(null);   // リアクション押下者ポップ {msgId,emoji}
             const [menuFor, setMenuFor] = React.useState(null);     // メニュー(返信/スタンプ/コピー/削除)を開いているメッセージID。モバイルは⋯ボタン、PCはホバー/右クリックで開く（本文の長押しはネイティブ選択＝部分コピーに使う）
+            const [menuDir, setMenuDir] = React.useState('up');     // メニューを上/下どちらに開くか（画面上部のメッセージは下向きにしてはみ出し防止）
+            const openMenu = (id, el) => { let up = true; try { const r = el.getBoundingClientRect(); up = r.top > (window.innerHeight * 0.42); } catch {} setMenuDir(up ? 'up' : 'down'); setMenuFor(id); };
             const scrollToEnd = React.useCallback((smooth) => { const el = endRef.current; if (!el) return; try { el.scrollIntoView({ block: 'end', behavior: smooth ? 'smooth' : 'auto' }); } catch { try { el.scrollIntoView(false); } catch {} } }, []);
             // リプライ元へジャンプ（引用タップ）。該当メッセージへスクロールして一瞬ハイライト（LINE同様）。
             const scrollToMsg = React.useCallback((id) => {
@@ -822,7 +824,7 @@
                                     const meta = (
                                         <div className={`flex flex-col ${mine ? 'items-end' : 'items-start'} justify-end shrink-0 pb-0.5`}>
                                             {/* モバイル用アクション（返信/スタンプ/コピー/削除）。本文の長押しはネイティブ選択に使うため別ボタンに。 */}
-                                            <button onClick={() => setMenuFor(menuFor === m.id ? null : m.id)} className="md:hidden text-[13px] leading-none text-[#C0C6CF] hover:text-brand-600 px-1 -mb-0.5" title="メニュー" aria-label="メニュー">⋯</button>
+                                            <button onClick={e => menuFor === m.id ? setMenuFor(null) : openMenu(m.id, e.currentTarget)} className="md:hidden text-[13px] leading-none text-[#C0C6CF] hover:text-brand-600 px-1 -mb-0.5" title="メニュー" aria-label="メニュー">⋯</button>
                                             <span className="text-[10px] text-[#B0B7C3] whitespace-nowrap">{m._pending ? '送信中…' : fmtTime(m.createdAt)}</span>
                                             {mine && Array.isArray(readMembers) && readers.length > 0 && (
                                                 <div className="relative group/rd mt-0.5">
@@ -845,7 +847,7 @@
                                                     {/* 吹き出し */}
                                                     <div className="relative min-w-0 group/msg">
                                                         <div
-                                                            onContextMenu={e => { e.preventDefault(); setMenuFor(m.id); }}
+                                                            onContextMenu={e => { e.preventDefault(); openMenu(m.id, e.currentTarget); }}
                                                             className={`group relative inline-block px-3 py-2 ${bubble} shadow-[0_1px_1px_rgba(16,24,40,0.06)]`} style={{ wordBreak: 'break-word' }}>
                                                             {m.replyTo && m.replyTo.id && <div role="button" onClick={() => scrollToMsg(m.replyTo.id)} className={`mb-1 pl-2 border-l-[3px] rounded-r-md px-2 py-1 select-none cursor-pointer active:opacity-70 transition ${mine ? 'border-white/60 bg-white/15 hover:bg-white/25' : 'border-brand-300 bg-[#F6F7F9] hover:bg-[#EEF0F3]'}`} title="元のメッセージへ移動"><div className={`text-[11px] font-bold ${mine ? 'text-white/90' : 'text-brand-600'}`}>{m.replyTo.name || '返信'}</div><div className={`text-[11px] truncate max-w-[220px] ${mine ? 'text-white/70' : 'text-[#98A2B3]'}`}>{m.replyTo.text || '（画像）'}</div></div>}
                                                             {/* 本文は長押しでネイティブ選択→部分コピー可能（LINE同様）。select-text＋callout許可。 */}
@@ -853,7 +855,7 @@
                                                             {/* 長押し/右クリックメニュー */}
                                                             {menuFor === m.id && (<>
                                                                 <div className="fixed inset-0 z-30" onClick={() => setMenuFor(null)} />
-                                                                <div className={`absolute z-40 bottom-full mb-1 ${mine ? 'right-0' : 'left-0'} bg-white border border-[#EAECF0] rounded-2xl shadow-xl p-1.5 w-max`} onClick={e => e.stopPropagation()}>
+                                                                <div className={`absolute z-40 ${menuDir === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'} ${mine ? 'right-0' : 'left-0'} bg-white border border-[#EAECF0] rounded-2xl shadow-xl p-1.5 w-max`} onClick={e => e.stopPropagation()}>
                                                                     <div className="flex items-center gap-0.5 px-1 pb-1.5 mb-1 border-b border-[#F2F4F7]">
                                                                         {stamps.slice(0, 6).map(s => <button key={s} onClick={() => { onReact(m.id, s); setMenuFor(null); }} className="w-8 h-8 flex items-center justify-center text-[18px] rounded-full hover:bg-[#F2F4F7] active:scale-95 transition">{s}</button>)}
                                                                     </div>

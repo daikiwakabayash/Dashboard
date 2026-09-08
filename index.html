@@ -12346,36 +12346,46 @@
                                 const dispNm = (prof && prof.nameKanji) || fallbackName || 'スタッフ';
                                 const snsList = prof && prof.sns ? Object.entries(prof.sns).filter(([, v]) => v) : [];
                                 const bday = isBirthdayToday(prof);
-                                return (<>
-                                    {bday && <div className="mb-3 rounded-xl bg-gradient-to-r from-pink-50 to-amber-50 border border-pink-200 px-3 py-2 text-[13px] font-black text-pink-700 flex items-center gap-1.5">🎂 本日は {dispNm} さんのお誕生日です！🎉</div>}
-                                    {prof ? (<>
-                                        {(() => {
-                                            const pics = [prof.mainImg, ...(Array.isArray(prof.subImgs) ? prof.subImgs : [])].filter(Boolean);
-                                            if (!pics.length) return null;
-                                            const sel = Math.min(Math.max(0, profPicIdx[pid] || 0), pics.length - 1);
-                                            return (<>
-                                                <div className={`w-full aspect-square rounded-xl overflow-hidden bg-[#F2F4F7] mb-2.5 ${bday ? 'ring-2 ring-pink-300' : ''}`}><img src={chatImgSrc(pics[sel])} className="w-full h-full object-cover transition-opacity" style={{ objectPosition: (sel === 0 && prof.mainPos) ? prof.mainPos : 'center' }} loading="lazy" alt="" /></div>
-                                                {pics.length > 1 && <div className="flex gap-1.5 mb-3">{pics.map((id, i) => <button key={id} onClick={() => setProfPicIdx(m => ({ ...m, [pid]: i }))} className={`${big ? 'w-16 h-16' : 'w-12 h-12'} rounded-lg overflow-hidden bg-[#F2F4F7] transition ${i === sel ? 'ring-2 ring-brand-500' : 'opacity-60 hover:opacity-100'}`}><img src={chatImgSrc(id)} className="w-full h-full object-cover" loading="lazy" alt="" /></button>)}</div>}
-                                            </>);
-                                        })()}
-                                        <div className="flex items-center gap-2 flex-wrap">
-                                            <span className={`${big ? 'text-[18px]' : 'text-[15px]'} font-bold text-[#111827]`}>{bday ? `🎂 ${dispNm}` : dispNm}</span>
-                                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${prof.kind === 'hq' ? 'text-indigo-700 bg-indigo-50' : prof.kind === 'owner' ? 'text-brand-700 bg-brand-50' : 'text-teal-700 bg-teal-50'}`}>{prof.kind === 'hq' ? '本部' : prof.kind === 'owner' ? 'オーナー' : 'セラピスト'}</span>
-                                        </div>
-                                        {prof.nameKana && <div className="text-[12px] text-[#98A2B3] mt-0.5">{prof.nameKana}</div>}
-                                        {prof.bio && <p className={`${big ? 'text-[14px]' : 'text-[12px]'} text-[#475467] leading-relaxed mt-2.5 whitespace-pre-wrap break-words ${big ? '' : 'max-h-32 overflow-y-auto'}`}>{prof.bio}</p>}
-                                        {snsList.length > 0 && <div className="flex flex-wrap gap-1.5 mt-3">{snsList.map(([k, v]) => { const m = snsMeta[k] || { label: k, color: 'text-brand-600' }; return <a key={k} href={/^https?:\/\//.test(v) ? v : `https://${v}`} target="_blank" rel="noopener noreferrer" className={`inline-flex items-center gap-1 text-[12px] font-semibold ${m.color} bg-[#F8F9FB] border border-[#EAECF0] rounded-full px-2.5 py-1 hover:bg-white transition`}>{m.label}<ExternalLink size={11} /></a>; })}</div>}
-                                    </>) : (
-                                        <div className="flex items-center gap-2.5">
-                                            <span className={`${big ? 'w-14 h-14 text-[20px]' : 'w-10 h-10 text-[15px]'} rounded-full ${chatAvatarColor(dispNm)} inline-flex items-center justify-center font-semibold`}>{String(dispNm || '？').charAt(0)}</span>
-                                            <div><div className={`${big ? 'text-[16px]' : 'text-[14px]'} font-bold text-[#111827]`}>{dispNm}</div><div className="text-[12px] text-[#98A2B3]">プロフィール未登録</div>{isMe && <div className="text-[11px] text-brand-600 mt-0.5">「編集」から登録できます</div>}</div>
-                                        </div>
-                                    )}
+                                const pics = prof ? [prof.mainImg, ...(Array.isArray(prof.subImgs) ? prof.subImgs : [])].filter(Boolean) : [];
+                                const sel = Math.min(Math.max(0, profPicIdx[pid] || 0), Math.max(0, pics.length - 1));
+                                const photosEl = pics.length ? (<>
+                                    <div className={`w-full aspect-square rounded-xl overflow-hidden bg-[#F2F4F7] mb-2.5 ${bday ? 'ring-2 ring-pink-300' : ''}`}><img src={chatImgSrc(pics[sel])} className="w-full h-full object-cover transition-opacity" style={{ objectPosition: (sel === 0 && prof.mainPos) ? prof.mainPos : 'center' }} loading="lazy" alt="" /></div>
+                                    {pics.length > 1 && <div className="flex gap-1.5 mb-1 flex-wrap">{pics.map((id, i) => <button key={id} onClick={() => setProfPicIdx(m => ({ ...m, [pid]: i }))} className={`${big ? 'w-16 h-16' : 'w-12 h-12'} rounded-lg overflow-hidden bg-[#F2F4F7] transition ${i === sel ? 'ring-2 ring-brand-500' : 'opacity-60 hover:opacity-100'}`}><img src={chatImgSrc(id)} className="w-full h-full object-cover" loading="lazy" alt="" /></button>)}</div>}
+                                </>) : null;
+                                const infoEl = prof ? (<>
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <span className={`${big ? 'text-[20px]' : 'text-[15px]'} font-bold text-[#111827]`}>{bday ? `🎂 ${dispNm}` : dispNm}</span>
+                                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${prof.kind === 'hq' ? 'text-indigo-700 bg-indigo-50' : prof.kind === 'owner' ? 'text-brand-700 bg-brand-50' : 'text-teal-700 bg-teal-50'}`}>{prof.kind === 'hq' ? '本部' : prof.kind === 'owner' ? 'オーナー' : 'セラピスト'}</span>
+                                    </div>
+                                    {prof.nameKana && <div className="text-[12px] text-[#98A2B3] mt-0.5">{prof.nameKana}</div>}
+                                    {prof.bio && <p className={`${big ? 'text-[14px]' : 'text-[12px]'} text-[#475467] leading-relaxed mt-2.5 whitespace-pre-wrap break-words ${big ? '' : 'max-h-32 overflow-y-auto'}`}>{prof.bio}</p>}
+                                    {snsList.length > 0 && <div className="flex flex-wrap gap-1.5 mt-3">{snsList.map(([k, v]) => { const m = snsMeta[k] || { label: k, color: 'text-brand-600' }; return <a key={k} href={/^https?:\/\//.test(v) ? v : `https://${v}`} target="_blank" rel="noopener noreferrer" className={`inline-flex items-center gap-1 text-[12px] font-semibold ${m.color} bg-[#F8F9FB] border border-[#EAECF0] rounded-full px-2.5 py-1 hover:bg-white transition`}>{m.label}<ExternalLink size={11} /></a>; })}</div>}
+                                </>) : (
+                                    <div className="flex items-center gap-2.5">
+                                        <span className={`${big ? 'w-14 h-14 text-[20px]' : 'w-10 h-10 text-[15px]'} rounded-full ${chatAvatarColor(dispNm)} inline-flex items-center justify-center font-semibold`}>{String(dispNm || '？').charAt(0)}</span>
+                                        <div><div className={`${big ? 'text-[16px]' : 'text-[14px]'} font-bold text-[#111827]`}>{dispNm}</div><div className="text-[12px] text-[#98A2B3]">プロフィール未登録</div>{isMe && <div className="text-[11px] text-brand-600 mt-0.5">「編集」から登録できます</div>}</div>
+                                    </div>
+                                );
+                                const actionsEl = (
                                     <div className="flex items-center gap-1.5 mt-4 pt-3.5 border-t border-[#F2F4F7]">
                                         {canDm && <button onClick={() => { setProfileView(null); startDm(dmTarget, dispNm); }} className="flex-1 min-w-0 inline-flex items-center justify-center gap-1 h-10 px-2 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-semibold whitespace-nowrap transition"><MessageSquare size={14} className="shrink-0" />メッセージ</button>}
                                         {canEdit && <button onClick={() => openProfileEditor(pid, dispNm, fallbackKind)} className="flex-1 min-w-0 inline-flex items-center justify-center gap-1.5 h-10 px-2 rounded-lg border border-[#EAECF0] text-[13px] font-semibold text-[#344054] whitespace-nowrap hover:bg-[#F8F9FB] transition">{isMe ? '編集' : '本部編集'}</button>}
                                         {isRoot && <button onClick={() => orgRemove(pid, dispNm)} title="組織図から削除" className="inline-flex items-center justify-center w-10 h-10 rounded-lg border border-[#EAECF0] text-[#98A2B3] hover:text-rose-600 hover:bg-rose-50 transition shrink-0"><Trash2 size={14} /></button>}
                                     </div>
+                                );
+                                return (<>
+                                    {bday && <div className="mb-3 rounded-xl bg-gradient-to-r from-pink-50 to-amber-50 border border-pink-200 px-3 py-2 text-[13px] font-black text-pink-700 flex items-center gap-1.5">🎂 本日は {dispNm} さんのお誕生日です！🎉</div>}
+                                    {/* PC(big)は写真を左・情報を右の2カラムで大きく表示。スマホ/ホバーは縦積み。 */}
+                                    {big && photosEl ? (
+                                        <div className="md:flex md:gap-6 md:items-start">
+                                            <div className="md:w-[340px] md:shrink-0">{photosEl}</div>
+                                            <div className="md:flex-1 md:min-w-0 mt-3 md:mt-1">{infoEl}{actionsEl}</div>
+                                        </div>
+                                    ) : (<>
+                                        {photosEl}
+                                        {infoEl}
+                                        {actionsEl}
+                                    </>)}
                                 </>);
                             };
                             const ProfilePop = ({ pid, name, kind }) => {
@@ -12488,7 +12498,7 @@
                                         const { pid, name, kind } = profileView;
                                         return (
                                             <div className="fixed inset-0 z-[70] flex items-end md:items-center justify-center bg-[#111827]/50 backdrop-blur-sm p-0 md:p-4" onClick={() => setProfileView(null)}>
-                                                <div className="bg-white w-full md:max-w-sm rounded-t-2xl md:rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto overscroll-contain px-5 pt-3 pb-[max(env(safe-area-inset-bottom,0px),20px)] md:pb-5" style={{ willChange: 'transform' }} onClick={e => e.stopPropagation()} {...sheetProps(() => setProfileView(null))}>
+                                                <div className="bg-white w-full md:max-w-2xl rounded-t-2xl md:rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto overscroll-contain px-5 pt-3 pb-[max(env(safe-area-inset-bottom,0px),20px)] md:pb-6 md:px-6" style={{ willChange: 'transform' }} onClick={e => e.stopPropagation()} {...sheetProps(() => setProfileView(null))}>
                                                     <div className="flex items-center justify-between mb-2 -mx-1">
                                                         <div className="w-9 md:hidden" />
                                                         <span className="md:hidden w-10 h-1 rounded-full bg-ink-100" />

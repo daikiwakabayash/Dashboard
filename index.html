@@ -2228,6 +2228,9 @@
             const [soMxStore, setSoMxStore] = useState('');      // 店舗名フィルタ
             const [soMxMedia, setSoMxMedia] = useState('');      // 媒体フィルタ（''=全媒体）
             const [soPivotMetric, setSoPivotMetric] = useState('booking'); // 媒体×店舗ピボットの指標（booking=新規予約/visit=来店/join=入会）
+            // 媒体別 広告費の手入力（期間ごと・媒体ごと）。localStorage保存。CPA算出用。
+            const [soAdSpend, setSoAdSpend] = useState(() => { try { return JSON.parse(localStorage.getItem('so_adspend_v1') || '{}'); } catch { return {}; } });
+            const soSetAdSpend = (rangeKey, media, yen) => setSoAdSpend(prev => { const n = { ...prev, [rangeKey]: { ...(prev[rangeKey] || {}), [media]: yen } }; try { localStorage.setItem('so_adspend_v1', JSON.stringify(n)); } catch {} return n; });
             const [soMkSort, setSoMkSort] = useState({ key: 'booking', dir: 'desc' });      // 担当者別ソート
             const [soDailySort, setSoDailySort] = useState({ key: 'date', dir: 'asc' });    // 日報ソート
             // 事業計画（計画サブタブ）
@@ -16634,24 +16637,37 @@
                                                     const medias = Object.values(mediaAgg).filter(m => m.tot > 0).sort((a, b) => b.tot - a.tot);
                                                     if (!medias.length) return null;
                                                     const cellOf = (r, name) => { const c = (r.channels || []).find(x => x.name === name); return c ? (c[metric] || 0) : 0; };
-                                                    const rows = active.map(r => ({ name: r.name, r, total: medias.reduce((a, m) => a + cellOf(r, m.name), 0) })).filter(x => x.total > 0).sort((a, b) => b.total - a.total);
+                                                    const allRows = active.map(r => ({ name: r.name, r, total: medias.reduce((a, m) => a + cellOf(r, m.name), 0) })).filter(x => x.total > 0).sort((a, b) => b.total - a.total);
+                                                    const rows = allRows.filter(x => !soMxStore || String(x.name).includes(soMxStore));
                                                     const colTot = (name) => rows.reduce((a, x) => a + cellOf(x.r, name), 0);
+                                                    const colSum = (name, key) => rows.reduce((a, x) => { const c = (x.r.channels || []).find(y => y.name === name); return a + ((c && c[key]) || 0); }, 0);
                                                     const grand = medias.reduce((a, m) => a + colTot(m.name), 0);
                                                     const hot = (v, max) => v <= 0 ? '' : v >= max * 0.66 ? 'bg-emerald-100 text-emerald-800' : v >= max * 0.33 ? 'bg-emerald-50 text-emerald-700' : 'text-slate-700';
                                                     const colMax = {}; medias.forEach(m => { colMax[m.name] = Math.max(1, ...rows.map(x => cellOf(x.r, m.name))); });
+                                                    // 広告費（手入力）＋CPA。CPAは表示指標に関わらず 予約/入会 の両方で算出。
+                                                    const rangeKey = `${soFrom}_${soTo}`;
+                                                    const adMap = (soAdSpend && soAdSpend[rangeKey]) || {};
+                                                    const adOf = (name) => Number(adMap[name]) || 0;
+                                                    const totAd = medias.reduce((a, m) => a + adOf(m.name), 0);
+                                                    const totBook = medias.reduce((a, m) => a + colSum(m.name, 'booking'), 0);
+                                                    const totJoin = medias.reduce((a, m) => a + colSum(m.name, 'join'), 0);
+                                                    const cpa = (ad, n) => (ad > 0 && n > 0) ? soYen(Math.round(ad / n)) : '–';
                                                     return (
                                                         <div className="bg-white rounded-2xl border border-emerald-100 p-4 md:p-5 mb-4">
                                                             <div className="flex items-center gap-2 mb-1 flex-wrap">
                                                                 <span className="text-emerald-600 text-[16px]">📊</span>
                                                                 <h3 className="text-sm md:text-base font-black text-slate-800">媒体 × 店舗（{metricLabel}件数）</h3>
                                                                 {soShopLoading && <span className="text-xs font-bold text-amber-600">集計中… {soShopProgress ? `${soShopProgress.done}/${soShopProgress.total}` : ''}</span>}
-                                                                <div className="ml-auto flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg">
-                                                                    {[{ k: 'booking', l: '新規予約' }, { k: 'visit', l: '来店' }, { k: 'join', l: '入会' }].map(m => (
-                                                                        <button key={m.k} onClick={() => setSoPivotMetric(m.k)} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition-all ${metric === m.k ? 'bg-emerald-600 text-white shadow' : 'text-slate-500 hover:bg-white'}`}>{m.l}</button>
-                                                                    ))}
+                                                                <div className="ml-auto flex items-center gap-2 flex-wrap">
+                                                                    <input value={soMxStore} onChange={e => setSoMxStore(e.target.value)} placeholder="店舗で絞る" className="px-2 py-1 text-[12px] font-bold border border-slate-200 rounded-lg w-28" />
+                                                                    <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg">
+                                                                        {[{ k: 'booking', l: '新規予約' }, { k: 'visit', l: '来店' }, { k: 'join', l: '入会' }].map(m => (
+                                                                            <button key={m.k} onClick={() => setSoPivotMetric(m.k)} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition-all ${metric === m.k ? 'bg-emerald-600 text-white shadow' : 'text-slate-500 hover:bg-white'}`}>{m.l}</button>
+                                                                        ))}
+                                                                    </div>
                                                                 </div>
                                                             </div>
-                                                            <p className="text-[10px] text-slate-400 font-bold mb-3">どの媒体経由で何件の新規（初めての予約）がどの店舗に入ったか。国内店舗のみ・{metricLabel}の件数。期間は上部フィルタ（現在 {soFrom}〜{soTo}）。</p>
+                                                            <p className="text-[10px] text-slate-400 font-bold mb-3">どの媒体経由で何件の新規（初めての予約）がどの店舗に入ったか。国内店舗のみ・{metricLabel}の件数。来店/キャンセル/入会の内訳は下の「店舗別×媒体」で確認可。期間は上部フィルタ（現在 {soFrom}〜{soTo}）。下部に媒体別の広告費を入力するとCPAが自動算出されます（期間ごとに保存）。</p>
                                                             <div className="overflow-auto max-h-[70vh] border border-slate-100 rounded-xl">
                                                                 <table className="text-[12px] whitespace-nowrap border-collapse">
                                                                     <thead>
@@ -16675,6 +16691,21 @@
                                                                             <td className="py-2 px-3 text-left sticky left-0 bg-slate-100">合計</td>
                                                                             <td className="py-2 px-3 text-right text-emerald-700">{grand.toLocaleString()}</td>
                                                                             {medias.map(m => <td key={m.name} className="py-2 px-3 text-right">{colTot(m.name).toLocaleString()}</td>)}
+                                                                        </tr>
+                                                                        <tr className="border-t border-slate-200 bg-white text-slate-600">
+                                                                            <td className="py-1.5 px-3 text-left font-bold sticky left-0 bg-white text-[11px]">広告費（入力）</td>
+                                                                            <td className="py-1.5 px-3 text-right font-black text-slate-700">{totAd ? soYen(totAd) : '–'}</td>
+                                                                            {medias.map(m => <td key={m.name} className="py-1 px-1.5 text-right"><input type="number" inputMode="numeric" value={adMap[m.name] ?? ''} onChange={e => soSetAdSpend(rangeKey, m.name, e.target.value)} placeholder="¥" className="w-20 px-1.5 py-1 text-right text-[11px] font-bold border border-slate-200 rounded-md focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none" /></td>)}
+                                                                        </tr>
+                                                                        <tr className="bg-white text-slate-600">
+                                                                            <td className="py-1.5 px-3 text-left font-bold sticky left-0 bg-white text-[11px]">予約CPA</td>
+                                                                            <td className="py-1.5 px-3 text-right font-black text-slate-700">{cpa(totAd, totBook)}</td>
+                                                                            {medias.map(m => <td key={m.name} className="py-1.5 px-3 text-right font-bold">{cpa(adOf(m.name), colSum(m.name, 'booking'))}</td>)}
+                                                                        </tr>
+                                                                        <tr className="bg-white text-slate-600 border-b border-slate-100">
+                                                                            <td className="py-1.5 px-3 text-left font-bold sticky left-0 bg-white text-[11px]">入会CPA</td>
+                                                                            <td className="py-1.5 px-3 text-right font-black text-emerald-700">{cpa(totAd, totJoin)}</td>
+                                                                            {medias.map(m => <td key={m.name} className="py-1.5 px-3 text-right font-bold text-emerald-700">{cpa(adOf(m.name), colSum(m.name, 'join'))}</td>)}
                                                                         </tr>
                                                                     </tfoot>
                                                                 </table>

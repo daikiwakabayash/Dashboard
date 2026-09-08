@@ -2515,6 +2515,8 @@
             const [chatNewRoom, setChatNewRoom] = useState(null);      // {kind, name, members:[id], q} or null
             const [chatLightbox, setChatLightbox] = useState(null);    // 画像拡大表示 {list:[imgId], i:index}（LINE風スライド）
             const [chatVideoView, setChatVideoView] = useState(null);  // 動画の全画面再生 {url,name}
+            const [chatVideoRate, setChatVideoRate] = useState(1);     // 再生速度（1/1.5/2倍）
+            const chatVideoRef = React.useRef(null);
             const [chatReplyTo, setChatReplyTo] = useState(null);      // 返信先メッセージ {id,name,text}
             const [chatAlbumOpen, setChatAlbumOpen] = useState(false); // アルバム（ルーム内の全画像）
             const [chatNotesOpen, setChatNotesOpen] = useState(false); // ノート
@@ -11419,7 +11421,7 @@
                                                             </div>
                                                         )}
 
-                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(list, i) => openLightbox(list, i)} onReply={(msg) => { setChatReplyTo(msg); requestAnimationFrame(() => { try { chatTaRef.current && chatTaRef.current.focus(); } catch {} }); }} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} resolveShop={chatResolveShop} roomId={activeRoom ? activeRoom.id : ''} onSaveMedia={chatSaveMedia} resolveAvatar={chatAvatarImg} onOpenProfile={chatOpenProfile} onForward={setChatForward} onPin={chatPinMsg} onCaptureRange={chatCaptureRange} pinnedId={activeRoom && activeRoom.pinned ? activeRoom.pinned.id : ''} onOpenVideo={(url, name) => setChatVideoView({ url, name })} />
+                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(list, i) => openLightbox(list, i)} onReply={(msg) => { setChatReplyTo(msg); requestAnimationFrame(() => { try { chatTaRef.current && chatTaRef.current.focus(); } catch {} }); }} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} resolveShop={chatResolveShop} roomId={activeRoom ? activeRoom.id : ''} onSaveMedia={chatSaveMedia} resolveAvatar={chatAvatarImg} onOpenProfile={chatOpenProfile} onForward={setChatForward} onPin={chatPinMsg} onCaptureRange={chatCaptureRange} pinnedId={activeRoom && activeRoom.pinned ? activeRoom.pinned.id : ''} onOpenVideo={(url, name) => { setChatVideoRate(1); setChatVideoView({ url, name }); }} />
 
                                                         {/* コンポーザー（ChatGPT/Slack風の一体型）。スマホは全画面なのでホームバー分の余白を確保 */}
                                                         <div className="px-3 md:px-4 pt-1 pb-[max(env(safe-area-inset-bottom,0px),12px)] shrink-0">
@@ -11654,7 +11656,13 @@
                                         <div className="fixed inset-0 z-[130] bg-black flex items-center justify-center select-none" onClick={() => setChatVideoView(null)}>
                                             <button onClick={e => { e.stopPropagation(); setChatVideoView(null); }} className="absolute top-5 right-3 w-12 h-12 rounded-full bg-white/20 hover:bg-white/30 text-white flex items-center justify-center transition z-20"><X size={26} /></button>
                                             <button onClick={e => { e.stopPropagation(); chatSaveMedia(chatVideoView.url, chatVideoView.name || 'naoru-video'); }} className="absolute top-5 right-[68px] w-12 h-12 rounded-full bg-white/20 hover:bg-white/30 text-white flex items-center justify-center transition z-20" title="保存"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg></button>
-                                            <video src={chatVideoView.url} controls autoPlay playsInline onClick={e => e.stopPropagation()} className="max-w-[100vw] max-h-[88vh] w-auto h-auto bg-black" />
+                                            <video ref={chatVideoRef} src={chatVideoView.url} controls autoPlay playsInline onLoadedMetadata={e => { try { e.currentTarget.playbackRate = chatVideoRate; } catch {} }} onClick={e => e.stopPropagation()} className="max-w-[100vw] max-h-[88vh] w-auto h-auto bg-black" />
+                                            <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-1.5 bg-black/55 rounded-full px-1.5 py-1" onClick={e => e.stopPropagation()}>
+                                                <span className="text-white/60 text-[11px] font-bold pl-2 pr-1">速度</span>
+                                                {[1, 1.5, 2].map(r => (
+                                                    <button key={r} onClick={() => { setChatVideoRate(r); try { if (chatVideoRef.current) chatVideoRef.current.playbackRate = r; } catch {} }} className={`px-3 py-1.5 rounded-full text-[13px] font-bold transition ${chatVideoRate === r ? 'bg-white text-ink-900' : 'text-white hover:bg-white/20'}`}>{r}x</button>
+                                                ))}
+                                            </div>
                                         </div>
                                     )}
                                     {chatLightbox && (() => {

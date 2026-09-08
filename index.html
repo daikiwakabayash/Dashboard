@@ -2345,7 +2345,7 @@
             };
 
             // ── サンクスギフト（感謝の投票）── スタッフが月1票、前月(対象月)にお世話になった1人へ感謝コメントを送る
-            const [tgData, setTgData] = useState({ votes: [], log: [], votingState: null, test: { open: false, period: '' }, published: [], dir: { shops: [], staff: [] }, configured: true, loaded: false });
+            const [tgData, setTgData] = useState({ votes: [], log: [], votingState: null, test: { open: false, period: '' }, published: [], dir: { shops: [], staff: [] }, merges: {}, configured: true, loaded: false });
             const [tgForm, setTgForm] = useState({ shopId: '', toStaffId: '', comment: '' });
             const [tgRoster, setTgRoster] = useState({ shopId: '', loading: false, list: [] }); // 選択店舗の対象月「売上>0」スタッフ
             const [tgMsg, setTgMsg] = useState('');
@@ -18477,6 +18477,8 @@
                         const shopStaffRoster = stTherapistRoster(tgForm.shopId).map(s => ({ id: String(s.id), name: s.name }));
                         const liveRoster = (tgRoster.shopId === tgForm.shopId ? tgRoster.list : []);
                         const dirRoster = (tgDir.staff || []).filter(s => s && String(s.shopId) === String(tgForm.shopId) && !s.deleted).map(s => ({ id: String(s.id), name: s.name }));
+                        // 名寄せ済みの重複スタッフ（例: 八事の宇良→千種の宇良）は相手候補から除外し、二重登録への誤投票を防ぐ。
+                        const tgMerges = (tgData.merges && typeof tgData.merges === 'object') ? tgData.merges : {};
                         const rosterList = (() => {
                             const m = new Map();
                             [...shopStaffRoster, ...dirRoster, ...liveRoster].forEach(s => {
@@ -18484,6 +18486,7 @@
                                 const nm = String(s.name || '').trim();
                                 if (isNonTherapistName(nm)) return;              // 楽トレ/ヘルプ/オーナー/受付等は除外
                                 if (String(s.id) === myStaffId) return;          // 自分は除外
+                                if (tgMerges[String(s.id)]) return;              // 名寄せで統合された重複IDは除外
                                 if (!m.has(String(s.id))) m.set(String(s.id), { id: String(s.id), name: s.name });
                             });
                             return [...m.values()].sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));

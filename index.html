@@ -956,7 +956,7 @@
                                     const authorName = (resolveName ? resolveName(m.fromStaffId, m.fromName || '') : (m.fromName || '')) || (m.fromStaffId === '__root__' ? '管理者' : 'スタッフ');
                                     const shop = resolveShop ? resolveShop(m.fromStaffId, m.fromShop) : m.fromShop;
                                     const bubble = mine ? 'text-white rounded-2xl rounded-br-md' : `bg-white border border-[#EAECF0] text-[#111827] rounded-2xl rounded-bl-md ${iMentioned ? 'ring-2 ring-brand-300' : ''}`;
-                                    const doReply = () => onReply && onReply({ id: m.id, name: authorName, text: (m.text || (m.imgIds && m.imgIds.length ? '画像' : '')).slice(0, 140) });
+                                    const doReply = () => onReply && onReply({ id: m.id, name: authorName, text: (m.text || (m.imgIds && m.imgIds.length ? '画像' : (m.media && m.media.length ? (m.media[0].kind === 'video' ? '動画' : 'ファイル') : ''))).slice(0, 140) });
                                     const doCopy = () => { const txt = m.text || ''; if (!txt) return; try { if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(txt); } else { const ta = document.createElement('textarea'); ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); } } catch {} };
                                     // 「選択してコピー」：本文を選択可能にし、全文を選択状態にする（そのままコピー/範囲調整できる）。
                                     const doSelectCopy = () => { setSelId(m.id); requestAnimationFrame(() => { try { const el = document.querySelector('#chatbubble-' + m.id + ' [data-msgtext]'); if (el) { const r = document.createRange(); r.selectNodeContents(el); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); } } catch {} }); };
@@ -1033,14 +1033,16 @@
                                                     ))}{menuFor === m.id && menuImgId === m.id && msgMenu}</div>
                                                     {!hasBubble && meta}
                                                 </div>}
-                                                {/* 動画/PDF/ファイル添付（Vercel Blob）。タップで保存（iOSは共有シート）。 */}
-                                                {Array.isArray(m.media) && m.media.length > 0 && <div className={`mt-1 flex items-end gap-1.5 ${mine ? 'flex-row-reverse' : 'flex-row'}`}><div className={`flex flex-col gap-1.5 ${mine ? 'items-end' : 'items-start'}`}>{m.media.map((md, i) => (
-                                                    md.kind === 'video'
-                                                        ? <div key={i} className="relative max-w-[260px] cursor-pointer group/vid" onClick={() => onOpenVideo && onOpenVideo(md.url, md.name)}><video src={md.url + '#t=0.1'} muted playsInline preload="metadata" className="rounded-xl max-w-full max-h-[320px] bg-black pointer-events-none" /><span className="absolute inset-0 flex items-center justify-center"><span className="w-12 h-12 rounded-full bg-black/55 group-hover/vid:bg-black/70 flex items-center justify-center transition"><svg width="22" height="22" viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z"/></svg></span></span><button onClick={e => { e.stopPropagation(); onSaveMedia && onSaveMedia(md.url, md.name); }} className="absolute top-1.5 right-1.5 px-2 py-1 rounded-md bg-black/55 hover:bg-black/70 text-white text-[11px] font-bold">保存</button></div>
+                                                {/* 動画/PDF/ファイル添付（Vercel Blob）。長押し＝メニュー（返信/転送/固定/削除/スタンプ）、動画タップ＝全画面、保存ボタンで保存。 */}
+                                                {Array.isArray(m.media) && m.media.length > 0 && <div className={`mt-1 flex items-end gap-1.5 ${mine ? 'flex-row-reverse' : 'flex-row'}`}><div className={`flex flex-col gap-1.5 ${mine ? 'items-end' : 'items-start'}`}>{m.media.map((md, i) => {
+                                                    const mp = { onContextMenu: e => { e.preventDefault(); setMenuImgId(m.id); openMenu(m.id, e.currentTarget); }, onTouchStart: e => lpStart(m.id, e.currentTarget, true, e), onTouchMove: lpMove, onTouchEnd: lpCancel, onTouchCancel: lpCancel };
+                                                    const saveBtn = <button onClick={e => { e.stopPropagation(); onSaveMedia && onSaveMedia(md.url, md.name); }} className="absolute top-1.5 right-1.5 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-black/60 hover:bg-black/75 active:scale-90 text-white text-[12px] font-bold shadow-md transition"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>保存</button>;
+                                                    return md.kind === 'video'
+                                                        ? <div key={i} {...mp} className="relative max-w-[260px] cursor-pointer group/vid chat-noselect" onClick={() => { if (lpFiredRef.current) { lpFiredRef.current = false; return; } onOpenVideo && onOpenVideo(md.url, md.name); }}><video src={md.url + '#t=0.1'} muted playsInline preload="metadata" className="rounded-xl max-w-full max-h-[320px] bg-black pointer-events-none" /><span className="absolute inset-0 flex items-center justify-center pointer-events-none"><span className="w-12 h-12 rounded-full bg-black/55 group-hover/vid:bg-black/70 flex items-center justify-center transition"><svg width="22" height="22" viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z" /></svg></span></span>{saveBtn}</div>
                                                         : md.kind === 'image'
-                                                            ? <div key={i} className="relative max-w-[260px]"><img src={md.url} className="rounded-xl max-w-full max-h-[320px] object-cover" alt={md.name || ''} loading="lazy" /><button onClick={() => onSaveMedia && onSaveMedia(md.url, md.name)} className="absolute top-1.5 right-1.5 px-2 py-1 rounded-md bg-black/55 hover:bg-black/70 text-white text-[11px] font-bold">保存</button></div>
-                                                            : <button key={i} onClick={() => onSaveMedia && onSaveMedia(md.url, md.name)} className="flex items-center gap-2 px-3 py-2 rounded-xl border border-[#EAECF0] bg-white max-w-[260px] hover:bg-[#F8F9FB] transition text-left"><span className="w-8 h-8 rounded-lg bg-[#F2F4F7] flex items-center justify-center shrink-0 text-[16px]">{/pdf/i.test(md.type) ? '📄' : '📎'}</span><span className="min-w-0"><span className="block text-[13px] font-semibold text-[#111827] truncate">{md.name || 'ファイル'}</span><span className="block text-[11px] text-[#98A2B3]">タップで保存{md.size ? ` ・ ${Math.round(md.size / 1024 / 1024 * 10) / 10}MB` : ''}</span></span></button>
-                                                ))}</div>{!hasBubble && !hasImgs && meta}</div>}
+                                                            ? <div key={i} {...mp} className="relative max-w-[260px] chat-noselect"><img src={md.url} className="rounded-xl max-w-full max-h-[320px] object-cover" alt={md.name || ''} loading="lazy" />{saveBtn}</div>
+                                                            : <div key={i} {...mp} className="chat-noselect"><button onClick={() => { if (lpFiredRef.current) { lpFiredRef.current = false; return; } onSaveMedia && onSaveMedia(md.url, md.name); }} className="flex items-center gap-2 px-3 py-2 rounded-xl border border-[#EAECF0] bg-white max-w-[260px] hover:bg-[#F8F9FB] active:scale-[0.98] transition text-left"><span className="w-8 h-8 rounded-lg bg-[#F2F4F7] flex items-center justify-center shrink-0 text-[16px]">{/pdf/i.test(md.type) ? '📄' : '📎'}</span><span className="min-w-0"><span className="block text-[13px] font-semibold text-[#111827] truncate">{md.name || 'ファイル'}</span><span className="block text-[11px] text-[#98A2B3]">タップで保存{md.size ? ` ・ ${Math.round(md.size / 1024 / 1024 * 10) / 10}MB` : ''}</span></span></button></div>;
+                                                })}{menuFor === m.id && menuImgId === m.id && !hasImgs && msgMenu}</div>{!hasBubble && !hasImgs && meta}</div>}
                                                 {/* リアクション */}
                                                 {(Object.keys(reactions).length > 0 || pickFor === m.id) && (
                                                     <div data-react-row className={`flex items-center gap-1 mt-0.5 flex-wrap ${mine ? 'justify-end' : 'justify-start'}`}>
@@ -2535,18 +2537,21 @@
             // 単一画像を開くヘルパー（従来の呼び出し互換: idひとつでも配列化）
             const openLightbox = (ids, i) => { const g = lbG.current; g.scale = 1; g.tx = 0; g.ty = 0; g.mode = ''; const list = Array.isArray(ids) ? ids : [ids]; setChatLightbox({ list, i: Math.max(0, Math.min(i || 0, list.length - 1)) }); };
             // 受信した画像/動画/ファイルを端末に保存。iOSは共有シート（写真/ファイルに保存）、PCはダウンロード。
+            const [chatToast, setChatToast] = useState('');           // 保存などの即時フィードバック
             const chatSaveMedia = async (url, baseName) => {
+                setChatToast('保存を準備中…');   // タップ直後に即フィードバック（大きい動画は取得に時間がかかるため）
                 try {
                     const res = await fetch(url); const blob = await res.blob();
                     const type = blob.type || 'application/octet-stream';
                     let ext = (type.split('/')[1] || 'dat').split('+')[0].replace('jpeg', 'jpg').replace('quicktime', 'mov');
                     const name = (baseName || ('naoru-' + Date.now())) + (String(baseName || '').includes('.') ? '' : ('.' + ext));
                     const file = new File([blob], name, { type });
-                    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; }
+                    if (navigator.canShare && navigator.canShare({ files: [file] })) { setChatToast(''); await navigator.share({ files: [file] }); return; }
                     const objUrl = URL.createObjectURL(blob); const a = document.createElement('a');
                     a.href = objUrl; a.download = name; document.body.appendChild(a); a.click();
                     setTimeout(() => { try { URL.revokeObjectURL(objUrl); a.remove(); } catch {} }, 1500);
-                } catch (e) { try { window.open(url, '_blank'); } catch {} }
+                    setChatToast('保存しました'); setTimeout(() => setChatToast(''), 1500);
+                } catch (e) { setChatToast(''); try { window.open(url, '_blank'); } catch {} }
             };
             const chatSwipeRef = useRef(0);                            // ライトボックスのスワイプ開始X
             // 画像ビューアのピンチ拡大/パン/ダブルタップ
@@ -11658,6 +11663,7 @@
                                     )}
 
                                     {/* 画像ライトボックス（LINE風: 前後の写真をスワイプ/矢印で見られる） */}
+                                    {chatToast && <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[140] bg-[#111827]/90 text-white text-[13px] font-bold px-4 py-2.5 rounded-full shadow-lg pointer-events-none">{chatToast}</div>}
                                     {chatVideoView && (
                                         <div className="fixed inset-0 z-[130] bg-black flex items-center justify-center select-none" onClick={() => setChatVideoView(null)}>
                                             <button onClick={e => { e.stopPropagation(); setChatVideoView(null); }} className="absolute top-5 right-3 w-12 h-12 rounded-full bg-white/20 hover:bg-white/30 text-white flex items-center justify-center transition z-20"><X size={26} /></button>

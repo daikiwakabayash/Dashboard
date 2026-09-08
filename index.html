@@ -857,20 +857,24 @@
             const [reactWho, setReactWho] = React.useState(null);   // リアクション押下者ポップ {msgId,emoji}
             const [menuFor, setMenuFor] = React.useState(null);     // メニュー(返信/スタンプ/コピー/削除)を開いているメッセージID。モバイルは⋯ボタン、PCはホバー/右クリックで開く（本文の長押しはネイティブ選択＝部分コピーに使う）
             const menuAnchorRef = React.useRef(null);               // メニューの基準＝押した吹き出し/画像の位置（viewport座標）
+            const readAnchorRef = React.useRef(null);               // 既読ポップの基準（既読ボタンの位置）
             const openMenu = (id, el) => { try { const r = el.getBoundingClientRect(); menuAnchorRef.current = { top: r.top, bottom: r.bottom, left: r.left, right: r.right }; } catch { menuAnchorRef.current = null; } setMenuFor(id); };
-            // メニューDOMを実測して、押した吹き出しの近く＋画面内に必ず収まる位置へ（上下は余白の広い側／左右は吹き出し側に寄せてクランプ）。body直下のportalに固定配置。
-            const positionMenu = (node) => {
-                if (!node) return; const r = menuAnchorRef.current; const vw = window.innerWidth, vh = window.innerHeight;
+            // ポップオーバーDOMを実測して、基準要素の近く＋画面内に必ず収まる位置へ（上下は余白の広い側／左右は基準側に寄せてクランプ）。body直下のportalに固定配置。
+            const placePopover = (node, r) => {
+                if (!node) return; const vw = window.innerWidth, vh = window.innerHeight;
                 const mw = node.offsetWidth || 200, mh = node.offsetHeight || 240; const M = 8;
                 if (!r) { node.style.left = Math.round((vw - mw) / 2) + 'px'; node.style.top = Math.round((vh - mh) / 2) + 'px'; return; }
                 const above = r.top - M, below = vh - r.bottom - M;
                 let top = (mh <= above || above >= below) ? (r.top - mh - M) : (r.bottom + M);
                 top = Math.max(M, Math.min(top, vh - mh - M));
-                const alignRight = (r.left + r.right) / 2 > vw / 2;      // 右寄せ吹き出し（自分）は右端合わせ
+                const alignRight = (r.left + r.right) / 2 > vw / 2;      // 右寄せ（自分側）は右端合わせ
                 let left = alignRight ? (r.right - mw) : r.left;
                 left = Math.max(M, Math.min(left, vw - mw - M));
                 node.style.left = Math.round(left) + 'px'; node.style.top = Math.round(top) + 'px';
             };
+            const positionMenu = (node) => placePopover(node, menuAnchorRef.current);
+            const positionRead = (node) => placePopover(node, readAnchorRef.current);
+            const openReadPop = (id, el) => { try { const r = el.getBoundingClientRect(); readAnchorRef.current = { top: r.top, bottom: r.bottom, left: r.left, right: r.right }; } catch { readAnchorRef.current = null; } setReadOpen(id); };
             const [readDir, setReadDir] = React.useState('up');     // 既読ポップの開く向き（上部メッセージは下向きにしてはみ出し防止）
             const calcDir = (el) => { try { const r = el.getBoundingClientRect(); return r.top > (window.innerHeight * 0.42) ? 'up' : 'down'; } catch { return 'up'; } };
             // 最下部へ（コンテナの scrollTop を直接最大化＝即時・確実。既定はアニメ無しで“ガタつき”を防ぐ）。
@@ -958,18 +962,18 @@
                                     const doSelectCopy = () => { setSelId(m.id); requestAnimationFrame(() => { try { const el = document.querySelector('#chatbubble-' + m.id + ' [data-msgtext]'); if (el) { const r = document.createRange(); r.selectNodeContents(el); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); } } catch {} }); };
                                     {/* メタ＝既読＋時刻を吹き出しの1番下に揃える（LINE風）。操作は吹き出しの長押し/右クリックのメニューへ集約（⋯は廃止）。 */}
                                     const meta = (
-                                        <div className={`flex flex-col ${mine ? 'items-end' : 'items-start'} justify-end shrink-0 pb-1 gap-0 leading-none`}>
+                                        <div className={`flex flex-col ${mine ? 'items-end' : 'items-start'} justify-end shrink-0 pb-0.5 gap-0 leading-none`}>
                                             {mine && Array.isArray(readMembers) && readers.length > 0 && (
-                                                <div className="relative group/rd">
-                                                    <button onClick={e => { if (readOpen === m.id) { setReadOpen(null); return; } setReadDir(calcDir(e.currentTarget)); setReadOpen(m.id); }} onMouseEnter={e => setReadDir(calcDir(e.currentTarget))} className="text-[10px] text-[#98A2B3] font-medium hover:text-brand-600" title="既読した人を表示">既読{readers.length}{readMembers.length > 1 ? `/${readMembers.length - 1}` : ''}</button>
-                                                    {readOpen === m.id && <div className="fixed inset-0 z-20" onClick={e => { e.stopPropagation(); setReadOpen(null); }} />}
-                                                    <div className={`${readOpen === m.id ? 'block' : 'hidden'} md:group-hover/rd:block absolute z-30 ${readDir === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'} ${mine ? 'right-0' : 'left-0'} w-[180px] max-w-[70vw] max-h-56 overflow-y-auto bg-white border border-[#EAECF0] rounded-xl shadow-xl p-2`} onClick={e => e.stopPropagation()}>
-                                                        <div className="text-[10px] font-bold text-[#98A2B3] px-1 pb-1.5">既読 {readers.length}名</div>
-                                                        {readers.map((id, i) => { const nm = readNames[i] || 'スタッフ'; return <div key={id} className="flex items-center gap-2 px-1 py-1"><span className={`w-6 h-6 rounded-full ${chatAvatarColor(nm)} inline-flex items-center justify-center text-[11px] font-semibold shrink-0`}>{String(nm).trim().charAt(0)}</span><span className="text-[13px] text-[#344054] truncate">{nm}</span></div>; })}
-                                                    </div>
-                                                </div>
+                                                <button onClick={e => { e.stopPropagation(); if (readOpen === m.id) { setReadOpen(null); return; } openReadPop(m.id, e.currentTarget); }} className="text-[10px] text-[#98A2B3] font-medium leading-none hover:text-brand-600" title="既読した人を表示">既読{readers.length}{readMembers.length > 1 ? `/${readMembers.length - 1}` : ''}</button>
                                             )}
-                                            <span className="text-[10px] text-[#B0B7C3] whitespace-nowrap">{m._pending ? '送信中…' : fmtTime(m.createdAt)}</span>
+                                            <span className="text-[10px] text-[#B0B7C3] leading-none whitespace-nowrap mt-0.5">{m._pending ? '送信中…' : fmtTime(m.createdAt)}</span>
+                                            {readOpen === m.id && ReactDOM.createPortal(<>
+                                                <div className="fixed inset-0 z-[120]" onClick={() => setReadOpen(null)} />
+                                                <div ref={positionRead} className="fixed z-[121] left-0 top-0 w-[200px] max-w-[86vw] max-h-[60vh] overflow-y-auto bg-white border border-[#EAECF0] rounded-xl shadow-xl p-2" onClick={e => e.stopPropagation()}>
+                                                    <div className="text-[10px] font-bold text-[#98A2B3] px-1 pb-1.5">既読 {readers.length}名</div>
+                                                    {readers.map((id, i) => { const nm = readNames[i] || 'スタッフ'; return <div key={id} className="flex items-center gap-2 px-1 py-1"><span className={`w-6 h-6 rounded-full ${chatAvatarColor(nm)} inline-flex items-center justify-center text-[11px] font-semibold shrink-0`}>{String(nm).trim().charAt(0)}</span><span className="text-[13px] text-[#344054] truncate">{nm}</span></div>; })}
+                                                </div>
+                                            </>, document.body)}
                                         </div>
                                     );
                                     // メッセージ操作メニュー（吹き出し／画像 どちらの長押しでも同じものを表示）。

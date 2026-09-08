@@ -16632,12 +16632,14 @@
                                                     const metric = soPivotMetric;
                                                     const metricLabel = metric === 'booking' ? '新規予約' : metric === 'visit' ? '来店' : '入会';
                                                     const nz = (c) => c && (c.booking > 0 || c.visit > 0 || c.join > 0);
+                                                    // 新規でない媒体（既存/未設定/会員系/時間メニュー等）は除外
+                                                    const isNonNew = (n) => { n = String(n || ''); return n === '既存' || n === '未設定' || /会員/.test(n) || /\d+\s*分/.test(n); };
                                                     const mediaAgg = {};
-                                                    active.forEach(r => (r.channels || []).forEach(c => { if (!nz(c)) return; const m = mediaAgg[c.name] = mediaAgg[c.name] || { name: c.name, tot: 0 }; m.tot += c[metric] || 0; }));
+                                                    active.forEach(r => (r.channels || []).forEach(c => { if (!nz(c) || isNonNew(c.name)) return; const m = mediaAgg[c.name] = mediaAgg[c.name] || { name: c.name, tot: 0 }; m.tot += c[metric] || 0; }));
                                                     const medias = Object.values(mediaAgg).filter(m => m.tot > 0).sort((a, b) => b.tot - a.tot);
                                                     if (!medias.length) return null;
                                                     const cellOf = (r, name) => { const c = (r.channels || []).find(x => x.name === name); return c ? (c[metric] || 0) : 0; };
-                                                    const allRows = active.map(r => ({ name: r.name, r, total: medias.reduce((a, m) => a + cellOf(r, m.name), 0) })).filter(x => x.total > 0).sort((a, b) => b.total - a.total);
+                                                    const allRows = active.map(r => ({ name: r.name, r, total: medias.reduce((a, m) => a + cellOf(r, m.name), 0) })).filter(x => x.total > 0).sort((a, b) => (orgGeoRank(a.name) - orgGeoRank(b.name)) || String(a.name).localeCompare(b.name, 'ja'));
                                                     const rows = allRows.filter(x => !soMxStore || String(x.name).includes(soMxStore));
                                                     const colTot = (name) => rows.reduce((a, x) => a + cellOf(x.r, name), 0);
                                                     const colSum = (name, key) => rows.reduce((a, x) => { const c = (x.r.channels || []).find(y => y.name === name); return a + ((c && c[key]) || 0); }, 0);
@@ -16679,6 +16681,12 @@
                                                                         </tr>
                                                                     </thead>
                                                                     <tbody>
+                                                                        {/* 合計を一番上に固定表示 */}
+                                                                        <tr className="border-b-2 border-slate-200 bg-slate-100 font-black text-slate-800 sticky top-[33px] z-10">
+                                                                            <td className="py-2 px-3 text-left sticky left-0 bg-slate-100 z-10">合計</td>
+                                                                            <td className="py-2 px-3 text-right text-emerald-700 bg-emerald-50">{grand.toLocaleString()}</td>
+                                                                            {medias.map(m => <td key={m.name} className="py-2 px-3 text-right">{colTot(m.name).toLocaleString()}</td>)}
+                                                                        </tr>
                                                                         {rows.map((x, xi) => (
                                                                             <tr key={xi} className="border-b border-slate-50 hover:bg-slate-50/70">
                                                                                 <td className="py-1.5 px-3 font-bold text-slate-700 sticky left-0 bg-white">{x.name.replace(/^NAORU\s*/, '')}</td>
@@ -16688,11 +16696,6 @@
                                                                         ))}
                                                                     </tbody>
                                                                     <tfoot>
-                                                                        <tr className="border-t-2 border-slate-200 bg-slate-100 font-black text-slate-800">
-                                                                            <td className="py-2 px-3 text-left sticky left-0 bg-slate-100">合計</td>
-                                                                            <td className="py-2 px-3 text-right text-emerald-700">{grand.toLocaleString()}</td>
-                                                                            {medias.map(m => <td key={m.name} className="py-2 px-3 text-right">{colTot(m.name).toLocaleString()}</td>)}
-                                                                        </tr>
                                                                         <tr className="border-t border-slate-200 bg-white text-slate-600">
                                                                             <td className="py-1.5 px-3 text-left font-bold sticky left-0 bg-white text-[11px]">広告費（入力）</td>
                                                                             <td className="py-1.5 px-3 text-right font-black text-slate-700">{totAd ? soYen(totAd) : '–'}</td>
@@ -16816,8 +16819,8 @@
                                                     );
                                                 })()}
 
-                                                {/* 担当者別 新規獲得 */}
-                                                <div className="bg-white rounded-2xl border border-emerald-100 p-4 md:p-5">
+                                                {/* 担当者別 新規獲得 — 非表示（ユーザー要望でカット） */}
+                                                {false && (<div className="bg-white rounded-2xl border border-emerald-100 p-4 md:p-5">
                                                     <h3 className="text-sm md:text-base font-black text-slate-800 mb-3 flex items-center gap-2"><Users size={15} className="text-emerald-600" />担当者別 新規獲得</h3>
                                                     {soStaffMk.length === 0 ? (<p className="text-center text-slate-400 font-bold py-6 text-sm">担当者別データはありません</p>) : (
                                                         <div className="overflow-x-auto">
@@ -16848,10 +16851,10 @@
                                                         </div>
                                                     )}
                                                     <p className="text-[10px] text-slate-400 mt-2 font-bold">※ 購入率＝購入数÷新規来店数（管理画面と同一定義）。担当はその顧客の初回予約担当。広告費・CPA・ROASはSalonOne側で広告費が未入力のため¥0。</p>
-                                                </div>
+                                                </div>)}
 
-                                                {/* 継続の内訳（媒体別 / 担当者別 / 購入回数別） */}
-                                                {soRetention && ((soRetention.bySource || []).length > 0 || (soRetention.byStaff || []).length > 0 || (soRetention.byPurchases || []).length > 0) && (
+                                                {/* 継続の内訳（媒体別 / 担当者別 / 購入回数別）— 非表示（ユーザー要望でカット） */}
+                                                {false && soRetention && ((soRetention.bySource || []).length > 0 || (soRetention.byStaff || []).length > 0 || (soRetention.byPurchases || []).length > 0) && (
                                                     <div className="bg-white rounded-2xl border border-emerald-100 p-4 md:p-5">
                                                         <h3 className="text-sm md:text-base font-black text-slate-800 mb-3 flex items-center gap-2"><Repeat size={15} className="text-emerald-600" />継続の内訳</h3>
                                                         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6">

@@ -209,7 +209,10 @@ export default async function handler(req, res) {
   if ((req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'blobcheck') {
     return res.status(200).json({ ok: true, configured: !!process.env.BLOB_READ_WRITE_TOKEN });
   }
-  const isBlobUpload = (req.body || {}).type === 'blobupload';
+  // ⚠️ @vercel/blob の client upload() はトークン発行POSTの body に独自の type
+  //    ('blob.generate-client-token') を入れるため、body.type では判定できない。
+  //    handleUploadUrl のクエリ ?type=blobupload で判定する（body.type は後方互換）。
+  const isBlobUpload = req.query.type === 'blobupload' || (req.body || {}).type === 'blobupload';
   if (isBlobUpload) {
     if (!process.env.BLOB_READ_WRITE_TOKEN) return res.status(200).json({ ok: false, configured: false, error: 'blob_not_configured' });
     try {

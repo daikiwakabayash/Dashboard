@@ -966,7 +966,7 @@
                                             {mine && Array.isArray(readMembers) && readers.length > 0 && (
                                                 <button onClick={e => { e.stopPropagation(); if (readOpen === m.id) { setReadOpen(null); return; } openReadPop(m.id, e.currentTarget); }} className="text-[10px] text-[#98A2B3] font-medium leading-none hover:text-brand-600" title="既読した人を表示">既読{readers.length}{readMembers.length > 1 ? `/${readMembers.length - 1}` : ''}</button>
                                             )}
-                                            <span className="text-[10px] text-[#B0B7C3] leading-none whitespace-nowrap mt-0.5">{m._pending ? '送信中…' : fmtTime(m.createdAt)}</span>
+                                            <span className="text-[10px] text-[#B0B7C3] leading-none whitespace-nowrap">{m._pending ? '送信中…' : fmtTime(m.createdAt)}</span>
                                             {readOpen === m.id && ReactDOM.createPortal(<>
                                                 <div className="fixed inset-0 z-[120]" onClick={() => setReadOpen(null)} />
                                                 <div ref={positionRead} className="fixed z-[121] left-0 top-0 w-[200px] max-w-[86vw] max-h-[60vh] overflow-y-auto bg-white border border-[#EAECF0] rounded-xl shadow-xl p-2" onClick={e => e.stopPropagation()}>
@@ -2492,6 +2492,8 @@
             const chatUploadFile = async (file) => {
                 if (!file) return;
                 if (typeof window.__blobUpload !== 'function') { alert('ファイル送信の準備ができていません（数秒後に再度お試しください）。改善しない場合は管理者へ：VercelでBlobストレージの有効化が必要です。'); return; }
+                // 保存先(Vercel Blob)が未設定なら、分かりやすいメッセージで止める（@vercel/blobの生エラーを出さない）
+                try { const c = await fetch('/api/plan-store?type=blobcheck'); const cj = await c.json().catch(() => ({})); if (cj && cj.configured === false) { alert('動画・ファイルの保存先（Vercel Blob）が未設定です。\n\n管理者へ：Vercelで Blob ストレージを作成し、環境変数 BLOB_READ_WRITE_TOKEN をProductionに設定して再デプロイしてください。'); return; } } catch {}
                 const isVideo = /^video\//.test(file.type);
                 const MAXB = isVideo ? 300 * 1024 * 1024 : 50 * 1024 * 1024; // 動画300MB / その他50MB
                 if (file.size > MAXB) { alert(`ファイルが大きすぎます（${Math.round(file.size / 1024 / 1024)}MB）。${isVideo ? '動画は300MBまで' : '50MBまで'}にしてください。`); return; }

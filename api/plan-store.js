@@ -205,6 +205,10 @@ export default async function handler(req, res) {
   // クライアントの @vercel/blob upload() が handleUploadUrl として叩く。大容量ファイルは
   // サーバー(4.5MB上限)を経由せず Blob ストレージへ直接アップロードされる。
   // 有効化には Vercel の Storage で Blob を作成（BLOB_READ_WRITE_TOKEN が自動注入）すること。
+  // Blob設定チェック（クライアントが動画/ファイル送信前に確認）
+  if ((req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'blobcheck') {
+    return res.status(200).json({ ok: true, configured: !!process.env.BLOB_READ_WRITE_TOKEN });
+  }
   const isBlobUpload = (req.body || {}).type === 'blobupload';
   if (isBlobUpload) {
     if (!process.env.BLOB_READ_WRITE_TOKEN) return res.status(200).json({ ok: false, configured: false, error: 'blob_not_configured' });

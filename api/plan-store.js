@@ -46,6 +46,8 @@ const PROFILE_KEY = 'naoru:profile:v1';       // { profiles:{pid:{kind,nameKanji
 const ADSPEND_KEY = 'naoru:adspend:v1';       // { spend:{ 'YYYY-MM'|rangeKey : { 媒体名: 金額(円) } } } 媒体別広告費（従来は端末localStorageのみ→全社共有＝AIアシスタントも参照可）
 const FAQ_KEY = 'naoru:faq:v1';               // { faqs:[{id,q,a,tags:[],shopScope:''|店舗名,updatedAt,updatedBy}] } 社内FAQ（AIアシスタントの回答根拠・本部が育てる）
 const AILOG_KEY = 'naoru:ailog:v1';           // { logs:[{id,ts,shop,staffId,staffName,question,escalated}] } AIアシスタントの質問ログ（自己解決率・よくある質問の可視化用）
+const KNOWLEDGE_KEY = 'naoru:knowledge:v1';   // { docs:[{id,title,body,shopScope,source,updatedAt,updatedBy}] } ナレッジ資料（長文: 議事録の文字起こし/スプレッドシート・スライドの中身/マニュアル）。AIが根拠に使う
+const KNOWCAND_KEY = 'naoru:knowcand:v1';     // { cands:[{id,ts,roomId,shop,fromName,question,answer}] } 本部チャット回答のナレッジ候補（承認でFAQ化）
 
 // ── Webプッシュ送信（VAPID設定時のみ動作・未設定なら黙ってスキップ） ──
 const VAPID_PUBLIC = () => process.env.VAPID_PUBLIC_KEY || '';
@@ -407,6 +409,85 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, count: next.length });
       }
       return res.status(400).json({ ok: false, error: 'invalid faq action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── ナレッジ資料（長文: 文字起こし/シート・スライドの中身/マニュアル）: ?type=knowledge ──
+  const isKnow = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'knowledge';
+  if (isKnow) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ docs: [], configured: false });
+    try {
+      const cur = (await blobGet(KNOWLEDGE_KEY, hasKV, hasSB, gas)) || {};
+      const docs = Array.isArray(cur.docs) ? cur.docs : [];
+      if (req.method === 'GET') return res.status(200).json({ docs, configured: true });
+      const body = req.body || {};
+      const clean = (d) => ({
+        id: String(d.id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6))),
+        title: String(d.title || '').slice(0, 200),
+        body: String(d.body || '').slice(0, 40000),          // 長文（1資料上限4万字）
+        shopScope: String(d.shopScope || '').slice(0, 60),   // '' = 全社共通
+        source: String(d.source || '').slice(0, 200),        // 例: Googleスライドのタイトル/URL、議事録2026-09 等
+        updatedAt: new Date().toISOString(),
+        updatedBy: String(d.updatedBy || '').slice(0, 60),
+      });
+      if ((body.action === 'add' || body.action === 'update') && body.doc) {
+        const rec = clean(body.doc);
+        const exists = docs.some(x => x && x.id === rec.id);
+        const next = exists ? docs.map(x => x && x.id === rec.id ? rec : x) : docs.concat(rec);
+        await blobSet(KNOWLEDGE_KEY, { docs: next.slice(0, 1000) }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, doc: rec });
+      }
+      if (body.action === 'delete' && body.id) {
+        const next = docs.filter(x => x && x.id !== String(body.id));
+        await blobSet(KNOWLEDGE_KEY, { docs: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      if (body.action === 'bulk' && Array.isArray(body.docs)) {
+        const map = new Map(docs.map(x => [String(x.id), x]));
+        for (const d of body.docs) { const rec = clean(d); map.set(rec.id, rec); }
+        const next = [...map.values()].slice(0, 1000);
+        await blobSet(KNOWLEDGE_KEY, { docs: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, count: next.length });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid knowledge action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── 本部チャット回答のナレッジ候補（承認でFAQ化）: ?type=knowcand ──
+  const isKnowCand = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'knowcand';
+  if (isKnowCand) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ cands: [], configured: false });
+    try {
+      const cur = (await blobGet(KNOWCAND_KEY, hasKV, hasSB, gas)) || {};
+      const cands = Array.isArray(cur.cands) ? cur.cands : [];
+      if (req.method === 'GET') return res.status(200).json({ cands, configured: true });
+      const body = req.body || {};
+      if (body.action === 'add' && body.cand) {
+        const c = body.cand;
+        const rec = {
+          id: String(c.id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6))),
+          ts: new Date().toISOString(),
+          roomId: String(c.roomId || '').slice(0, 80),
+          shop: String(c.shop || '').slice(0, 60),
+          fromName: String(c.fromName || '').slice(0, 60),
+          question: String(c.question || '').slice(0, 500),
+          answer: String(c.answer || '').slice(0, 4000),
+        };
+        if (!rec.answer.trim()) return res.status(200).json({ ok: false, error: 'empty' });
+        const next = [...cands, rec].slice(-2000);
+        await blobSet(KNOWCAND_KEY, { cands: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      if (body.action === 'delete' && body.id) {
+        const next = cands.filter(x => x && x.id !== String(body.id));
+        await blobSet(KNOWCAND_KEY, { cands: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid knowcand action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
     }

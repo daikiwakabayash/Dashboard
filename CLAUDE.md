@@ -182,6 +182,11 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
 - **回答生成**: `api/chat.js` の `agent:'faq'`（別人格 `ASSISTANT_SYSTEM_PROMPT`・モデル `claude-sonnet-5`→`claude-haiku-4-5`・思考なし・`max_tokens`小）。**渡したFAQ＋店舗データの範囲だけで回答**し、範囲外や確信が持てない/重い話題は**1行目に `NEEDS_HQ`** を出力→フロントで本部へエスカレ（🙋＋`orgHq` メンション＝プッシュ通知）。ボット投稿は `fromStaffId='__ai__'`・名前「🤖 NAORUアシスタント」。二重起動ガード（`chatAiBusyRef`）。
 - **FAQストア**（`/api/plan-store?type=faq`）: `{faqs:[{id,q,a,tags,shopScope,updatedAt,updatedBy}]}`。action=add/update/delete/bulk。`shopScope=''` は全社共通、店舗名指定でその店舗限定。**FAQ管理タブ（root専用・id=`faqadmin`）** でGUI編集。
 - **広告費の共有化・店舗別**（`/api/plan-store?type=adspend`）: 従来は端末localStorage(`so_adspend_v1`)のみ→共有ストア化（`soAdSpend` は起動時サーバー読込＋書込み、localStorageはキャッシュ）。構造 `spend[rangeKey][media]`（全社合計・媒体×店舗ピボットのtfoot入力）＋ `spend[rangeKey].__shops__[店舗名][media]`（店舗別・ピボット下の「店舗別 広告費入力」で店舗選択して入力）。`rangeKey=`${soFrom}_${soTo}``。AIは店舗別→全社合計の順に参照。
+- **ナレッジ収集**（AIの根拠を育てる）:
+  - **ナレッジ資料**（`/api/plan-store?type=knowledge`）: 長文資料 `{docs:[{id,title,body,shopScope,source,updatedAt}]}`（議事録の文字起こし・スプレッドシート/スライドの中身・マニュアル）。AIはFAQに加えこれも根拠に使う（`aiFetchFaq` が faq＋knowledge を取得、資料は合計12000字上限で新しい順に詰める）。動画は別アプリで文字起こししたテキストを貼付。
+  - **本部回答の自動蓄積**（`/api/plan-store?type=knowcand`）: 本部(root/hq)がチャットで送った回答を「ナレッジ候補」として自動記録（`chatSend` で @AI起動でない通常回答時・質問=返信元本文）。FAQ管理で候補一覧→ワンタップ「承認してFAQ化」。
+  - **一括貼付インポート**: FAQ管理でGoogleスプレッドシート/Excelをコピー→貼付（1行=`質問[TAB]回答[TAB]店舗`）→`faq bulk`。Google資料はコピペ or Claude(セッション)がDrive経由で代行取込。
+  - **訂正して再学習**: AI回答が誤りなら、本部が正しい回答をチャットで送る（=候補化）か、メッセージメニュー「🤖 この回答をFAQに追加」で修正版をFAQ登録。
 - ⚠️ 信頼モデルは thanksgift/chat と同じ（plan-store はサーバー認証なし・UIレベル社内利用前提）。
 
 ## 勉強会・イベント日程（共有編集グリッド）／組織図

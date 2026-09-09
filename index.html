@@ -2232,16 +2232,55 @@
             const [faqAdmin, setFaqAdmin] = useState({ list: [], loading: false, loaded: false });
             const [faqEdit, setFaqEdit] = useState(null);        // 編集中 {id?, q, a, shopScope} or null
             const [aiLog, setAiLog] = useState([]);              // AI質問ログ（分析用）
+            const [knowDocs, setKnowDocs] = useState([]);        // ナレッジ資料（長文）
+            const [knowEdit, setKnowEdit] = useState(null);      // 編集中の資料 {id?, title, body, shopScope, source}
+            const [knowCands, setKnowCands] = useState([]);      // 本部回答のナレッジ候補
+            const [faqBulk, setFaqBulk] = useState('');          // 一括貼付インポートのテキスト
             const faqAdminLoad = async () => {
                 setFaqAdmin(s => ({ ...s, loading: true }));
                 try {
-                    const [fr, lr] = await Promise.all([
+                    const [fr, lr, kr, cr] = await Promise.all([
                         fetch('/api/plan-store?type=faq', { cache: 'no-store' }).then(r => r.json()).catch(() => null),
                         fetch('/api/plan-store?type=ailog', { cache: 'no-store' }).then(r => r.json()).catch(() => null),
+                        fetch('/api/plan-store?type=knowledge', { cache: 'no-store' }).then(r => r.json()).catch(() => null),
+                        fetch('/api/plan-store?type=knowcand', { cache: 'no-store' }).then(r => r.json()).catch(() => null),
                     ]);
                     setFaqAdmin({ list: (fr && Array.isArray(fr.faqs)) ? fr.faqs : [], loading: false, loaded: true });
                     setAiLog((lr && Array.isArray(lr.logs)) ? lr.logs : []);
+                    setKnowDocs((kr && Array.isArray(kr.docs)) ? kr.docs : []);
+                    setKnowCands((cr && Array.isArray(cr.cands)) ? cr.cands : []);
                 } catch { setFaqAdmin(s => ({ ...s, loading: false, loaded: true })); }
+            };
+            // ナレッジ資料の保存/削除
+            const knowSave = async () => {
+                const e = knowEdit; if (!e || !String(e.body || '').trim()) return;
+                const doc = { id: e.id || undefined, title: e.title || '', body: e.body, shopScope: e.shopScope || '', source: e.source || '', updatedBy: authState.staffName || authState.owner || '管理者' };
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'knowledge', action: e.id ? 'update' : 'add', doc }) }); } catch {}
+                setKnowEdit(null); await faqAdminLoad();
+            };
+            const knowDelete = async (id) => {
+                if (!id || !window.confirm('この資料を削除しますか？')) return;
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'knowledge', action: 'delete', id }) }); } catch {}
+                await faqAdminLoad();
+            };
+            // 一括貼付インポート: 1行=「質問<TAB>回答[<TAB>店舗]」（Googleスプレッドシート/Excelからコピー）。カンマ区切りも可。
+            const faqBulkImport = async () => {
+                const lines = String(faqBulk || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+                const faqs = [];
+                for (const line of lines) {
+                    let cols = line.includes('\t') ? line.split('\t') : line.split(',');
+                    cols = cols.map(c => c.trim());
+                    if (cols.length < 2 || !cols[0] || !cols[1]) continue;
+                    faqs.push({ q: cols[0], a: cols[1], shopScope: cols[2] || '' });
+                }
+                if (!faqs.length) { window.alert('取り込める行がありません。「質問[タブ]回答」の形式で貼り付けてください。'); return; }
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'faq', action: 'bulk', faqs }) }); } catch {}
+                setFaqBulk(''); window.alert(`${faqs.length}件を取り込みました。`); await faqAdminLoad();
+            };
+            // 本部回答候補: 却下（削除）
+            const knowCandReject = async (id) => {
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'knowcand', action: 'delete', id }) }); } catch {}
+                setKnowCands(cs => cs.filter(c => c.id !== id));
             };
             const faqAdminSave = async () => {
                 const e = faqEdit; if (!e || !String(e.q || '').trim() || !String(e.a || '').trim()) return;
@@ -2826,7 +2865,18 @@
                     chatPendingRef.current = chatPendingRef.current.filter(x => x.id !== tmpId); // 確定：以後はサーバー本物を表示
                     await chatLoad();
                     // ── @AI 起動: 文中に @AI があるか、🤖ボタン(forceAi)の場合、NAORUアシスタントが店舗データ＋FAQで返信 ──
-                    if (t && (forceAi || /[@＠]\s*ai\b/i.test(t))) { chatAiReply(roomId, t).catch(() => {}); }
+                    const isAiTrigger = forceAi || /[@＠]\s*ai\b/i.test(t);
+                    if (t && isAiTrigger) { chatAiReply(roomId, t).catch(() => {}); }
+                    // ── 本部(root/hq)の回答をナレッジ候補として自動蓄積（FAQ管理でワンタップ承認→FAQ化） ──
+                    // 質問=返信元の本文（あれば）／回答=今回の本文。@AI起動や自分宛でない通常回答のみ対象。
+                    else if (t && chatIsRoot) {
+                        try {
+                            const roomForCand = (chatData.rooms || []).find(r => r.id === roomId) || null;
+                            const shopForCand = (roomForCand && roomForCand.kind === 'store' && roomForCand.shop) ? roomForCand.shop : '';
+                            const qText = (replyTo && replyTo.text) ? String(replyTo.text).replace(/[@＠]\s*ai\b/ig, '').trim() : '';
+                            fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'knowcand', action: 'add', cand: { roomId, shop: shopForCand, fromName: chatMyName, question: qText, answer: t } }) }).catch(() => {});
+                        } catch {}
+                    }
                 } catch {
                     // 失敗時は仮メッセージを消して入力を復元（送信できていない）
                     chatPendingRef.current = chatPendingRef.current.filter(x => x.id !== tmpId);
@@ -2900,18 +2950,33 @@
                 }
                 return s;
             };
-            // 社内FAQを取得（全社共通＋その店舗限定を対象）
+            // 社内FAQ＋ナレッジ資料を取得（全社共通＋その店舗限定を対象）してAIの根拠テキストにする
             const aiFetchFaq = async (shopName) => {
+                let out = '';
                 try {
                     const r = await fetch('/api/plan-store?type=faq', { cache: 'no-store' });
                     const j = await r.json();
                     const faqs = (j && Array.isArray(j.faqs)) ? j.faqs : [];
                     const rel = faqs.filter(f => !f.shopScope || (shopName && soShopNorm(f.shopScope) === soShopNorm(shopName)));
-                    if (!rel.length) return '';
-                    let s = '■ 社内FAQ（本部が用意した回答集。ここに該当があれば必ず使う）\n';
-                    rel.slice(0, 200).forEach(f => { s += `---\nQ: ${f.q}\nA: ${f.a}\n`; });
-                    return s;
-                } catch { return ''; }
+                    if (rel.length) { out += '■ 社内FAQ（本部が用意した回答集。ここに該当があれば必ず使う）\n'; rel.slice(0, 200).forEach(f => { out += `---\nQ: ${f.q}\nA: ${f.a}\n`; }); }
+                } catch {}
+                try {
+                    const r = await fetch('/api/plan-store?type=knowledge', { cache: 'no-store' });
+                    const j = await r.json();
+                    const docs = (j && Array.isArray(j.docs)) ? j.docs : [];
+                    const rel = docs.filter(d => !d.shopScope || (shopName && soShopNorm(d.shopScope) === soShopNorm(shopName)));
+                    if (rel.length) {
+                        // 資料は長文になり得るので合計12000字を上限に詰める（新しい順）
+                        let budget = 12000, block = '\n■ ナレッジ資料（議事録・マニュアル等。回答の根拠に使う）\n';
+                        for (const d of rel.slice().reverse()) {
+                            const piece = `---\n【${d.title || '無題'}${d.source ? ' / ' + d.source : ''}】\n${d.body}\n`;
+                            if (budget - piece.length < 0) { block += `---\n（他 ${rel.length}件中の一部のみ掲載。詳細は本部に確認）\n`; break; }
+                            block += piece; budget -= piece.length;
+                        }
+                        out += block;
+                    }
+                } catch {}
+                return out;
             };
             // 本部メンバーのstaffId（エスカレ時のメンション先＝プッシュ通知）
             const aiHqMentionIds = () => {
@@ -18307,6 +18372,82 @@
                                             </div>
                                         </div>
                                     )}
+                                </div>
+
+                                {/* 本部回答の候補（チャットで本部が答えた内容→承認でFAQ化） */}
+                                {(knowCands && knowCands.length > 0) && (
+                                    <div className="bg-white rounded-2xl border border-amber-200 shadow-sm p-4 md:p-5">
+                                        <div className="flex items-center gap-2 mb-2">
+                                            <span className="text-[14px] font-black text-slate-800">📥 本部回答の候補</span>
+                                            <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-100 text-amber-700">{knowCands.length}件</span>
+                                            <span className="text-[10px] text-slate-400 font-bold hidden sm:inline">チャットで本部が答えた内容。承認するとFAQになりAIが使います。</span>
+                                        </div>
+                                        <div className="space-y-2 max-h-72 overflow-y-auto">
+                                            {knowCands.slice().reverse().map(c => (
+                                                <div key={c.id} className="border border-slate-100 rounded-xl p-2.5 bg-slate-50/50">
+                                                    {c.question && <div className="text-[12px] text-slate-500 font-bold mb-0.5">Q: {c.question}</div>}
+                                                    <div className="text-[13px] text-slate-700 font-medium whitespace-pre-wrap leading-relaxed">{c.answer}</div>
+                                                    <div className="flex items-center gap-2 mt-1.5">
+                                                        <span className="text-[10px] text-slate-400 font-bold">{c.fromName}{c.shop ? ' / ' + String(c.shop).replace(/^NAORU\s*/, '') : ''}</span>
+                                                        <button onClick={() => { setFaqEdit({ q: c.question || '', a: c.answer || '', shopScope: c.shop || '' }); knowCandReject(c.id); requestAnimationFrame(() => { try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch {} }); }} className="ml-auto px-2.5 py-1 rounded-md text-[11px] font-bold text-white bg-indigo-600 hover:bg-indigo-700">承認してFAQ化</button>
+                                                        <button onClick={() => knowCandReject(c.id)} className="px-2.5 py-1 rounded-md text-[11px] font-bold text-slate-400 hover:bg-slate-100">却下</button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* ナレッジ資料（長文: 議事録の文字起こし・シート/スライドの中身・マニュアル） */}
+                                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 md:p-5">
+                                    <div className="flex items-center gap-2 mb-3 flex-wrap">
+                                        <span className="text-[14px] font-black text-slate-800">📚 ナレッジ資料（長文）</span>
+                                        <span className="text-[10px] text-slate-400 font-bold">議事録の文字起こし・スプレッドシート/スライドの中身・マニュアルを貼り付け。AIが根拠に使います。</span>
+                                        {!knowEdit && <button onClick={() => setKnowEdit({ title: '', body: '', shopScope: '', source: '' })} className="ml-auto px-3 py-1.5 rounded-lg bg-slate-800 text-white font-bold text-[12px] hover:bg-slate-900">＋ 資料を追加</button>}
+                                    </div>
+                                    {knowEdit && (
+                                        <div className="space-y-2 mb-3 border border-slate-200 rounded-xl p-3 bg-slate-50/50">
+                                            <div className="flex gap-2 flex-wrap">
+                                                <input value={knowEdit.title} onChange={e => setKnowEdit(k => ({ ...k, title: e.target.value }))} placeholder="タイトル（例: 定例MTG 2026-09-01 文字起こし）" className="flex-1 min-w-[180px] px-3 py-2 border border-slate-200 rounded-lg text-sm font-medium outline-none focus:border-indigo-400" />
+                                                <select value={knowEdit.shopScope} onChange={e => setKnowEdit(k => ({ ...k, shopScope: e.target.value }))} className="px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white">
+                                                    <option value="">全店共通</option>
+                                                    {shopList.map((s, i) => <option key={i} value={s.name}>{s.name.replace(/^NAORU\s*/, '')} 限定</option>)}
+                                                </select>
+                                            </div>
+                                            <input value={knowEdit.source} onChange={e => setKnowEdit(k => ({ ...k, source: e.target.value }))} placeholder="出典（任意・例: GoogleスライドURL / 議事録）" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-[12px] font-medium outline-none focus:border-indigo-400" />
+                                            <textarea value={knowEdit.body} onChange={e => setKnowEdit(k => ({ ...k, body: e.target.value }))} rows={8} placeholder="ここに本文（文字起こし・資料の中身）を貼り付け。長文OK。" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-medium outline-none focus:border-indigo-400 resize-y" />
+                                            <div className="flex items-center gap-2">
+                                                <button onClick={() => setKnowEdit(null)} className="text-[12px] font-bold text-slate-400 hover:text-slate-600">キャンセル</button>
+                                                <button onClick={knowSave} disabled={!String(knowEdit.body || '').trim()} className="ml-auto px-5 py-2 rounded-lg bg-slate-800 text-white font-bold text-[13px] hover:bg-slate-900 disabled:opacity-40">{knowEdit.id ? '保存' : '追加'}</button>
+                                            </div>
+                                        </div>
+                                    )}
+                                    {(knowDocs || []).length === 0 && !knowEdit && <p className="text-[12px] text-slate-400 font-bold">まだ資料がありません。議事録の文字起こしや資料の中身を貼り付けて追加してください（動画は別アプリで文字起こししたテキストを貼付）。</p>}
+                                    <div className="space-y-1.5">
+                                        {(knowDocs || []).map(d => (
+                                            <div key={d.id} className="flex items-center gap-2 border border-slate-100 rounded-lg px-3 py-2">
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="flex items-center gap-2"><span className="text-[13px] font-bold text-slate-800 truncate">{d.title || '無題'}</span>{d.shopScope ? <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-violet-50 text-violet-600 shrink-0">{String(d.shopScope).replace(/^NAORU\s*/, '')}</span> : <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-slate-100 text-slate-500 shrink-0">全店</span>}</div>
+                                                    <div className="text-[11px] text-slate-400 truncate">{(d.body || '').slice(0, 80)}…（{(d.body || '').length.toLocaleString()}字）</div>
+                                                </div>
+                                                <button onClick={() => setKnowEdit({ id: d.id, title: d.title, body: d.body, shopScope: d.shopScope || '', source: d.source || '' })} className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-bold text-slate-500 hover:bg-slate-100">編集</button>
+                                                <button onClick={() => knowDelete(d.id)} className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-bold text-rose-500 hover:bg-rose-50">削除</button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* 一括貼付インポート（Googleスプレッドシート/Excelからコピー→FAQ一括登録） */}
+                                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 md:p-5">
+                                    <div className="flex items-center gap-2 mb-2 flex-wrap">
+                                        <span className="text-[14px] font-black text-slate-800">📄 一括貼付インポート（FAQ）</span>
+                                        <span className="text-[10px] text-slate-400 font-bold">Googleスプレッドシート/Excelを選択してコピー→下に貼付。1行＝「質問[タブ]回答[タブ]店舗(任意)」。</span>
+                                    </div>
+                                    <textarea value={faqBulk} onChange={e => setFaqBulk(e.target.value)} rows={5} placeholder={'返金対応は？\t手順は…\n領収書の再発行は？\tSquareから…\t渋谷院'} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-[12px] font-mono outline-none focus:border-indigo-400 resize-y" />
+                                    <div className="flex items-center gap-2 mt-2">
+                                        <span className="text-[11px] text-slate-400 font-bold">{String(faqBulk).split(/\r?\n/).filter(l => l.trim()).length} 行</span>
+                                        <button onClick={faqBulkImport} disabled={!String(faqBulk).trim()} className="ml-auto px-4 py-2 rounded-lg bg-indigo-600 text-white font-bold text-[13px] hover:bg-indigo-700 disabled:opacity-40">一括取り込み</button>
+                                    </div>
                                 </div>
 
                                 {/* 一覧 */}

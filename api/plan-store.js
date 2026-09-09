@@ -45,6 +45,7 @@ const EVENTS_KEY = 'naoru:events:v1';         // { sections:{study:[row],event:[
 const PROFILE_KEY = 'naoru:profile:v1';       // { profiles:{pid:{kind,nameKanji,nameKana,bio,mainImg,subImgs,sns,shops,birthday,updatedAt}} } スタッフ/オーナーのプロフィール（組織図で表示・店舗割当の上書き・birthday=誕生日の当日表示）
 const ADSPEND_KEY = 'naoru:adspend:v1';       // { spend:{ 'YYYY-MM'|rangeKey : { 媒体名: 金額(円) } } } 媒体別広告費（従来は端末localStorageのみ→全社共有＝AIアシスタントも参照可）
 const FAQ_KEY = 'naoru:faq:v1';               // { faqs:[{id,q,a,tags:[],shopScope:''|店舗名,updatedAt,updatedBy}] } 社内FAQ（AIアシスタントの回答根拠・本部が育てる）
+const AILOG_KEY = 'naoru:ailog:v1';           // { logs:[{id,ts,shop,staffId,staffName,question,escalated}] } AIアシスタントの質問ログ（自己解決率・よくある質問の可視化用）
 
 // ── Webプッシュ送信（VAPID設定時のみ動作・未設定なら黙ってスキップ） ──
 const VAPID_PUBLIC = () => process.env.VAPID_PUBLIC_KEY || '';
@@ -406,6 +407,36 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, count: next.length });
       }
       return res.status(400).json({ ok: false, error: 'invalid faq action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── AIアシスタント質問ログ（自己解決率・よくある質問の可視化）: ?type=ailog ──
+  const isAiLog = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'ailog';
+  if (isAiLog) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ logs: [], configured: false });
+    try {
+      const cur = (await blobGet(AILOG_KEY, hasKV, hasSB, gas)) || {};
+      const logs = Array.isArray(cur.logs) ? cur.logs : [];
+      if (req.method === 'GET') return res.status(200).json({ logs, configured: true });
+      const body = req.body || {};
+      if (body.action === 'add' && body.entry) {
+        const e = body.entry;
+        const rec = {
+          id: String(e.id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6))),
+          ts: new Date().toISOString(),
+          shop: String(e.shop || '').slice(0, 60),
+          staffId: String(e.staffId || '').slice(0, 40),
+          staffName: String(e.staffName || '').slice(0, 60),
+          question: String(e.question || '').slice(0, 500),
+          escalated: !!e.escalated,
+        };
+        const next = [...logs, rec].slice(-3000); // リングバッファ
+        await blobSet(AILOG_KEY, { logs: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid ailog action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
     }

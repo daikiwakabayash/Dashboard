@@ -174,6 +174,16 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
 - **PWA**: `manifest.webmanifest`＋`sw.js`＋アイコン（`icon-192/512(-maskable)`・`apple-touch-icon`）で携帯にインストール可。SWは**キャッシュしない**（fetchはパススルー＝古いビルドが残らない）。用途はインストール可能化とプッシュ受信のみ。`scripts/precompile.mjs`がpublicへコピー。
 - **Webプッシュ**: `sw.js`のpush/notificationclickで受信・遷移（`/?tab=board|chat`）。購読は`/api/plan-store?type=push`（GETで公開鍵配布・subscribe/unsubscribe）。送信は掲示板投稿=全員、チャットはグループ/DM=メンバー・全社アナウンス=全員（店舗ルームは送らない）。`web-push`依存・VAPID環境変数が必要（上記）。フロントは掲示板ヘッダーの「通知をオンにする」で許可＋購読。
 
+## AIアシスタント（グループチャット内 @AI）＋ FAQ ＋ 店舗別広告費
+チャット内でスタッフの質問に、店舗データ（SalonOne）と社内FAQに基づいて自動返信する社内AI。
+- **起動**: チャット入力欄の「🤖 AIに質問」ボタン、または本文に `@AI` を含めて送信（`chatSend(true)` / 正規表現 `[@＠]\s*ai\b`）。`chatAiReply(roomId, text)` が実行。
+- **対象店舗**: 店舗ルームはそのルームの店舗、それ以外は質問者の所属店舗（`aiResolveShop`）。`soShops` から `soShopNorm` で店舗id解決。
+- **店舗スナップショット**（`aiBuildContext`）: SalonOne `sales/summary`＋`marketing/by-channel` を今月・先月で取得し、売上/新規来店/入会/入会率を整形（`loadShopBreakdown` と同じ導出でダッシュボードと数字一致）。広告費は共有ストアの店舗別（`__shops__[店舗名]`）→無ければ全社合計を参考値として付与。
+- **回答生成**: `api/chat.js` の `agent:'faq'`（別人格 `ASSISTANT_SYSTEM_PROMPT`・モデル `claude-sonnet-5`→`claude-haiku-4-5`・思考なし・`max_tokens`小）。**渡したFAQ＋店舗データの範囲だけで回答**し、範囲外や確信が持てない/重い話題は**1行目に `NEEDS_HQ`** を出力→フロントで本部へエスカレ（🙋＋`orgHq` メンション＝プッシュ通知）。ボット投稿は `fromStaffId='__ai__'`・名前「🤖 NAORUアシスタント」。二重起動ガード（`chatAiBusyRef`）。
+- **FAQストア**（`/api/plan-store?type=faq`）: `{faqs:[{id,q,a,tags,shopScope,updatedAt,updatedBy}]}`。action=add/update/delete/bulk。`shopScope=''` は全社共通、店舗名指定でその店舗限定。**FAQ管理タブ（root専用・id=`faqadmin`）** でGUI編集。
+- **広告費の共有化・店舗別**（`/api/plan-store?type=adspend`）: 従来は端末localStorage(`so_adspend_v1`)のみ→共有ストア化（`soAdSpend` は起動時サーバー読込＋書込み、localStorageはキャッシュ）。構造 `spend[rangeKey][media]`（全社合計・媒体×店舗ピボットのtfoot入力）＋ `spend[rangeKey].__shops__[店舗名][media]`（店舗別・ピボット下の「店舗別 広告費入力」で店舗選択して入力）。`rangeKey=`${soFrom}_${soTo}``。AIは店舗別→全社合計の順に参照。
+- ⚠️ 信頼モデルは thanksgift/chat と同じ（plan-store はサーバー認証なし・UIレベル社内利用前提）。
+
 ## 勉強会・イベント日程（共有編集グリッド）／組織図
 - **勉強会・イベントタブ**: スプレッドシート風の共有編集表。3セクション（勉強会／飲み会などのイベント／部活）。各セルはtextareaで直接編集→**自動保存**（デバウンス700ms・`upsertRow`）。行の追加/削除可。**日付が過ぎた行は自動グレーアウト**（`lib/events.js` の `parseEventDate`/`isPastEvent`・毎週/未定は対象外）。保存=`/api/plan-store?type=events`（sections別・行単位upsert/delete）。編集中(`evEditingRef`)はポーリング取り込みを止めて入力消失を防止。
 - **組織図タブ**: エリア（店舗名から都道府県を推定＝`lib/geo.js`／北→南・海外最下部）→店舗→オーナー/スタッフ。**月選択**で、その月に**売上>0**のスタッフのみ表示（SalonOne売上と同じ per-shop `sales/summary` の `by_staff`・`org_sales_v1` にキャッシュ・レート制限バックオフ）。楽トレ/ヘルプ/受付/役職(`isNonTherapistName`)は除外。オーナーは「オーナー設定」の管轄店舗から紐付け（👑）。検索・合計ヘッダー付き。地域辞書に無い店舗は「その他」（要追加）。

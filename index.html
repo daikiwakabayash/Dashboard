@@ -2226,6 +2226,27 @@
             const [soChSort, setSoChSort] = useState({ key: 'booking', dir: 'desc' });      // 媒体別ソート
             const [soMxMode, setSoMxMode] = useState('shop');    // 店舗×媒体一覧: 'shop'(店舗ごと) | 'media'(媒体ごと)
             const [soMxStore, setSoMxStore] = useState('');      // 店舗名フィルタ
+            const [soAdShop, setSoAdShop] = useState('');        // 店舗別 広告費入力の対象店舗（媒体×店舗ピボット下）
+            // ── FAQ管理（AIアシスタントの回答根拠。root専用タブ） ──
+            const [faqAdmin, setFaqAdmin] = useState({ list: [], loading: false, loaded: false });
+            const [faqEdit, setFaqEdit] = useState(null);        // 編集中 {id?, q, a, shopScope} or null
+            const faqAdminLoad = async () => {
+                setFaqAdmin(s => ({ ...s, loading: true }));
+                try { const r = await fetch('/api/plan-store?type=faq', { cache: 'no-store' }); const j = await r.json(); setFaqAdmin({ list: (j && Array.isArray(j.faqs)) ? j.faqs : [], loading: false, loaded: true }); }
+                catch { setFaqAdmin(s => ({ ...s, loading: false, loaded: true })); }
+            };
+            const faqAdminSave = async () => {
+                const e = faqEdit; if (!e || !String(e.q || '').trim() || !String(e.a || '').trim()) return;
+                const faq = { id: e.id || undefined, q: e.q, a: e.a, shopScope: e.shopScope || '', updatedBy: authState.staffName || authState.owner || '管理者' };
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'faq', action: e.id ? 'update' : 'add', faq }) }); } catch {}
+                setFaqEdit(null); await faqAdminLoad();
+            };
+            const faqAdminDelete = async (id) => {
+                if (!id || !window.confirm('このFAQを削除しますか？')) return;
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'faq', action: 'delete', id }) }); } catch {}
+                await faqAdminLoad();
+            };
+            useEffect(() => { if (currentPage === 'faqadmin' && !faqAdmin.loaded) faqAdminLoad(); }, [currentPage]);
             const [soMxMedia, setSoMxMedia] = useState('');      // 媒体フィルタ（''=全媒体）
             const [soPivotMetric, setSoPivotMetric] = useState('booking'); // 媒体×店舗ピボットの指標（booking=新規予約/visit=来店/join=入会）
             // 媒体別 広告費の手入力（期間ごと・媒体ごと）。全社共有ストア(plan-store ?type=adspend)＋localStorageキャッシュ。
@@ -2246,10 +2267,23 @@
                 })();
                 return () => { alive = false; };
             }, []);
-            const soSetAdSpend = (rangeKey, media, yen) => {
-                setSoAdSpend(prev => { const n = { ...prev, [rangeKey]: { ...(prev[rangeKey] || {}), [media]: yen } }; try { localStorage.setItem('so_adspend_v1', JSON.stringify(n)); } catch {} return n; });
+            // shop 未指定=全社合計（spend[rk][media]）、shop 指定=店舗別（spend[rk].__shops__[shop][media]）
+            const soSetAdSpend = (rangeKey, media, yen, shop) => {
+                setSoAdSpend(prev => {
+                    const bucket = { ...(prev[rangeKey] || {}) };
+                    if (shop) {
+                        const shops = { ...(bucket.__shops__ || {}) };
+                        shops[shop] = { ...(shops[shop] || {}), [media]: yen };
+                        bucket.__shops__ = shops;
+                    } else {
+                        bucket[media] = yen;
+                    }
+                    const n = { ...prev, [rangeKey]: bucket };
+                    try { localStorage.setItem('so_adspend_v1', JSON.stringify(n)); } catch {}
+                    return n;
+                });
                 // 共有ストアへ書き込み（全端末・AIボットへ反映）。失敗してもlocalStorageで継続。
-                try { fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'adspend', action: 'set', rangeKey, media, yen }) }).catch(() => {}); } catch {}
+                try { fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'adspend', action: 'set', rangeKey, media, yen, shop: shop || '' }) }).catch(() => {}); } catch {}
             };
             const [soMkSort, setSoMkSort] = useState({ key: 'booking', dir: 'desc' });      // 担当者別ソート
             const [soDailySort, setSoDailySort] = useState({ key: 'date', dir: 'asc' });    // 日報ソート
@@ -2834,15 +2868,27 @@
                 if (cur && cur.hasData) s += `【今月 ${curFrom}〜${curTo}（暫定・確定前）】\n- 総売上: ${yen(cur.gross)}\n- 新規来店: ${cur.newCount}名 / 入会: ${cur.joinCount}名 / 入会率: ${cur.joinRate}%\n`;
                 else s += `【今月】この店舗のSalonOneデータは取得できませんでした（未導入 or 未反映の可能性）\n`;
                 if (prev && prev.hasData) s += `【先月 ${lmFrom.slice(0, 7)}】\n- 総売上: ${yen(prev.gross)}\n- 新規来店: ${prev.newCount}名 / 入会: ${prev.joinCount}名 / 入会率: ${prev.joinRate}%\n`;
-                // 広告費（全社・媒体別・SalonOne売上タブで選択中の期間）。※店舗別ではない点を明記。
+                // 広告費（SalonOne売上タブで選択中の期間 rk）。まず店舗別、無ければ全社合計を提示。
                 const rk = `${soFrom}_${soTo}`;
-                const ad = (soAdSpend && soAdSpend[rk]) || {};
-                const adEntries = Object.entries(ad).filter(([, v]) => Number(v) > 0);
-                if (adEntries.length) {
-                    s += `【広告費（全社・媒体別・期間 ${soFrom}〜${soTo}）※店舗別ではなく全社合計】\n`;
-                    adEntries.forEach(([md, v]) => { s += `- ${md}: ${yen(v)}\n`; });
+                const bucket = (soAdSpend && soAdSpend[rk]) || {};
+                // 店舗別（__shops__）を店舗名の正規化一致で引く
+                const shopsMap = (bucket.__shops__ && typeof bucket.__shops__ === 'object') ? bucket.__shops__ : {};
+                let shopAd = null;
+                for (const [nm, row] of Object.entries(shopsMap)) { if (soShopNorm(nm) === soShopNorm(shop.name)) { shopAd = row; break; } }
+                const shopEntries = shopAd ? Object.entries(shopAd).filter(([, v]) => Number(v) > 0) : [];
+                if (shopEntries.length) {
+                    const tot = shopEntries.reduce((a, [, v]) => a + Number(v), 0);
+                    s += `【広告費（${shop.name}・媒体別・期間 ${soFrom}〜${soTo}）】\n`;
+                    shopEntries.forEach(([md, v]) => { s += `- ${md}: ${yen(v)}\n`; });
+                    s += `- 合計: ${yen(tot)}\n`;
                 } else {
-                    s += `【広告費】未登録（現状は店舗別ではなく全社合計のみ。SalonOne売上→媒体×店舗で入力）\n`;
+                    const groupEntries = Object.entries(bucket).filter(([k, v]) => k !== '__shops__' && Number(v) > 0);
+                    if (groupEntries.length) {
+                        s += `【広告費（全社・媒体別・期間 ${soFrom}〜${soTo}）※この店舗単体の広告費は未登録のため全社合計を参考値として提示。店舗別を聞かれたら未登録として本部に確認】\n`;
+                        groupEntries.forEach(([md, v]) => { s += `- ${md}: ${yen(v)}\n`; });
+                    } else {
+                        s += `【広告費】この店舗・期間の広告費は未登録（SalonOne売上→媒体×店舗の「店舗別 広告費」で入力）\n`;
+                    }
                 }
                 return s;
             };
@@ -16841,6 +16887,39 @@
                                                                     </tfoot>
                                                                 </table>
                                                             </div>
+                                                            {/* ── 店舗別 広告費入力（AIが「〇〇院の広告費」に答える元データ） ── */}
+                                                            <div className="mt-4 border-t border-slate-100 pt-3">
+                                                                <div className="flex items-center gap-2 flex-wrap mb-2">
+                                                                    <span className="text-emerald-600 text-[15px]">🏪</span>
+                                                                    <span className="text-[13px] font-black text-slate-800">店舗別 広告費入力</span>
+                                                                    <span className="text-[10px] text-slate-400 font-bold hidden sm:inline">チャットの🤖AIが「〇〇院の今月の広告費は？」に店舗別で即答する元データ（期間 {soFrom}〜{soTo}）</span>
+                                                                    <select value={soAdShop} onChange={e => setSoAdShop(e.target.value)} className="ml-auto px-2 py-1 text-[12px] font-bold border border-slate-200 rounded-lg bg-white">
+                                                                        <option value="">店舗を選択</option>
+                                                                        {allRows.map((x, i) => <option key={i} value={x.name}>{x.name.replace(/^NAORU\s*/, '')}</option>)}
+                                                                    </select>
+                                                                </div>
+                                                                {soAdShop ? (() => {
+                                                                    const srow = ((adMap.__shops__ || {})[soAdShop]) || {};
+                                                                    const stot = medias.reduce((a, m) => a + (Number(srow[m.name]) || 0), 0);
+                                                                    const sbook = medias.reduce((a, m) => a + colSum(m.name, 'booking'), 0);   // 注: 列合計は現在の絞り込み対象の合計（参考）
+                                                                    return (
+                                                                        <div className="overflow-x-auto">
+                                                                            <table className="text-[12px] whitespace-nowrap">
+                                                                                <thead><tr className="text-[10px] font-black text-slate-500 uppercase bg-slate-50">
+                                                                                    <th className="py-1.5 px-2 text-left">{soAdShop.replace(/^NAORU\s*/, '')}</th>
+                                                                                    {medias.map(m => <th key={m.name} className="py-1.5 px-2 text-right">{m.name}</th>)}
+                                                                                    <th className="py-1.5 px-2 text-right bg-emerald-50 text-emerald-700">合計</th>
+                                                                                </tr></thead>
+                                                                                <tbody><tr>
+                                                                                    <td className="py-1.5 px-2 text-left font-bold text-slate-600 text-[11px]">広告費 ¥</td>
+                                                                                    {medias.map(m => <td key={m.name} className="py-1 px-1"><input type="number" inputMode="numeric" value={srow[m.name] ?? ''} onChange={e => soSetAdSpend(rangeKey, m.name, e.target.value, soAdShop)} placeholder="¥" className="w-20 px-1.5 py-1 text-right text-[11px] font-bold border border-slate-200 rounded-md focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none" /></td>)}
+                                                                                    <td className="py-1.5 px-2 text-right font-black text-emerald-700 bg-emerald-50/40">{stot ? soYen(stot) : '–'}</td>
+                                                                                </tr></tbody>
+                                                                            </table>
+                                                                        </div>
+                                                                    );
+                                                                })() : <p className="text-[11px] text-slate-400 font-bold">店舗を選ぶと、その店舗の媒体別広告費を入力できます。店舗別を入れておくと、チャットのAIが店舗ごとの広告費・CPAに答えられます（全社合計は上の表で入力）。</p>}
+                                                            </div>
                                                         </div>
                                                     );
                                                 })()}
@@ -18119,6 +18198,81 @@
                     })()}
 
                     {/* ===== オーナー設定タブ ===== */}
+                    {currentPage === 'faqadmin' && authState.root && (() => {
+                        const shopList = (soShops.length ? soShops : soDemoShops);
+                        const list = faqAdmin.list || [];
+                        return (
+                        <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
+                            <div className="w-full max-w-4xl mx-auto space-y-4">
+                                <header className="flex items-center gap-3 bg-white p-3 md:p-5 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
+                                    <div className="p-2 md:p-3 bg-gradient-to-br from-indigo-600 to-indigo-500 rounded-xl md:rounded-2xl text-white shadow-lg text-2xl leading-none">🤖</div>
+                                    <div className="min-w-0">
+                                        <div className="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-50 text-indigo-600 rounded-full text-[10px] font-black uppercase tracking-widest mb-1">FAQ / AI</div>
+                                        <h1 className="text-xl md:text-2xl font-black tracking-tight">FAQ管理（AIアシスタント）</h1>
+                                        <p className="text-[11px] md:text-xs text-slate-400 font-bold mt-0.5">ここに登録した回答を、チャットの🤖AIがスタッフの質問に使います。分からない質問は本部にエスカレされます。</p>
+                                    </div>
+                                    <button onClick={() => faqAdminLoad()} disabled={faqAdmin.loading} className="ml-auto shrink-0 inline-flex items-center gap-1 px-3 py-2 rounded-lg text-[12px] font-bold text-slate-500 hover:bg-slate-100 disabled:opacity-40"><RefreshCw size={14} className={faqAdmin.loading ? 'animate-spin' : ''} />更新</button>
+                                </header>
+
+                                {/* 追加/編集フォーム */}
+                                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 md:p-5">
+                                    <div className="flex items-center gap-2 mb-3">
+                                        <span className="text-[14px] font-black text-slate-800">{faqEdit && faqEdit.id ? 'FAQを編集' : '新しいFAQを追加'}</span>
+                                        {faqEdit && <button onClick={() => setFaqEdit(null)} className="ml-auto text-[12px] font-bold text-slate-400 hover:text-slate-600">キャンセル</button>}
+                                    </div>
+                                    {!faqEdit && <button onClick={() => setFaqEdit({ q: '', a: '', shopScope: '' })} className="w-full py-2.5 rounded-lg bg-indigo-50 text-indigo-600 font-bold text-[13px] hover:bg-indigo-100 transition">＋ FAQを追加</button>}
+                                    {faqEdit && (
+                                        <div className="space-y-3">
+                                            <div>
+                                                <label className="text-[11px] font-black text-slate-500 uppercase tracking-wide">質問（想定される聞き方）</label>
+                                                <input value={faqEdit.q} onChange={e => setFaqEdit(f => ({ ...f, q: e.target.value }))} placeholder="例）返金対応はどうすればいい？" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-medium focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200 outline-none" />
+                                            </div>
+                                            <div>
+                                                <label className="text-[11px] font-black text-slate-500 uppercase tracking-wide">回答（AIがこの内容で案内します）</label>
+                                                <textarea value={faqEdit.a} onChange={e => setFaqEdit(f => ({ ...f, a: e.target.value }))} rows={5} placeholder="手順を具体的に。条件や例外も省略せず書くと精度が上がります。" className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-medium focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200 outline-none resize-y" />
+                                            </div>
+                                            <div className="flex items-end gap-3 flex-wrap">
+                                                <div>
+                                                    <label className="text-[11px] font-black text-slate-500 uppercase tracking-wide">対象店舗</label>
+                                                    <select value={faqEdit.shopScope} onChange={e => setFaqEdit(f => ({ ...f, shopScope: e.target.value }))} className="block mt-1 px-3 py-2 border border-slate-200 rounded-lg text-sm font-bold bg-white">
+                                                        <option value="">全店共通</option>
+                                                        {shopList.map((s, i) => <option key={i} value={s.name}>{s.name.replace(/^NAORU\s*/, '')} 限定</option>)}
+                                                    </select>
+                                                </div>
+                                                <button onClick={faqAdminSave} disabled={!String(faqEdit.q || '').trim() || !String(faqEdit.a || '').trim()} className="ml-auto px-5 py-2.5 rounded-lg bg-indigo-600 text-white font-bold text-[13px] hover:bg-indigo-700 disabled:opacity-40 transition">{faqEdit.id ? '保存' : '追加'}</button>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* 一覧 */}
+                                <div className="space-y-2">
+                                    <div className="text-[12px] font-black text-slate-400 px-1">登録済みFAQ（{list.length}件）</div>
+                                    {faqAdmin.loading && !list.length && <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center text-sm font-bold text-slate-400">読み込み中…</div>}
+                                    {!faqAdmin.loading && !list.length && <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center text-sm font-bold text-slate-400">まだFAQがありません。「＋ FAQを追加」から登録してください。</div>}
+                                    {list.map(f => (
+                                        <div key={f.id} className="bg-white rounded-xl border border-slate-200 p-3 md:p-4">
+                                            <div className="flex items-start gap-2">
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="flex items-center gap-2 flex-wrap mb-1">
+                                                        <span className="text-[13px] font-black text-slate-800">Q. {f.q}</span>
+                                                        {f.shopScope ? <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-violet-50 text-violet-600">{String(f.shopScope).replace(/^NAORU\s*/, '')} 限定</span> : <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-slate-100 text-slate-500">全店共通</span>}
+                                                    </div>
+                                                    <div className="text-[13px] text-slate-600 font-medium whitespace-pre-wrap leading-relaxed">{f.a}</div>
+                                                </div>
+                                                <div className="flex flex-col gap-1 shrink-0">
+                                                    <button onClick={() => setFaqEdit({ id: f.id, q: f.q, a: f.a, shopScope: f.shopScope || '' })} className="px-2.5 py-1 rounded-md text-[11px] font-bold text-slate-500 hover:bg-slate-100">編集</button>
+                                                    <button onClick={() => faqAdminDelete(f.id)} className="px-2.5 py-1 rounded-md text-[11px] font-bold text-rose-500 hover:bg-rose-50">削除</button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                        );
+                    })()}
+
                     {currentPage === 'settings' && (() => {
                         const shopList = (soShops.length ? soShops : soDemoShops);
                         return (
@@ -22208,6 +22362,7 @@
                 ] },
                 { label: '管理', accent: { pill: 'bg-slate-100 text-slate-600', dot: 'bg-slate-400', chip: 'group-hover:bg-slate-100 group-hover:text-slate-600' }, items: [
                     { id: 'settings', label: 'オーナー設定', icon: <Users size={18} />, mobileIcon: <Users size={18} />, rootOnly: true },
+                    { id: 'faqadmin', label: 'FAQ管理（AI）', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, rootOnly: true },
                 ] },
             ];
             const canShow = (it) => (authRoot || !it.rootOnly) && !(it.hideForStaff && authRole === 'staff') && (!it.thanksOnly || authRole === 'staff' || authRole === 'owner' || authRoot);

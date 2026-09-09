@@ -334,14 +334,25 @@ export default async function handler(req, res) {
       if (req.method === 'GET') return res.status(200).json({ spend, configured: true });
       const body = req.body || {};
       // 1媒体だけ更新（rangeKey=対象期間キー・media=媒体名・yen=金額文字列/数値）
+      // body.shop があれば店舗別（spend[rk].__shops__[shop][media]）、無ければ全社合計（spend[rk][media]）。
       if (body.action === 'set' && body.rangeKey && body.media != null) {
         const rk = String(body.rangeKey).slice(0, 40);
         const md = String(body.media).slice(0, 60);
-        const yenNum = Number(String(body.yen).replace(/[^\d.-]/g, ''));
-        const row = { ...(spend[rk] || {}) };
-        if (!Number.isFinite(yenNum) || String(body.yen).trim() === '') delete row[md];
-        else row[md] = yenNum;
-        const nextSpend = { ...spend, [rk]: row };
+        const shop = body.shop != null ? String(body.shop).slice(0, 60) : '';
+        const yenRaw = String(body.yen == null ? '' : body.yen);
+        const yenNum = Number(yenRaw.replace(/[^\d.-]/g, ''));
+        const del = !Number.isFinite(yenNum) || yenRaw.trim() === '';
+        const bucket = { ...(spend[rk] || {}) };
+        if (shop) {
+          const shops = { ...(bucket.__shops__ || {}) };
+          const srow = { ...(shops[shop] || {}) };
+          if (del) delete srow[md]; else srow[md] = yenNum;
+          shops[shop] = srow;
+          bucket.__shops__ = shops;
+        } else {
+          if (del) delete bucket[md]; else bucket[md] = yenNum;
+        }
+        const nextSpend = { ...spend, [rk]: bucket };
         await blobSet(ADSPEND_KEY, { spend: nextSpend }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true, spend: nextSpend });
       }

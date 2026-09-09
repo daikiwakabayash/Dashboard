@@ -50,7 +50,7 @@ api/                # ⚠️ Vercel Hobbyの関数数上限(12)対策で「1エ�
   feedback.js       # フィードバックAPI（GAS連携・取得/送信）
   health.js         # ヘルスチェック（env.planStore で保存先の有効状態も返す）
   salonone.js       # SalonOne 分析APIプロキシ（APIキー隠蔽・GET限定・許可リスト）
-  plan-store.js     # SalonOne計画の目標・アクション共有ストア（全デバイス同期）。保存先=Vercel KV(推奨) or Supabase or GAS。未設定時はlocalStorage継続。?type=allowance で手当（領収書）の提出・個人別生産性も同ストアに保存（submit/delete/recordProductivity）。?type=thanksgift でサンクスギフト投票を保存（vote/delete・投票期間と自分不可はサーバー側でも強制）。?type=chat で社内チャット（rooms/messages/reads/dir・画像別キー）。?type=board で掲示板（全社発信）を保存（post/comment/deleteComment/uploadImage/uploadFile/pin/delete/read・画像はchatと同じ別キー、ファイルは naoru:board:file:<id>）。コメントは post.comments[{id,parentId,fromStaffId,fromName,text,mentions,createdAt}]＝投稿への返信・@メンション対応（メンション/返信先/投稿者へweb-push通知）。?type=push でWebプッシュ購読（config/subscribe/unsubscribe）。掲示板投稿・グループ/DM/全社アナウンスのチャット送信時に、購読者へ web-push で通知送信（VAPID未設定なら無効）。?type=chat で社内チャットを保存（rooms/messages/reads/dir・画像は別キー naoru:chat:img:<id>・ensureRooms/createRoom/send/react/read/uploadImage/deleteMsg/deleteRoom）
+  plan-store.js     # SalonOne計画の目標・アクション共有ストア（全デバイス同期）。保存先=Vercel KV(推奨) or Supabase or GAS。未設定時はlocalStorage継続。?type=allowance で手当（領収書）の提出・個人別生産性も同ストアに保存（submit/delete/recordProductivity）。?type=thanksgift でサンクスギフト投票を保存（vote/delete・投票期間と自分不可はサーバー側でも強制）。?type=chat で社内チャット（rooms/messages/reads/dir・画像別キー）。?type=board で掲示板（全社発信）を保存（post/comment/deleteComment/uploadImage/uploadFile/pin/delete/read・画像はchatと同じ別キー、ファイルは naoru:board:file:<id>）。コメントは post.comments[{id,parentId,fromStaffId,fromName,text,mentions,createdAt}]＝投稿への返信・@メンション対応（メンション/返信先/投稿者へweb-push通知）。?type=push でWebプッシュ購読（config/subscribe/unsubscribe）。掲示板投稿・グループ/DM/全社アナウンスのチャット送信時に、購読者へ web-push で通知送信（VAPID未設定なら無効）。?type=chat で社内チャットを保存（rooms/messages/reads/dir・画像は別キー naoru:chat:img:<id>・ensureRooms/createRoom/send/react/read/uploadImage/deleteMsg/deleteRoom）。?type=patrol でAIパトロール（analyze=各店のSalonOne実績＋Googleマップを`lib/patrol.js`/`lib/places.js`で分析し注意喚起項目＋店舗チャット文面を返す／places=単店ルックアップ／config=住所照合・検索クエリ保存 naoru:patrol:v1）。GoogleはPlaces API(New)・`GOOGLE_PLACES_API_KEY`未設定でもSalonOneのみで動作
   tasks.js          # タスク系API
   settlement.js     # 返金明細書ディスパッチャ → /api/settlement-auth|owners|store（?fn=auth/owners/store・rewrite）
   square.js         # Squareディスパッチャ → /api/square/metrics|settlement|test（?fn=metrics/settlement/test・rewrite）
@@ -66,6 +66,8 @@ lib/
   board.js          # 掲示板（全社発信）ロジック（新着集計・並び替え・リンク抽出・動画URL埋め込み判定）。tests/board.test.js
   events.js         # 勉強会・イベント日程 ロジック（日付解釈・過ぎた予定の判定＝グレーアウト・セクション定義）。tests/events.test.js
   geo.js            # 組織図の地理順（店舗名→都道府県ランク北→南・海外最下部・地域グルーピング）。tests/geo.test.js
+  patrol.js         # AIパトロール ロジック（SalonOne前月比の異常検知・入会率/クチコミ/住所照合の判定・クーポン月初リマインド・店舗チャット文面生成）。tests/patrol.test.js
+  places.js         # Google Places API (New) 連携（Text Searchリクエスト組立・レスポンス解析・住所正規化/一致判定）。tests/places.test.js
   settlement.js     # 返金明細書 共通ロジック（オーナー認証トークン・スナップショット・計算・期日/注意書き）
   handlers/         # api/ ディスパッチャから呼ばれる実ハンドラ群（Serverless Functionにカウントされない）
     settlement-auth.js / settlement-owners.js / settlement-store.js
@@ -106,6 +108,7 @@ tests/              # Vitestテスト
   - `KV_REST_API_URL` / `KV_REST_API_TOKEN` — 計画の目標・アクション共有ストア（`api/plan-store.js`）用のVercel KV。VercelのStorageでKVを作成すると自動注入（GAS不要・推奨）
   - ⚠️ **共有ストアの有効化が必要**: `api/plan-store.js` のブロブ系ストア（手当`allowance`・`accountmeta`・`zktherapist`・サンクスギフト`thanksgift`）は **KV or Supabase or「KVStore対応のGAS」** のいずれかが必要。GASを使う場合は `gas/settlement-gas-sample.js` の最新版（`type=kv`/`action=saveKv` 実装済み）を再デプロイすること。未対応だと保存が無反応（`configured:true` でも永続化されない）
   - `AUTH_SALT` — トークン用ソルト（オプション・オーナー認証で使用）
+  - `GOOGLE_PLACES_API_KEY` — AIパトロールのGoogleマップ連携用（Places API (New) Text Search）。設定するとクチコミ件数・評価・住所一致チェックが有効化。未設定なら SalonOne 実績のみでパトロール動作（graceful degrade）。サーバー側（`api/plan-store.js` ?type=patrol）に隠蔽しフロントに出さない
   - `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` — Webプッシュ通知用（掲示板投稿・グループ/DMチャットの新着通知）。`npx web-push generate-vapid-keys` で生成し、公開鍵/秘密鍵をVercel環境変数に設定（SUBJECTは `mailto:...`）。未設定なら通知機能は自動でオフ（本体は正常動作）。⚠️ iPhoneは「ホーム画面に追加」でPWAインストール後のみ通知可（iOS16.4+）
 
 ## SalonOne 分析API連携
@@ -176,6 +179,7 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
 
 ## AIアシスタント（グループチャット内 @AI）＋ FAQ ＋ 店舗別広告費
 チャット内でスタッフの質問に、店舗データ（SalonOne）と社内FAQに基づいて自動返信する社内AI。
+- **人格＝若林大樹の分身**: `ASSISTANT_SYSTEM_PROMPT`（`api/chat.js`）で、渡されたナレッジ資料・FAQに現れる**若林/本部の言葉づかい・価値観・判断軸を最優先で再現**する（一般論のAI回答にしない・ただし事実/方針は情報源に基づき創作しない）。手順（例: SalonOneのメニュー変更）を聞かれたら**番号付き手順**で案内し、資料に参考画像/操作動画のURLがあれば `![参考](画像URL)` / `[操作動画](動画URL)` で併記。
 - **2つの入口（同一エンジン）**: ①グループ/店舗チャットの「🤖 AIに質問」ボタン or 本文 `@AI`（`chatAiReply`・全員に見える・本部エスカレ時は本部メンション）②サイドバー「AIに質問」タブ（id=`askai`・コミュニケーション/組織図の下・個人用で他者に通知しない・`askAiSend`）。どちらも `agent:'faq'`＋同じFAQ/ナレッジ/店舗スナップショットを参照。
 - **AIに質問タブ**: 個人チャットUI（履歴は端末localStorage `naoru_askai_v1`）。**画像添付＝Vision対応**（`askAttachImage` で1280px/JPEG縮小→base64→`images`で送信）。質問文/直近会話から店舗を解決しマーケ/売上も回答。エスカレ時は「グループで本部に確認を」と案内（個人なので自動通知はしない）。質問は `ailog` に蓄積。⚠️ 画像“生成”は未対応（Anthropicは画像生成非対応。必要なら別の画像生成APIの追加が必要）。
 - **起動（グループ）**: チャット入力欄の「🤖 AIに質問」ボタン、または本文に `@AI` を含めて送信（`chatSend(true)` / 正規表現 `[@＠]\s*ai\b`）。`chatAiReply(roomId, text)` が実行。質問文の店舗名を最優先で解決（`aiShopFromText`・DM/別ルームでも名指し可）。
@@ -190,6 +194,14 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
   - **一括貼付インポート**: FAQ管理でGoogleスプレッドシート/Excelをコピー→貼付（1行=`質問[TAB]回答[TAB]店舗`）→`faq bulk`。Google資料はコピペ or Claude(セッション)がDrive経由で代行取込。
   - **訂正して再学習**: AI回答が誤りなら、本部が正しい回答をチャットで送る（=候補化）か、メッセージメニュー「🤖 この回答をFAQに追加」で修正版をFAQ登録。
 - ⚠️ 信頼モデルは thanksgift/chat と同じ（plan-store はサーバー認証なし・UIレベル社内利用前提）。
+
+## AIパトロール（自発マーケ巡回・root/hq専用）
+本部が押すと、AIが全店を巡回して「プロのマーケ担当」視点で注意喚起・アドバイスを自動作成し、各店の店舗チャットへ投稿できる（若林大樹の分身＝AIアシスタントと同じ思想の"自発チェック"版）。タブ=`経営・分析`＞`AIパトロール`（id=`patrol`・rootのみ）。
+- **入力データ**: 各店の当月/先月のSalonOne実績（`aiFetchMonth` を店舗ごとに取得）＋Googleマップ（Places API）。フロントがSalonOne実績を集めて `/api/plan-store?type=patrol&action=analyze` に渡し、サーバーが `lib/patrol.js` で判定＋`lib/places.js`でGoogle取得（キーはサーバー隠蔽）。
+- **判定（`lib/patrol.js`・業界ベンチマーク準拠）**: 新規来店の前月比±20%（減=警告/増=好調）・総売上前月比-15%・入会率<30%（警告）/≥55%（好調）・新規<10名（集客強化）・Googleクチコミ0件/<20件・評価<4.0・**Googleマップ vs 登録住所（HP/ホットペッパー）の不一致（NAP統一）**。月初1〜7日はクーポン更新リマインドを合流。
+- **投稿**: 「🤖 AIパトロール」名義で店舗ルーム（`kind==='store'`）へ送信（`chatPost` send）。ルーム未生成時は `chatEnsureRooms` で生成。単店「この店舗チャットに投稿」／「要対応店に一括投稿」／「クーポン点検を全店に送る」。
+- **住所・検索設定**: 各店のHP/ホットペッパー住所とGoogle検索クエリ上書きを `?type=patrol&action=config`（`naoru:patrol:v1`）に保存。住所一致チェックに使用。
+- **フェーズ**: ①SalonOne実績＋クーポンリマインド（外部連携不要・常時可）②Googleマップ連携（`GOOGLE_PLACES_API_KEY` 設定で有効）。⚠️ ホットペッパーのクチコミ/クーポンは公式読み取りAPIが無いため未自動化（クーポン点検はリマインド方式）。数字は捏造せずSalonOne/Placesの実データのみ。
 
 ## 勉強会・イベント日程（共有編集グリッド）／組織図
 - **勉強会・イベントタブ**: スプレッドシート風の共有編集表。3セクション（勉強会／飲み会などのイベント／部活）。各セルはtextareaで直接編集→**自動保存**（デバウンス700ms・`upsertRow`）。行の追加/削除可。**日付が過ぎた行は自動グレーアウト**（`lib/events.js` の `parseEventDate`/`isPastEvent`・毎週/未定は対象外）。保存=`/api/plan-store?type=events`（sections別・行単位upsert/delete）。編集中(`evEditingRef`)はポーリング取り込みを止めて入力消失を防止。

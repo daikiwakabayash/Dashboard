@@ -3113,6 +3113,100 @@
                 } catch { setAskMsgs(m => [...m, { role: 'assistant', content: '通信エラーが発生しました。もう一度お試しください。' }]); }
                 finally { askBusyRef.current = false; setAskBusy(false); }
             };
+            // ── AIパトロール（自発マーケ巡回・root/hq専用） ─────────────────────────────
+            //   各店のSalonOne実績（当月/先月）＋Googleマップ（Places・サーバー隠蔽キー）をAIが点検し、
+            //   プロのマーケ視点で注意喚起/アドバイスを作成→各店の店舗チャットへ「🤖 AIパトロール」名義で投稿。
+            const [patrolBusy, setPatrolBusy] = useState(false);
+            const [patrolProgress, setPatrolProgress] = useState(null); // {done,total,label}
+            const [patrolReports, setPatrolReports] = useState([]);      // [{shop,items,places,placesError,message}]
+            const [patrolGoogle, setPatrolGoogle] = useState(false);     // Googleマップ連携の有効/無効
+            const [patrolCfg, setPatrolCfg] = useState({ addresses: {}, queries: {} });
+            const [patrolCfgOpen, setPatrolCfgOpen] = useState(false);
+            const [patrolPosted, setPatrolPosted] = useState({});        // {shop:true} 投稿済み
+            const patrolBusyRef = useRef(false);
+            const patrolLoadedRef = useRef(false);
+            const patrolLoadCfg = async () => {
+                try {
+                    const r = await fetch('/api/plan-store?type=patrol', { cache: 'no-store' });
+                    const j = await r.json();
+                    setPatrolGoogle(!!(j && j.googleEnabled));
+                    if (j && j.config) setPatrolCfg({ addresses: j.config.addresses || {}, queries: j.config.queries || {} });
+                } catch {}
+            };
+            useEffect(() => { if (currentPage === 'patrol' && !patrolLoadedRef.current) { patrolLoadedRef.current = true; patrolLoadCfg(); } }, [currentPage]);
+            // 全店を巡回: 各店の当月/先月をSalonOneから取得→サーバー(?type=patrol&action=analyze)で分析
+            const patrolRun = async () => {
+                if (patrolBusyRef.current) return;
+                const shops = (soShops || []).filter(s => s && s.id);
+                if (!shops.length) { alert('店舗が読み込まれていません。「SalonOne売上」タブを一度開いてからお試しください。'); return; }
+                patrolBusyRef.current = true; setPatrolBusy(true); setPatrolReports([]); setPatrolPosted({});
+                try {
+                    const now = new Date(), y = now.getFullYear(), m = now.getMonth();
+                    const curFrom = `${y}-${aiPad2(m + 1)}-01`, curTo = `${y}-${aiPad2(m + 1)}-${aiPad2(now.getDate())}`;
+                    const lm = new Date(y, m - 1, 1);
+                    const lmFrom = `${lm.getFullYear()}-${aiPad2(lm.getMonth() + 1)}-01`;
+                    const lmTo = `${lm.getFullYear()}-${aiPad2(lm.getMonth() + 1)}-${aiPad2(new Date(lm.getFullYear(), lm.getMonth() + 1, 0).getDate())}`;
+                    const payload = [];
+                    for (let i = 0; i < shops.length; i++) {
+                        const sh = shops[i];
+                        setPatrolProgress({ done: i, total: shops.length, label: `${sh.name} を取得中…` });
+                        const [cur, prev] = await Promise.all([aiFetchMonth(sh.id, curFrom, curTo), aiFetchMonth(sh.id, lmFrom, lmTo)]);
+                        const pick = (x) => x ? { gross: x.gross, newCount: x.newCount, joinCount: x.joinCount, joinRate: x.joinRate, bookingCount: x.bookingCount, hasData: x.hasData } : { hasData: false };
+                        payload.push({ name: sh.name, cur: pick(cur), prev: pick(prev) });
+                    }
+                    setPatrolProgress({ done: shops.length, total: shops.length, label: 'AIが分析中…' });
+                    const r = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'patrol', action: 'analyze', stores: payload, wantPlaces: patrolGoogle }) });
+                    const j = await r.json().catch(() => null);
+                    setPatrolReports((j && Array.isArray(j.reports)) ? j.reports : []);
+                } catch { alert('パトロールの実行中にエラーが発生しました。'); }
+                finally { patrolBusyRef.current = false; setPatrolBusy(false); setPatrolProgress(null); }
+            };
+            // 店舗ルームを店舗名で検索（無ければ ensureRooms で生成してから再検索）
+            const patrolFindRoom = (shopName) => {
+                const nn = soShopNorm(shopName);
+                return (chatData.rooms || []).find(r => r.kind === 'store' && soShopNorm(r.shop) === nn) || null;
+            };
+            const patrolPostOne = async (rep) => {
+                if (!rep || !rep.message) return false;
+                let room = patrolFindRoom(rep.shop);
+                if (!room) { try { chatEnsuredRef.current = ''; await chatEnsureRooms(soShopsRaw, soStaffs); } catch {} room = patrolFindRoom(rep.shop); }
+                if (!room) { alert(`「${rep.shop}」の店舗チャットが見つかりませんでした。チャットタブを一度開いてからお試しください。`); return false; }
+                try {
+                    await chatPost({ action: 'send', roomId: room.id, msg: { fromStaffId: '__ai__', fromName: '🤖 AIパトロール', fromShop: rep.shop, text: rep.message, mentions: [], replyTo: null } });
+                    setPatrolPosted(p => ({ ...p, [rep.shop]: true })); return true;
+                } catch { return false; }
+            };
+            const patrolPostAll = async () => {
+                const targets = (patrolReports || []).filter(r => r.message && (r.items || []).some(i => i.level === 'warn' || i.level === 'info') && !patrolPosted[r.shop]);
+                if (!targets.length) { alert('投稿対象（要対応/改善余地のある店舗）がありません。'); return; }
+                if (!window.confirm(`${targets.length}店舗の店舗チャットに、AIパトロールの注意喚起を投稿します。よろしいですか？`)) return;
+                for (const rep of targets) { await patrolPostOne(rep); await new Promise(x => setTimeout(x, 200)); }
+                alert('投稿しました。');
+            };
+            // クーポン点検リマインド（月に関わらず手動で全店へ）。文面は lib/patrol.js の buildCouponMessage と同義。
+            const patrolCouponText = () => {
+                const now = new Date(), month = now.getMonth() + 1, prev = month === 1 ? 12 : month - 1;
+                return `📣 【${month}月 クーポン点検のお願い】\n\n${prev}月のクーポンが残っていないか、下記を今日中に確認してください。\n1. ホットペッパー：${month}月のクーポン・サムネ画像は最新ですか？（${prev}月分の掲載残りに注意）\n2. Googleマップ：投稿・クーポン・写真は最新ですか？\n3. 自社HP：キャンペーン表記は当月のものですか？\n4. 初回オファー価格・予約枠の空き状況も合わせて点検を。\n\n― AIパトロール（NAORU本部）`;
+            };
+            const patrolPostCoupon = async () => {
+                const shops = (soShops || []).filter(s => s && s.name);
+                if (!shops.length) { alert('店舗が読み込まれていません。'); return; }
+                if (!window.confirm(`全 ${shops.length} 店舗にクーポン点検リマインドを投稿します。よろしいですか？`)) return;
+                const text = patrolCouponText();
+                if (!patrolFindRoom(shops[0].name)) { try { chatEnsuredRef.current = ''; await chatEnsureRooms(soShopsRaw, soStaffs); } catch {} }
+                let n = 0;
+                for (const sh of shops) {
+                    const room = patrolFindRoom(sh.name); if (!room) continue;
+                    try { await chatPost({ action: 'send', roomId: room.id, msg: { fromStaffId: '__ai__', fromName: '🤖 AIパトロール', fromShop: sh.name, text, mentions: [], replyTo: null } }); n++; } catch {}
+                    await new Promise(x => setTimeout(x, 180));
+                }
+                alert(`${n}店舗に投稿しました。`);
+            };
+            const patrolSaveCfg = async () => {
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'patrol', action: 'config', addresses: patrolCfg.addresses, queries: patrolCfg.queries }) }); alert('設定を保存しました。'); }
+                catch { alert('保存に失敗しました。'); }
+            };
+
             // リアクションのトグル（1ユーザー1絵文字＝別絵文字は付け替え・同じ絵文字は解除）。lib/chat.js の toggleReaction と同じ挙動。
             const reactToggleOne = (reactions, emoji, uid) => {
                 const src = reactions && typeof reactions === 'object' ? reactions : {};
@@ -18433,6 +18527,96 @@
                         );
                     })()}
 
+                    {currentPage === 'patrol' && authState.root && (() => {
+                        const reps = patrolReports || [];
+                        const tot = reps.reduce((a, r) => { (r.items || []).forEach(i => { a[i.level] = (a[i.level] || 0) + 1; }); return a; }, {});
+                        const lvlChip = (lv) => lv === 'warn' ? 'bg-rose-50 text-rose-700 border-rose-200' : lv === 'info' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200';
+                        const lvlIcon = (lv) => lv === 'warn' ? '⚠️' : lv === 'info' ? '💡' : '✅';
+                        const shopsCount = (soShops || []).filter(s => s && s.id).length;
+                        return (
+                        <div className="max-w-5xl mx-auto px-4 md:px-6 py-6">
+                            <div className="flex items-start gap-3 mb-5">
+                                <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-emerald-600 to-teal-500 text-white flex items-center justify-center text-2xl shadow shrink-0">🔎</div>
+                                <div className="min-w-0">
+                                    <h1 className="text-[20px] font-black text-slate-900">AIパトロール</h1>
+                                    <p className="text-[12px] text-slate-500 font-bold mt-0.5">SalonOne実績＋Googleマップを巡回し、プロのマーケ視点で各店に注意喚起・アドバイスを自動作成。要対応の店舗はワンタップで店舗チャットへ投稿できます。</p>
+                                </div>
+                            </div>
+                            <div className={`mb-4 rounded-xl border px-3.5 py-2.5 text-[12px] font-bold flex items-start gap-2 ${patrolGoogle ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-slate-50 border-slate-200 text-slate-500'}`}>
+                                <span>{patrolGoogle ? '🟢' : '⚪'}</span>
+                                <span>{patrolGoogle ? 'Googleマップ連携: 有効（クチコミ件数・評価・住所チェックを実行します）' : 'Googleマップ連携: 未設定 — SalonOne実績のみで分析します。環境変数 GOOGLE_PLACES_API_KEY を設定すると、Googleクチコミ・評価・住所一致チェックが有効になります。'}</span>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 mb-5">
+                                <button onClick={patrolRun} disabled={patrolBusy} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 text-white text-[13px] font-black shadow hover:opacity-95 disabled:opacity-50 transition">{patrolBusy ? '巡回中…' : `🔎 全店をパトロール（${shopsCount}店舗）`}</button>
+                                {reps.length > 0 && <button onClick={patrolPostAll} disabled={patrolBusy} className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-rose-600 text-white text-[13px] font-black shadow hover:bg-rose-700 disabled:opacity-50 transition">⚠️ 要対応店に一括投稿</button>}
+                                <button onClick={patrolPostCoupon} disabled={patrolBusy} className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-700 text-[13px] font-black hover:bg-slate-50 disabled:opacity-50 transition">📣 クーポン点検を全店に送る</button>
+                                <button onClick={() => setPatrolCfgOpen(o => !o)} className="ml-auto text-[12px] font-bold text-slate-400 hover:text-slate-600">⚙️ 住所・検索設定</button>
+                            </div>
+                            {patrolProgress && <div className="mb-4 text-[12px] font-bold text-slate-500">{patrolProgress.label}（{patrolProgress.done}/{patrolProgress.total}）<div className="mt-1 h-1.5 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-emerald-500 transition-all" style={{ width: `${Math.round(patrolProgress.done / Math.max(1, patrolProgress.total) * 100)}%` }} /></div></div>}
+                            {patrolCfgOpen && (
+                                <div className="mb-5 rounded-xl border border-slate-200 bg-white p-4">
+                                    <div className="text-[13px] font-black text-slate-800 mb-1">住所・検索クエリ設定</div>
+                                    <div className="text-[11px] text-slate-400 font-bold mb-3">Googleマップの住所と「HP」「ホットペッパー」の登録住所を突き合わせて不一致を検知します（NAP統一）。検索クエリはGoogleマップ検索の上書き（既定=「NAORU整体 店舗名」）。空欄でOK。</div>
+                                    <div className="space-y-2 max-h-[46vh] overflow-y-auto">
+                                        {(soShops || []).filter(s => s && s.name).map(s => { const a = (patrolCfg.addresses || {})[s.name] || {}; const setA = (k, v) => setPatrolCfg(c => ({ ...c, addresses: { ...c.addresses, [s.name]: { ...((c.addresses || {})[s.name] || {}), [k]: v } } })); return (
+                                            <div key={s.name} className="grid grid-cols-1 md:grid-cols-4 gap-1.5 items-center">
+                                                <div className="text-[12px] font-bold text-slate-700 truncate">{s.name}</div>
+                                                <input value={a.hp || ''} onChange={e => setA('hp', e.target.value)} placeholder="HP住所" className="px-2 py-1.5 border border-slate-200 rounded-lg text-[12px] outline-none focus:border-emerald-400" />
+                                                <input value={a.hotpepper || ''} onChange={e => setA('hotpepper', e.target.value)} placeholder="ホットペッパー住所" className="px-2 py-1.5 border border-slate-200 rounded-lg text-[12px] outline-none focus:border-emerald-400" />
+                                                <input value={(patrolCfg.queries || {})[s.name] || ''} onChange={e => setPatrolCfg(c => ({ ...c, queries: { ...c.queries, [s.name]: e.target.value } }))} placeholder="Google検索クエリ（任意）" className="px-2 py-1.5 border border-slate-200 rounded-lg text-[12px] outline-none focus:border-emerald-400" />
+                                            </div>
+                                        ); })}
+                                    </div>
+                                    <div className="mt-3 flex justify-end"><button onClick={patrolSaveCfg} className="px-4 py-2 rounded-lg bg-slate-800 text-white text-[12px] font-black hover:bg-slate-900">設定を保存</button></div>
+                                </div>
+                            )}
+                            {reps.length > 0 && (
+                                <div className="grid grid-cols-4 gap-2 mb-4">
+                                    <div className="rounded-xl bg-white border border-slate-200 p-3 text-center"><div className="text-[20px] font-black text-slate-900">{reps.length}</div><div className="text-[10px] font-bold text-slate-400">巡回店舗</div></div>
+                                    <div className="rounded-xl bg-rose-50 border border-rose-200 p-3 text-center"><div className="text-[20px] font-black text-rose-600">{tot.warn || 0}</div><div className="text-[10px] font-bold text-rose-400">要対応</div></div>
+                                    <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-center"><div className="text-[20px] font-black text-amber-600">{tot.info || 0}</div><div className="text-[10px] font-bold text-amber-400">改善余地</div></div>
+                                    <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3 text-center"><div className="text-[20px] font-black text-emerald-600">{tot.good || 0}</div><div className="text-[10px] font-bold text-emerald-400">好調</div></div>
+                                </div>
+                            )}
+                            {reps.length === 0 && !patrolBusy && (
+                                <div className="text-center py-16 text-slate-400">
+                                    <div className="text-4xl mb-2">🔎</div>
+                                    <div className="text-[14px] font-black text-slate-500">「全店をパトロール」を押すと分析が始まります</div>
+                                    <div className="text-[12px] font-bold mt-1">各店の当月/先月のSalonOne実績{patrolGoogle ? '＋Googleマップ' : ''}をAIが点検します。</div>
+                                </div>
+                            )}
+                            <div className="space-y-3">
+                                {reps.map((r, i) => {
+                                    const warns = (r.items || []).filter(x => x.level === 'warn');
+                                    const posted = !!patrolPosted[r.shop];
+                                    return (
+                                    <div key={i} className={`rounded-2xl border bg-white p-4 ${warns.length ? 'border-rose-200' : 'border-slate-200'}`}>
+                                        <div className="flex items-center gap-2 mb-2 flex-wrap">
+                                            <div className="text-[15px] font-black text-slate-900">{r.shop}</div>
+                                            {r.places && <span className="text-[11px] font-bold text-slate-500">★{r.places.rating ?? '—'}・クチコミ{r.places.userRatingCount ?? 0}件</span>}
+                                            {r.placesError && <span className="text-[10px] font-bold text-slate-300" title={r.placesError}>（Google取得不可）</span>}
+                                            <div className="ml-auto flex items-center gap-1.5">
+                                                {posted ? <span className="text-[11px] font-black text-emerald-600">✓ 投稿済み</span>
+                                                    : <button onClick={() => patrolPostOne(r)} disabled={!r.message} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-[11px] font-black hover:bg-emerald-700 disabled:opacity-40">この店舗チャットに投稿</button>}
+                                            </div>
+                                        </div>
+                                        <div className="space-y-1.5">
+                                            {(r.items || []).map((it, k) => (
+                                                <div key={k} className={`flex items-start gap-2 rounded-lg border px-2.5 py-1.5 ${lvlChip(it.level)}`}>
+                                                    <span className="text-[13px] leading-5">{lvlIcon(it.level)}</span>
+                                                    <div className="min-w-0"><div className="text-[12.5px] font-black leading-tight">{it.title}</div>{it.detail && <div className="text-[11px] font-semibold opacity-80 mt-0.5 leading-snug">{it.detail}</div>}</div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    );
+                                })}
+                            </div>
+                            <div className="mt-6 text-[11px] text-slate-400 font-bold leading-relaxed">※ 投稿は「🤖 AIパトロール」名義で各店の店舗チャットに送信されます。数値はSalonOne実績（当月は暫定・確定前）に基づき、Googleマップ情報は Places API 経由です。ホットペッパーのクチコミ/クーポンは公式APIが無いため、クーポン点検はリマインド方式で運用します。</div>
+                        </div>
+                        );
+                    })()}
+
                     {currentPage === 'faqadmin' && authState.root && (() => {
                         const shopList = (soShops.length ? soShops : soDemoShops);
                         const list = faqAdmin.list || [];
@@ -22731,6 +22915,7 @@
                     { id: 'square', label: 'サブスク分析', icon: <CreditCard size={18} />, mobileIcon: <CreditCard size={18} /> },
                     // 事業計画はスタッフ/オーナーには当面非表示（本部(hq)・管理者(root)のみ）
                     { id: 'planning', label: '事業計画', icon: <Target size={18} />, mobileIcon: <Target size={18} />, rootOnly: true },
+                    { id: 'patrol', label: 'AIパトロール', icon: <span className="text-[17px] leading-none">🔎</span>, mobileIcon: <span className="text-[17px] leading-none">🔎</span>, rootOnly: true },
                 ] },
                 { label: '店舗運営', accent: { pill: 'bg-violet-50 text-violet-700', dot: 'bg-violet-500', chip: 'group-hover:bg-violet-50 group-hover:text-violet-600' }, items: [
                     { id: 'settlement', label: '返金明細書', icon: <Banknote size={18} />, mobileIcon: <Banknote size={18} />, hideForStaff: true },

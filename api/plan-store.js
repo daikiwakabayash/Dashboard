@@ -16,6 +16,8 @@
 import { getVotingState, validateVote, upsertVote, removeVote } from '../lib/thanksgift.js';
 import { ensureBaseRooms, extractLinks, toggleReaction, genId } from '../lib/chat.js';
 import { videoEmbed } from '../lib/board.js';
+import { analyzeStore, couponReminderItems, buildStoreMessage } from '../lib/patrol.js';
+import { buildSearchRequest, parsePlacesResponse } from '../lib/places.js';
 
 // Vercel KV / Upstash Redis / Vercel Redis いずれの環境変数名でも動くよう両対応（REST APIは共通）
 const KV_URL = () => process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_REST_API_URL || '';
@@ -48,6 +50,7 @@ const FAQ_KEY = 'naoru:faq:v1';               // { faqs:[{id,q,a,tags:[],shopSco
 const AILOG_KEY = 'naoru:ailog:v1';           // { logs:[{id,ts,shop,staffId,staffName,question,escalated}] } AIアシスタントの質問ログ（自己解決率・よくある質問の可視化用）
 const KNOWLEDGE_KEY = 'naoru:knowledge:v1';   // { docs:[{id,title,body,shopScope,source,updatedAt,updatedBy}] } ナレッジ資料（長文: 議事録の文字起こし/スプレッドシート・スライドの中身/マニュアル）。AIが根拠に使う
 const KNOWCAND_KEY = 'naoru:knowcand:v1';     // { cands:[{id,ts,roomId,shop,fromName,question,answer}] } 本部チャット回答のナレッジ候補（承認でFAQ化）
+const PATROL_KEY = 'naoru:patrol:v1';         // { addresses:{shopName:{hp,hotpepper}}, queries:{shopName:検索クエリ} } AIパトロール設定（住所照合・Google検索クエリ上書き）
 
 // ── Webプッシュ送信（VAPID設定時のみ動作・未設定なら黙ってスキップ） ──
 const VAPID_PUBLIC = () => process.env.VAPID_PUBLIC_KEY || '';
@@ -525,6 +528,89 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: 'invalid ailog action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── AIパトロール（自発チェック・マーケ巡回）: ?type=patrol ──
+  // SalonOne実績（クライアントから受領）＋Googleマップ（Places API・キーはサーバー隠蔽）で各店を分析し、
+  // 注意喚起・アドバイス項目を返す。住所照合・Google検索クエリの上書きは設定として保存。
+  // Googleマップ連携は GOOGLE_PLACES_API_KEY 未設定でも SalonOne のみで動作（graceful degrade）。
+  const isPatrol = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'patrol';
+  if (isPatrol) {
+    const GKEY = process.env.GOOGLE_PLACES_API_KEY || '';
+    const googleEnabled = !!GKEY;
+    const hasStore = !!(hasKV || hasSB || gas);
+    const body = req.body || {};
+    const action = req.method === 'GET' ? 'get' : String(body.action || '');
+    // Google Places (New) Text Search でその店舗の口コミ件数・評価・住所を取得
+    const lookupPlace = async (query) => {
+      if (!GKEY) return null;
+      const def = buildSearchRequest(query);
+      if (!def) return null;
+      try {
+        const r = await fetch(def.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': GKEY, 'X-Goog-FieldMask': def.fieldMask },
+          body: JSON.stringify(def.body),
+        });
+        if (!r.ok) return { error: `places_http_${r.status}` };
+        const j = await r.json().catch(() => null);
+        return parsePlacesResponse(j) || { error: 'no_result' };
+      } catch (e) { return { error: String((e && e.message) || e) }; }
+    };
+    const loadCfg = async () => {
+      if (!hasStore) return {};
+      const c = (await blobGet(PATROL_KEY, hasKV, hasSB, gas)) || {};
+      return (c && typeof c === 'object') ? c : {};
+    };
+    try {
+      if (action === 'get') {
+        const cfg = await loadCfg();
+        return res.status(200).json({ config: { addresses: cfg.addresses || {}, queries: cfg.queries || {} }, googleEnabled, configured: hasStore });
+      }
+      if (action === 'config') {
+        if (!hasStore) return res.status(200).json({ ok: false, configured: false });
+        const cfg = await loadCfg();
+        const next = { ...cfg };
+        if (body.addresses && typeof body.addresses === 'object') next.addresses = body.addresses;
+        if (body.queries && typeof body.queries === 'object') next.queries = body.queries;
+        await blobSet(PATROL_KEY, next, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      if (action === 'places') {
+        // 接続テスト・単店ルックアップ
+        const p = await lookupPlace(String(body.query || ''));
+        return res.status(200).json({ ok: true, place: p, googleEnabled });
+      }
+      if (action === 'analyze') {
+        const cfg = await loadCfg();
+        const addresses = (cfg.addresses && typeof cfg.addresses === 'object') ? cfg.addresses : {};
+        const queries = (cfg.queries && typeof cfg.queries === 'object') ? cfg.queries : {};
+        const stores = Array.isArray(body.stores) ? body.stores.slice(0, 60) : [];
+        const wantPlaces = body.wantPlaces !== false && googleEnabled;
+        const jstNow = new Date(Date.now() + 9 * 3600 * 1000); // JST基準でクーポン月初判定
+        const couponItems = couponReminderItems(jstNow);       // 月初のみ（各店メッセージに合流）
+        const reports = [];
+        for (const st of stores) {
+          const name = String((st && st.name) || '');
+          if (!name) continue;
+          let places = null, placesError = '';
+          if (wantPlaces) {
+            const q = queries[name] || (st && st.query) || `NAORU整体 ${name}`;
+            const p = await lookupPlace(q);
+            if (p && !p.error) places = p; else if (p && p.error) placesError = p.error;
+            await new Promise(r => setTimeout(r, 120)); // Places レート制限に配慮
+          }
+          const rep = analyzeStore({ name, cur: (st && st.cur) || {}, prev: (st && st.prev) || {}, places, addresses: addresses[name] || {} });
+          const items = [...rep.items, ...couponItems];
+          const message = buildStoreMessage(name, items, { date: jstNow });
+          reports.push({ shop: name, items, places, placesError, message });
+        }
+        return res.status(200).json({ ok: true, reports, coupon: couponItems, googleEnabled });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid patrol action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, error: String((err && err.message) || err) });
     }
   }
 

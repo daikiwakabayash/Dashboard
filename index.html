@@ -2228,9 +2228,29 @@
             const [soMxStore, setSoMxStore] = useState('');      // 店舗名フィルタ
             const [soMxMedia, setSoMxMedia] = useState('');      // 媒体フィルタ（''=全媒体）
             const [soPivotMetric, setSoPivotMetric] = useState('booking'); // 媒体×店舗ピボットの指標（booking=新規予約/visit=来店/join=入会）
-            // 媒体別 広告費の手入力（期間ごと・媒体ごと）。localStorage保存。CPA算出用。
+            // 媒体別 広告費の手入力（期間ごと・媒体ごと）。全社共有ストア(plan-store ?type=adspend)＋localStorageキャッシュ。
+            // CPA算出＋AIアシスタント(グループ@AI)が店舗の広告費を答えるための共有元。
             const [soAdSpend, setSoAdSpend] = useState(() => { try { return JSON.parse(localStorage.getItem('so_adspend_v1') || '{}'); } catch { return {}; } });
-            const soSetAdSpend = (rangeKey, media, yen) => setSoAdSpend(prev => { const n = { ...prev, [rangeKey]: { ...(prev[rangeKey] || {}), [media]: yen } }; try { localStorage.setItem('so_adspend_v1', JSON.stringify(n)); } catch {} return n; });
+            // 起動時に共有ストアから読み込み（サーバー値を正とし、localStorageは即時表示用キャッシュ）
+            useEffect(() => {
+                let alive = true;
+                (async () => {
+                    try {
+                        const r = await fetch('/api/plan-store?type=adspend', { cache: 'no-store' });
+                        const j = await r.json();
+                        if (alive && j && j.configured !== false && j.spend && typeof j.spend === 'object') {
+                            setSoAdSpend(j.spend);
+                            try { localStorage.setItem('so_adspend_v1', JSON.stringify(j.spend)); } catch {}
+                        }
+                    } catch {}
+                })();
+                return () => { alive = false; };
+            }, []);
+            const soSetAdSpend = (rangeKey, media, yen) => {
+                setSoAdSpend(prev => { const n = { ...prev, [rangeKey]: { ...(prev[rangeKey] || {}), [media]: yen } }; try { localStorage.setItem('so_adspend_v1', JSON.stringify(n)); } catch {} return n; });
+                // 共有ストアへ書き込み（全端末・AIボットへ反映）。失敗してもlocalStorageで継続。
+                try { fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'adspend', action: 'set', rangeKey, media, yen }) }).catch(() => {}); } catch {}
+            };
             const [soMkSort, setSoMkSort] = useState({ key: 'booking', dir: 'desc' });      // 担当者別ソート
             const [soDailySort, setSoDailySort] = useState({ key: 'date', dir: 'asc' });    // 日報ソート
             // 事業計画（計画サブタブ）

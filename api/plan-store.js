@@ -43,6 +43,8 @@ const BOARD_POST_CAP = 500;                   // 保持する最大投稿数
 const PUSH_KEY = 'naoru:push:v1';             // { subs:[{endpoint,keys,staffId,name,createdAt}] } Webプッシュ購読
 const EVENTS_KEY = 'naoru:events:v1';         // { sections:{study:[row],event:[row],bukatsu:[row]} } 勉強会・イベント日程（共有編集）
 const PROFILE_KEY = 'naoru:profile:v1';       // { profiles:{pid:{kind,nameKanji,nameKana,bio,mainImg,subImgs,sns,shops,birthday,updatedAt}} } スタッフ/オーナーのプロフィール（組織図で表示・店舗割当の上書き・birthday=誕生日の当日表示）
+const ADSPEND_KEY = 'naoru:adspend:v1';       // { spend:{ 'YYYY-MM'|rangeKey : { 媒体名: 金額(円) } } } 媒体別広告費（従来は端末localStorageのみ→全社共有＝AIアシスタントも参照可）
+const FAQ_KEY = 'naoru:faq:v1';               // { faqs:[{id,q,a,tags:[],shopScope:''|店舗名,updatedAt,updatedBy}] } 社内FAQ（AIアシスタントの回答根拠・本部が育てる）
 
 // ── Webプッシュ送信（VAPID設定時のみ動作・未設定なら黙ってスキップ） ──
 const VAPID_PUBLIC = () => process.env.VAPID_PUBLIC_KEY || '';
@@ -315,6 +317,84 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
       return res.status(400).json({ ok: false, error: 'invalid zktherapist action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── 媒体別広告費ストア（全社共有・AIアシスタントも参照）: ?type=adspend ──
+  // 従来は端末のlocalStorage(so_adspend_v1)のみ＝端末間で共有されず、サーバー側(AIボット)から読めなかった。
+  // これを共有ストアへ移し、広告費/CPAを全社・AIで共通に扱えるようにする。
+  const isAdSpend = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'adspend';
+  if (isAdSpend) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ spend: {}, configured: false });
+    try {
+      const cur = (await blobGet(ADSPEND_KEY, hasKV, hasSB, gas)) || {};
+      const spend = (cur.spend && typeof cur.spend === 'object') ? cur.spend : {};
+      if (req.method === 'GET') return res.status(200).json({ spend, configured: true });
+      const body = req.body || {};
+      // 1媒体だけ更新（rangeKey=対象期間キー・media=媒体名・yen=金額文字列/数値）
+      if (body.action === 'set' && body.rangeKey && body.media != null) {
+        const rk = String(body.rangeKey).slice(0, 40);
+        const md = String(body.media).slice(0, 60);
+        const yenNum = Number(String(body.yen).replace(/[^\d.-]/g, ''));
+        const row = { ...(spend[rk] || {}) };
+        if (!Number.isFinite(yenNum) || String(body.yen).trim() === '') delete row[md];
+        else row[md] = yenNum;
+        const nextSpend = { ...spend, [rk]: row };
+        await blobSet(ADSPEND_KEY, { spend: nextSpend }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, spend: nextSpend });
+      }
+      // まとめて上書き（移行・一括保存用）: body.spend 全体を置換
+      if (body.action === 'replace' && body.spend && typeof body.spend === 'object') {
+        await blobSet(ADSPEND_KEY, { spend: body.spend }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, spend: body.spend });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid adspend action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── 社内FAQストア（AIアシスタントの回答根拠・本部が育てる）: ?type=faq ──
+  const isFaq = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'faq';
+  if (isFaq) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ faqs: [], configured: false });
+    try {
+      const cur = (await blobGet(FAQ_KEY, hasKV, hasSB, gas)) || {};
+      const faqs = Array.isArray(cur.faqs) ? cur.faqs : [];
+      if (req.method === 'GET') return res.status(200).json({ faqs, configured: true });
+      const body = req.body || {};
+      const clean = (f) => ({
+        id: String(f.id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6))),
+        q: String(f.q || '').slice(0, 500),
+        a: String(f.a || '').slice(0, 4000),
+        tags: Array.isArray(f.tags) ? f.tags.map(t => String(t).slice(0, 30)).slice(0, 12) : [],
+        shopScope: String(f.shopScope || '').slice(0, 60), // '' = 全社共通 / 店舗名 = その店舗限定
+        updatedAt: new Date().toISOString(),
+        updatedBy: String(f.updatedBy || '').slice(0, 60),
+      });
+      if ((body.action === 'add' || body.action === 'update') && body.faq) {
+        const rec = clean(body.faq);
+        const exists = faqs.some(x => x && x.id === rec.id);
+        const next = exists ? faqs.map(x => x && x.id === rec.id ? rec : x) : faqs.concat(rec);
+        await blobSet(FAQ_KEY, { faqs: next.slice(0, 2000) }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, faq: rec });
+      }
+      if (body.action === 'delete' && body.id) {
+        const next = faqs.filter(x => x && x.id !== String(body.id));
+        await blobSet(FAQ_KEY, { faqs: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      // 一括投入（シード/移行）: body.faqs 配列を追記マージ（id一致は置換）
+      if (body.action === 'bulk' && Array.isArray(body.faqs)) {
+        const map = new Map(faqs.map(x => [String(x.id), x]));
+        for (const f of body.faqs) { const rec = clean(f); map.set(rec.id, rec); }
+        const next = [...map.values()].slice(0, 2000);
+        await blobSet(FAQ_KEY, { faqs: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, count: next.length });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid faq action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
     }

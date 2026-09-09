@@ -205,6 +205,35 @@ NAORUは「仮説を立てて施策を打ち、数字で検証し、次の一手
 - 各アクションは「今すぐ（今週）／短期（1ヶ月）／中期（3ヶ月）」のどれかに割り当てる
 - 期待効果は必ず計算式付き（例: 新規62名 × 入会率改善18pt × 客単価7.5万円 = 月+83万円）`;
 
+// ── System prompt: 店舗スタッフ向け FAQ/店舗連携アシスタント ──────────
+// グループチャット内で @AI が呼ばれたときに使う。経営顧問(SYSTEM_PROMPT)とは別人格。
+// 【鉄則】渡された「FAQ」と「店舗データ」だけで答える。無ければ勝手に作らず本部へエスカレする。
+export const ASSISTANT_SYSTEM_PROMPT = `あなたは「NAORUアシスタント」— NAORU整骨院グループの店舗スタッフを助ける社内AIです。
+グループチャットの中で、スタッフからの質問に日本語で簡潔に答えます。
+
+## 使える情報源（これ以外は使わない）
+1. 【社内FAQ】… 本部が用意した手順・ルールの回答集（返金対応・各種申請・運用ルール等）
+2. 【店舗データ】… その店舗のSalonOne実績（売上・新規・入会率など）と広告費/CPA（当月・先月など）
+ユーザーの質問の直後に、これらが「データコンテキスト」として渡されます。
+
+## 回答ルール（厳守）
+- **必ず、渡されたFAQと店舗データの範囲だけで答える。** 推測や一般論で手順・金額・数字を作らない。
+- 数字を聞かれたら【店舗データ】の該当値を、単位付き・カンマ区切りで答える（例: 今月の広告費は ¥320,000 です）。
+- 手順を聞かれたら【FAQ】の該当項目を、そのまま分かりやすく案内する（要点を箇条書きで）。
+- 回答は短く・親切に。前置きや長い解説は不要。必要ならMarkdownの箇条書き/太字を使う。
+- 店舗データにもFAQにも**該当する根拠が無い**、または**確信が持てない**場合は、**1行目に必ず** \`NEEDS_HQ\` とだけ書き、
+  改行して「この質問は本部に確認しますね。少々お待ちください。」と添える。**曖昧なまま答えない。**
+- 医療・法務・個人情報・給与・懲戒など判断が重い話題、または「本部案件」と読めるものも \`NEEDS_HQ\` にする。
+- FAQの回答に条件や例外がある場合は、それも省略せず伝える。
+
+## トーン
+- 現場スタッフの同僚のように、丁寧で分かりやすく。絵文字は控えめでOK。
+- 断定できることは自信を持って。分からないことは正直に \`NEEDS_HQ\`。`;
+
+// アシスタント用モデル（最新・高コスパ）。1問1回答・思考なしで速く安く。
+const ASSISTANT_MODELS = ['claude-sonnet-5', 'claude-haiku-4-5'];
+const ASSISTANT_MAX_TOKENS = 1500;
+
 // ── Helper: リクエストボディのバリデーション ──────────────────────
 export function validateRequest(body) {
   if (!body || typeof body.question !== 'string' || !body.question.trim()) {
@@ -301,33 +330,45 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: validation.error });
     }
 
-    const { question, history, dataContext, images, stream: useStream, thinking: useThinking } = body;
+    const { question, history, dataContext, images, stream: useStream, thinking: useThinking, agent } = body;
+
+    // agent==='faq' のときは店舗スタッフ向けFAQ/店舗連携アシスタント（別人格・別モデル・思考なし）
+    const isAssistant = agent === 'faq';
 
     const messages = buildMessages(question, history, dataContext, images);
 
     // Extended Thinking が要求された場合、思考用パラメータを構築
     // - temperature は 1 必須（thinking 有効時の制約）
     // - max_tokens > budget_tokens 必須
-    const thinkingParams = useThinking ? {
-      thinking: { type: 'enabled', budget_tokens: THINKING_BUDGET },
-      temperature: 1,
-      max_tokens: THINKING_MAX_TOKENS,
-    } : { max_tokens: MAX_TOKENS };
+    const thinkingParams = isAssistant
+      ? { max_tokens: ASSISTANT_MAX_TOKENS }
+      : (useThinking ? {
+          thinking: { type: 'enabled', budget_tokens: THINKING_BUDGET },
+          temperature: 1,
+          max_tokens: THINKING_MAX_TOKENS,
+        } : { max_tokens: MAX_TOKENS });
 
-    // ── フィードバック動的注入: GAS から改善例を取得してシステムプロンプトに追加 ──
-    let systemPrompt = SYSTEM_PROMPT;
-    try {
-      const feedbackExamples = await fetchFeedbackExamples();
-      const feedbackSection = buildFeedbackPrompt(feedbackExamples);
-      if (feedbackSection) {
-        systemPrompt = SYSTEM_PROMPT + feedbackSection;
+    // ── システムプロンプト選択 ──
+    let systemPrompt;
+    if (isAssistant) {
+      systemPrompt = ASSISTANT_SYSTEM_PROMPT; // FAQ/店舗連携。フィードバック注入は経営顧問専用なので使わない
+    } else {
+      // ── フィードバック動的注入: GAS から改善例を取得してシステムプロンプトに追加 ──
+      systemPrompt = SYSTEM_PROMPT;
+      try {
+        const feedbackExamples = await fetchFeedbackExamples();
+        const feedbackSection = buildFeedbackPrompt(feedbackExamples);
+        if (feedbackSection) {
+          systemPrompt = SYSTEM_PROMPT + feedbackSection;
+        }
+      } catch (err) {
+        console.log('[chat] Feedback fetch skipped:', err.message);
       }
-    } catch (err) {
-      console.log('[chat] Feedback fetch skipped:', err.message);
     }
 
     // ── 利用可能なモデルを特定（最初の1回だけ404/400でフォールバック）──
-    let selectedModel = MODELS[0];
+    const MODEL_LIST = isAssistant ? ASSISTANT_MODELS : MODELS;
+    let selectedModel = MODEL_LIST[0];
 
     // ── ストリーミングモード ──
     if (useStream) {
@@ -337,8 +378,8 @@ export default async function handler(req, res) {
 
       // モデルフォールバック: 接続テストとして非ストリーミングで試行し、
       // 404/400ならフォールバック。成功したモデルでストリーミング開始。
-      for (let i = 0; i < MODELS.length; i++) {
-        selectedModel = MODELS[i];
+      for (let i = 0; i < MODEL_LIST.length; i++) {
+        selectedModel = MODEL_LIST[i];
         console.log(`[chat] Trying model: ${selectedModel}`);
         try {
           const stream = anthropic.messages.stream({
@@ -375,7 +416,7 @@ export default async function handler(req, res) {
           const status = err.status || err.error?.status;
           console.log(`[chat] Model ${selectedModel} failed: ${status || err.message}`);
           // 404(モデル不存在) or 400(パラメータエラー) → 次のモデルで再試行
-          if ((status === 404 || status === 400) && i < MODELS.length - 1) {
+          if ((status === 404 || status === 400) && i < MODEL_LIST.length - 1) {
             continue;
           }
           // それ以外のエラー or 最後のモデル → エラー応答
@@ -391,8 +432,8 @@ export default async function handler(req, res) {
 
     // ── 非ストリーミングモード ──
     let lastError;
-    for (let i = 0; i < MODELS.length; i++) {
-      selectedModel = MODELS[i];
+    for (let i = 0; i < MODEL_LIST.length; i++) {
+      selectedModel = MODEL_LIST[i];
       try {
         console.log(`[chat] Trying model (non-stream): ${selectedModel}`);
         const response = await anthropic.messages.create({

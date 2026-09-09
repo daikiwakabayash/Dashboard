@@ -2470,6 +2470,8 @@
             const [chatMention, setChatMention] = useState(null);      // @メンション候補 {query, list:[{id,name}], index} or null
             const chatTaRef = useRef(null);                            // 本文textarea参照（メンション挿入後のカーソル復元）
             const chatSendingRef = useRef(false);                       // 二重送信ガード（同期・stateの遅延に依存しない）
+            const [chatAiBusy, setChatAiBusy] = useState(false);        // @AI（NAORUアシスタント）応答中インジケータ
+            const chatAiBusyRef = useRef(false);                        // @AI 応答の二重起動ガード
             // 検索結果クリック時：ルームを開いた後に該当メッセージまでスクロール＆ハイライト（描画待ちのため遅延）
             const chatJumpToMsg = (id, tries) => {
                 if (!id) return; tries = tries || 0;
@@ -2755,7 +2757,8 @@
                     return jj.ok ? { id: jj.id, dataUrl } : null;
                 } catch { return null; }
             };
-            const chatSend = async () => {
+            const chatSend = async (opt) => {
+                const forceAi = opt === true;                          // 🤖ボタンからの呼び出しのみ true（onClick={chatSend} はeventが渡るので false 扱い）
                 if (chatSendingRef.current) return;                    // 二重送信ガード（連打・Enter重複を防止）
                 const t = chatDraft.trim(); const imgIds = chatStaged.map(s => s.id);
                 const media = chatStagedMedia.slice();
@@ -2780,12 +2783,115 @@
                     await chatPost({ action: 'send', roomId, msg: { fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, imgIds, media, mentions, replyTo: replyTo || null } });
                     chatPendingRef.current = chatPendingRef.current.filter(x => x.id !== tmpId); // 確定：以後はサーバー本物を表示
                     await chatLoad();
+                    // ── @AI 起動: 文中に @AI があるか、🤖ボタン(forceAi)の場合、NAORUアシスタントが店舗データ＋FAQで返信 ──
+                    if (t && (forceAi || /[@＠]\s*ai\b/i.test(t))) { chatAiReply(roomId, t).catch(() => {}); }
                 } catch {
                     // 失敗時は仮メッセージを消して入力を復元（送信できていない）
                     chatPendingRef.current = chatPendingRef.current.filter(x => x.id !== tmpId);
                     setChatData(d => ({ ...d, messages: { ...d.messages, [roomId]: (d.messages[roomId] || []).filter(x => x.id !== tmpId) } }));
                     setChatDraft(prev => prev ? prev : t);
                 } finally { chatSendingRef.current = false; setChatSending(false); }
+            };
+
+            // ── @AI（NAORUアシスタント）: 店舗データ(SalonOne)＋社内FAQに基づき、グループ/店舗チャットで自動返信 ──
+            const AI_STAFF_ID = '__ai__';
+            const aiPad2 = (n) => String(n).padStart(2, '0');
+            // 対象店舗の解決: 店舗ルームはそのルームの店舗、それ以外は質問者の所属店舗
+            const aiResolveShop = (room) => {
+                const shopName = (room && room.kind === 'store' && room.shop) ? room.shop : chatMyShop;
+                if (!shopName) return null;
+                const norm = (s) => soShopNorm(s);
+                let hit = (soShops || []).find(s => norm(s.name) === norm(shopName));
+                if (!hit) hit = (soShops || []).find(s => { const a = norm(s.name), b = norm(shopName); return a && b && (a.includes(b) || b.includes(a)); });
+                return hit ? { id: String(hit.id), name: hit.name } : { id: '', name: shopName };
+            };
+            // 1ヶ月分のSalonOne実績を取得して整形（loadShopBreakdownと同じ導出でダッシュボードと数字一致）
+            const aiFetchMonth = async (shopId, from, to) => {
+                if (!shopId) return null;
+                const q = (res) => `${SALONONE_API_URL}?${new URLSearchParams({ resource: res, from, to, shop_id: shopId }).toString()}`;
+                const get = async (url) => { for (let a = 0; a < 3; a++) { try { const r = await fetch(url); if (r.status === 429 || r.status >= 500) { await new Promise(x => setTimeout(x, 700 * (a + 1))); continue; } if (!r.ok) return null; return await r.json().catch(() => null); } catch { await new Promise(x => setTimeout(x, 500 * (a + 1))); } } return null; };
+                const [sumR, chR] = await Promise.all([get(q('sales/summary')), get(q('marketing/by-channel'))]);
+                const sum = sumR && sumR.data ? normalizeSalonSummary({ data: sumR.data }) : null;
+                const ch = chR && chR.data ? normalizeMkChannels({ data: chR.data }) : [];
+                const gross = sum ? sum.grossSales : 0;
+                const newCount = ch.reduce((a, c) => a + (c.visit || 0), 0);
+                const joinCount = ch.reduce((a, c) => a + (c.join || 0), 0);
+                const joinRate = newCount ? Math.round(joinCount / newCount * 1000) / 10 : 0;
+                return { gross, newCount, joinCount, joinRate, hasData: !!(sum || ch.length) };
+            };
+            // 店舗スナップショット（今月＋先月）＋広告費（全社・媒体別）をテキスト化してAIに渡す
+            const aiBuildContext = async (shop) => {
+                const now = new Date();
+                const y = now.getFullYear(), m = now.getMonth();
+                const curFrom = `${y}-${aiPad2(m + 1)}-01`;
+                const curTo = `${y}-${aiPad2(m + 1)}-${aiPad2(now.getDate())}`;
+                const lm = new Date(y, m - 1, 1);
+                const lmFrom = `${lm.getFullYear()}-${aiPad2(lm.getMonth() + 1)}-01`;
+                const lmTo = `${lm.getFullYear()}-${aiPad2(lm.getMonth() + 1)}-${aiPad2(new Date(lm.getFullYear(), lm.getMonth() + 1, 0).getDate())}`;
+                const [cur, prev] = await Promise.all([aiFetchMonth(shop.id, curFrom, curTo), aiFetchMonth(shop.id, lmFrom, lmTo)]);
+                const yen = (n) => '¥' + Math.round(Number(n) || 0).toLocaleString();
+                let s = `■ 店舗データ（${shop.name}）\n`;
+                if (cur && cur.hasData) s += `【今月 ${curFrom}〜${curTo}（暫定・確定前）】\n- 総売上: ${yen(cur.gross)}\n- 新規来店: ${cur.newCount}名 / 入会: ${cur.joinCount}名 / 入会率: ${cur.joinRate}%\n`;
+                else s += `【今月】この店舗のSalonOneデータは取得できませんでした（未導入 or 未反映の可能性）\n`;
+                if (prev && prev.hasData) s += `【先月 ${lmFrom.slice(0, 7)}】\n- 総売上: ${yen(prev.gross)}\n- 新規来店: ${prev.newCount}名 / 入会: ${prev.joinCount}名 / 入会率: ${prev.joinRate}%\n`;
+                // 広告費（全社・媒体別・SalonOne売上タブで選択中の期間）。※店舗別ではない点を明記。
+                const rk = `${soFrom}_${soTo}`;
+                const ad = (soAdSpend && soAdSpend[rk]) || {};
+                const adEntries = Object.entries(ad).filter(([, v]) => Number(v) > 0);
+                if (adEntries.length) {
+                    s += `【広告費（全社・媒体別・期間 ${soFrom}〜${soTo}）※店舗別ではなく全社合計】\n`;
+                    adEntries.forEach(([md, v]) => { s += `- ${md}: ${yen(v)}\n`; });
+                } else {
+                    s += `【広告費】未登録（現状は店舗別ではなく全社合計のみ。SalonOne売上→媒体×店舗で入力）\n`;
+                }
+                return s;
+            };
+            // 社内FAQを取得（全社共通＋その店舗限定を対象）
+            const aiFetchFaq = async (shopName) => {
+                try {
+                    const r = await fetch('/api/plan-store?type=faq', { cache: 'no-store' });
+                    const j = await r.json();
+                    const faqs = (j && Array.isArray(j.faqs)) ? j.faqs : [];
+                    const rel = faqs.filter(f => !f.shopScope || (shopName && soShopNorm(f.shopScope) === soShopNorm(shopName)));
+                    if (!rel.length) return '';
+                    let s = '■ 社内FAQ（本部が用意した回答集。ここに該当があれば必ず使う）\n';
+                    rel.slice(0, 200).forEach(f => { s += `---\nQ: ${f.q}\nA: ${f.a}\n`; });
+                    return s;
+                } catch { return ''; }
+            };
+            // 本部メンバーのstaffId（エスカレ時のメンション先＝プッシュ通知）
+            const aiHqMentionIds = () => {
+                const ids = [];
+                (orgHq || []).forEach(m => { const id = (m.staffId && /^\d+$/.test(m.staffId)) ? String(m.staffId) : String(m.owner || ''); if (id) ids.push(id); });
+                return ids;
+            };
+            const chatAiReply = async (roomId, rawText) => {
+                if (chatAiBusyRef.current) return;
+                chatAiBusyRef.current = true; setChatAiBusy(true);
+                try {
+                    const room = (chatData.rooms || []).find(r => r.id === roomId) || null;
+                    const shop = aiResolveShop(room);
+                    const question = String(rawText || '').replace(/[@＠]\s*ai\b/ig, '').trim() || String(rawText || '');
+                    let ctx = '';
+                    if (shop) { try { ctx = await aiBuildContext(shop); } catch {} }
+                    const faq = await aiFetchFaq(shop && shop.name);
+                    const dataContext = [ctx, faq].filter(Boolean).join('\n');
+                    const r = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent: 'faq', question, dataContext }) });
+                    const j = await r.json().catch(() => null);
+                    let reply = (j && j.message) ? String(j.message) : '';
+                    if (!reply) return;
+                    const escalate = /^\s*NEEDS_HQ\b/.test(reply);
+                    let text, mentions = [];
+                    if (escalate) {
+                        text = reply.replace(/^\s*NEEDS_HQ\b[:：]?\s*/, '').trim() || 'この質問は本部に確認しますね。少々お待ちください。';
+                        text = '🙋 ' + text + '\n\n（本部に確認します）';
+                        mentions = aiHqMentionIds();
+                    } else {
+                        text = reply;
+                    }
+                    await chatPost({ action: 'send', roomId, msg: { fromStaffId: AI_STAFF_ID, fromName: '🤖 NAORUアシスタント', fromShop: shop ? shop.name : '', text, mentions, replyTo: null } });
+                    await chatLoad();
+                } catch {} finally { chatAiBusyRef.current = false; setChatAiBusy(false); }
             };
             // リアクションのトグル（1ユーザー1絵文字＝別絵文字は付け替え・同じ絵文字は解除）。lib/chat.js の toggleReaction と同じ挙動。
             const reactToggleOne = (reactions, emoji, uid) => {
@@ -11521,7 +11627,8 @@
                                                                     </label>
                                                                     <button onClick={() => setChatEmojiOpen(o => !o)} className={`w-8 h-8 flex items-center justify-center rounded-md text-lg transition ${chatEmojiOpen ? 'bg-brand-50 text-brand-600' : 'text-[#667085] hover:bg-[#F2F4F7]'}`} title="スタンプ">☺</button>
                                                                     <button onClick={() => { const ta = chatTaRef.current; const caret = ta ? (ta.selectionStart || chatDraft.length) : chatDraft.length; const needSp = caret > 0 && !/\s|　/.test(chatDraft.charAt(caret - 1)); const ins = (needSp ? ' @' : '@'); const nv = chatDraft.slice(0, caret) + ins + chatDraft.slice(caret); setChatDraft(nv); const list = chatMentionCandidates(activeRoom).slice(0, 8); setChatMention(list.length ? { query: '', list, index: 0 } : null); requestAnimationFrame(() => { if (ta) { ta.focus(); const c = caret + ins.length; try { ta.setSelectionRange(c, c); } catch {} } }); }} className="w-8 h-8 flex items-center justify-center rounded-md text-[17px] font-bold text-[#667085] hover:bg-[#F2F4F7] transition" title="メンション">@</button>
-                                                                    <button onClick={chatSend} disabled={chatSending || (!chatDraft.trim() && chatStaged.length === 0 && chatStagedMedia.length === 0)} className="ml-auto w-9 h-9 flex items-center justify-center rounded-lg bg-brand-500 hover:bg-brand-600 text-white disabled:bg-[#EAECF0] disabled:text-[#98A2B3] active:scale-95 transition"><Send size={16} /></button>
+                                                                    <button onClick={() => chatSend(true)} disabled={chatSending || chatAiBusy || !chatDraft.trim()} title="この内容をAIに質問（店舗データ＋FAQで自動回答・不明なら本部へ）" className={`ml-auto inline-flex items-center gap-1 h-9 px-2.5 rounded-lg text-[12px] font-bold transition disabled:opacity-40 ${chatAiBusy ? 'bg-indigo-100 text-indigo-600' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'}`}><span className="text-[15px] leading-none">🤖</span><span className="hidden sm:inline">{chatAiBusy ? '考え中…' : 'AIに質問'}</span></button>
+                                                                    <button onClick={chatSend} disabled={chatSending || (!chatDraft.trim() && chatStaged.length === 0 && chatStagedMedia.length === 0)} className="w-9 h-9 flex items-center justify-center rounded-lg bg-brand-500 hover:bg-brand-600 text-white disabled:bg-[#EAECF0] disabled:text-[#98A2B3] active:scale-95 transition"><Send size={16} /></button>
                                                                 </div>
                                                             </div>
                                                         </div>

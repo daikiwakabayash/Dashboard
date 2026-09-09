@@ -2909,7 +2909,13 @@
                 const newCount = ch.reduce((a, c) => a + (c.visit || 0), 0);
                 const joinCount = ch.reduce((a, c) => a + (c.join || 0), 0);
                 const joinRate = newCount ? Math.round(joinCount / newCount * 1000) / 10 : 0;
-                return { gross, newCount, joinCount, joinRate, hasData: !!(sum || ch.length) };
+                // スタッフ別売上（by_staff）: ヘルプ/楽トレ等を除き、売上>0を降順で。
+                const soNonTher = new Set(['ヘルプ', '楽トレ', '未割当', '(不明)', '不明', '受付']);
+                const staff = (sum && Array.isArray(sum.byStaff) ? sum.byStaff : [])
+                    .filter(st => st && !soNonTher.has(String(st.name || '').trim()) && (st.gross || 0) > 0)
+                    .map(st => ({ name: st.name, gross: st.gross || 0, treatments: st.treatments || 0 }))
+                    .sort((a, b) => b.gross - a.gross);
+                return { gross, newCount, joinCount, joinRate, staff, hasData: !!(sum || ch.length) };
             };
             // 店舗スナップショット（今月＋先月）＋広告費（全社・媒体別）をテキスト化してAIに渡す
             const aiBuildContext = async (shop) => {
@@ -2922,10 +2928,16 @@
                 const lmTo = `${lm.getFullYear()}-${aiPad2(lm.getMonth() + 1)}-${aiPad2(new Date(lm.getFullYear(), lm.getMonth() + 1, 0).getDate())}`;
                 const [cur, prev] = await Promise.all([aiFetchMonth(shop.id, curFrom, curTo), aiFetchMonth(shop.id, lmFrom, lmTo)]);
                 const yen = (n) => '¥' + Math.round(Number(n) || 0).toLocaleString();
+                const staffLines = (arr) => (arr && arr.length) ? arr.map(st => `  ・${st.name}: ${yen(st.gross)}${st.treatments ? `（施術${st.treatments}件）` : ''}`).join('\n') : '';
                 let s = `■ 店舗データ（${shop.name}）\n`;
-                if (cur && cur.hasData) s += `【今月 ${curFrom}〜${curTo}（暫定・確定前）】\n- 総売上: ${yen(cur.gross)}\n- 新規来店: ${cur.newCount}名 / 入会: ${cur.joinCount}名 / 入会率: ${cur.joinRate}%\n`;
-                else s += `【今月】この店舗のSalonOneデータは取得できませんでした（未導入 or 未反映の可能性）\n`;
-                if (prev && prev.hasData) s += `【先月 ${lmFrom.slice(0, 7)}】\n- 総売上: ${yen(prev.gross)}\n- 新規来店: ${prev.newCount}名 / 入会: ${prev.joinCount}名 / 入会率: ${prev.joinRate}%\n`;
+                if (cur && cur.hasData) {
+                    s += `【今月 ${curFrom}〜${curTo}（暫定・確定前）】\n- 総売上: ${yen(cur.gross)}\n- 新規来店: ${cur.newCount}名 / 入会: ${cur.joinCount}名 / 入会率: ${cur.joinRate}%\n`;
+                    if (cur.staff && cur.staff.length) s += `- スタッフ別売上（今月・売上>0を降順）:\n${staffLines(cur.staff)}\n`;
+                } else s += `【今月】この店舗のSalonOneデータは取得できませんでした（未導入 or 未反映の可能性）\n`;
+                if (prev && prev.hasData) {
+                    s += `【先月 ${lmFrom.slice(0, 7)}】\n- 総売上: ${yen(prev.gross)}\n- 新規来店: ${prev.newCount}名 / 入会: ${prev.joinCount}名 / 入会率: ${prev.joinRate}%\n`;
+                    if (prev.staff && prev.staff.length) s += `- スタッフ別売上（先月・売上>0を降順）:\n${staffLines(prev.staff)}\n`;
+                }
                 // 広告費（SalonOne売上タブで選択中の期間 rk）。まず店舗別、無ければ全社合計を提示。
                 const rk = `${soFrom}_${soTo}`;
                 const bucket = (soAdSpend && soAdSpend[rk]) || {};
@@ -2950,8 +2962,17 @@
                 }
                 return s;
             };
-            // 社内FAQ＋ナレッジ資料を取得（全社共通＋その店舗限定を対象）してAIの根拠テキストにする
-            const aiFetchFaq = async (shopName) => {
+            // 質問との関連度スコア（日本語は空白が無いので2-gramの一致数で近似。タイトル一致は重み3）
+            const aiRelevance = (text, title, q) => {
+                const s = String(q || '').replace(/[\s　。、，,.!?！？・「」（）()【】]/g, '');
+                if (s.length < 2) return 0;
+                const body = String(text || ''), tt = String(title || '');
+                let sc = 0; const seen = new Set();
+                for (let i = 0; i < s.length - 1; i++) { const g = s.substr(i, 2); if (seen.has(g)) continue; seen.add(g); if (body.indexOf(g) >= 0) sc += 1; if (tt.indexOf(g) >= 0) sc += 3; }
+                return sc;
+            };
+            // 社内FAQ＋ナレッジ資料を取得（全社共通＋その店舗限定）し、質問に関連する順でAIの根拠テキストにする
+            const aiFetchFaq = async (shopName, question) => {
                 let out = '';
                 try {
                     const r = await fetch('/api/plan-store?type=faq', { cache: 'no-store' });
@@ -2966,13 +2987,16 @@
                     const docs = (j && Array.isArray(j.docs)) ? j.docs : [];
                     const rel = docs.filter(d => !d.shopScope || (shopName && soShopNorm(d.shopScope) === soShopNorm(shopName)));
                     if (rel.length) {
-                        // 資料は長文になり得るので合計12000字を上限に詰める（新しい順）
-                        let budget = 12000, block = '\n■ ナレッジ資料（議事録・マニュアル等。回答の根拠に使う）\n';
-                        for (const d of rel.slice().reverse()) {
+                        // 質問との関連度が高い順→新しい順。合計18000字を上限に詰める。
+                        const ranked = rel.map(d => ({ d, sc: aiRelevance(d.body, d.title, question) }))
+                            .sort((a, b) => (b.sc - a.sc) || String(b.d.updatedAt || '').localeCompare(String(a.d.updatedAt || '')));
+                        let budget = 18000, block = '\n■ ナレッジ資料（議事録・マニュアル等。質問に関連する資料を優先。回答の根拠に使う）\n', shown = 0;
+                        for (const { d } of ranked) {
                             const piece = `---\n【${d.title || '無題'}${d.source ? ' / ' + d.source : ''}】\n${d.body}\n`;
-                            if (budget - piece.length < 0) { block += `---\n（他 ${rel.length}件中の一部のみ掲載。詳細は本部に確認）\n`; break; }
-                            block += piece; budget -= piece.length;
+                            if (budget - piece.length < 0) { if (!shown) { block += piece.slice(0, budget); shown++; } break; }
+                            block += piece; budget -= piece.length; shown++;
                         }
+                        if (shown < ranked.length) block += `---\n（関連度の高い資料を優先表示。全${ranked.length}件中${shown}件を掲載）\n`;
                         out += block;
                     }
                 } catch {}
@@ -2993,7 +3017,7 @@
                     const question = String(rawText || '').replace(/[@＠]\s*ai\b/ig, '').trim() || String(rawText || '');
                     let ctx = '';
                     if (shop) { try { ctx = await aiBuildContext(shop); } catch {} }
-                    const faq = await aiFetchFaq(shop && shop.name);
+                    const faq = await aiFetchFaq(shop && shop.name, question);
                     const dataContext = [ctx, faq].filter(Boolean).join('\n');
                     const r = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent: 'faq', question, dataContext }) });
                     const j = await r.json().catch(() => null);
@@ -18402,7 +18426,7 @@
                                 <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 md:p-5">
                                     <div className="flex items-center gap-2 mb-3 flex-wrap">
                                         <span className="text-[14px] font-black text-slate-800">📚 ナレッジ資料（長文）</span>
-                                        <span className="text-[10px] text-slate-400 font-bold">議事録の文字起こし・スプレッドシート/スライドの中身・マニュアルを貼り付け。AIが根拠に使います。</span>
+                                        <span className="text-[10px] text-slate-400 font-bold">本文（中身）を貼るとAIが学習します＝「✅反映済み」。⚠️ URLだけでは学習されません（Googleスライド/ドキュメントはClaudeに取込を依頼、または中身を貼付）。</span>
                                         {!knowEdit && <button onClick={() => setKnowEdit({ title: '', body: '', shopScope: '', source: '' })} className="ml-auto px-3 py-1.5 rounded-lg bg-slate-800 text-white font-bold text-[12px] hover:bg-slate-900">＋ 資料を追加</button>}
                                     </div>
                                     {knowEdit && (
@@ -18424,16 +18448,27 @@
                                     )}
                                     {(knowDocs || []).length === 0 && !knowEdit && <p className="text-[12px] text-slate-400 font-bold">まだ資料がありません。議事録の文字起こしや資料の中身を貼り付けて追加してください（動画は別アプリで文字起こししたテキストを貼付）。</p>}
                                     <div className="space-y-1.5">
-                                        {(knowDocs || []).map(d => (
+                                        {(knowDocs || []).map(d => {
+                                            const bodyLen = String(d.body || '').trim().length;
+                                            const urlOnly = /^https?:\/\/\S+$/.test(String(d.body || '').trim());
+                                            const reflected = bodyLen >= 50 && !urlOnly;   // 中身が入っている＝AIが学習済み
+                                            return (
                                             <div key={d.id} className="flex items-center gap-2 border border-slate-100 rounded-lg px-3 py-2">
                                                 <div className="min-w-0 flex-1">
-                                                    <div className="flex items-center gap-2"><span className="text-[13px] font-bold text-slate-800 truncate">{d.title || '無題'}</span>{d.shopScope ? <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-violet-50 text-violet-600 shrink-0">{String(d.shopScope).replace(/^NAORU\s*/, '')}</span> : <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-slate-100 text-slate-500 shrink-0">全店</span>}</div>
-                                                    <div className="text-[11px] text-slate-400 truncate">{(d.body || '').slice(0, 80)}…（{(d.body || '').length.toLocaleString()}字）</div>
+                                                    <div className="flex items-center gap-2 flex-wrap">
+                                                        <span className="text-[13px] font-bold text-slate-800 truncate">{d.title || '無題'}</span>
+                                                        {reflected
+                                                            ? <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-emerald-100 text-emerald-700 shrink-0">✅ 反映済み</span>
+                                                            : <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-amber-100 text-amber-700 shrink-0">⚠️ 未反映（中身が空/URLのみ）</span>}
+                                                        {d.shopScope ? <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-violet-50 text-violet-600 shrink-0">{String(d.shopScope).replace(/^NAORU\s*/, '')}</span> : <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-slate-100 text-slate-500 shrink-0">全店</span>}
+                                                    </div>
+                                                    <div className="text-[11px] text-slate-400 truncate">{(d.body || '').slice(0, 80)}{bodyLen > 80 ? '…' : ''}（{bodyLen.toLocaleString()}字）</div>
                                                 </div>
                                                 <button onClick={() => setKnowEdit({ id: d.id, title: d.title, body: d.body, shopScope: d.shopScope || '', source: d.source || '' })} className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-bold text-slate-500 hover:bg-slate-100">編集</button>
                                                 <button onClick={() => knowDelete(d.id)} className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-bold text-rose-500 hover:bg-rose-50">削除</button>
                                             </div>
-                                        ))}
+                                            );
+                                        })}
                                     </div>
                                 </div>
 

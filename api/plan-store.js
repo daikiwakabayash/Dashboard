@@ -436,6 +436,11 @@ export default async function handler(req, res) {
         await blobSet(AILOG_KEY, { logs: next }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true });
       }
+      if (body.action === 'delete' && body.id) {
+        const next = logs.filter(l => l && l.id !== String(body.id));
+        await blobSet(AILOG_KEY, { logs: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
       return res.status(400).json({ ok: false, error: 'invalid ailog action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });

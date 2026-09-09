@@ -176,7 +176,9 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
 
 ## AIアシスタント（グループチャット内 @AI）＋ FAQ ＋ 店舗別広告費
 チャット内でスタッフの質問に、店舗データ（SalonOne）と社内FAQに基づいて自動返信する社内AI。
-- **起動**: チャット入力欄の「🤖 AIに質問」ボタン、または本文に `@AI` を含めて送信（`chatSend(true)` / 正規表現 `[@＠]\s*ai\b`）。`chatAiReply(roomId, text)` が実行。
+- **2つの入口（同一エンジン）**: ①グループ/店舗チャットの「🤖 AIに質問」ボタン or 本文 `@AI`（`chatAiReply`・全員に見える・本部エスカレ時は本部メンション）②サイドバー「AIに質問」タブ（id=`askai`・コミュニケーション/組織図の下・個人用で他者に通知しない・`askAiSend`）。どちらも `agent:'faq'`＋同じFAQ/ナレッジ/店舗スナップショットを参照。
+- **AIに質問タブ**: 個人チャットUI（履歴は端末localStorage `naoru_askai_v1`）。**画像添付＝Vision対応**（`askAttachImage` で1280px/JPEG縮小→base64→`images`で送信）。質問文/直近会話から店舗を解決しマーケ/売上も回答。エスカレ時は「グループで本部に確認を」と案内（個人なので自動通知はしない）。質問は `ailog` に蓄積。⚠️ 画像“生成”は未対応（Anthropicは画像生成非対応。必要なら別の画像生成APIの追加が必要）。
+- **起動（グループ）**: チャット入力欄の「🤖 AIに質問」ボタン、または本文に `@AI` を含めて送信（`chatSend(true)` / 正規表現 `[@＠]\s*ai\b`）。`chatAiReply(roomId, text)` が実行。質問文の店舗名を最優先で解決（`aiShopFromText`・DM/別ルームでも名指し可）。
 - **対象店舗**: 店舗ルームはそのルームの店舗、それ以外は質問者の所属店舗（`aiResolveShop`）。`soShops` から `soShopNorm` で店舗id解決。
 - **店舗スナップショット**（`aiBuildContext`）: SalonOne `sales/summary`＋`marketing/by-channel` を今月・先月で取得し、売上/新規来店/入会/入会率を整形（`loadShopBreakdown` と同じ導出でダッシュボードと数字一致）。広告費は共有ストアの店舗別（`__shops__[店舗名]`）→無ければ全社合計を参考値として付与。
 - **回答生成**: `api/chat.js` の `agent:'faq'`（別人格 `ASSISTANT_SYSTEM_PROMPT`・モデル `claude-sonnet-5`→`claude-haiku-4-5`・思考なし・`max_tokens`小）。**渡したFAQ＋店舗データの範囲だけで回答**し、範囲外や確信が持てない/重い話題は**1行目に `NEEDS_HQ`** を出力→フロントで本部へエスカレ（🙋＋`orgHq` メンション＝プッシュ通知）。ボット投稿は `fromStaffId='__ai__'`・名前「🤖 NAORUアシスタント」。二重起動ガード（`chatAiBusyRef`）。

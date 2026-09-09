@@ -3064,6 +3064,55 @@
                     await chatLoad();
                 } catch {} finally { chatAiBusyRef.current = false; setChatAiBusy(false); }
             };
+
+            // ── 「AIに質問」タブ（個別のAI相談。グループ@AIと同じエンジン・同じナレッジ。他者に通知しない個人用） ──
+            const [askMsgs, setAskMsgs] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_askai_v1') || '[]'); } catch { return []; } });
+            const [askInput, setAskInput] = useState('');
+            const [askBusy, setAskBusy] = useState(false);
+            const [askImgs, setAskImgs] = useState([]);   // 添付画像 [{dataUrl, mediaType, data(base64)}]
+            const askBusyRef = useRef(false);
+            const askEndRef = useRef(null);
+            useEffect(() => { try { localStorage.setItem('naoru_askai_v1', JSON.stringify(askMsgs.slice(-100))); } catch {} }, [askMsgs]);
+            useEffect(() => { if (currentPage === 'askai') requestAnimationFrame(() => { try { askEndRef.current && askEndRef.current.scrollIntoView({ behavior: 'smooth' }); } catch {} }); }, [askMsgs, currentPage, askBusy]);
+            // 画像を縮小しbase64化（Vision用・アップロードはしない）
+            const askAttachImage = (file) => new Promise((resolve) => {
+                if (!file || !/^image\//.test(file.type || '')) return resolve(null);
+                const reader = new FileReader();
+                reader.onload = () => { const img = new Image(); img.onload = () => {
+                    const max = 1280; let w = img.width, h = img.height;
+                    if (w > max || h > max) { const r = Math.min(max / w, max / h); w = Math.round(w * r); h = Math.round(h * r); }
+                    const cv = document.createElement('canvas'); cv.width = w; cv.height = h; cv.getContext('2d').drawImage(img, 0, 0, w, h);
+                    const dataUrl = cv.toDataURL('image/jpeg', 0.8);
+                    resolve({ dataUrl, mediaType: 'image/jpeg', data: dataUrl.split(',')[1] });
+                }; img.onerror = () => resolve(null); img.src = reader.result; };
+                reader.onerror = () => resolve(null); reader.readAsDataURL(file);
+            });
+            const askAiSend = async () => {
+                const t = askInput.trim();
+                if ((!t && !askImgs.length) || askBusyRef.current) return;
+                const imgs = askImgs.slice();
+                const base = [...askMsgs, { role: 'user', content: t, images: imgs.map(i => i.dataUrl) }];
+                setAskMsgs(base); setAskInput(''); setAskImgs([]); askBusyRef.current = true; setAskBusy(true);
+                try {
+                    const ctxText = base.slice(-6).map(m => m.content || '').join('  ');
+                    const shop = aiShopFromText(t) || aiShopFromText(ctxText) || null;
+                    let ctx = '';
+                    if (shop && shop.id) { try { ctx = await aiBuildContext(shop); } catch {} }
+                    const faq = await aiFetchFaq(shop && shop.name, t || ctxText);
+                    const dataContext = [ctx, faq].filter(Boolean).join('\n');
+                    const history = base.slice(0, -1).slice(-6).map(m => ({ role: m.role, content: m.content })).filter(h => h.content);
+                    const images = imgs.map(i => ({ mediaType: i.mediaType, data: i.data }));
+                    const r = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent: 'faq', question: t || '添付画像の内容を説明してください', history, dataContext, images }) });
+                    const j = await r.json().catch(() => null);
+                    let reply = (j && j.message) ? String(j.message) : '';
+                    const escalate = /^\s*NEEDS_HQ\b/.test(reply);
+                    if (escalate) reply = '🙋 ' + reply.replace(/^\s*NEEDS_HQ\b[:：]?\s*/, '').trim() + '\n\n（この内容はまだナレッジにありません。グループチャットで本部にご確認ください。本部の回答はナレッジに学習されます。）';
+                    setAskMsgs(m => [...m, { role: 'assistant', content: reply || 'すみません、うまく回答できませんでした。もう一度、質問の仕方を変えてお試しください。' }]);
+                    // ナレッジ蓄積（質問ログ＝自己解決率/よくある質問の集計対象）
+                    try { fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'ailog', action: 'add', entry: { shop: shop ? shop.name : '', staffId: chatMyId, staffName: chatMyName, question: t, escalated: escalate } }) }).catch(() => {}); } catch {}
+                } catch { setAskMsgs(m => [...m, { role: 'assistant', content: '通信エラーが発生しました。もう一度お試しください。' }]); }
+                finally { askBusyRef.current = false; setAskBusy(false); }
+            };
             // リアクションのトグル（1ユーザー1絵文字＝別絵文字は付け替え・同じ絵文字は解除）。lib/chat.js の toggleReaction と同じ挙動。
             const reactToggleOne = (reactions, emoji, uid) => {
                 const src = reactions && typeof reactions === 'object' ? reactions : {};
@@ -18323,6 +18372,67 @@
                     })()}
 
                     {/* ===== オーナー設定タブ ===== */}
+                    {currentPage === 'askai' && (() => {
+                        const suggestions = ['NAORUの理念は？', '恵比寿の先月の売上は？', '返金対応はどうすればいい？', '健康手当の条件は？'];
+                        return (
+                        <div className="flex flex-col h-[100dvh] md:h-[calc(100dvh-0px)] bg-gradient-to-b from-indigo-50/40 to-white">
+                            <header className="flex items-center gap-3 px-4 py-3 bg-white/90 backdrop-blur border-b border-slate-200 shrink-0">
+                                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-600 to-indigo-500 text-white flex items-center justify-center text-xl leading-none shadow">🤖</div>
+                                <div className="min-w-0">
+                                    <div className="text-[15px] font-black text-slate-900">AIに質問</div>
+                                    <div className="text-[11px] text-slate-400 font-bold">ナレッジ全体＋店舗データから回答（個人用・他の人には通知されません）</div>
+                                </div>
+                                {askMsgs.length > 0 && <button onClick={() => { if (window.confirm('この会話をクリアしますか？')) setAskMsgs([]); }} className="ml-auto text-[12px] font-bold text-slate-400 hover:text-rose-500">クリア</button>}
+                            </header>
+                            <div className="flex-1 overflow-y-auto px-3 md:px-4 py-4 space-y-3">
+                                {askMsgs.length === 0 && (
+                                    <div className="max-w-2xl mx-auto text-center pt-8">
+                                        <div className="text-4xl mb-2">🤖</div>
+                                        <div className="text-[15px] font-black text-slate-700">何でも聞いてください</div>
+                                        <div className="text-[12px] text-slate-400 font-bold mt-1 mb-4">理念・手当・売上・マーケ・オーナー制度など、ナレッジと店舗データから answer します。画像も読み込めます。</div>
+                                        <div className="flex flex-wrap gap-2 justify-center">
+                                            {suggestions.map((s, i) => <button key={i} onClick={() => setAskInput(s)} className="px-3 py-1.5 rounded-full bg-white border border-slate-200 text-[12px] font-bold text-slate-600 hover:border-indigo-300 hover:text-indigo-600 transition">{s}</button>)}
+                                        </div>
+                                    </div>
+                                )}
+                                {askMsgs.map((m, i) => (
+                                    <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                        <div className={`max-w-[88%] md:max-w-[75%] ${m.role === 'user' ? '' : 'flex items-start gap-2'}`}>
+                                            {m.role === 'assistant' && <div className="w-7 h-7 rounded-lg bg-indigo-100 text-indigo-600 flex items-center justify-center text-[15px] leading-none shrink-0 mt-0.5">🤖</div>}
+                                            <div className={`${m.role === 'user' ? 'bg-brand-500 text-white' : 'bg-white border border-slate-200 text-slate-800'} rounded-2xl px-3.5 py-2.5 shadow-sm`}>
+                                                {Array.isArray(m.images) && m.images.map((src, k) => <img key={k} src={src} className="rounded-lg mb-2 max-h-56 w-auto" />)}
+                                                {m.role === 'assistant'
+                                                    ? <div className="chat-ai-response text-[14px] break-words">{renderMarkdown(m.content)}</div>
+                                                    : <div className="text-[14px] whitespace-pre-wrap break-words">{m.content}</div>}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                                {askBusy && <div className="flex justify-start"><div className="flex items-center gap-2"><div className="w-7 h-7 rounded-lg bg-indigo-100 text-indigo-600 flex items-center justify-center text-[15px] shrink-0">🤖</div><div className="bg-white border border-slate-200 rounded-2xl px-4 py-2.5 text-slate-400 text-[13px] font-bold">考え中…</div></div></div>}
+                                <div ref={askEndRef} />
+                            </div>
+                            <div className="shrink-0 border-t border-slate-200 bg-white px-3 md:px-4 py-3">
+                                {askImgs.length > 0 && (
+                                    <div className="flex gap-2 mb-2 flex-wrap">
+                                        {askImgs.map((im, i) => (
+                                            <div key={i} className="relative"><img src={im.dataUrl} className="w-14 h-14 object-cover rounded-lg border border-slate-200" /><button onClick={() => setAskImgs(a => a.filter((_, k) => k !== i))} className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-slate-800 text-white text-[11px] flex items-center justify-center">×</button></div>
+                                        ))}
+                                    </div>
+                                )}
+                                <div className="flex items-end gap-2 max-w-3xl mx-auto">
+                                    <label className="w-9 h-9 flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 cursor-pointer shrink-0" title="画像を添付">
+                                        <ImageIcon size={18} />
+                                        <input type="file" accept="image/*" multiple className="hidden" onChange={async e => { const files = [...(e.target.files || [])].slice(0, 4); e.target.value = ''; for (const f of files) { const im = await askAttachImage(f); if (im) setAskImgs(a => [...a, im].slice(0, 4)); } }} />
+                                    </label>
+                                    <textarea value={askInput} onChange={e => setAskInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && IS_DESKTOP && !(e.nativeEvent && e.nativeEvent.isComposing)) { e.preventDefault(); askAiSend(); } }} rows={1} placeholder="質問を入力（Enterで送信・Shift+Enterで改行）" className="flex-1 resize-none px-3.5 py-2.5 border border-slate-200 rounded-xl text-[14px] outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200 max-h-40" style={{ minHeight: '42px' }} />
+                                    <button onClick={askAiSend} disabled={askBusy || (!askInput.trim() && !askImgs.length)} className="w-10 h-10 shrink-0 flex items-center justify-center rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white disabled:bg-slate-200 disabled:text-slate-400 transition"><Send size={17} /></button>
+                                </div>
+                                <div className="max-w-3xl mx-auto text-[10px] text-slate-400 font-bold mt-1.5 px-1">回答は社内ナレッジに基づきます。不明なものは本部にご確認ください（本部の回答は自動でナレッジに蓄積されます）。</div>
+                            </div>
+                        </div>
+                        );
+                    })()}
+
                     {currentPage === 'faqadmin' && authState.root && (() => {
                         const shopList = (soShops.length ? soShops : soDemoShops);
                         const list = faqAdmin.list || [];
@@ -22613,6 +22723,7 @@
                     { id: 'board', label: '重要掲示板', icon: <Megaphone size={18} />, mobileIcon: <Megaphone size={18} />, badge: boardUnread, rootOnly: true },
                     { id: 'events', label: '勉強会・イベント', icon: <Calendar size={18} />, mobileIcon: <Calendar size={18} />, badge: eventsUnread, rootOnly: true },
                     { id: 'org', label: '組織図', icon: <Users size={18} />, mobileIcon: <Users size={18} />, rootOnly: true },
+                    { id: 'askai', label: 'AIに質問', icon: <span className="text-[17px] leading-none">🤖</span>, mobileIcon: <span className="text-[17px] leading-none">🤖</span> },
                 ] },
                 { label: '経営・分析', accent: { pill: 'bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500', chip: 'group-hover:bg-emerald-50 group-hover:text-emerald-600' }, items: [
                     { id: 'zenkanri', label: '全体管理シート', icon: <BarChart3 size={18} />, mobileIcon: <BarChart3 size={18} /> },

@@ -2919,13 +2919,20 @@
                 const newCount = ch.reduce((a, c) => a + (c.visit || 0), 0);
                 const joinCount = ch.reduce((a, c) => a + (c.join || 0), 0);
                 const joinRate = newCount ? Math.round(joinCount / newCount * 1000) / 10 : 0;
+                const bookingCount = ch.reduce((a, c) => a + (c.booking || 0), 0);
+                // 媒体別 新規獲得（マーケデータ）: 新規でない媒体（既存/未設定/会員/分メニュー）は除外・来店降順。
+                const isNonNew = (n) => { n = String(n || ''); return n === '既存' || n === '未設定' || /会員/.test(n) || /\d+\s*分/.test(n); };
+                const channels = ch
+                    .filter(c => !isNonNew(c.name) && ((c.booking || 0) > 0 || (c.visit || 0) > 0 || (c.join || 0) > 0))
+                    .map(c => ({ name: c.name, booking: c.booking || 0, visit: c.visit || 0, join: c.join || 0, joinRate: c.visit ? Math.round((c.join || 0) / c.visit * 1000) / 10 : 0, cpa: c.cpa || 0, sales: c.sales || 0 }))
+                    .sort((a, b) => b.visit - a.visit || b.booking - a.booking);
                 // スタッフ別売上（by_staff）: ヘルプ/楽トレ等を除き、売上>0を降順で。
                 const soNonTher = new Set(['ヘルプ', '楽トレ', '未割当', '(不明)', '不明', '受付']);
                 const staff = (sum && Array.isArray(sum.byStaff) ? sum.byStaff : [])
                     .filter(st => st && !soNonTher.has(String(st.name || '').trim()) && (st.gross || 0) > 0)
                     .map(st => ({ name: st.name, gross: st.gross || 0, treatments: st.treatments || 0 }))
                     .sort((a, b) => b.gross - a.gross);
-                return { gross, newCount, joinCount, joinRate, staff, hasData: !!(sum || ch.length) };
+                return { gross, newCount, joinCount, joinRate, bookingCount, channels, staff, hasData: !!(sum || ch.length) };
             };
             // 店舗スナップショット（今月＋先月）＋広告費（全社・媒体別）をテキスト化してAIに渡す
             const aiBuildContext = async (shop) => {
@@ -2939,13 +2946,16 @@
                 const [cur, prev] = await Promise.all([aiFetchMonth(shop.id, curFrom, curTo), aiFetchMonth(shop.id, lmFrom, lmTo)]);
                 const yen = (n) => '¥' + Math.round(Number(n) || 0).toLocaleString();
                 const staffLines = (arr) => (arr && arr.length) ? arr.map(st => `  ・${st.name}: ${yen(st.gross)}${st.treatments ? `（施術${st.treatments}件）` : ''}`).join('\n') : '';
+                const chLines = (arr) => (arr && arr.length) ? arr.map(c => `  ・${c.name}: 新規予約${c.booking} / 来店${c.visit} / 入会${c.join}（入会率${c.joinRate}%）${c.cpa ? ` / CPA${yen(c.cpa)}` : ''}`).join('\n') : '';
                 let s = `■ 店舗データ（${shop.name}）\n`;
                 if (cur && cur.hasData) {
-                    s += `【今月 ${curFrom}〜${curTo}（暫定・確定前）】\n- 総売上: ${yen(cur.gross)}\n- 新規来店: ${cur.newCount}名 / 入会: ${cur.joinCount}名 / 入会率: ${cur.joinRate}%\n`;
+                    s += `【今月 ${curFrom}〜${curTo}（暫定・確定前）】\n- 総売上: ${yen(cur.gross)}\n- 新規予約: ${cur.bookingCount}名 / 新規来店(新患): ${cur.newCount}名 / 入会: ${cur.joinCount}名 / 入会率: ${cur.joinRate}%\n`;
+                    if (cur.channels && cur.channels.length) s += `- 媒体別 新規獲得（今月・マーケ）:\n${chLines(cur.channels)}\n`;
                     if (cur.staff && cur.staff.length) s += `- スタッフ別売上（今月・売上>0を降順）:\n${staffLines(cur.staff)}\n`;
                 } else s += `【今月】この店舗のSalonOneデータは取得できませんでした（未導入 or 未反映の可能性）\n`;
                 if (prev && prev.hasData) {
-                    s += `【先月 ${lmFrom.slice(0, 7)}】\n- 総売上: ${yen(prev.gross)}\n- 新規来店: ${prev.newCount}名 / 入会: ${prev.joinCount}名 / 入会率: ${prev.joinRate}%\n`;
+                    s += `【先月 ${lmFrom.slice(0, 7)}】\n- 総売上: ${yen(prev.gross)}\n- 新規予約: ${prev.bookingCount}名 / 新規来店(新患): ${prev.newCount}名 / 入会: ${prev.joinCount}名 / 入会率: ${prev.joinRate}%\n`;
+                    if (prev.channels && prev.channels.length) s += `- 媒体別 新規獲得（先月・マーケ）:\n${chLines(prev.channels)}\n`;
                     if (prev.staff && prev.staff.length) s += `- スタッフ別売上（先月・売上>0を降順）:\n${staffLines(prev.staff)}\n`;
                 }
                 // 広告費（SalonOne売上タブで選択中の期間 rk）。まず店舗別、無ければ全社合計を提示。
@@ -3024,13 +3034,18 @@
                 try {
                     const room = (chatData.rooms || []).find(r => r.id === roomId) || null;
                     const question = String(rawText || '').replace(/[@＠]\s*ai\b/ig, '').trim() || String(rawText || '');
-                    // 質問文で店舗名が指定されていればそれを優先（例「恵比寿の売上は？」）。無ければルーム/所属店舗。
-                    const shop = aiShopFromText(question) || aiResolveShop(room);
+                    // 直近の会話（フォローアップの文脈引き継ぎ用）。最新ほど後ろ。
+                    const recentMsgs = (chatData.messages[roomId] || []).filter(m => m && m.text).slice(-10);
+                    const recentText = recentMsgs.map(m => m.text).join('  ');
+                    // 店舗解決の優先順: 質問文の店舗名 → 直近会話の店舗名（例: 前ターンで「恵比寿」）→ ルーム/所属店舗。
+                    const shop = aiShopFromText(question) || aiShopFromText(recentText) || aiResolveShop(room);
+                    // 会話履歴を最大6メッセージ渡す（現在の質問は別途 question で送るので末尾は除く）
+                    const history = recentMsgs.slice(0, -1).slice(-6).map(m => ({ role: String(m.fromStaffId) === '__ai__' ? 'assistant' : 'user', content: String(m.text).replace(/[@＠]\s*ai\b/ig, '').trim() })).filter(h => h.content);
                     let ctx = '';
                     if (shop) { try { ctx = await aiBuildContext(shop); } catch {} }
                     const faq = await aiFetchFaq(shop && shop.name, question);
                     const dataContext = [ctx, faq].filter(Boolean).join('\n');
-                    const r = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent: 'faq', question, dataContext }) });
+                    const r = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent: 'faq', question, history, dataContext }) });
                     const j = await r.json().catch(() => null);
                     let reply = (j && j.message) ? String(j.message) : '';
                     if (!reply) return;

@@ -2206,6 +2206,7 @@
             const [soChannels, setSoChannels] = useState([]);   // マーケ: 媒体別 新規獲得
             const [soStaffMk, setSoStaffMk] = useState([]);     // マーケ: 担当者別 新規獲得
             const [soRetention, setSoRetention] = useState(null); // マーケ: 継続顧客（summary/by_source/by_staff/by_purchases）
+            const [soMkLoading, setSoMkLoading] = useState(false); // マーケ集計の取得中フラグ（売上サマリとは別の非同期取得のため独立）
             const [soView, setSoView] = useState('shops');   // サブタブ: shops | staff | marketing | creative | daily | plan（概要は廃止）
             // クリエイティブ分析タブ（媒体×メニュー・受付履歴 appointments 集計）
             const [soCreative, setSoCreative] = useState({ rows: [], kpi: null, loading: false, ready: false, error: '' });
@@ -6667,6 +6668,7 @@
                 const reqId = ++soReqRef.current;      // この取得のID
                 const stale = () => soReqRef.current !== reqId; // 途中で新しい取得が始まったら古い応答は破棄
                 setSoLoading(true);
+                setSoMkLoading(true);   // マーケ集計は下の非同期IIFEで別途取得するため独立フラグで管理（空表示のフラッシュを防ぐ）
                 setSoError(null);
                 try {
                     const ids = soShopSel;
@@ -6757,6 +6759,7 @@
                             byPurchases: [{ purchases: 1, label: '1回', active: 9, churned: 1 }, { purchases: 2, label: '2回', active: 2, churned: 0 }],
                         });
                         setSoLastFetch(new Date());
+                        setSoMkLoading(false); // デモはマーケも同期セット済み
                         return;
                     }
                     if (stale()) return; // 店舗が切り替わっていたら古い応答を破棄
@@ -6781,12 +6784,15 @@
 
                     // マーケ集計（売上サマリの成否に関わらず取得・複数店舗は合算）
                     (async () => {
-                        const [ch, st, rt] = await Promise.all([fetchResource('marketing/by-channel'), fetchResource('marketing/by-staff'), fetchResource('marketing/retention')]);
-                        if (stale()) return; // 店舗が切り替わっていたら古いマーケ応答を破棄
-                        const okData = arr => arr.filter(r => r.status === 200).map(r => (r.json && r.json.data) || []);
-                        setSoChannels(normalizeMkChannels({ data: soMergeChannels(okData(ch)) }));
-                        setSoStaffMk(normalizeMkStaff({ data: soMergeMkStaff(okData(st)) }));
-                        setSoRetention(normalizeMkRetention(soMergeRetention(rt.filter(r => r.status === 200).map(r => (r.json && r.json.data) || r.json))));
+                        try {
+                            const [ch, st, rt] = await Promise.all([fetchResource('marketing/by-channel'), fetchResource('marketing/by-staff'), fetchResource('marketing/retention')]);
+                            if (stale()) return; // 店舗が切り替わっていたら古いマーケ応答を破棄
+                            const okData = arr => arr.filter(r => r.status === 200).map(r => (r.json && r.json.data) || []);
+                            setSoChannels(normalizeMkChannels({ data: soMergeChannels(okData(ch)) }));
+                            setSoStaffMk(normalizeMkStaff({ data: soMergeMkStaff(okData(st)) }));
+                            setSoRetention(normalizeMkRetention(soMergeRetention(rt.filter(r => r.status === 200).map(r => (r.json && r.json.data) || r.json))));
+                        } catch (e) { console.error('[salonone] marketing fetch error:', e); }
+                        finally { if (!stale()) setSoMkLoading(false); }
                     })();
 
                     // 店舗・スタッフの選択肢はSalonOneから取得（それぞれ未取得なら取得。売上の成否に依存しない）
@@ -6811,6 +6817,7 @@
                 } catch (err) {
                     console.error('[salonone] fetch error:', err);
                     setSoError(err.message);
+                    setSoMkLoading(false); // 本体取得が失敗しマーケ非同期に到達しなかった場合もフラグを解除
                 } finally {
                     setSoLoading(false);
                 }
@@ -16996,6 +17003,25 @@
                                     })()}
 
                                     {/* ===== マーケ分析（売上サマリの成否に依存せず表示） ===== */}
+                                    {/* マーケ: データ未取得時のローディング/空状態（真っ白防止） */}
+                                    {soView === 'marketing' && !(soChannels.length > 0 || soStaffMk.length > 0 || soRetention) && (
+                                        soMkLoading ? (
+                                            <div className="flex items-center justify-center py-20">
+                                                <div className="text-center">
+                                                    <Loader2 size={40} className="animate-spin text-emerald-500 mx-auto mb-3" />
+                                                    <p className="text-slate-500 font-bold text-sm">マーケデータを取得中…</p>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center">
+                                                <Megaphone size={28} className="text-slate-300 mx-auto mb-3" />
+                                                <p className="text-slate-600 font-black text-sm">マーケデータが取得できませんでした</p>
+                                                <p className="text-slate-400 font-bold text-xs mt-1 leading-relaxed">期間・店舗を変えるか、右上の「Sync」で再取得してください。<br className="hidden sm:inline" />SalonOneが混雑している場合は、少し待つと自動で表示されます。</p>
+                                                <button onClick={() => fetchSalonOneData(true)} className="mt-4 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-colors font-bold text-xs">再試行</button>
+                                            </div>
+                                        )
+                                    )}
+
                                     {soView === 'marketing' && (soChannels.length > 0 || soStaffMk.length > 0 || soRetention) && (
                                         <div className="bg-gradient-to-br from-emerald-50 to-teal-50 border border-emerald-100 rounded-2xl md:rounded-3xl p-4 md:p-6 space-y-4 md:space-y-5">
                                                 <div className="flex items-center gap-2 flex-wrap">

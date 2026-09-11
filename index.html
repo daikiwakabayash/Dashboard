@@ -16748,6 +16748,7 @@
                                             { k: 'shops', label: '店舗', icon: <MapPin size={15} /> },
                                             { k: 'staff', label: 'スタッフ', icon: <Users size={15} /> },
                                             { k: 'marketing', label: 'マーケ', icon: <Megaphone size={15} /> },
+                                            { k: 'acq', label: '獲得分析', icon: <TrendingUp size={15} /> },
                                             { k: 'daily', label: '日報', icon: <Calendar size={15} /> },
                                             { k: 'plan', label: '計画', icon: <Target size={15} /> },
                                         ].map(t => (
@@ -17032,6 +17033,144 @@
                                     })()}
 
                                     {/* ===== マーケ分析（売上サマリの成否に依存せず表示） ===== */}
+                                    {/* ===== 獲得分析（マーケLTV/ファネル・SalonOne媒体別データ由来） ===== */}
+                                    {soView === 'acq' && (() => {
+                                        const isNonNew = (n) => { n = String(n || ''); return n === '既存' || n === '未設定' || /会員/.test(n) || /\d+\s*分/.test(n); };
+                                        const chs = (soChannels || []).filter(c => !isNonNew(c.name) && ((c.booking || 0) > 0 || (c.visit || 0) > 0 || (c.sales || 0) > 0 || (c.clicks || 0) > 0));
+                                        if (soMkLoading && !chs.length) return (<div className="flex items-center justify-center py-20"><div className="text-center"><Loader2 size={40} className="animate-spin text-emerald-500 mx-auto mb-3" /><p className="text-slate-500 font-bold text-sm">獲得データを取得中…</p></div></div>);
+                                        if (!chs.length) return (<div className="bg-white border border-slate-200 rounded-2xl p-8 text-center"><TrendingUp size={28} className="text-slate-300 mx-auto mb-3" /><p className="text-slate-600 font-black text-sm">獲得データがありません</p><p className="text-slate-400 font-bold text-xs mt-1">期間・店舗を変えるか「Sync」で再取得してください。</p></div>);
+                                        const S = (k) => chs.reduce((a, c) => a + (Number(c[k]) || 0), 0);
+                                        const adSpend = S('adSpend'), clicks = S('clicks'), booking = S('booking'), visit = S('visit'), join = S('join'), sales = S('sales'), impressions = S('impressions');
+                                        const rate = (n, d) => d > 0 ? Math.round(n / d * 1000) / 10 : 0;
+                                        const yenOr = (v, ok) => ok ? soYen(v) : '—';
+                                        const bookCPA = booking > 0 && adSpend > 0 ? Math.round(adSpend / booking) : 0;
+                                        const buyCPA = join > 0 && adSpend > 0 ? Math.round(adSpend / join) : 0;
+                                        const roas = adSpend > 0 ? Math.round(sales / adSpend * 100) : 0;
+                                        const kpi = [
+                                            { label: '広告費', val: yenOr(adSpend, adSpend > 0), c: 'from-rose-500 to-orange-500' },
+                                            { label: '広告クリック', val: clicks ? clicks.toLocaleString() : '—', c: 'from-slate-500 to-slate-600' },
+                                            { label: '新規予約', val: booking.toLocaleString() + '件', c: 'from-blue-500 to-indigo-500' },
+                                            { label: '予約CPA', val: yenOr(bookCPA, bookCPA > 0), c: 'from-cyan-500 to-blue-500' },
+                                            { label: '新規来店', val: visit.toLocaleString() + '名', c: 'from-amber-500 to-yellow-500' },
+                                            { label: '来店率', val: rate(visit, booking) + '%', c: 'from-yellow-500 to-amber-500' },
+                                            { label: '購入(入会)', val: join.toLocaleString() + '名', c: 'from-emerald-500 to-teal-500' },
+                                            { label: '購入率', val: rate(join, visit) + '%', c: 'from-teal-500 to-emerald-600' },
+                                            { label: '購入CPA', val: yenOr(buyCPA, buyCPA > 0), c: 'from-rose-500 to-pink-500' },
+                                            { label: '売上', val: soYen(sales), c: 'from-emerald-600 to-green-600' },
+                                            { label: 'ROAS', val: roas ? roas + '%' : '—', c: 'from-violet-500 to-purple-500' },
+                                            { label: 'LTV/CAC', val: '—', note: '90日LTVは後日接続', c: 'from-slate-400 to-slate-500' },
+                                        ];
+                                        // ファネル（クリック→新規予約→来店→購入）
+                                        const funnel = [
+                                            { k: '広告クリック', v: clicks, color: 'bg-blue-100 text-blue-700' },
+                                            { k: '新規予約', v: booking, color: 'bg-indigo-100 text-indigo-700' },
+                                            { k: '来店', v: visit, color: 'bg-amber-100 text-amber-700' },
+                                            { k: '購入', v: join, color: 'bg-emerald-100 text-emerald-700' },
+                                        ];
+                                        // 媒体別（来店降順）
+                                        const rows = [...chs].sort((a, b) => (b.visit || 0) - (a.visit || 0) || (b.booking || 0) - (a.booking || 0));
+                                        // インサイト（実データからルールベース）
+                                        const insights = [];
+                                        const withRoas = rows.filter(c => (c.adSpend || 0) > 0 && (c.sales || 0) > 0).map(c => ({ ...c, _roas: c.sales / c.adSpend }));
+                                        if (withRoas.length) { const best = withRoas.slice().sort((a, b) => b._roas - a._roas)[0]; insights.push({ t: `${best.name} のROASが最良（${Math.round(best._roas * 100)}%）`, d: 'この媒体に予算を寄せると効率的。クリエイティブ・オファーを他媒体へ横展開。', tag: '投資強化', c: 'bg-emerald-50 text-emerald-700' }); }
+                                        const withBuyRate = rows.filter(c => (c.visit || 0) >= 5);
+                                        if (withBuyRate.length) { const worst = withBuyRate.slice().sort((a, b) => rate(a.join, a.visit) - rate(b.join, b.visit))[0]; const wr = rate(worst.join, worst.visit); if (wr < 30) insights.push({ t: `${worst.name} の購入率が低い（${wr}%）`, d: 'カウンセリング/初回オファーの見直し余地。トップ媒体の接客を横展開。', tag: '改善余地', c: 'bg-amber-50 text-amber-700' }); const bestv = withBuyRate.slice().sort((a, b) => rate(b.visit, b.booking) - rate(a.visit, a.booking))[0]; insights.push({ t: `来店率が最も高いのは ${bestv.name}（${rate(bestv.visit, bestv.booking)}%）`, d: 'この媒体は予約→来店の歩留まりが良い。', tag: '来店の質', c: 'bg-blue-50 text-blue-700' }); }
+                                        const withCPA = rows.filter(c => (c.adSpend || 0) > 0 && (c.booking || 0) > 0).map(c => ({ ...c, _cpa: c.adSpend / c.booking }));
+                                        if (withCPA.length) { const worst = withCPA.slice().sort((a, b) => b._cpa - a._cpa)[0]; if (worst._cpa > 5000) insights.push({ t: `${worst.name} の予約CPAが高い（${soYen(Math.round(worst._cpa))}）`, d: 'ターゲティング絞り込み→クリエイティブ刷新→予算再配分の順で改善を。', tag: 'コスト', c: 'bg-rose-50 text-rose-700' }); }
+                                        return (
+                                        <div className="space-y-5">
+                                            {/* KPIカード */}
+                                            <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-2.5 md:gap-3">
+                                                {kpi.map((k, i) => (
+                                                    <div key={i} className="bg-white border border-slate-200 rounded-2xl p-3 md:p-3.5 shadow-sm">
+                                                        <div className={`inline-block text-[10px] font-black text-white px-2 py-0.5 rounded-full bg-gradient-to-r ${k.c} mb-1.5`}>{k.label}</div>
+                                                        <div className="text-lg md:text-xl font-black text-slate-900 tracking-tight">{k.val}</div>
+                                                        {k.note && <div className="text-[9px] font-bold text-slate-400 mt-0.5">{k.note}</div>}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            {/* 獲得ファネル */}
+                                            <div className="bg-gradient-to-br from-emerald-50 to-teal-50 border border-emerald-100 rounded-2xl p-4 md:p-6">
+                                                <div className="flex items-center gap-2 mb-4"><TrendingUp size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">獲得ファネル <span className="text-slate-400 font-bold text-sm">/ クリック→予約→来店→購入</span></h2></div>
+                                                <div className="flex items-stretch gap-1.5 md:gap-3 overflow-x-auto">
+                                                    {funnel.map((f, i) => (
+                                                        <React.Fragment key={i}>
+                                                            <div className="flex-1 min-w-[80px] text-center">
+                                                                <div className={`rounded-xl py-3 md:py-4 font-black ${f.color}`}>
+                                                                    <div className="text-[11px] font-bold opacity-80">{f.k}</div>
+                                                                    <div className="text-xl md:text-2xl">{(f.v || 0).toLocaleString()}</div>
+                                                                </div>
+                                                                {i > 0 && <div className="text-[10px] font-black text-slate-500 mt-1">転換 {rate(f.v, funnel[i - 1].v)}%</div>}
+                                                            </div>
+                                                        </React.Fragment>
+                                                    ))}
+                                                </div>
+                                                {!clicks && <div className="text-[11px] text-slate-400 font-bold mt-3">※ 広告クリック/インプレッションはSalonOneの媒体設定に入力がある場合のみ表示されます（0の媒体は広告連携未設定）。問い合わせ数は広告媒体側の指標のため現状は非対象です。</div>}
+                                            </div>
+                                            {/* 今月の重要インサイト */}
+                                            {insights.length > 0 && (
+                                                <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
+                                                    <div className="flex items-center gap-2 mb-3"><span className="text-lg">💡</span><h2 className="text-base md:text-lg font-black text-slate-900">重要インサイト</h2><span className="text-[10px] font-bold text-slate-400">実データからの示唆</span></div>
+                                                    <div className="space-y-2">
+                                                        {insights.map((ins, i) => (
+                                                            <div key={i} className="flex items-start gap-3 p-2.5 rounded-xl bg-slate-50">
+                                                                <span className="w-6 h-6 shrink-0 rounded-full bg-emerald-600 text-white text-[12px] font-black flex items-center justify-center">{i + 1}</span>
+                                                                <div className="min-w-0 flex-1"><div className="text-[13px] font-black text-slate-800">{ins.t}</div><div className="text-[11px] font-semibold text-slate-500 mt-0.5">{ins.d}</div></div>
+                                                                <span className={`shrink-0 text-[10px] font-black px-2 py-0.5 rounded-full ${ins.c}`}>{ins.tag}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {/* 媒体別コホート */}
+                                            <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
+                                                <div className="flex items-center gap-2 mb-3"><Megaphone size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">媒体別 獲得コホート</h2><span className="px-2 py-0.5 bg-emerald-600 text-white rounded-full text-[10px] font-black">SalonOne実データ</span></div>
+                                                <div className="overflow-x-auto">
+                                                    <table className="w-full text-[12px] whitespace-nowrap">
+                                                        <thead><tr className="text-slate-400 font-black border-b border-slate-200">
+                                                            <th className="text-left pb-2 px-2 sticky left-0 bg-white">媒体</th>
+                                                            <th className="text-right pb-2 px-2">広告費</th><th className="text-right pb-2 px-2">クリック</th><th className="text-right pb-2 px-2">新規予約</th><th className="text-right pb-2 px-2">予約CPA</th><th className="text-right pb-2 px-2">来店</th><th className="text-right pb-2 px-2">来店率</th><th className="text-right pb-2 px-2">購入</th><th className="text-right pb-2 px-2">購入率</th><th className="text-right pb-2 px-2">購入CPA</th><th className="text-right pb-2 px-2">売上</th><th className="text-right pb-2 px-2">ROAS</th>
+                                                        </tr></thead>
+                                                        <tbody>
+                                                            {rows.map((c, i) => { const bcpa = (c.adSpend > 0 && c.booking > 0) ? Math.round(c.adSpend / c.booking) : 0; const pcpa = (c.adSpend > 0 && c.join > 0) ? Math.round(c.adSpend / c.join) : 0; const cr = c.adSpend > 0 ? Math.round(c.sales / c.adSpend * 100) : 0; return (
+                                                                <tr key={i} className="border-b border-slate-100 hover:bg-slate-50">
+                                                                    <td className="py-2 px-2 font-bold text-slate-800 sticky left-0 bg-white">{c.name}</td>
+                                                                    <td className="py-2 px-2 text-right font-bold text-slate-600">{c.adSpend > 0 ? soYen(c.adSpend) : '—'}</td>
+                                                                    <td className="py-2 px-2 text-right text-slate-500">{c.clicks ? c.clicks.toLocaleString() : '—'}</td>
+                                                                    <td className="py-2 px-2 text-right font-bold text-slate-700">{(c.booking || 0).toLocaleString()}</td>
+                                                                    <td className="py-2 px-2 text-right text-slate-500">{bcpa ? soYen(bcpa) : '—'}</td>
+                                                                    <td className="py-2 px-2 text-right font-bold text-slate-700">{(c.visit || 0).toLocaleString()}</td>
+                                                                    <td className="py-2 px-2 text-right text-slate-500">{rate(c.visit, c.booking)}%</td>
+                                                                    <td className="py-2 px-2 text-right font-black text-emerald-600">{(c.join || 0).toLocaleString()}</td>
+                                                                    <td className="py-2 px-2 text-right text-slate-500">{rate(c.join, c.visit)}%</td>
+                                                                    <td className="py-2 px-2 text-right text-slate-500">{pcpa ? soYen(pcpa) : '—'}</td>
+                                                                    <td className="py-2 px-2 text-right font-bold text-slate-900">{soYen(c.sales || 0)}</td>
+                                                                    <td className="py-2 px-2 text-right font-bold text-violet-600">{cr ? cr + '%' : '—'}</td>
+                                                                </tr>
+                                                            ); })}
+                                                            <tr className="font-black bg-slate-50">
+                                                                <td className="py-2 px-2 sticky left-0 bg-slate-50">合計</td>
+                                                                <td className="py-2 px-2 text-right">{adSpend > 0 ? soYen(adSpend) : '—'}</td>
+                                                                <td className="py-2 px-2 text-right">{clicks ? clicks.toLocaleString() : '—'}</td>
+                                                                <td className="py-2 px-2 text-right">{booking.toLocaleString()}</td>
+                                                                <td className="py-2 px-2 text-right">{bookCPA ? soYen(bookCPA) : '—'}</td>
+                                                                <td className="py-2 px-2 text-right">{visit.toLocaleString()}</td>
+                                                                <td className="py-2 px-2 text-right">{rate(visit, booking)}%</td>
+                                                                <td className="py-2 px-2 text-right text-emerald-600">{join.toLocaleString()}</td>
+                                                                <td className="py-2 px-2 text-right">{rate(join, visit)}%</td>
+                                                                <td className="py-2 px-2 text-right">{buyCPA ? soYen(buyCPA) : '—'}</td>
+                                                                <td className="py-2 px-2 text-right">{soYen(sales)}</td>
+                                                                <td className="py-2 px-2 text-right text-violet-600">{roas ? roas + '%' : '—'}</td>
+                                                            </tr>
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                                <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 「購入」はSalonOneの入会数、集計は「その期間に初めて予約した新規客」が母集団。CPA/ROASは広告費が入力されている媒体のみ算出。90日LTV・LTV/CAC・新規顧客一覧・メール受信日分析は次フェーズで接続します。</p>
+                                            </div>
+                                        </div>
+                                        );
+                                    })()}
+
                                     {/* マーケ: データ未取得時のローディング/空状態（真っ白防止） */}
                                     {soView === 'marketing' && !(soChannels.length > 0 || soStaffMk.length > 0 || soRetention) && (
                                         soMkLoading ? (

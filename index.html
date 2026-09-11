@@ -2213,6 +2213,9 @@
             const [acqSort, setAcqSort] = useState('new');    // 新規顧客一覧の並び順（'new'=新しい順 / 'old'=古い順）
             const [acqPivotMetric, setAcqPivotMetric] = useState('booking'); // 媒体×店舗ピボットの指標（booking=新規予約/visit=来店/join=入会）
             const [acqMediaSel, setAcqMediaSel] = useState('');  // マーケ: 媒体フィルタ（''=全媒体 / visit_source_name）
+            const [acqMediaSort, setAcqMediaSort] = useState({ key: 'booking', dir: 'desc' }); // 媒体別コホートの並び替え
+            const [acqShopSort, setAcqShopSort] = useState({ key: 'order', dir: 'asc' });       // 店舗別コホートの並び替え（既定=出店順）
+            const [acqShopSearch, setAcqShopSearch] = useState('');  // 店舗別コホート/店舗×媒体の店舗名検索
             const acqLoadedKeyRef = useRef('');
             const [acqForced, setAcqForced] = useState([]);   // 獲得分析: 強制リンク別 実績（/marketing/by-forced-link・初回オファー/訴求）
             const [acqForcedLoading, setAcqForcedLoading] = useState(false);
@@ -4576,10 +4579,31 @@
             }, [zkCountry]);
             // 獲得分析タブ: 新規顧客一覧（/marketing/new-customers）を取得（受付日時・LTV・入会/来店）。
             // ページング(cursor)で全件取得（上限ガード付き）。タブを開いた時＋期間/店舗変更時のみ。
+            // ── 獲得データのローカルキャッシュ（過去の期間は確定＝再取得せず即表示。現在の期間はキャッシュ即表示＋裏で更新）──
+            // 過去に登録された予約データは基本消えない前提。期間終了日(soTo)が今日より前＝確定データとしてキャッシュのみで完了し高速化。
+            const acqCacheGet = (lsKey, key) => { try { const m = JSON.parse(localStorage.getItem(lsKey) || '{}'); return m[key] || null; } catch { return null; } };
+            const acqCachePut = (lsKey, key, rows, max) => {
+                try {
+                    let m = {}; try { m = JSON.parse(localStorage.getItem(lsKey) || '{}'); } catch { m = {}; }
+                    m[key] = { rows, ts: Date.now() };
+                    const ks = Object.keys(m);
+                    if (ks.length > max) ks.map(k => [k, m[k].ts || 0]).sort((a, b) => a[1] - b[1]).slice(0, ks.length - max).forEach(([k]) => delete m[k]);
+                    try { localStorage.setItem(lsKey, JSON.stringify(m)); }
+                    catch { try { localStorage.setItem(lsKey, JSON.stringify({ [key]: { rows, ts: Date.now() } })); } catch {} } // 容量超過時は当該キーのみ保持
+                } catch {}
+            };
+            const acqIsPastPeriod = () => { try { return soTo < new Date().toISOString().slice(0, 10); } catch { return false; } };
             const acqFetchCustomers = async () => {
                 const key = `${soFrom}_${soTo}_${(soShopSel || []).join(',')}`;
-                if (acqLoadedKeyRef.current === key || acqCustLoading) return;
-                acqLoadedKeyRef.current = key; setAcqCustLoading(true);
+                if (acqCustLoading) return;
+                const cached = acqCacheGet('naoru_acqcust_v1', key);
+                if (cached && Array.isArray(cached.rows)) {
+                    setAcqCust(cached.rows);                    // キャッシュを即表示（スピナー無し・体感高速）
+                    if (acqIsPastPeriod()) { acqLoadedKeyRef.current = key; return; } // 過去＝確定。再取得しない
+                }
+                if (acqLoadedKeyRef.current === key) return;    // 同一セッション内の同キー重複取得を防止
+                acqLoadedKeyRef.current = key;
+                if (!(cached && cached.rows)) setAcqCustLoading(true); // キャッシュが無い時だけスピナー表示
                 try {
                     const ids = (soShopSel && soShopSel.length) ? soShopSel : ['']; // '' = ブランド全店（1系列でページング）
                     let all = [];
@@ -4597,23 +4621,29 @@
                             guard++;
                         } while (cursor && guard < 10 && all.length < 8000);
                     }
-                    setAcqCust(all);
-                } catch { setAcqCust([]); acqLoadedKeyRef.current = ''; }
+                    setAcqCust(all); acqCachePut('naoru_acqcust_v1', key, all, 4); // 最新4期間分をキャッシュ
+                } catch { if (!(cached && cached.rows)) setAcqCust([]); acqLoadedKeyRef.current = ''; }
                 finally { setAcqCustLoading(false); }
             };
             // 強制リンク別 実績（1リクエスト）。全店＝shop_id無し、単一店選択時のみ絞り込み。
             const acqFetchForced = async () => {
                 const key = `${soFrom}_${soTo}_${(soShopSel || []).join(',')}`;
+                const cached = acqCacheGet('naoru_acqforced_v1', key);
+                if (cached && Array.isArray(cached.rows)) {
+                    setAcqForced(cached.rows);
+                    if (acqIsPastPeriod()) { acqForcedKeyRef.current = key; return; }
+                }
                 if (acqForcedKeyRef.current === key) return;
-                acqForcedKeyRef.current = key; setAcqForcedLoading(true);
+                acqForcedKeyRef.current = key;
+                if (!(cached && cached.rows)) setAcqForcedLoading(true);
                 try {
                     const p = new URLSearchParams({ resource: 'marketing/by-forced-link', from: soFrom, to: soTo });
                     if (soShopSel && soShopSel.length === 1) p.set('shop_id', soShopSel[0]);
                     let j = null;
                     for (let a = 0; a < 4; a++) { try { const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`); if (r.status === 429 || r.status >= 500) { await new Promise(x => setTimeout(x, 800 * (a + 1))); continue; } j = await r.json().catch(() => null); break; } catch { await new Promise(x => setTimeout(x, 600 * (a + 1))); } }
                     const rows = (j && j.data && Array.isArray(j.data.rows)) ? j.data.rows : [];
-                    setAcqForced(rows);
-                } catch { setAcqForced([]); acqForcedKeyRef.current = ''; }
+                    setAcqForced(rows); acqCachePut('naoru_acqforced_v1', key, rows, 8);
+                } catch { if (!(cached && cached.rows)) setAcqForced([]); acqForcedKeyRef.current = ''; }
                 finally { setAcqForcedLoading(false); }
             };
             useEffect(() => {
@@ -17137,6 +17167,14 @@
                                         const _adShopsMap = (_adBucket.__shops__ && typeof _adBucket.__shops__ === 'object') ? _adBucket.__shops__ : {};
                                         const adForShop = (shopName) => { for (const [nm, row] of Object.entries(_adShopsMap)) { if (soShopNorm(nm) === soShopNorm(shopName)) return (row && typeof row === 'object') ? row : {}; } return {}; };
                                         const adShopTotal = (shopName) => { const r = adForShop(shopName); return Object.values(r).reduce((a, v) => a + (Number(v) || 0), 0); };
+                                        // 出店順（SO_SHOP_ORDER）で店舗を並べるためのインデックス。名称は soPlanCoreOf で正規化して照合。
+                                        const _shopOrderIdx = {}; SO_SHOP_ORDER.forEach((n, i) => { _shopOrderIdx[soPlanCoreOf(n)] = i; });
+                                        const shopOrderOf = (name) => { const c = soPlanCoreOf(name); return _shopOrderIdx[c] != null ? _shopOrderIdx[c] : 900 + String(name || '').length; };
+                                        const BIG = Number.MAX_SAFE_INTEGER;
+                                        // 汎用ソート（クリックで昇順/降順トグル）。valOf(row,key) が数値/文字列を返す。
+                                        const applySort = (arr, sort, valOf) => { const a = [...arr]; a.sort((x, y) => { const vx = valOf(x, sort.key), vy = valOf(y, sort.key); if (typeof vx === 'string' || typeof vy === 'string') return sort.dir === 'asc' ? String(vx).localeCompare(String(vy)) : String(vy).localeCompare(String(vx)); return sort.dir === 'asc' ? vx - vy : vy - vx; }); return a; };
+                                        // ソート可能な列見出し（クリックで方向トグル・現在列に▲▼）
+                                        const ThSort = ({ label, k, sort, setSort, align }) => (<th onClick={() => setSort(s => ({ key: k, dir: s.key === k && s.dir === 'desc' ? 'asc' : 'desc' }))} className={`text-${align || 'right'} pb-2 px-2 cursor-pointer select-none whitespace-nowrap ${sort.key === k ? 'text-emerald-600' : 'hover:text-slate-600'}`}>{label}{sort.key === k ? (sort.dir === 'desc' ? ' ▼' : ' ▲') : ''}</th>);
                                         const isVisited = (c) => c.visited_completed === true || c.first_appointment_status === 'completed';
                                         // 広告費・クリックはby-channel（媒体）から。それ以外（予約/来店/入会/売上）はコホート(custRows)から。
                                         const isNonNew = (n) => { n = String(n || ''); return n === '既存' || n === '未設定' || /会員/.test(n) || /\d+\s*分/.test(n); };
@@ -17188,7 +17226,8 @@
                                             { k: '購入', v: join, color: 'bg-emerald-100 text-emerald-700' },
                                         ];
                                         // 媒体別（受付日コホート・予約降順）
-                                        const rows = mediaRows;
+                                        const mediaValOf = (r, k) => { const bcpa = r.adSpend > 0 && r.booking > 0 ? r.adSpend / r.booking : BIG; const pcpa = r.adSpend > 0 && r.join > 0 ? r.adSpend / r.join : BIG; switch (k) { case 'name': return r.name; case 'adSpend': return r.adSpend || 0; case 'clicks': return r.clicks || 0; case 'booking': return r.booking || 0; case 'bcpa': return bcpa; case 'visit': return r.visit || 0; case 'visitRate': return r.booking ? r.visit / r.booking : 0; case 'cancel': return r.cancel || 0; case 'cancelRate': return r.booking ? r.cancel / r.booking : 0; case 'join': return r.join || 0; case 'joinRate': return r.visit ? r.join / r.visit : 0; case 'pcpa': return pcpa; case 'sales': return r.sales || 0; case 'roas': return r.adSpend > 0 ? r.sales / r.adSpend : 0; default: return 0; } };
+                                        const rows = applySort(mediaRows, acqMediaSort, mediaValOf);
                                         // インサイト（実データからルールベース）
                                         const insights = [];
                                         const withRoas = rows.filter(c => (c.adSpend || 0) > 0 && (c.sales || 0) > 0).map(c => ({ ...c, _roas: c.sales / c.adSpend }));
@@ -17258,8 +17297,8 @@
                                                 <div className="overflow-x-auto">
                                                     <table className="w-full text-[12px] whitespace-nowrap">
                                                         <thead><tr className="text-slate-400 font-black border-b border-slate-200">
-                                                            <th className="text-left pb-2 px-2 sticky left-0 bg-white">媒体</th>
-                                                            <th className="text-right pb-2 px-2">広告費</th><th className="text-right pb-2 px-2">クリック</th><th className="text-right pb-2 px-2">新規予約</th><th className="text-right pb-2 px-2">予約CPA</th><th className="text-right pb-2 px-2">来店</th><th className="text-right pb-2 px-2">来店率</th><th className="text-right pb-2 px-2">キャンセル</th><th className="text-right pb-2 px-2">キャンセル率</th><th className="text-right pb-2 px-2">購入</th><th className="text-right pb-2 px-2">購入率</th><th className="text-right pb-2 px-2">購入CPA</th><th className="text-right pb-2 px-2">売上</th><th className="text-right pb-2 px-2">ROAS</th>
+                                                            <ThSort label="媒体" k="name" sort={acqMediaSort} setSort={setAcqMediaSort} align="left" />
+                                                            <ThSort label="広告費" k="adSpend" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="クリック" k="clicks" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="新規予約" k="booking" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="予約CPA" k="bcpa" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="来店" k="visit" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="来店率" k="visitRate" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="キャンセル" k="cancel" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="キャンセル率" k="cancelRate" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="購入" k="join" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="購入率" k="joinRate" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="購入CPA" k="pcpa" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="売上" k="sales" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="ROAS" k="roas" sort={acqMediaSort} setSort={setAcqMediaSort} />
                                                         </tr></thead>
                                                         <tbody>
                                                             {rows.map((c, i) => { const bcpa = (c.adSpend > 0 && c.booking > 0) ? Math.round(c.adSpend / c.booking) : 0; const pcpa = (c.adSpend > 0 && c.join > 0) ? Math.round(c.adSpend / c.join) : 0; const cr = c.adSpend > 0 ? Math.round(c.sales / c.adSpend * 100) : 0; return (
@@ -17308,15 +17347,22 @@
                                                 custRows.forEach(c => { const id = String(c.shop_id); const o = byShop[id] = byShop[id] || { name: (shopMeta[id] || {}).name || id, booking: 0, visit: 0, join: 0, cancel: 0, ltv: 0 }; o.booking++; if (c.visited_completed) o.visit++; if (c.joined) o.join++; if (c.first_appointment_status === 'cancelled') o.cancel++; o.ltv += Number(c.ltv) || 0; });
                                                 // 店舗別 広告費（媒体フィルタ時はその媒体のみ、全媒体時は店舗合計）
                                                 Object.values(byShop).forEach(o => { o.ad = acqMediaSel ? (Number(adForShop(o.name)[acqMediaSel]) || 0) : adShopTotal(o.name); });
-                                                const shopRows = Object.values(byShop).sort((a, b) => b.booking - a.booking);
+                                                const _shopAll = Object.values(byShop);
+                                                const _q = acqShopSearch.trim();
+                                                const _shopFiltered = _q ? _shopAll.filter(r => String(r.name || '').includes(_q)) : _shopAll;
+                                                const shopValOf = (r, k) => { const bcpa = r.ad > 0 && r.booking > 0 ? r.ad / r.booking : BIG; const pcpa = r.ad > 0 && r.join > 0 ? r.ad / r.join : BIG; switch (k) { case 'order': return shopOrderOf(r.name); case 'name': return r.name; case 'ad': return r.ad || 0; case 'booking': return r.booking || 0; case 'bcpa': return bcpa; case 'visit': return r.visit || 0; case 'visitRate': return r.booking ? r.visit / r.booking : 0; case 'cancel': return r.cancel || 0; case 'cancelRate': return r.booking ? r.cancel / r.booking : 0; case 'join': return r.join || 0; case 'joinRate': return r.visit ? r.join / r.visit : 0; case 'pcpa': return pcpa; case 'ltv': return r.ltv || 0; case 'avgLtv': return r.booking ? r.ltv / r.booking : 0; default: return 0; } };
+                                                const shopRows = applySort(_shopFiltered, acqShopSort, shopValOf);
                                                 const tot = shopRows.reduce((a, r) => ({ booking: a.booking + r.booking, visit: a.visit + r.visit, join: a.join + r.join, cancel: a.cancel + r.cancel, ltv: a.ltv + r.ltv, ad: a.ad + (r.ad || 0) }), { booking: 0, visit: 0, join: 0, cancel: 0, ltv: 0, ad: 0 });
                                                 return (
                                                 <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
-                                                    <div className="flex items-center gap-2 mb-3"><MapPin size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">店舗別 獲得コホート</h2><span className="px-2 py-0.5 bg-emerald-600 text-white rounded-full text-[10px] font-black">日本・新規客ベース</span></div>
-                                                    <div className="overflow-x-auto">
+                                                    <div className="flex items-center gap-2 mb-3 flex-wrap"><MapPin size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">店舗別 獲得コホート</h2><span className="px-2 py-0.5 bg-emerald-600 text-white rounded-full text-[10px] font-black">日本・新規客ベース</span>
+                                                        <div className="ml-auto flex items-center gap-1.5"><Search size={13} className="text-slate-400" /><input value={acqShopSearch} onChange={e => setAcqShopSearch(e.target.value)} placeholder="店舗名で絞り込み" className="w-32 md:w-44 px-2.5 py-1 text-[12px] font-bold border border-slate-200 rounded-lg focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none" />{acqShopSearch && <button onClick={() => setAcqShopSearch('')} className="text-slate-400 hover:text-slate-600"><X size={14} /></button>}</div>
+                                                    </div>
+                                                    <p className="text-[10px] text-slate-400 font-bold mb-2">見出しをクリックで並び替え（既定＝出店順）。例: 来店・購入の多い順、CPAの安い順、広告費の高い順。</p>
+                                                    <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
                                                         <table className="w-full text-[12px] whitespace-nowrap">
                                                             <thead><tr className="text-slate-400 font-black border-b border-slate-200">
-                                                                <th className="text-left pb-2 px-2 sticky left-0 bg-white">店舗</th><th className="text-right pb-2 px-2">広告費</th><th className="text-right pb-2 px-2">新規予約</th><th className="text-right pb-2 px-2">予約CPA</th><th className="text-right pb-2 px-2">来店</th><th className="text-right pb-2 px-2">来店率</th><th className="text-right pb-2 px-2">キャンセル</th><th className="text-right pb-2 px-2">キャンセル率</th><th className="text-right pb-2 px-2">購入</th><th className="text-right pb-2 px-2">購入率</th><th className="text-right pb-2 px-2">購入CPA</th><th className="text-right pb-2 px-2">LTV合計</th><th className="text-right pb-2 px-2">平均LTV</th>
+                                                                <ThSort label="店舗" k="order" sort={acqShopSort} setSort={setAcqShopSort} align="left" /><ThSort label="広告費" k="ad" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="新規予約" k="booking" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="予約CPA" k="bcpa" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="来店" k="visit" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="来店率" k="visitRate" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="キャンセル" k="cancel" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="キャンセル率" k="cancelRate" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="購入" k="join" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="購入率" k="joinRate" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="購入CPA" k="pcpa" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="LTV合計" k="ltv" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="平均LTV" k="avgLtv" sort={acqShopSort} setSort={setAcqShopSort} />
                                                             </tr></thead>
                                                             <tbody>
                                                                 {shopRows.map((r, i) => { const bcpa = r.ad > 0 && r.booking > 0 ? Math.round(r.ad / r.booking) : 0; const pcpa = r.ad > 0 && r.join > 0 ? Math.round(r.ad / r.join) : 0; return (
@@ -17392,7 +17438,7 @@
                                                             ))}
                                                         </div>
                                                     </div>
-                                                    <div className="overflow-x-auto">
+                                                    <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
                                                         <table className="w-full text-[12px] whitespace-nowrap border-collapse">
                                                             <thead><tr className="text-slate-400 font-black border-b border-slate-200">
                                                                 <th className="text-left pb-2 px-2 sticky left-0 bg-white">店舗＼媒体</th>
@@ -17502,43 +17548,23 @@
                                                     if (c.first_appointment_status === 'cancelled') m.cancel++;
                                                     if (c.joined) m.join++; m.ltv += Number(c.ltv) || 0;
                                                 });
-                                                const shops = Object.values(byShop).map(s => ({ ...s, ad: acqMediaSel ? (Number(adForShop(s.name)[acqMediaSel]) || 0) : adShopTotal(s.name) })).sort((a, b) => b.total - a.total);
-                                                const mediaAgg = {};
-                                                shops.forEach(s => { Object.values(s.media).forEach(m => { const a = mediaAgg[m.name] = mediaAgg[m.name] || { name: m.name, booking: 0, visit: 0, cancel: 0, join: 0, ltv: 0, ad: 0 }; a.booking += m.booking; a.visit += m.visit; a.cancel += m.cancel; a.join += m.join; a.ltv += m.ltv; a.ad += Number(adForShop(s.name)[m.name]) || 0; }); });
-                                                const mediaSummary = Object.values(mediaAgg).sort((a, b) => b.booking - a.booking);
+                                                const _q2 = acqShopSearch.trim();
+                                                const shops = Object.values(byShop)
+                                                    .map(s => ({ ...s, ad: acqMediaSel ? (Number(adForShop(s.name)[acqMediaSel]) || 0) : adShopTotal(s.name) }))
+                                                    .filter(s => !_q2 || String(s.name || '').includes(_q2))
+                                                    .sort((a, b) => shopOrderOf(a.name) - shopOrderOf(b.name)); // 出店順
                                                 return (
                                                 <div className="space-y-4">
-                                                    {/* 媒体別 CPAサマリ（全選択店舗を横断・一覧でCPAが見える） */}
-                                                    <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl p-4 md:p-6 text-white shadow-lg">
-                                                        <div className="flex items-center gap-2 mb-3"><Megaphone size={18} className="text-emerald-400" /><h2 className="text-base md:text-lg font-black">媒体別 CPAサマリ</h2><span className="text-[10px] font-bold text-slate-400">選択中の店舗を横断・予約/入会CPA</span></div>
-                                                        <div className="overflow-x-auto">
-                                                            <table className="w-full text-[12px] whitespace-nowrap">
-                                                                <thead><tr className="text-slate-400 font-black border-b border-white/10"><th className="text-left pb-2 px-2">媒体</th><th className="text-right pb-2 px-2">広告費</th><th className="text-right pb-2 px-2">新規予約</th><th className="text-right pb-2 px-2">予約CPA</th><th className="text-right pb-2 px-2">来店</th><th className="text-right pb-2 px-2">来店率</th><th className="text-right pb-2 px-2">入会</th><th className="text-right pb-2 px-2">入会率</th><th className="text-right pb-2 px-2">購入CPA</th><th className="text-right pb-2 px-2">LTV合計</th></tr></thead>
-                                                                <tbody>
-                                                                    {mediaSummary.map((m, i) => { const bcpa = m.ad > 0 && m.booking > 0 ? Math.round(m.ad / m.booking) : 0; const pcpa = m.ad > 0 && m.join > 0 ? Math.round(m.ad / m.join) : 0; return (
-                                                                        <tr key={i} className="border-b border-white/5">
-                                                                            <td className="py-2 px-2 font-bold">{m.name}</td>
-                                                                            <td className="py-2 px-2 text-right text-slate-300">{m.ad > 0 ? soYen(m.ad) : '—'}</td>
-                                                                            <td className="py-2 px-2 text-right font-bold">{m.booking.toLocaleString()}</td>
-                                                                            <td className="py-2 px-2 text-right font-black text-cyan-300">{bcpa ? soYen(bcpa) : '—'}</td>
-                                                                            <td className="py-2 px-2 text-right">{m.visit.toLocaleString()}</td>
-                                                                            <td className="py-2 px-2 text-right text-slate-300">{pct(m.visit, m.booking)}%</td>
-                                                                            <td className="py-2 px-2 text-right text-emerald-300 font-bold">{m.join.toLocaleString()}</td>
-                                                                            <td className="py-2 px-2 text-right text-slate-300">{pct(m.join, m.visit)}%</td>
-                                                                            <td className="py-2 px-2 text-right font-black text-rose-300">{pcpa ? soYen(pcpa) : '—'}</td>
-                                                                            <td className="py-2 px-2 text-right">{soYen(m.ltv)}</td>
-                                                                        </tr>
-                                                                    ); })}
-                                                                </tbody>
-                                                            </table>
-                                                        </div>
-                                                        <p className="text-[10px] text-slate-400 mt-2 font-bold">※ 広告費は「ダッシュボード」下部の店舗別・媒体別入力の合算。CPA＝広告費÷予約(または入会)。媒体別に広告費を入力するとCPA精度が上がります。</p>
+                                                    <div className="flex items-center gap-2 flex-wrap">
+                                                        <Grid3x3 size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">店舗×媒体 内訳</h2>
+                                                        <span className="text-[10px] font-bold text-slate-400">各店の新規を媒体別に分解（出店順）</span>
+                                                        <div className="ml-auto flex items-center gap-1.5"><Search size={13} className="text-slate-400" /><input value={acqShopSearch} onChange={e => setAcqShopSearch(e.target.value)} placeholder="店舗名で絞り込み" className="w-32 md:w-44 px-2.5 py-1 text-[12px] font-bold border border-slate-200 rounded-lg focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none" />{acqShopSearch && <button onClick={() => setAcqShopSearch('')} className="text-slate-400 hover:text-slate-600"><X size={14} /></button>}</div>
                                                     </div>
-                                                    {/* 店舗ごとの媒体内訳 */}
-                                                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                                                    {/* 店舗ごとの媒体内訳（出店順・スマホは1列） */}
+                                                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 md:gap-4">
                                                         {shops.map((s, si) => { const rows = Object.values(s.media).sort((a, b) => b.booking - a.booking); const stCPA = s.ad > 0 && s.total > 0 ? Math.round(s.ad / s.total) : 0; return (
-                                                            <div key={si} className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
-                                                                <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+                                                            <div key={si} className="bg-white border border-slate-200 rounded-2xl p-3 md:p-4 shadow-sm">
+                                                                <div className="flex items-center justify-between mb-3 gap-x-3 gap-y-1 flex-wrap">
                                                                     <div className="flex items-center gap-2"><MapPin size={16} className="text-emerald-600" /><h3 className="text-sm font-black text-slate-900">{s.name}</h3></div>
                                                                     <div className="flex items-center gap-3 text-[11px] font-black">
                                                                         <span className="text-slate-500">新規 <span className="text-slate-900 text-sm">{s.total}</span>件</span>
@@ -17546,7 +17572,7 @@
                                                                         <span className="text-cyan-600">予約CPA <span className="text-sm">{stCPA ? soYen(stCPA) : '—'}</span></span>
                                                                     </div>
                                                                 </div>
-                                                                <div className="overflow-x-auto">
+                                                                <div className="overflow-x-auto -mx-3 px-3 md:mx-0 md:px-0">
                                                                     <table className="w-full text-[11px] whitespace-nowrap">
                                                                         <thead><tr className="text-slate-400 font-black border-b border-slate-200"><th className="text-left pb-1.5 px-1.5">媒体</th><th className="text-right pb-1.5 px-1.5">予約</th><th className="text-right pb-1.5 px-1.5">来店</th><th className="text-right pb-1.5 px-1.5">来店率</th><th className="text-right pb-1.5 px-1.5">ｷｬﾝｾﾙ</th><th className="text-right pb-1.5 px-1.5">ｷｬﾝｾﾙ率</th><th className="text-right pb-1.5 px-1.5">入会</th><th className="text-right pb-1.5 px-1.5">入会率</th><th className="text-right pb-1.5 px-1.5">予約CPA</th><th className="text-right pb-1.5 px-1.5">LTV</th></tr></thead>
                                                                         <tbody>

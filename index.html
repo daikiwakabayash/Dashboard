@@ -17192,7 +17192,7 @@
                                                     <table className="w-full text-[12px] whitespace-nowrap">
                                                         <thead><tr className="text-slate-400 font-black border-b border-slate-200">
                                                             <th className="text-left pb-2 px-2 sticky left-0 bg-white">媒体</th>
-                                                            <th className="text-right pb-2 px-2">広告費</th><th className="text-right pb-2 px-2">クリック</th><th className="text-right pb-2 px-2">新規予約</th><th className="text-right pb-2 px-2">予約CPA</th><th className="text-right pb-2 px-2">来店</th><th className="text-right pb-2 px-2">来店率</th><th className="text-right pb-2 px-2">購入</th><th className="text-right pb-2 px-2">購入率</th><th className="text-right pb-2 px-2">購入CPA</th><th className="text-right pb-2 px-2">売上</th><th className="text-right pb-2 px-2">ROAS</th>
+                                                            <th className="text-right pb-2 px-2">広告費</th><th className="text-right pb-2 px-2">クリック</th><th className="text-right pb-2 px-2">新規予約</th><th className="text-right pb-2 px-2">予約CPA</th><th className="text-right pb-2 px-2">来店</th><th className="text-right pb-2 px-2">来店率</th><th className="text-right pb-2 px-2">キャンセル</th><th className="text-right pb-2 px-2">キャンセル率</th><th className="text-right pb-2 px-2">購入</th><th className="text-right pb-2 px-2">購入率</th><th className="text-right pb-2 px-2">購入CPA</th><th className="text-right pb-2 px-2">売上</th><th className="text-right pb-2 px-2">ROAS</th>
                                                         </tr></thead>
                                                         <tbody>
                                                             {rows.map((c, i) => { const bcpa = (c.adSpend > 0 && c.booking > 0) ? Math.round(c.adSpend / c.booking) : 0; const pcpa = (c.adSpend > 0 && c.join > 0) ? Math.round(c.adSpend / c.join) : 0; const cr = c.adSpend > 0 ? Math.round(c.sales / c.adSpend * 100) : 0; return (
@@ -17204,6 +17204,8 @@
                                                                     <td className="py-2 px-2 text-right text-slate-500">{bcpa ? soYen(bcpa) : '—'}</td>
                                                                     <td className="py-2 px-2 text-right font-bold text-slate-700">{(c.visit || 0).toLocaleString()}</td>
                                                                     <td className="py-2 px-2 text-right text-slate-500">{rate(c.visit, c.booking)}%</td>
+                                                                    <td className="py-2 px-2 text-right text-rose-500">{(c.cancel || 0).toLocaleString()}</td>
+                                                                    <td className="py-2 px-2 text-right text-rose-500">{c.cancelRate != null ? c.cancelRate + '%' : (c.booking > 0 ? Math.round((c.cancel || 0) / c.booking * 1000) / 10 + '%' : '—')}</td>
                                                                     <td className="py-2 px-2 text-right font-black text-emerald-600">{(c.join || 0).toLocaleString()}</td>
                                                                     <td className="py-2 px-2 text-right text-slate-500">{rate(c.join, c.visit)}%</td>
                                                                     <td className="py-2 px-2 text-right text-slate-500">{pcpa ? soYen(pcpa) : '—'}</td>
@@ -17219,6 +17221,8 @@
                                                                 <td className="py-2 px-2 text-right">{bookCPA ? soYen(bookCPA) : '—'}</td>
                                                                 <td className="py-2 px-2 text-right">{visit.toLocaleString()}</td>
                                                                 <td className="py-2 px-2 text-right">{rate(visit, booking)}%</td>
+                                                                <td className="py-2 px-2 text-right text-rose-500">{S('cancel').toLocaleString()}</td>
+                                                                <td className="py-2 px-2 text-right text-rose-500">{rate(S('cancel'), booking)}%</td>
                                                                 <td className="py-2 px-2 text-right text-emerald-600">{join.toLocaleString()}</td>
                                                                 <td className="py-2 px-2 text-right">{rate(join, visit)}%</td>
                                                                 <td className="py-2 px-2 text-right">{buyCPA ? soYen(buyCPA) : '—'}</td>
@@ -17230,6 +17234,54 @@
                                                 </div>
                                                 <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 「購入」はSalonOneの入会数、集計は「その期間に初めて予約した新規客」が母集団。CPA/ROASは広告費が入力されている媒体のみ算出。平均LTVは新規客の会計累計（取得時点まで）。</p>
                                             </div>
+                                            {/* 店舗別 獲得コホート（新規客一覧 acqCust から集計・キャンセル込み・日本のみ） */}
+                                            {custRows.length > 0 && (() => {
+                                                const byShop = {};
+                                                custRows.forEach(c => { const id = String(c.shop_id); const o = byShop[id] = byShop[id] || { name: (shopMeta[id] || {}).name || id, booking: 0, visit: 0, join: 0, cancel: 0, ltv: 0 }; o.booking++; if (c.visited_completed) o.visit++; if (c.joined) o.join++; if (c.first_appointment_status === 'cancelled') o.cancel++; o.ltv += Number(c.ltv) || 0; });
+                                                const shopRows = Object.values(byShop).sort((a, b) => b.booking - a.booking);
+                                                const tot = shopRows.reduce((a, r) => ({ booking: a.booking + r.booking, visit: a.visit + r.visit, join: a.join + r.join, cancel: a.cancel + r.cancel, ltv: a.ltv + r.ltv }), { booking: 0, visit: 0, join: 0, cancel: 0, ltv: 0 });
+                                                return (
+                                                <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
+                                                    <div className="flex items-center gap-2 mb-3"><MapPin size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">店舗別 獲得コホート</h2><span className="px-2 py-0.5 bg-emerald-600 text-white rounded-full text-[10px] font-black">日本・新規客ベース</span></div>
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-[12px] whitespace-nowrap">
+                                                            <thead><tr className="text-slate-400 font-black border-b border-slate-200">
+                                                                <th className="text-left pb-2 px-2 sticky left-0 bg-white">店舗</th><th className="text-right pb-2 px-2">新規予約</th><th className="text-right pb-2 px-2">来店</th><th className="text-right pb-2 px-2">来店率</th><th className="text-right pb-2 px-2">キャンセル</th><th className="text-right pb-2 px-2">キャンセル率</th><th className="text-right pb-2 px-2">購入</th><th className="text-right pb-2 px-2">購入率</th><th className="text-right pb-2 px-2">LTV合計</th><th className="text-right pb-2 px-2">平均LTV</th>
+                                                            </tr></thead>
+                                                            <tbody>
+                                                                {shopRows.map((r, i) => (
+                                                                    <tr key={i} className="border-b border-slate-100 hover:bg-slate-50">
+                                                                        <td className="py-2 px-2 font-bold text-slate-800 sticky left-0 bg-white">{r.name}</td>
+                                                                        <td className="py-2 px-2 text-right font-bold text-slate-700">{r.booking.toLocaleString()}</td>
+                                                                        <td className="py-2 px-2 text-right font-bold text-slate-700">{r.visit.toLocaleString()}</td>
+                                                                        <td className="py-2 px-2 text-right text-slate-500">{r.booking > 0 ? Math.round(r.visit / r.booking * 1000) / 10 : 0}%</td>
+                                                                        <td className="py-2 px-2 text-right text-rose-500">{r.cancel.toLocaleString()}</td>
+                                                                        <td className="py-2 px-2 text-right text-rose-500">{r.booking > 0 ? Math.round(r.cancel / r.booking * 1000) / 10 : 0}%</td>
+                                                                        <td className="py-2 px-2 text-right font-black text-emerald-600">{r.join.toLocaleString()}</td>
+                                                                        <td className="py-2 px-2 text-right text-slate-500">{r.visit > 0 ? Math.round(r.join / r.visit * 1000) / 10 : 0}%</td>
+                                                                        <td className="py-2 px-2 text-right font-bold text-slate-900">{soYen(r.ltv)}</td>
+                                                                        <td className="py-2 px-2 text-right text-slate-600">{r.booking > 0 ? soYen(Math.round(r.ltv / r.booking)) : '—'}</td>
+                                                                    </tr>
+                                                                ))}
+                                                                <tr className="font-black bg-slate-50">
+                                                                    <td className="py-2 px-2 sticky left-0 bg-slate-50">合計</td>
+                                                                    <td className="py-2 px-2 text-right">{tot.booking.toLocaleString()}</td>
+                                                                    <td className="py-2 px-2 text-right">{tot.visit.toLocaleString()}</td>
+                                                                    <td className="py-2 px-2 text-right">{tot.booking > 0 ? Math.round(tot.visit / tot.booking * 1000) / 10 : 0}%</td>
+                                                                    <td className="py-2 px-2 text-right text-rose-500">{tot.cancel.toLocaleString()}</td>
+                                                                    <td className="py-2 px-2 text-right text-rose-500">{tot.booking > 0 ? Math.round(tot.cancel / tot.booking * 1000) / 10 : 0}%</td>
+                                                                    <td className="py-2 px-2 text-right text-emerald-600">{tot.join.toLocaleString()}</td>
+                                                                    <td className="py-2 px-2 text-right">{tot.visit > 0 ? Math.round(tot.join / tot.visit * 1000) / 10 : 0}%</td>
+                                                                    <td className="py-2 px-2 text-right">{soYen(tot.ltv)}</td>
+                                                                    <td className="py-2 px-2 text-right">{tot.booking > 0 ? soYen(Math.round(tot.ltv / tot.booking)) : '—'}</td>
+                                                                </tr>
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                    <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 新規客一覧（受付日時ベース）から店舗別に集計。新規予約＝新規客数、来店＝会計完了、キャンセル＝初回予約がキャンセル、購入＝入会。LTVは会計累計（取得時点まで）。日本の店舗のみ。</p>
+                                                </div>
+                                                );
+                                            })()}
                                             {/* 強制リンク別 実績（初回オファー/訴求の効果） */}
                                             {(acqForcedLoading || (acqForced && acqForced.length > 0)) && (() => {
                                                 const fl = (acqForced || []).filter(r => (r.booking_count || 0) > 0).sort((a, b) => (b.booking_count || 0) - (a.booking_count || 0)).slice(0, 40);
@@ -17298,7 +17350,7 @@
                                             })()}
                                             {/* 新規顧客一覧 */}
                                             <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
-                                                <div className="flex items-center gap-2 mb-3"><Users size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">新規顧客一覧</h2><span className="text-[10px] font-bold text-slate-400">{acqCustLoading ? '読み込み中…' : `全${custRows.length.toLocaleString()}名（日本の店舗のみ・受付日時の新しい順・上位200名）`}</span></div>
+                                                <div className="flex items-center gap-2 mb-3"><Users size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">新規顧客一覧</h2><span className="text-[10px] font-bold text-slate-400">{acqCustLoading ? '読み込み中…' : `全${custRows.length.toLocaleString()}名（日本の店舗のみ・受付日時の新しい順・期間内すべて表示）`}</span></div>
                                                 {acqCustLoading && !custRows.length ? (
                                                     <div className="flex items-center justify-center py-10"><Loader2 size={28} className="animate-spin text-emerald-500" /></div>
                                                 ) : !custRows.length ? (
@@ -17308,7 +17360,7 @@
                                                     const stLabel = (s) => s === 'completed' ? '来店済' : s === 'booked' ? '予約済' : s === 'cancelled' ? 'キャンセル' : (s || '—');
                                                     const stCls = (s) => s === 'completed' ? 'bg-emerald-50 text-emerald-700' : s === 'booked' ? 'bg-amber-50 text-amber-700' : s === 'cancelled' ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-500';
                                                     const fmt = (s) => { s = String(s || ''); return s.length >= 16 ? s.slice(5, 16).replace('T', ' ') : '—'; };
-                                                    const list = [...custRows].sort((a, b) => String(b.received_at || '').localeCompare(String(a.received_at || ''))).slice(0, 200);
+                                                    const list = [...custRows].sort((a, b) => String(b.received_at || '').localeCompare(String(a.received_at || ''))).slice(0, 3000);
                                                     return (
                                                     <div className="overflow-x-auto">
                                                         <table className="w-full text-[12px] whitespace-nowrap">

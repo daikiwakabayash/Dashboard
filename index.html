@@ -6633,13 +6633,15 @@
                 }).length;
                 // 応答1店ぶん（per-shop sales/summary・by_staff付き）を {gross,karte,newc,ther} に整形して格納。
                 // gross＝会計済み売上(digest・ネイティブ通貨。表示側 money() が国別の最小通貨単位で換算)。ther＝売上>0の担当者数。
-                const zkApply = (sh, ym, raw) => {
+                const zkApply = (sh, ym, raw, hasStaff) => {
                     if (!raw) return;
                     // 総売上（gross_sales・総額）を優先。消化売上(digest)は月初は0になりがちで、CSV(1〜8月=総売上)と不整合になるため。
                     const gross = Number(raw.gross_sales != null ? raw.gross_sales : raw.digest_sales) || 0;
                     const karte = Number(raw.gross_count) || 0;                                        // カルテ枚数＝会計数
                     const newc = Number(raw.new_visit_count != null ? raw.new_visit_count : raw.new_count) || 0; // 新規来店
-                    const ther = countTherapists(raw.by_staff || raw.byStaff || []);                   // 売上>0のセラピスト数
+                    // group_by=shop は by_staff を返さないため、セラピスト数は既存値（CSV/上書き/前回取得）を維持する。
+                    const prev = sh.months[ym] || (ycache[sh.id] || {})[ym] || {};
+                    const ther = hasStaff ? countTherapists(raw.by_staff || raw.byStaff || []) : (Number(prev.ther) || 0);
                     const data = { gross, karte, newc, ther };
                     sh.months[ym] = data;
                     (ycache[sh.id] = ycache[sh.id] || {})[ym] = data;                                  // キャッシュにも保存
@@ -6659,28 +6661,30 @@
                     }
                     return { ok: false, json: null };
                 };
-                let done = 0; const total = tasks.length;
-                // per-shop の sales/summary（by_staff付き＝金額＋売上>0のセラピスト数）を並列6で取得。取得できた店舗から逐次表示。
-                let idx = 0; let authBlocked = false;
-                const worker = async () => {
-                    while (idx < tasks.length) {
-                        if (authBlocked) break;                    // 認証エラーを検知したら以降は打ち切り（全店同じ結果＝無駄打ち回避）
-                        const { sh, ym } = tasks[idx++];
-                        try {
-                            const { from, to } = monthRange(ym);
-                            if (to >= from) {
-                                const { json } = await zkFetch(`${SALONONE_API_URL}?resource=sales/summary&from=${from}&to=${to}&shop_id=${sh.id}`);
-                                // 認証必須キーで当月が弾かれる場合、全店同じ user_auth_required になるため即中断する。
-                                if (json && json.error && ['user_auth_required', 'invalid_token', 'unauthorized'].includes(json.error.code)) { authBlocked = true; break; }
-                                const raw = (json && json.data && !Array.isArray(json.data)) ? json.data : ((json && json.data && json.data[0]) || null);
-                                zkApply(sh, ym, raw);
-                            }
-                        } catch (e) { /* この月は空のまま */ }
-                        done++; setZkProgress({ done, total });
-                        if (done % 6 === 0) setZkData({ year, months, shops: shops.map(s => ({ ...s })) });
+                let done = 0; const total = tasks.length; let authBlocked = false;
+                // ⚡ 大幅高速化: 店舗ごとに叩かず、月ごとに group_by=shop で「全店を1リクエスト」取得する
+                //   （API仕様書 6章。従来は店舗数×月＝最大200回超→レート制限で数分。これを月数ぶんの数回に）。
+                const byMonth = {};
+                tasks.forEach(t => { (byMonth[t.ym] = byMonth[t.ym] || []).push(t.sh); });
+                const shopById = {}; shops.forEach(s => { shopById[String(s.id)] = s; });
+                for (const ym of Object.keys(byMonth)) {
+                    if (authBlocked) break;
+                    const { from, to } = monthRange(ym);
+                    if (to < from) { done += byMonth[ym].length; setZkProgress({ done, total }); continue; }
+                    let json = null;
+                    try { ({ json } = await zkFetch(`${SALONONE_API_URL}?resource=sales/summary&group_by=shop&from=${from}&to=${to}`)); } catch (e) { json = null; }
+                    // 認証必須キーで当月が弾かれる場合は全店同じ結果になるため即中断（無駄打ち回避）。
+                    if (json && json.error && ['user_auth_required', 'invalid_token', 'unauthorized'].includes(json.error.code)) { authBlocked = true; break; }
+                    const arr = (json && Array.isArray(json.data)) ? json.data : [];
+                    const rowById = {}; arr.forEach(r => { const id = String(r.shop_id != null ? r.shop_id : (r.shopId != null ? r.shopId : '')); if (id) rowById[id] = r; });
+                    for (const sh of byMonth[ym]) {
+                        const row = rowById[String(sh.id)];
+                        if (row) zkApply(sh, ym, row, false);   // group_by=shop は by_staff 無し→セラピスト数は既存維持
+                        done++;
                     }
-                };
-                await Promise.all(Array.from({ length: 6 }, () => worker()));
+                    setZkProgress({ done, total });
+                    setZkData({ year, months, shops: shops.map(s => ({ ...s })) });
+                }
                 if (authBlocked) setZkError('当月（進行中）のデータはSalonOneのログイン認証が必要な設定のため、本部キーでは取得できません。対処: ①SalonOneで「ユーザー認証を必須にする」を外したキーを発行し Vercel の SALONONE_API_KEY に設定、または ②SalonOneのIDでログイン。過去の確定月（公式シート）は表示されています。');
                 cacheAll._stamp = cacheAll._stamp || {}; cacheAll._stamp[year] = Date.now(); // 取得完了時刻（10分以内は再取得しない）
                 try { localStorage.setItem(ZK_CACHE_KEY, JSON.stringify(cacheAll)); } catch (e) { /* 容量超過等は無視 */ }

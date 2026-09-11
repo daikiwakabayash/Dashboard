@@ -4543,6 +4543,14 @@
                     loadZenkanri(zkYear);
                 }
             }, [currentPage, soShops.length]);
+            // 国タブ切替時、その国のデータ（当月）が未取得なら取得。日本は初回ロードで取得済みなので二重取得を避ける。
+            const zkLoadedCountryRef = useRef('jp');
+            useEffect(() => {
+                if (currentPage !== 'zenkanri' || !soShops.length || !zkData || zkLoading) return;
+                if (zkCountry === zkLoadedCountryRef.current) return;
+                zkLoadedCountryRef.current = zkCountry;
+                loadZenkanri(zkYear, { country: zkCountry });
+            }, [zkCountry]);
             const [soShopSel, setSoShopSel] = useState([]);     // 店舗フィルタ（[]=全店舗 / shop_id配列）
             const [soStaffSel, setSoStaffSel] = useState([]);   // スタッフフィルタ（[]=全スタッフ / staff_id配列）
             const [soOwner, setSoOwner] = useState('');         // オーナー選択（空=なし）
@@ -6584,17 +6592,27 @@
                 // 取得対象＝「未確定月」または「キャッシュ未取得の確定月」または force。確定済み＆キャッシュ有りはスキップ。
                 // さらに、直近（10分以内）に取得済みなら未確定月も再取得しない（毎回全件取り直すのを防ぐ）。
                 const stampFresh = !forceAll && cacheAll._stamp && cacheAll._stamp[year] && (Date.now() - cacheAll._stamp[year] < 10 * 60 * 1000);
-                // 取得対象: 当月のみ（過去月は取得済みなら固定＝再取得しない・未取得のみ初回取得）。翌月は取得しない。
+                // ⚡ 高速化の要: 「選択中の国だけ」「日本は当月だけ」取得する。
+                //   国判定は area_id（Malaysia=900000341 / Australia=900000342 / それ以外=日本）。
+                //   → 日本タブを見ているのに海外(AU/MY)まで取りに行く／日本の過去月まで取りに行く、という無駄を排除。
+                const zkCountryOf = (s) => { const aid = String((s && s.area_id) || ''); return aid === '900000341' ? 'my' : aid === '900000342' ? 'au' : 'jp'; };
+                const selCountry = opts.country || zkCountry;
+                // 取得対象: 選択国のみ。日本は過去月＝公式CSVが唯一のソースなので当月のみ取得（CSV未カバー店も過去は取りに行かない）。海外はCSVが無いので全月。
                 const tasks = [];
-                shops.forEach(sh => months.forEach(ym => {
-                    if (ym > nowYM) return;                       // 翌月・未来は取得しない
-                    if (fixedHas(sh.name, ym)) return;            // 公式CSVで確定済み→SalonOne取得不要
-                    const has = sh.months[ym] != null;
-                    if (forceAll) { tasks.push({ sh, ym }); return; }   // 手動「更新」＝全部再取得
-                    if (!has) { tasks.push({ sh, ym }); return; }       // 未取得は初回のみ取得
-                    // 取得済み: 当月だけ10分ごとに更新。前月以前は固定（再取得しない）＝高速化。
-                    if (ym === nowYM && !stampFresh) tasks.push({ sh, ym });
-                }));
+                shops.forEach(sh => {
+                    if (zkCountryOf(sh) !== selCountry) return;   // ★選択中の国だけ
+                    const isJp = selCountry === 'jp';
+                    months.forEach(ym => {
+                        if (ym > nowYM) return;                       // 翌月・未来は取得しない
+                        if (fixedHas(sh.name, ym)) return;            // 公式CSVで確定済み→SalonOne取得不要
+                        if (isJp && ym !== nowYM && !forceAll) return; // ★日本の過去月はCSVのみ（当月だけ取得）。「全期間」ボタン時のみ取得
+                        const has = sh.months[ym] != null;
+                        if (forceAll) { tasks.push({ sh, ym }); return; }   // 手動「全期間」＝全部再取得
+                        if (!has) { tasks.push({ sh, ym }); return; }       // 未取得は初回のみ取得
+                        // 取得済み: 当月だけ10分ごとに更新。前月以前は固定（再取得しない）＝高速化。
+                        if (ym === nowYM && !stampFresh) tasks.push({ sh, ym });
+                    });
+                });
                 setZkProgress({ done: 0, total: tasks.length });
                 const p2b = p2;
                 // 月の期間（from/to。当月は当日まで）
@@ -6634,7 +6652,7 @@
                                 const ra = Number(res.headers.get('retry-after')) || 0;
                                 await new Promise(r => setTimeout(r, ra > 0 ? Math.min(ra, 30) * 1000 + 300 : Math.min(1000 * Math.pow(1.8, a), 8000))); continue;
                             }
-                            if (!res.ok) return { ok: false, json: null };
+                            if (!res.ok) return { ok: false, json: await res.json().catch(() => null) };
                             return { ok: true, json: await res.json().catch(() => null) };
                         } catch (e) { await new Promise(r => setTimeout(r, 1000 * Math.pow(1.8, a))); }
                     }
@@ -6642,14 +6660,17 @@
                 };
                 let done = 0; const total = tasks.length;
                 // per-shop の sales/summary（by_staff付き＝金額＋売上>0のセラピスト数）を並列6で取得。取得できた店舗から逐次表示。
-                let idx = 0;
+                let idx = 0; let authBlocked = false;
                 const worker = async () => {
                     while (idx < tasks.length) {
+                        if (authBlocked) break;                    // 認証エラーを検知したら以降は打ち切り（全店同じ結果＝無駄打ち回避）
                         const { sh, ym } = tasks[idx++];
                         try {
                             const { from, to } = monthRange(ym);
                             if (to >= from) {
                                 const { json } = await zkFetch(`${SALONONE_API_URL}?resource=sales/summary&from=${from}&to=${to}&shop_id=${sh.id}`);
+                                // 認証必須キーで当月が弾かれる場合、全店同じ user_auth_required になるため即中断する。
+                                if (json && json.error && ['user_auth_required', 'invalid_token', 'unauthorized'].includes(json.error.code)) { authBlocked = true; break; }
                                 const raw = (json && json.data && !Array.isArray(json.data)) ? json.data : ((json && json.data && json.data[0]) || null);
                                 zkApply(sh, ym, raw);
                             }
@@ -6659,6 +6680,7 @@
                     }
                 };
                 await Promise.all(Array.from({ length: 6 }, () => worker()));
+                if (authBlocked) setZkError('当月（進行中）のデータはSalonOneのログイン認証が必要な設定のため、本部キーでは取得できません。対処: ①SalonOneで「ユーザー認証を必須にする」を外したキーを発行し Vercel の SALONONE_API_KEY に設定、または ②SalonOneのIDでログイン。過去の確定月（公式シート）は表示されています。');
                 cacheAll._stamp = cacheAll._stamp || {}; cacheAll._stamp[year] = Date.now(); // 取得完了時刻（10分以内は再取得しない）
                 try { localStorage.setItem(ZK_CACHE_KEY, JSON.stringify(cacheAll)); } catch (e) { /* 容量超過等は無視 */ }
                 setZkData({ year, months, shops });

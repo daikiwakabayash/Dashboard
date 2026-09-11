@@ -633,6 +633,7 @@
 
         const TrendingUp = (props) => <Icon {...props}><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></Icon>;
         const TrendingDown = (props) => <Icon {...props}><polyline points="23 18 13.5 8.5 8.5 13.5 1 6"/><polyline points="17 18 23 18 23 12"/></Icon>;
+        const Grid3x3 = (props) => <Icon {...props}><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M9 3v18"/><path d="M15 3v18"/></Icon>;
         const Users = (props) => <Icon {...props}><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></Icon>;
         const Target = (props) => <Icon {...props}><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></Icon>;
         const Calendar = (props) => <Icon {...props}><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></Icon>;
@@ -2210,6 +2211,7 @@
             const [acqCust, setAcqCust] = useState([]);       // 獲得分析: 新規顧客一覧（/marketing/new-customers・受付日/LTV）
             const [acqCustLoading, setAcqCustLoading] = useState(false);
             const [acqSort, setAcqSort] = useState('new');    // 新規顧客一覧の並び順（'new'=新しい順 / 'old'=古い順）
+            const [acqPivotMetric, setAcqPivotMetric] = useState('booking'); // 媒体×店舗ピボットの指標（booking=新規予約/visit=来店/join=入会）
             const acqLoadedKeyRef = useRef('');
             const [acqForced, setAcqForced] = useState([]);   // 獲得分析: 強制リンク別 実績（/marketing/by-forced-link・初回オファー/訴求）
             const [acqForcedLoading, setAcqForcedLoading] = useState(false);
@@ -17314,6 +17316,69 @@
                                                         </table>
                                                     </div>
                                                     <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 新規客一覧（受付日時ベース）から店舗別に集計。新規予約＝新規客数、来店＝会計完了、キャンセル＝初回予約がキャンセル、購入＝入会。LTVは会計累計（取得時点まで）。日本の店舗のみ。</p>
+                                                </div>
+                                                );
+                                            })()}
+                                            {/* 媒体×店舗ピボット（どの店のどの媒体が強い/弱いか）＝サブタブ「ダッシュボード」 */}
+                                            {soView === 'acq' && custRows.length > 0 && (() => {
+                                                const metricOf = (c) => acqPivotMetric === 'visit' ? (c.visited_completed ? 1 : 0) : acqPivotMetric === 'join' ? (c.joined ? 1 : 0) : 1;
+                                                // 媒体の合計件数で上位を採用（多すぎると横に広がるため上位8媒体＋その他）
+                                                const mediaCount = {};
+                                                custRows.forEach(c => { const m = c.visit_source_name || '不明'; mediaCount[m] = (mediaCount[m] || 0) + 1; });
+                                                const topMedia = Object.entries(mediaCount).sort((a, b) => b[1] - a[1]).slice(0, 8).map(e => e[0]);
+                                                const hasOther = Object.keys(mediaCount).length > topMedia.length;
+                                                const mediaCols = hasOther ? [...topMedia, 'その他'] : topMedia;
+                                                const bucket = (m) => topMedia.includes(m) ? m : 'その他';
+                                                // 店舗×媒体グリッド
+                                                const grid = {}; const shopTot = {}; const mediaTot = {};
+                                                custRows.forEach(c => {
+                                                    const sid = String(c.shop_id); const sname = (shopMeta[sid] || {}).name || sid;
+                                                    const m = bucket(c.visit_source_name || '不明'); const v = metricOf(c);
+                                                    grid[sname] = grid[sname] || {}; grid[sname][m] = (grid[sname][m] || 0) + v;
+                                                    shopTot[sname] = (shopTot[sname] || 0) + v; mediaTot[m] = (mediaTot[m] || 0) + v;
+                                                });
+                                                const shopNames = Object.keys(shopTot).sort((a, b) => shopTot[b] - shopTot[a]);
+                                                let maxCell = 1; shopNames.forEach(s => mediaCols.forEach(m => { const v = (grid[s] || {})[m] || 0; if (v > maxCell) maxCell = v; }));
+                                                const grandTot = shopNames.reduce((a, s) => a + (shopTot[s] || 0), 0);
+                                                const metricLabel = acqPivotMetric === 'visit' ? '新規来店' : acqPivotMetric === 'join' ? '入会' : '新規予約';
+                                                return (
+                                                <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
+                                                    <div className="flex flex-wrap items-center gap-2 mb-3">
+                                                        <Grid3x3 size={18} className="text-emerald-600" />
+                                                        <h2 className="text-base md:text-lg font-black text-slate-900">媒体 × 店舗ヒートマップ</h2>
+                                                        <span className="text-[10px] font-bold text-slate-400">どの店のどの媒体が強い／弱いか（色が濃いほど多い）</span>
+                                                        <div className="ml-auto flex items-center gap-1 bg-slate-100 rounded-xl p-1">
+                                                            {[['booking', '新規予約'], ['visit', '来店'], ['join', '入会']].map(([k, lb]) => (
+                                                                <button key={k} onClick={() => setAcqPivotMetric(k)} className={`px-3 py-1 rounded-lg text-[11px] font-black transition ${acqPivotMetric === k ? 'bg-emerald-600 text-white shadow' : 'text-slate-500 hover:text-slate-700'}`}>{lb}</button>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-[12px] whitespace-nowrap border-collapse">
+                                                            <thead><tr className="text-slate-400 font-black border-b border-slate-200">
+                                                                <th className="text-left pb-2 px-2 sticky left-0 bg-white">店舗＼媒体</th>
+                                                                {mediaCols.map((m, i) => (<th key={i} className="text-right pb-2 px-2">{m}</th>))}
+                                                                <th className="text-right pb-2 px-2 border-l border-slate-200">合計</th>
+                                                            </tr></thead>
+                                                            <tbody>
+                                                                {shopNames.map((s, i) => (
+                                                                    <tr key={i} className="border-b border-slate-100">
+                                                                        <td className="py-1.5 px-2 font-bold text-slate-800 sticky left-0 bg-white">{s}</td>
+                                                                        {mediaCols.map((m, j) => { const v = (grid[s] || {})[m] || 0; const a = v > 0 ? 0.12 + (v / maxCell) * 0.78 : 0; return (
+                                                                            <td key={j} className="py-1.5 px-2 text-right font-bold tabular-nums" style={{ backgroundColor: v > 0 ? `rgba(16,185,129,${a})` : 'transparent', color: a > 0.55 ? '#fff' : '#0f172a' }}>{v > 0 ? v.toLocaleString() : '·'}</td>
+                                                                        ); })}
+                                                                        <td className="py-1.5 px-2 text-right font-black text-slate-900 border-l border-slate-200">{(shopTot[s] || 0).toLocaleString()}</td>
+                                                                    </tr>
+                                                                ))}
+                                                                <tr className="font-black bg-slate-50 border-t-2 border-slate-200">
+                                                                    <td className="py-2 px-2 sticky left-0 bg-slate-50">合計</td>
+                                                                    {mediaCols.map((m, j) => (<td key={j} className="py-2 px-2 text-right text-emerald-700">{(mediaTot[m] || 0).toLocaleString()}</td>))}
+                                                                    <td className="py-2 px-2 text-right border-l border-slate-200">{grandTot.toLocaleString()}</td>
+                                                                </tr>
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                    <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 新規客一覧（受付日時が選択期間内・日本の店舗）から集計。現在の指標＝{metricLabel}。媒体は件数上位8＋「その他」に集約。色が濃いほど値が大きい＝その店舗の主力チャネル。</p>
                                                 </div>
                                                 );
                                             })()}

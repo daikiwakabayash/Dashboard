@@ -3056,7 +3056,9 @@
                     // 店舗解決の優先順: 質問文の店舗名 → 直近会話の店舗名（例: 前ターンで「恵比寿」）→ ルーム/所属店舗。
                     const shop = aiShopFromText(question) || aiShopFromText(recentText) || aiResolveShop(room);
                     // 会話履歴を最大6メッセージ渡す（現在の質問は別途 question で送るので末尾は除く）
-                    const history = recentMsgs.slice(0, -1).slice(-6).map(m => ({ role: String(m.fromStaffId) === '__ai__' ? 'assistant' : 'user', content: String(m.text).replace(/[@＠]\s*ai\b/ig, '').trim() })).filter(h => h.content);
+                    // ⚠️ 各メッセージは240字に切り詰める。AIの過去の長い回答（売上データ等）をそのまま渡すと
+                    //    小型モデルが最新質問を無視して過去回答を丸ごと再掲してしまうため（文脈把握には冒頭で十分）。
+                    const history = recentMsgs.slice(0, -1).slice(-6).map(m => ({ role: String(m.fromStaffId) === '__ai__' ? 'assistant' : 'user', content: String(m.text).replace(/[@＠]\s*ai\b/ig, '').trim().slice(0, 240) })).filter(h => h.content);
                     let ctx = '';
                     if (shop) { try { ctx = await aiBuildContext(shop); } catch {} }
                     const faq = await aiFetchFaq(shop && shop.name, question);
@@ -3116,7 +3118,7 @@
                     if (shop && shop.id) { try { ctx = await aiBuildContext(shop); } catch {} }
                     const faq = await aiFetchFaq(shop && shop.name, t || ctxText);
                     const dataContext = [ctx, faq].filter(Boolean).join('\n');
-                    const history = base.slice(0, -1).slice(-6).map(m => ({ role: m.role, content: m.content })).filter(h => h.content);
+                    const history = base.slice(0, -1).slice(-6).map(m => ({ role: m.role, content: String(m.content || '').slice(0, 240) })).filter(h => h.content);
                     const images = imgs.map(i => ({ mediaType: i.mediaType, data: i.data }));
                     const r = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent: 'faq', question: t || '添付画像の内容を説明してください', history, dataContext, images }) });
                     const j = await r.json().catch(() => null);

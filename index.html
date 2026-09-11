@@ -2209,6 +2209,7 @@
             const [soMkLoading, setSoMkLoading] = useState(false); // マーケ集計の取得中フラグ（売上サマリとは別の非同期取得のため独立）
             const [acqCust, setAcqCust] = useState([]);       // 獲得分析: 新規顧客一覧（/marketing/new-customers・受付日/LTV）
             const [acqCustLoading, setAcqCustLoading] = useState(false);
+            const [acqSort, setAcqSort] = useState('new');    // 新規顧客一覧の並び順（'new'=新しい順 / 'old'=古い順）
             const acqLoadedKeyRef = useRef('');
             const [acqForced, setAcqForced] = useState([]);   // 獲得分析: 強制リンク別 実績（/marketing/by-forced-link・初回オファー/訴求）
             const [acqForcedLoading, setAcqForcedLoading] = useState(false);
@@ -17350,7 +17351,11 @@
                                             })()}
                                             {/* 新規顧客一覧 */}
                                             <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
-                                                <div className="flex items-center gap-2 mb-3"><Users size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">新規顧客一覧</h2><span className="text-[10px] font-bold text-slate-400">{acqCustLoading ? '読み込み中…' : `全${custRows.length.toLocaleString()}名（日本の店舗のみ・受付日時の新しい順・期間内すべて表示）`}</span></div>
+                                                <div className="flex items-center gap-2 mb-3"><Users size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">新規顧客一覧</h2><span className="text-[10px] font-bold text-slate-400">{acqCustLoading ? '読み込み中…' : `全${custRows.length.toLocaleString()}名（日本の店舗のみ・期間内すべて表示）`}</span>
+                                                    <div className="ml-auto flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
+                                                        <button onClick={() => setAcqSort('new')} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${acqSort === 'new' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>新しい順</button>
+                                                        <button onClick={() => setAcqSort('old')} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${acqSort === 'old' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>古い順(9/1〜)</button>
+                                                    </div></div>
                                                 {acqCustLoading && !custRows.length ? (
                                                     <div className="flex items-center justify-center py-10"><Loader2 size={28} className="animate-spin text-emerald-500" /></div>
                                                 ) : !custRows.length ? (
@@ -17360,7 +17365,7 @@
                                                     const stLabel = (s) => s === 'completed' ? '来店済' : s === 'booked' ? '予約済' : s === 'cancelled' ? 'キャンセル' : (s || '—');
                                                     const stCls = (s) => s === 'completed' ? 'bg-emerald-50 text-emerald-700' : s === 'booked' ? 'bg-amber-50 text-amber-700' : s === 'cancelled' ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-500';
                                                     const fmt = (s) => { s = String(s || ''); return s.length >= 16 ? s.slice(5, 16).replace('T', ' ') : '—'; };
-                                                    const list = [...custRows].sort((a, b) => String(b.received_at || '').localeCompare(String(a.received_at || ''))).slice(0, 3000);
+                                                    const list = [...custRows].sort((a, b) => { const cmp = String(a.received_at || '').localeCompare(String(b.received_at || '')); return acqSort === 'new' ? -cmp : cmp; }).slice(0, 3000);
                                                     return (
                                                     <div className="overflow-x-auto">
                                                         <table className="w-full text-[12px] whitespace-nowrap">

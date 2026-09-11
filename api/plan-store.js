@@ -51,6 +51,7 @@ const AILOG_KEY = 'naoru:ailog:v1';           // { logs:[{id,ts,shop,staffId,sta
 const KNOWLEDGE_KEY = 'naoru:knowledge:v1';   // { docs:[{id,title,body,shopScope,source,updatedAt,updatedBy}] } ナレッジ資料（長文: 議事録の文字起こし/スプレッドシート・スライドの中身/マニュアル）。AIが根拠に使う
 const KNOWCAND_KEY = 'naoru:knowcand:v1';     // { cands:[{id,ts,roomId,shop,fromName,question,answer}] } 本部チャット回答のナレッジ候補（承認でFAQ化）
 const PATROL_KEY = 'naoru:patrol:v1';         // { addresses:{shopName:{hp,hotpepper}}, queries:{shopName:検索クエリ} } AIパトロール設定（住所照合・Google検索クエリ上書き）
+const ACQEXCLUDE_KEY = 'naoru:acqexclude:v1'; // { ids:{ customer_id: {by,name,shop,at} } } マーケ集計から手動除外した予約（スタッフのテスト予約でキャンセル率等が狂うのを防ぐ・全社共有）
 
 // ── Webプッシュ送信（VAPID設定時のみ動作・未設定なら黙ってスキップ） ──
 const VAPID_PUBLIC = () => process.env.VAPID_PUBLIC_KEY || '';
@@ -368,6 +369,33 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, spend: body.spend });
       }
       return res.status(400).json({ ok: false, error: 'invalid adspend action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── マーケ集計 手動除外（テスト予約を全マーケ指標から除外・全社共有）: ?type=acqexclude ──
+  const isAcqExclude = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'acqexclude';
+  if (isAcqExclude) {
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ ids: {}, configured: false });
+    try {
+      const cur = (await blobGet(ACQEXCLUDE_KEY, hasKV, hasSB, gas)) || {};
+      const ids = (cur.ids && typeof cur.ids === 'object') ? cur.ids : {};
+      if (req.method === 'GET') return res.status(200).json({ ids, configured: true });
+      const body = req.body || {};
+      if (body.action === 'add' && body.id != null) {
+        const id = String(body.id).slice(0, 80);
+        const next = { ...ids, [id]: { by: String(body.by || '').slice(0, 60), name: String(body.name || '').slice(0, 80), shop: String(body.shop || '').slice(0, 60), at: Date.now() } };
+        await blobSet(ACQEXCLUDE_KEY, { ids: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, ids: next });
+      }
+      if (body.action === 'remove' && body.id != null) {
+        const id = String(body.id).slice(0, 80);
+        const next = { ...ids }; delete next[id];
+        await blobSet(ACQEXCLUDE_KEY, { ids: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, ids: next });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid acqexclude action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
     }

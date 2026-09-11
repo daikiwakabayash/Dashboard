@@ -2216,6 +2216,8 @@
             const [acqMediaSort, setAcqMediaSort] = useState({ key: 'booking', dir: 'desc' }); // 媒体別コホートの並び替え
             const [acqShopSort, setAcqShopSort] = useState({ key: 'order', dir: 'asc' });       // 店舗別コホートの並び替え（既定=出店順）
             const [acqShopSearch, setAcqShopSearch] = useState('');  // 店舗別コホート/店舗×媒体の店舗名検索
+            const [acqExcluded, setAcqExcluded] = useState({});      // マーケ集計から手動除外した予約 { customer_id: {by,name,shop,at} }（全社共有）
+            const [acqShowExcluded, setAcqShowExcluded] = useState(false); // 新規顧客一覧: 除外済みも表示（戻す用）
             const acqLoadedKeyRef = useRef('');
             const [acqForced, setAcqForced] = useState([]);   // 獲得分析: 強制リンク別 実績（/marketing/by-forced-link・初回オファー/訴求）
             const [acqForcedLoading, setAcqForcedLoading] = useState(false);
@@ -4646,8 +4648,21 @@
                 } catch { if (!(cached && cached.rows)) setAcqForced([]); acqForcedKeyRef.current = ''; }
                 finally { setAcqForcedLoading(false); }
             };
+            // マーケ集計 手動除外リスト（全社共有）を取得
+            const acqLoadExcluded = async () => {
+                try { const r = await fetch('/api/plan-store?type=acqexclude'); const j = await r.json().catch(() => null); if (j && j.ids && typeof j.ids === 'object') setAcqExcluded(j.ids); } catch {}
+            };
+            // 予約を除外/復帰（テスト予約対策・全マーケ指標から除外）。楽観更新＋サーバー保存。
+            const acqToggleExclude = async (c, exclude) => {
+                const id = String(c.customer_id != null ? c.customer_id : (c.customer_code || ''));
+                if (!id) return;
+                setAcqExcluded(prev => { const n = { ...prev }; if (exclude) n[id] = { by: authState.staffName || authState.owner || '', name: c.customer_name || '', shop: String(c.shop_id || ''), at: Date.now() }; else delete n[id]; return n; });
+                try {
+                    await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'acqexclude', action: exclude ? 'add' : 'remove', id, by: authState.staffName || authState.owner || '', name: c.customer_name || '', shop: String(c.shop_id || '') }) });
+                } catch {}
+            };
             useEffect(() => {
-                if ((currentPage === 'salonone' || currentPage === 'mktg') && ['acq', 'forced', 'customers', 'storemedia'].includes(soView) && soShops.length) { acqFetchCustomers(); acqFetchForced(); }
+                if ((currentPage === 'salonone' || currentPage === 'mktg') && ['acq', 'forced', 'customers', 'storemedia'].includes(soView) && soShops.length) { acqFetchCustomers(); acqFetchForced(); acqLoadExcluded(); }
                 // 注: soShops.length を依存に含め、店舗一覧が後から届いても再取得されるようにする（マーケタブ直リンク対策）
             }, [currentPage, soView, soFrom, soTo, soShopSel, soShops.length]);
             const [zkZoom, setZkZoom] = useState(() => (typeof window !== 'undefined' && window.innerWidth < 640) ? 0.5 : 1); // 全体管理シートの表示倍率（既定=スマホ50%/PC100%。スマホは指ピンチでも拡大縮小可）
@@ -17152,15 +17167,21 @@
                                             if (/^(.)\1{2,}$/.test(core)) return true;                // 同一文字3連以上（あああ/aaa/ええええ）
                                             return false;
                                         };
+                                        // 手動除外リスト（全社共有・テスト予約対策）。除外IDは全マーケ指標から「データ無し」として扱う。
+                                        const acqExclSet = (acqExcluded && typeof acqExcluded === 'object') ? acqExcluded : {};
+                                        const custIdOf = (c) => String(c.customer_id != null ? c.customer_id : (c.customer_code || ''));
                                         // 全媒体のコホート（媒体フィルタ前）。custRows は媒体フィルタ適用後（KPI/一覧/店舗別に反映）。
                                         const custRowsAll = (acqCust || []).filter(c => {
                                             const m = shopMeta[String(c.shop_id)]; if (!m || m.overseas) return false;
                                             if (isJunkCust(c)) return false;
+                                            if (acqExclSet[custIdOf(c)]) return false;       // 手動除外＝全指標からカウントしない
                                             const d = String(c.received_at || '').slice(0, 10);
                                             return d && d >= soFrom && d <= soTo;
                                         });
                                         const mediaOptions = Array.from(new Set(custRowsAll.map(c => c.visit_source_name || '未設定'))).sort();
                                         const custRows = acqMediaSel ? custRowsAll.filter(c => (c.visit_source_name || '未設定') === acqMediaSel) : custRowsAll;
+                                        // 手動除外された予約（当期間・日本のみ）＝新規顧客一覧で「除外済みを表示」時に復帰用として出す
+                                        const acqExclRows = (acqCust || []).filter(c => { const m = shopMeta[String(c.shop_id)]; if (!m || m.overseas) return false; if (!acqExclSet[custIdOf(c)]) return false; const d = String(c.received_at || '').slice(0, 10); return d && d >= soFrom && d <= soTo; });
                                         // 店舗別 広告費（__shops__[店舗名][媒体]）を店舗名の正規化一致で引くヘルパ
                                         const _adRange = `${soFrom}_${soTo}`;
                                         const _adBucket = (soAdSpend && soAdSpend[_adRange]) || {};
@@ -17616,14 +17637,17 @@
                                             })()}
                                             {/* 新規顧客一覧＝サブタブ「新規顧客一覧」 */}
                                             {soView === 'customers' && (<div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
-                                                <div className="flex items-center gap-2 mb-3"><Users size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">新規顧客一覧</h2><span className="text-[10px] font-bold text-slate-400">{acqCustLoading ? '読み込み中…' : `全${custRows.length.toLocaleString()}名（日本の店舗のみ・受付日時が期間内の新規客・全件表示）`}</span>
-                                                    <div className="ml-auto flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
-                                                        <button onClick={() => setAcqSort('new')} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${acqSort === 'new' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>新しい順</button>
-                                                        <button onClick={() => setAcqSort('old')} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${acqSort === 'old' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>古い順(9/1〜)</button>
+                                                <div className="flex items-center gap-2 mb-3 flex-wrap"><Users size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">新規顧客一覧</h2><span className="text-[10px] font-bold text-slate-400">{acqCustLoading ? '読み込み中…' : `全${custRows.length.toLocaleString()}名（日本の店舗のみ・受付日時が期間内の新規客・全件表示）`}</span>
+                                                    <div className="ml-auto flex items-center gap-2 flex-wrap">
+                                                        {acqExclRows.length > 0 && <button onClick={() => setAcqShowExcluded(v => !v)} className={`px-2.5 py-1 rounded-lg text-[11px] font-black border transition ${acqShowExcluded ? 'bg-rose-600 text-white border-rose-600' : 'bg-white text-rose-600 border-rose-200 hover:border-rose-400'}`}>除外済み {acqExclRows.length}件 {acqShowExcluded ? '隠す' : '表示'}</button>}
+                                                        <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
+                                                            <button onClick={() => setAcqSort('new')} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${acqSort === 'new' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>新しい順</button>
+                                                            <button onClick={() => setAcqSort('old')} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${acqSort === 'old' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>古い順(9/1〜)</button>
+                                                        </div>
                                                     </div></div>
                                                 {acqCustLoading && !custRows.length ? (
                                                     <div className="flex items-center justify-center py-10"><Loader2 size={28} className="animate-spin text-emerald-500" /></div>
-                                                ) : !custRows.length ? (
+                                                ) : (!custRows.length && !(acqShowExcluded && acqExclRows.length)) ? (
                                                     <div className="text-center text-slate-400 font-bold text-[13px] py-8">この期間の新規客データはありません。</div>
                                                 ) : (() => {
                                                     const staffName = (id) => { const s = (soStaffs || []).find(x => String(x.id) === String(id)); return s ? s.name : (id ? '—' : '未割当'); };
@@ -17634,25 +17658,30 @@
                                                     const fmtW = (s) => { const f = fmt(s); const w = wd(s); return w ? `${f}(${w})` : f; };
                                                     // received_at は全行 同一形式のISO(+09:00)。文字列比較＝時系列比較で最も確実（Date.parseのブレを排除）。
                                                     const cmp = (a, b) => { const sa = String(a.received_at || ''), sb = String(b.received_at || ''); return sa < sb ? -1 : sa > sb ? 1 : 0; };
-                                                    const list = [...custRows].sort((a, b) => acqSort === 'new' ? -cmp(a, b) : cmp(a, b)).slice(0, 3000);
+                                                    const base = [...custRows].map(c => ({ c, ex: false }));
+                                                    const exl = acqShowExcluded ? acqExclRows.map(c => ({ c, ex: true })) : [];
+                                                    const list = [...base, ...exl].sort((a, b) => acqSort === 'new' ? -cmp(a.c, b.c) : cmp(a.c, b.c)).slice(0, 3000);
                                                     return (
-                                                    <div className="overflow-x-auto">
+                                                    <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
                                                         <table className="w-full text-[12px] whitespace-nowrap">
                                                             <thead><tr className="text-slate-400 font-black border-b border-slate-200">
-                                                                <th className="text-left pb-2 px-2">受付日時</th><th className="text-left pb-2 px-2">初回来店予定</th><th className="text-left pb-2 px-2">店舗</th><th className="text-left pb-2 px-2">顧客名</th><th className="text-left pb-2 px-2">担当</th><th className="text-left pb-2 px-2">媒体</th><th className="text-center pb-2 px-2">状態</th><th className="text-center pb-2 px-2">購入</th><th className="text-right pb-2 px-2">LTV</th>
+                                                                <th className="text-left pb-2 px-2">受付日時</th><th className="text-left pb-2 px-2">初回来店予定</th><th className="text-left pb-2 px-2">店舗</th><th className="text-left pb-2 px-2">顧客名</th><th className="text-left pb-2 px-2">担当</th><th className="text-left pb-2 px-2">媒体</th><th className="text-center pb-2 px-2">状態</th><th className="text-center pb-2 px-2">購入</th><th className="text-right pb-2 px-2">LTV</th><th className="text-center pb-2 px-2">操作</th>
                                                             </tr></thead>
                                                             <tbody>
-                                                                {list.map((c, i) => (
-                                                                    <tr key={c.customer_id || i} className="border-b border-slate-100 hover:bg-slate-50">
-                                                                        <td className="py-2 px-2 font-bold text-slate-700">{fmtW(c.received_at)}</td>
+                                                                {list.map(({ c, ex }, i) => (
+                                                                    <tr key={custIdOf(c) || i} className={`border-b border-slate-100 ${ex ? 'bg-rose-50/60 opacity-70' : 'hover:bg-slate-50'}`}>
+                                                                        <td className="py-2 px-2 font-bold text-slate-700">{fmtW(c.received_at)}{ex && <span className="ml-1 text-[9px] font-black text-rose-500">除外中</span>}</td>
                                                                         <td className="py-2 px-2 text-slate-500">{fmtW(c.reserved_at)}</td>
                                                                         <td className="py-2 px-2 text-slate-600">{(shopMeta[String(c.shop_id)] || {}).name || '—'}</td>
-                                                                        <td className="py-2 px-2 font-bold text-slate-800">{c.customer_name || '（非公開）'}</td>
+                                                                        <td className={`py-2 px-2 font-bold ${ex ? 'text-slate-500 line-through' : 'text-slate-800'}`}>{c.customer_name || '（非公開）'}</td>
                                                                         <td className="py-2 px-2 text-slate-600">{staffName(c.staff_id)}</td>
                                                                         <td className="py-2 px-2 text-slate-600">{c.visit_source_name || '未設定'}</td>
                                                                         <td className="py-2 px-2 text-center"><span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${stCls(c.first_appointment_status)}`}>{stLabel(c.first_appointment_status)}</span></td>
                                                                         <td className="py-2 px-2 text-center font-black">{c.joined ? <span className="text-emerald-600">○</span> : <span className="text-slate-300">-</span>}</td>
                                                                         <td className="py-2 px-2 text-right font-bold text-slate-900">{c.ltv ? soYen(c.ltv) : '¥0'}</td>
+                                                                        <td className="py-2 px-2 text-center">{ex
+                                                                            ? <button onClick={() => acqToggleExclude(c, false)} className="text-[10px] font-black px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 whitespace-nowrap">戻す</button>
+                                                                            : <button onClick={() => acqToggleExclude(c, true)} title="テスト予約などを全マーケ指標から除外" className="text-[10px] font-black px-2 py-1 rounded-lg bg-slate-100 text-slate-500 hover:bg-rose-100 hover:text-rose-600 whitespace-nowrap">除外</button>}</td>
                                                                     </tr>
                                                                 ))}
                                                             </tbody>
@@ -17660,7 +17689,7 @@
                                                     </div>
                                                     );
                                                 })()}
-                                                <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 受付日時＝予約がSalonOneに登録された日時（ホットペッパー等からの取込は取込時刻）。LTVは会計完了予約の累計（取得時点まで）。顧客名は個人情報ありキーのときのみ表示。</p>
+                                                <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 受付日時＝予約がSalonOneに登録された日時（ホットペッパー等からの取込は取込時刻）。LTVは会計完了予約の累計（取得時点まで）。顧客名は個人情報ありキーのときのみ表示。<br/>「除外」＝スタッフのテスト予約など。押すと<b>全マーケ指標（新規予約・来店・キャンセル・入会・媒体別/店舗別・CPA）からデータ無しとしてカウント除外</b>されます（全社共有）。「除外済み◯件 表示」から戻せます。</p>
                                             </div>)}
                                         </div>
                                         );

@@ -2210,6 +2210,9 @@
             const [acqCust, setAcqCust] = useState([]);       // 獲得分析: 新規顧客一覧（/marketing/new-customers・受付日/LTV）
             const [acqCustLoading, setAcqCustLoading] = useState(false);
             const acqLoadedKeyRef = useRef('');
+            const [acqForced, setAcqForced] = useState([]);   // 獲得分析: 強制リンク別 実績（/marketing/by-forced-link・初回オファー/訴求）
+            const [acqForcedLoading, setAcqForcedLoading] = useState(false);
+            const acqForcedKeyRef = useRef('');
             const [soView, setSoView] = useState('shops');   // サブタブ: shops | staff | marketing | acq | daily | plan（概要は廃止）
             // クリエイティブ分析タブ（媒体×メニュー・受付履歴 appointments 集計）
             const [soCreative, setSoCreative] = useState({ rows: [], kpi: null, loading: false, ready: false, error: '' });
@@ -4594,8 +4597,23 @@
                 } catch { setAcqCust([]); acqLoadedKeyRef.current = ''; }
                 finally { setAcqCustLoading(false); }
             };
+            // 強制リンク別 実績（1リクエスト）。全店＝shop_id無し、単一店選択時のみ絞り込み。
+            const acqFetchForced = async () => {
+                const key = `${soFrom}_${soTo}_${(soShopSel || []).join(',')}`;
+                if (acqForcedKeyRef.current === key) return;
+                acqForcedKeyRef.current = key; setAcqForcedLoading(true);
+                try {
+                    const p = new URLSearchParams({ resource: 'marketing/by-forced-link', from: soFrom, to: soTo });
+                    if (soShopSel && soShopSel.length === 1) p.set('shop_id', soShopSel[0]);
+                    let j = null;
+                    for (let a = 0; a < 4; a++) { try { const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`); if (r.status === 429 || r.status >= 500) { await new Promise(x => setTimeout(x, 800 * (a + 1))); continue; } j = await r.json().catch(() => null); break; } catch { await new Promise(x => setTimeout(x, 600 * (a + 1))); } }
+                    const rows = (j && j.data && Array.isArray(j.data.rows)) ? j.data.rows : [];
+                    setAcqForced(rows);
+                } catch { setAcqForced([]); acqForcedKeyRef.current = ''; }
+                finally { setAcqForcedLoading(false); }
+            };
             useEffect(() => {
-                if (currentPage === 'salonone' && soView === 'acq' && soShops.length) acqFetchCustomers();
+                if (currentPage === 'salonone' && soView === 'acq' && soShops.length) { acqFetchCustomers(); acqFetchForced(); }
             }, [currentPage, soView, soFrom, soTo, soShopSel]);
             const [zkZoom, setZkZoom] = useState(() => (typeof window !== 'undefined' && window.innerWidth < 640) ? 0.5 : 1); // 全体管理シートの表示倍率（既定=スマホ50%/PC100%。スマホは指ピンチでも拡大縮小可）
             const [soStoreMenuOpen, setSoStoreMenuOpen] = useState(false);
@@ -17212,6 +17230,43 @@
                                                 </div>
                                                 <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 「購入」はSalonOneの入会数、集計は「その期間に初めて予約した新規客」が母集団。CPA/ROASは広告費が入力されている媒体のみ算出。平均LTVは新規客の会計累計（取得時点まで）。</p>
                                             </div>
+                                            {/* 強制リンク別 実績（初回オファー/訴求の効果） */}
+                                            {(acqForcedLoading || (acqForced && acqForced.length > 0)) && (() => {
+                                                const fl = (acqForced || []).filter(r => (r.booking_count || 0) > 0).sort((a, b) => (b.booking_count || 0) - (a.booking_count || 0)).slice(0, 40);
+                                                return (
+                                                <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
+                                                    <div className="flex items-center gap-2 mb-3"><TrendingUp size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">強制リンク別 実績</h2><span className="text-[10px] font-bold text-slate-400">{acqForcedLoading ? '読み込み中…' : 'どの予約フォーム（初回オファー/訴求）が効いているか・予約数の多い順40件'}</span></div>
+                                                    {acqForcedLoading && !fl.length ? (
+                                                        <div className="flex items-center justify-center py-8"><Loader2 size={24} className="animate-spin text-emerald-500" /></div>
+                                                    ) : (
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-[12px] whitespace-nowrap">
+                                                            <thead><tr className="text-slate-400 font-black border-b border-slate-200">
+                                                                <th className="text-left pb-2 px-2 sticky left-0 bg-white">強制リンク（フォーム）</th><th className="text-left pb-2 px-2">媒体</th><th className="text-left pb-2 px-2">メニュー</th><th className="text-right pb-2 px-2">予約</th><th className="text-right pb-2 px-2">来店</th><th className="text-right pb-2 px-2">来店率</th><th className="text-right pb-2 px-2">キャンセル率</th><th className="text-right pb-2 px-2">売上</th><th className="text-right pb-2 px-2">客単価</th><th className="text-right pb-2 px-2">CPA</th>
+                                                            </tr></thead>
+                                                            <tbody>
+                                                                {fl.map((r, i) => (
+                                                                    <tr key={r.forced_link_id || i} className="border-b border-slate-100 hover:bg-slate-50">
+                                                                        <td className="py-2 px-2 font-bold text-slate-800 sticky left-0 bg-white max-w-[240px] truncate" title={r.title || ''}>{r.title || '（無題）'}</td>
+                                                                        <td className="py-2 px-2 text-slate-500">{r.visit_source_name || '—'}</td>
+                                                                        <td className="py-2 px-2 text-slate-500 max-w-[180px] truncate" title={r.menu_name || ''}>{r.menu_name || '—'}</td>
+                                                                        <td className="py-2 px-2 text-right font-bold text-slate-700">{(r.booking_count || 0).toLocaleString()}</td>
+                                                                        <td className="py-2 px-2 text-right font-bold text-slate-700">{(r.visit_count || 0).toLocaleString()}</td>
+                                                                        <td className="py-2 px-2 text-right text-slate-500">{(r.booking_count > 0 ? Math.round((r.visit_count || 0) / r.booking_count * 1000) / 10 : 0)}%</td>
+                                                                        <td className="py-2 px-2 text-right text-slate-500">{r.cancel_rate != null ? r.cancel_rate + '%' : '—'}</td>
+                                                                        <td className="py-2 px-2 text-right font-bold text-slate-900">{soYen(r.sales || 0)}</td>
+                                                                        <td className="py-2 px-2 text-right text-slate-600">{r.avg_price ? soYen(r.avg_price) : '—'}</td>
+                                                                        <td className="py-2 px-2 text-right text-slate-500">{r.cpa ? soYen(r.cpa) : '—'}</td>
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                    )}
+                                                    <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 強制リンク＝予約フォーム単位（初回オファー額・肩こり/腰痛訴求などがタイトル/メニューに現れます）。期間内に開始する予約を集計。CPAは強制リンク単位で広告費が入力されている場合のみ。※顧客1人ごとの強制リンクはSalonOne上の記録が少ないため、ここでは強制リンク別の集計で表示しています。</p>
+                                                </div>
+                                                );
+                                            })()}
                                             {/* 受付日分析（曜日×時間帯） */}
                                             {(() => {
                                                 const wd = ['日', '月', '火', '水', '木', '金', '土'];

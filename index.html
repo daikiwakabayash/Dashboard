@@ -4543,14 +4543,6 @@
                     loadZenkanri(zkYear);
                 }
             }, [currentPage, soShops.length]);
-            // 国タブ切替時、その国のデータ（当月）が未取得なら取得。日本は初回ロードで取得済みなので二重取得を避ける。
-            const zkLoadedCountryRef = useRef('jp');
-            useEffect(() => {
-                if (currentPage !== 'zenkanri' || !soShops.length || !zkData || zkLoading) return;
-                if (zkCountry === zkLoadedCountryRef.current) return;
-                zkLoadedCountryRef.current = zkCountry;
-                loadZenkanri(zkYear, { country: zkCountry });
-            }, [zkCountry]);
             const [soShopSel, setSoShopSel] = useState([]);     // 店舗フィルタ（[]=全店舗 / shop_id配列）
             const [soStaffSel, setSoStaffSel] = useState([]);   // スタッフフィルタ（[]=全スタッフ / staff_id配列）
             const [soOwner, setSoOwner] = useState('');         // オーナー選択（空=なし）
@@ -4563,6 +4555,15 @@
             const [zkError, setZkError] = useState(null);
             const [zkYear, setZkYear] = useState(new Date().getFullYear());
             const [zkCountry, setZkCountry] = useState('jp');    // 'jp' | 'au' | 'my'
+            // 国タブ切替時、その国のデータ（当月）が未取得なら取得。日本は初回ロードで取得済みなので二重取得を避ける。
+            // ⚠️ この useEffect は zkCountry 宣言より後に置くこと（依存配列 [zkCountry] が宣言前だとTDZでクラッシュする）。
+            const zkLoadedCountryRef = useRef('jp');
+            useEffect(() => {
+                if (currentPage !== 'zenkanri' || !soShops.length || !zkData || zkLoading) return;
+                if (zkCountry === zkLoadedCountryRef.current) return;
+                zkLoadedCountryRef.current = zkCountry;
+                loadZenkanri(zkYear, { country: zkCountry });
+            }, [zkCountry]);
             const [zkZoom, setZkZoom] = useState(() => (typeof window !== 'undefined' && window.innerWidth < 640) ? 0.5 : 1); // 全体管理シートの表示倍率（既定=スマホ50%/PC100%。スマホは指ピンチでも拡大縮小可）
             const [soStoreMenuOpen, setSoStoreMenuOpen] = useState(false);
             const [soStoreSearch, setSoStoreSearch] = useState('');

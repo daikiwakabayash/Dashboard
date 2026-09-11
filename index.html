@@ -2207,7 +2207,10 @@
             const [soStaffMk, setSoStaffMk] = useState([]);     // マーケ: 担当者別 新規獲得
             const [soRetention, setSoRetention] = useState(null); // マーケ: 継続顧客（summary/by_source/by_staff/by_purchases）
             const [soMkLoading, setSoMkLoading] = useState(false); // マーケ集計の取得中フラグ（売上サマリとは別の非同期取得のため独立）
-            const [soView, setSoView] = useState('shops');   // サブタブ: shops | staff | marketing | creative | daily | plan（概要は廃止）
+            const [acqCust, setAcqCust] = useState([]);       // 獲得分析: 新規顧客一覧（/marketing/new-customers・受付日/LTV）
+            const [acqCustLoading, setAcqCustLoading] = useState(false);
+            const acqLoadedKeyRef = useRef('');
+            const [soView, setSoView] = useState('shops');   // サブタブ: shops | staff | marketing | acq | daily | plan（概要は廃止）
             // クリエイティブ分析タブ（媒体×メニュー・受付履歴 appointments 集計）
             const [soCreative, setSoCreative] = useState({ rows: [], kpi: null, loading: false, ready: false, error: '' });
             const soCreativeMastersRef = useRef({ sources: null, menus: null });   // 媒体名・メニュー名/単価のマスタ(キャッシュ)
@@ -4564,6 +4567,36 @@
                 zkLoadedCountryRef.current = zkCountry;
                 loadZenkanri(zkYear, { country: zkCountry });
             }, [zkCountry]);
+            // 獲得分析タブ: 新規顧客一覧（/marketing/new-customers）を取得（受付日時・LTV・入会/来店）。
+            // ページング(cursor)で全件取得（上限ガード付き）。タブを開いた時＋期間/店舗変更時のみ。
+            const acqFetchCustomers = async () => {
+                const key = `${soFrom}_${soTo}_${(soShopSel || []).join(',')}`;
+                if (acqLoadedKeyRef.current === key || acqCustLoading) return;
+                acqLoadedKeyRef.current = key; setAcqCustLoading(true);
+                try {
+                    const ids = (soShopSel && soShopSel.length) ? soShopSel : ['']; // '' = ブランド全店（1系列でページング）
+                    let all = [];
+                    for (const sid of ids) {
+                        let cursor = '', guard = 0;
+                        do {
+                            const p = new URLSearchParams({ resource: 'marketing/new-customers', from: soFrom, to: soTo, limit: '1000' });
+                            if (sid) p.set('shop_id', sid);
+                            if (cursor) p.set('cursor', cursor);
+                            let j = null;
+                            for (let a = 0; a < 4; a++) { try { const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`); if (r.status === 429 || r.status >= 500) { await new Promise(x => setTimeout(x, 800 * (a + 1))); continue; } j = await r.json().catch(() => null); break; } catch { await new Promise(x => setTimeout(x, 600 * (a + 1))); } }
+                            if (!j || j.error) break;
+                            all = all.concat(Array.isArray(j.data) ? j.data : []);
+                            cursor = (j.meta && j.meta.has_more) ? j.meta.next_cursor : '';
+                            guard++;
+                        } while (cursor && guard < 10 && all.length < 8000);
+                    }
+                    setAcqCust(all);
+                } catch { setAcqCust([]); acqLoadedKeyRef.current = ''; }
+                finally { setAcqCustLoading(false); }
+            };
+            useEffect(() => {
+                if (currentPage === 'salonone' && soView === 'acq' && soShops.length) acqFetchCustomers();
+            }, [currentPage, soView, soFrom, soTo, soShopSel]);
             const [zkZoom, setZkZoom] = useState(() => (typeof window !== 'undefined' && window.innerWidth < 640) ? 0.5 : 1); // 全体管理シートの表示倍率（既定=スマホ50%/PC100%。スマホは指ピンチでも拡大縮小可）
             const [soStoreMenuOpen, setSoStoreMenuOpen] = useState(false);
             const [soStoreSearch, setSoStoreSearch] = useState('');
@@ -17050,6 +17083,11 @@
                                         const bookCPA = booking > 0 && adSpend > 0 ? Math.round(adSpend / booking) : 0;
                                         const buyCPA = join > 0 && adSpend > 0 ? Math.round(adSpend / join) : 0;
                                         const roas = adSpend > 0 ? Math.round(sales / adSpend * 100) : 0;
+                                        // 新規顧客一覧（/marketing/new-customers）由来: 平均LTV・LTV/CAC・受付日分析
+                                        const custRows = acqCust || [];
+                                        const ltvSum = custRows.reduce((a, c) => a + (Number(c.ltv) || 0), 0);
+                                        const avgLtv = custRows.length ? Math.round(ltvSum / custRows.length) : 0;
+                                        const ltvCac = (avgLtv > 0 && buyCPA > 0) ? Math.round(avgLtv / buyCPA * 10) / 10 : 0;
                                         const kpi = [
                                             { label: '広告費', val: yenOr(adSpend, adSpend > 0), c: 'from-rose-500 to-orange-500' },
                                             { label: '広告クリック', val: clicks ? clicks.toLocaleString() : '—', c: 'from-slate-500 to-slate-600' },
@@ -17062,7 +17100,8 @@
                                             { label: '購入CPA', val: yenOr(buyCPA, buyCPA > 0), c: 'from-rose-500 to-pink-500' },
                                             { label: '売上', val: soYen(sales), c: 'from-emerald-600 to-green-600' },
                                             { label: 'ROAS', val: roas ? roas + '%' : '—', c: 'from-violet-500 to-purple-500' },
-                                            { label: 'LTV/CAC', val: '—', note: '90日LTVは後日接続', c: 'from-slate-400 to-slate-500' },
+                                            { label: '平均LTV', val: avgLtv ? soYen(avgLtv) : (acqCustLoading ? '…' : '—'), note: custRows.length ? `新規${custRows.length.toLocaleString()}名の会計累計` : '', c: 'from-pink-500 to-rose-500' },
+                                            { label: 'LTV/CAC', val: ltvCac ? ltvCac + '倍' : (acqCustLoading ? '…' : '—'), note: '平均LTV÷購入CPA', c: 'from-violet-500 to-fuchsia-500' },
                                         ];
                                         // ファネル（クリック→新規予約→来店→購入）
                                         const funnel = [
@@ -17169,7 +17208,75 @@
                                                         </tbody>
                                                     </table>
                                                 </div>
-                                                <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 「購入」はSalonOneの入会数、集計は「その期間に初めて予約した新規客」が母集団。CPA/ROASは広告費が入力されている媒体のみ算出。90日LTV・LTV/CAC・新規顧客一覧・メール受信日分析は次フェーズで接続します。</p>
+                                                <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 「購入」はSalonOneの入会数、集計は「その期間に初めて予約した新規客」が母集団。CPA/ROASは広告費が入力されている媒体のみ算出。平均LTVは新規客の会計累計（取得時点まで）。</p>
+                                            </div>
+                                            {/* 受付日分析（曜日×時間帯） */}
+                                            {(() => {
+                                                const wd = ['日', '月', '火', '水', '木', '金', '土'];
+                                                const byW = [0, 0, 0, 0, 0, 0, 0];
+                                                const byH = new Array(24).fill(0);
+                                                custRows.forEach(c => { const s = String(c.received_at || ''); if (s.length >= 10) { const dt = new Date(s); if (!isNaN(dt)) { byW[dt.getDay()]++; const hh = Number(s.slice(11, 13)); if (hh >= 0 && hh < 24) byH[hh]++; } } });
+                                                const maxW = Math.max(1, ...byW), maxH = Math.max(1, ...byH);
+                                                if (!custRows.length) return null;
+                                                return (
+                                                <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
+                                                    <div className="flex items-center gap-2 mb-3"><Calendar size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">受付日 分析</h2><span className="text-[10px] font-bold text-slate-400">予約の受付日時ベース・新規{custRows.length.toLocaleString()}件</span></div>
+                                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                                                        <div>
+                                                            <div className="text-[12px] font-black text-slate-500 mb-2">曜日別</div>
+                                                            <div className="flex items-end gap-1.5 h-28">
+                                                                {byW.map((v, i) => (<div key={i} className="flex-1 flex flex-col items-center justify-end h-full"><div className="text-[10px] font-bold text-slate-500">{v}</div><div className="w-full rounded-t bg-gradient-to-t from-emerald-500 to-teal-400" style={{ height: `${Math.round(v / maxW * 90)}%` }} /><div className="text-[10px] font-bold text-slate-400 mt-1">{wd[i]}</div></div>))}
+                                                            </div>
+                                                        </div>
+                                                        <div>
+                                                            <div className="text-[12px] font-black text-slate-500 mb-2">時間帯別</div>
+                                                            <div className="flex items-end gap-0.5 h-28">
+                                                                {byH.map((v, i) => (<div key={i} className="flex-1 flex flex-col items-center justify-end h-full" title={`${i}時: ${v}件`}><div className="w-full rounded-t bg-gradient-to-t from-blue-500 to-cyan-400" style={{ height: `${Math.round(v / maxH * 90)}%` }} /></div>))}
+                                                            </div>
+                                                            <div className="flex justify-between text-[9px] font-bold text-slate-400 mt-1"><span>0時</span><span>6</span><span>12</span><span>18</span><span>23</span></div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                );
+                                            })()}
+                                            {/* 新規顧客一覧 */}
+                                            <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
+                                                <div className="flex items-center gap-2 mb-3"><Users size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">新規顧客一覧</h2><span className="text-[10px] font-bold text-slate-400">{acqCustLoading ? '読み込み中…' : `全${custRows.length.toLocaleString()}名（受付日時の新しい順・上位200名を表示）`}</span></div>
+                                                {acqCustLoading && !custRows.length ? (
+                                                    <div className="flex items-center justify-center py-10"><Loader2 size={28} className="animate-spin text-emerald-500" /></div>
+                                                ) : !custRows.length ? (
+                                                    <div className="text-center text-slate-400 font-bold text-[13px] py-8">この期間の新規客データはありません。</div>
+                                                ) : (() => {
+                                                    const staffName = (id) => { const s = (soStaffs || []).find(x => String(x.id) === String(id)); return s ? s.name : (id ? '—' : '未割当'); };
+                                                    const stLabel = (s) => s === 'completed' ? '来店済' : s === 'booked' ? '予約済' : s === 'cancelled' ? 'キャンセル' : (s || '—');
+                                                    const stCls = (s) => s === 'completed' ? 'bg-emerald-50 text-emerald-700' : s === 'booked' ? 'bg-amber-50 text-amber-700' : s === 'cancelled' ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-500';
+                                                    const fmt = (s) => { s = String(s || ''); return s.length >= 16 ? s.slice(5, 16).replace('T', ' ') : '—'; };
+                                                    const list = [...custRows].sort((a, b) => String(b.received_at || '').localeCompare(String(a.received_at || ''))).slice(0, 200);
+                                                    return (
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-[12px] whitespace-nowrap">
+                                                            <thead><tr className="text-slate-400 font-black border-b border-slate-200">
+                                                                <th className="text-left pb-2 px-2">受付日時</th><th className="text-left pb-2 px-2">初回来店予定</th><th className="text-left pb-2 px-2">顧客名</th><th className="text-left pb-2 px-2">担当</th><th className="text-left pb-2 px-2">媒体</th><th className="text-center pb-2 px-2">状態</th><th className="text-center pb-2 px-2">購入</th><th className="text-right pb-2 px-2">LTV</th>
+                                                            </tr></thead>
+                                                            <tbody>
+                                                                {list.map((c, i) => (
+                                                                    <tr key={c.customer_id || i} className="border-b border-slate-100 hover:bg-slate-50">
+                                                                        <td className="py-2 px-2 font-bold text-slate-700">{fmt(c.received_at)}</td>
+                                                                        <td className="py-2 px-2 text-slate-500">{fmt(c.reserved_at)}</td>
+                                                                        <td className="py-2 px-2 font-bold text-slate-800">{c.customer_name || '（非公開）'}</td>
+                                                                        <td className="py-2 px-2 text-slate-600">{staffName(c.staff_id)}</td>
+                                                                        <td className="py-2 px-2 text-slate-600">{c.visit_source_name || '未設定'}</td>
+                                                                        <td className="py-2 px-2 text-center"><span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${stCls(c.first_appointment_status)}`}>{stLabel(c.first_appointment_status)}</span></td>
+                                                                        <td className="py-2 px-2 text-center font-black">{c.joined ? <span className="text-emerald-600">○</span> : <span className="text-slate-300">-</span>}</td>
+                                                                        <td className="py-2 px-2 text-right font-bold text-slate-900">{c.ltv ? soYen(c.ltv) : '¥0'}</td>
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                    );
+                                                })()}
+                                                <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 受付日時＝予約がSalonOneに登録された日時（ホットペッパー等からの取込は取込時刻）。LTVは会計完了予約の累計（取得時点まで）。顧客名は個人情報ありキーのときのみ表示。</p>
                                             </div>
                                         </div>
                                         );

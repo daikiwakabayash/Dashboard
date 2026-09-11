@@ -116,7 +116,10 @@ SalonOne（`https://salonone.net`）の**読み取り専用**分析APIと連携�
 - **認証**: 運営発行のアクセスキーをヘッダ `X-SalonOne-Api-Key` に付与。キーは `SALONONE_API_KEY` 環境変数でサーバー側に隠蔽し、`/api/salonone` プロキシ経由でのみ利用（フロントに出さない）
 - **フロント呼び出し**: `fetchSalonOne('sales/summary', { from, to })` / `/api/salonone?resource=<name>&...`
 - **疎通確認**: `GET /api/salonone?diagnostic=1`（`/meta` への到達性を段階検査）
-- **利用可能リソース**: `meta` / `sales/summary` / `marketing/by-channel` / `marketing/by-staff` / `marketing/retention` / `shops` / `staffs` / `menus` / `menu-categories` / `visit-sources` / `customer-tags` / `customers` / `appointments` / `appointment-menus`
+- **利用可能リソース**: `meta` / `sales/summary` / `marketing/by-channel` / `marketing/by-staff` / `marketing/retention` / `marketing/new-customers` / `shops` / `staffs` / `menus` / `menu-categories` / `visit-sources` / `customer-tags` / `customers` / `appointments` / `appointment-menus`
+- **全店1リクエスト**: `sales/summary?group_by=shop` は全店の内訳を1回で返す（各行 `shop_id`/`gross_sales`/`new_visit_count`/`amounts_jpy`）。全体管理シートはこれで当月を1リクエスト取得（店舗ごとに叩かない＝レート制限回避）。合計は `amounts_jpy` を使う（トップレベル金額は店舗通貨のまま）
+- **新規客一覧**: `marketing/new-customers` は1人1行（`received_at`受付日時 / `reserved_at` / `first_appointment_status` / `visited_completed` / `joined` / `ltv` / `customer_name`(個人情報ありキー時)）。ページングは `limit`/`cursor`（`meta.has_more`/`next_cursor`）。獲得分析タブの「新規顧客一覧・平均LTV・受付日分析」で使用
+- **獲得分析タブ**（SalonOne売上の soView='acq'）: by-channel由来のKPI/獲得ファネル/媒体別コホート/インサイト＋ new-customers由来の平均LTV・LTV/CAC・新規顧客一覧・受付日(曜日×時間帯)分析
 - **マーケ集計**: 「その期間に初めて予約した新規客」が母集団。`by-channel`（媒体別 予約/来店/入会/入会率/売上）・`by-staff`（担当者別 新規予約/来店/購入/購入率）・`retention`（継続）。入会率 `join_rate` は分母=来店数で100%超あり（媒体比較は `join_rate_by_booking`）、`join_count` は遡及増加あり（月次推移は `join_in_period_count`）
 - **制約**: データ取得はGETのみ・ブランド単位でスコープ・レート制限60/分（`X-RateLimit-*`透過）・明細の日時はUTC（JST表示は+9h、`utcToJstIso`）
 - ロジックは `lib/salonone.js` に分離し `tests/salonone.test.js` でカバー

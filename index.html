@@ -17084,7 +17084,9 @@
                                         const buyCPA = join > 0 && adSpend > 0 ? Math.round(adSpend / join) : 0;
                                         const roas = adSpend > 0 ? Math.round(sales / adSpend * 100) : 0;
                                         // 新規顧客一覧（/marketing/new-customers）由来: 平均LTV・LTV/CAC・受付日分析
-                                        const custRows = acqCust || [];
+                                        // 店舗メタ（id→店舗名・海外判定）。海外(AU=900000342 / MY=900000341)は除外し、日本の店舗のみ対象。
+                                        const shopMeta = {}; (soShopsRaw || []).forEach(s => { const aid = String(s.area_id || ''); shopMeta[String(s.id)] = { name: s.name, overseas: aid === '900000341' || aid === '900000342' }; });
+                                        const custRows = (acqCust || []).filter(c => { const m = shopMeta[String(c.shop_id)]; return m && !m.overseas; }); // 日本のみ
                                         const ltvSum = custRows.reduce((a, c) => a + (Number(c.ltv) || 0), 0);
                                         const avgLtv = custRows.length ? Math.round(ltvSum / custRows.length) : 0;
                                         const ltvCac = (avgLtv > 0 && buyCPA > 0) ? Math.round(avgLtv / buyCPA * 10) / 10 : 0;
@@ -17241,7 +17243,7 @@
                                             })()}
                                             {/* 新規顧客一覧 */}
                                             <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
-                                                <div className="flex items-center gap-2 mb-3"><Users size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">新規顧客一覧</h2><span className="text-[10px] font-bold text-slate-400">{acqCustLoading ? '読み込み中…' : `全${custRows.length.toLocaleString()}名（受付日時の新しい順・上位200名を表示）`}</span></div>
+                                                <div className="flex items-center gap-2 mb-3"><Users size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">新規顧客一覧</h2><span className="text-[10px] font-bold text-slate-400">{acqCustLoading ? '読み込み中…' : `全${custRows.length.toLocaleString()}名（日本の店舗のみ・受付日時の新しい順・上位200名）`}</span></div>
                                                 {acqCustLoading && !custRows.length ? (
                                                     <div className="flex items-center justify-center py-10"><Loader2 size={28} className="animate-spin text-emerald-500" /></div>
                                                 ) : !custRows.length ? (
@@ -17256,13 +17258,14 @@
                                                     <div className="overflow-x-auto">
                                                         <table className="w-full text-[12px] whitespace-nowrap">
                                                             <thead><tr className="text-slate-400 font-black border-b border-slate-200">
-                                                                <th className="text-left pb-2 px-2">受付日時</th><th className="text-left pb-2 px-2">初回来店予定</th><th className="text-left pb-2 px-2">顧客名</th><th className="text-left pb-2 px-2">担当</th><th className="text-left pb-2 px-2">媒体</th><th className="text-center pb-2 px-2">状態</th><th className="text-center pb-2 px-2">購入</th><th className="text-right pb-2 px-2">LTV</th>
+                                                                <th className="text-left pb-2 px-2">受付日時</th><th className="text-left pb-2 px-2">初回来店予定</th><th className="text-left pb-2 px-2">店舗</th><th className="text-left pb-2 px-2">顧客名</th><th className="text-left pb-2 px-2">担当</th><th className="text-left pb-2 px-2">媒体</th><th className="text-center pb-2 px-2">状態</th><th className="text-center pb-2 px-2">購入</th><th className="text-right pb-2 px-2">LTV</th>
                                                             </tr></thead>
                                                             <tbody>
                                                                 {list.map((c, i) => (
                                                                     <tr key={c.customer_id || i} className="border-b border-slate-100 hover:bg-slate-50">
                                                                         <td className="py-2 px-2 font-bold text-slate-700">{fmt(c.received_at)}</td>
                                                                         <td className="py-2 px-2 text-slate-500">{fmt(c.reserved_at)}</td>
+                                                                        <td className="py-2 px-2 text-slate-600">{(shopMeta[String(c.shop_id)] || {}).name || '—'}</td>
                                                                         <td className="py-2 px-2 font-bold text-slate-800">{c.customer_name || '（非公開）'}</td>
                                                                         <td className="py-2 px-2 text-slate-600">{staffName(c.staff_id)}</td>
                                                                         <td className="py-2 px-2 text-slate-600">{c.visit_source_name || '未設定'}</td>

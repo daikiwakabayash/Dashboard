@@ -19,7 +19,7 @@ describe('ENDPOINTS registry', () => {
     const expected = [
       'meta', 'me', 'sales/summary',
       'auth/login', 'auth/refresh', 'auth/logout',
-      'marketing/by-channel', 'marketing/by-staff', 'marketing/retention',
+      'marketing/by-channel', 'marketing/by-staff', 'marketing/retention', 'marketing/new-customers',
       'shops', 'staffs', 'menus', 'menu-categories',
       'visit-sources', 'customer-tags', 'customers', 'appointments', 'appointment-menus',
     ];

@@ -2279,6 +2279,9 @@
             // 施策リンク背景同期マップ（顧客id→施策リンクid）。新規顧客一覧(コホート)へJOINして施策リンク別を再構築する。
             const [acqSoflMap, setAcqSoflMap] = useState({});  // { customer_id: forced_link_id }（全社共有・plan-store ?type=soflmap）
             const acqSoflSyncedRef = useRef(false);            // このセッションで一度だけ末尾同期をキック
+            // 前月同日比（ダッシュボードKPIの前月比）: 期間を1ヶ月前へずらしたコホート＋広告費
+            const [acqPrev, setAcqPrev] = useState(null);      // { from, to, cust:[...], adSpend } or null
+            const acqPrevKeyRef = useRef('');
             const [soView, setSoView] = useState('shops');   // サブタブ: shops | staff | marketing | acq | daily | plan（概要は廃止）
             // クリエイティブ分析タブ（媒体×メニュー・受付履歴 appointments 集計）
             const [soCreative, setSoCreative] = useState({ rows: [], kpi: null, loading: false, ready: false, error: '' });
@@ -4817,6 +4820,48 @@
                     }
                 } catch {}
             };
+            // 前月同日へ日付を1ヶ月ずらす（YYYY-MM-DD）。月末は前月の月末に丸める（8/31→7/31, 3/31→2/28）。
+            const soShiftMonth = (ymd, delta) => {
+                const [y, m, d] = String(ymd || '').split('-').map(Number);
+                if (!y || !m || !d) return ymd;
+                const base = new Date(Date.UTC(y, m - 1 + delta, 1));
+                const py = base.getUTCFullYear(), pm = base.getUTCMonth();
+                const last = new Date(Date.UTC(py, pm + 1, 0)).getUTCDate();
+                return `${py}-${String(pm + 1).padStart(2, '0')}-${String(Math.min(d, last)).padStart(2, '0')}`;
+            };
+            // 前月同日コホート＋広告費を取得（ダッシュボードKPIの前月比用）。失敗時は前月比を出さないだけ。
+            const acqFetchPrev = async (force = false) => {
+                const pFrom = soShiftMonth(soFrom, -1), pTo = soShiftMonth(soTo, -1);
+                const key = `${soRegion}_${pFrom}_${pTo}_${(soShopSel || []).join(',')}`;
+                if (!force && acqPrevKeyRef.current === key) return;
+                acqPrevKeyRef.current = key;
+                try {
+                    const ids = (soShopSel && soShopSel.length) ? soShopSel : (soRegion === 'jp' ? [''] : (soShopsRegion || []).map(s => String(s.id)));
+                    // 新規顧客一覧（前月同日コホート）
+                    let cust = [];
+                    for (const sid of ids) {
+                        let cursor = '', guard = 0;
+                        do {
+                            const p = new URLSearchParams({ resource: 'marketing/new-customers', from: pFrom, to: pTo, limit: '1000' });
+                            if (sid) p.set('shop_id', sid);
+                            if (cursor) p.set('cursor', cursor);
+                            let j = null;
+                            for (let a = 0; a < 3; a++) { try { const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`); if (r.status === 429 || r.status >= 500) { await new Promise(x => setTimeout(x, 700 * (a + 1))); continue; } j = await r.json().catch(() => null); break; } catch { await new Promise(x => setTimeout(x, 500 * (a + 1))); } }
+                            if (!j || j.error) break;
+                            cust = cust.concat(Array.isArray(j.data) ? j.data : []);
+                            cursor = (j.meta && j.meta.has_more) ? j.meta.next_cursor : '';
+                            guard++;
+                        } while (cursor && guard < 10 && cust.length < 8000);
+                    }
+                    // 広告費（前月・媒体別by-channel）: JP=全店1リクエスト／海外=自国店舗ぶん合算。新規媒体のみ合算。
+                    const isNonNew = (n) => { n = String(n || ''); return n === '既存' || n === '未設定' || /会員/.test(n) || /\d+\s*分/.test(n); };
+                    const chFetch = async (sid) => { const p = new URLSearchParams({ resource: 'marketing/by-channel', from: pFrom, to: pTo }); if (sid) p.set('shop_id', sid); for (let a = 0; a < 3; a++) { try { const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`); if (r.status === 429 || r.status >= 500) { await new Promise(x => setTimeout(x, 700 * (a + 1))); continue; } const j = await r.json().catch(() => null); const rows = (j && (j.data || j.rows)) || []; return Array.isArray(rows) ? rows : (rows.rows || []); } catch { await new Promise(x => setTimeout(x, 500 * (a + 1))); } } return []; };
+                    let adSpend = 0;
+                    if (soRegion === 'jp') { const rows = await chFetch(''); adSpend = rows.filter(r => !isNonNew(r.channel_name || r.name || r.visit_source_name)).reduce((a, r) => a + (Number(r.ad_spend) || 0), 0); }
+                    else { const per = await Promise.all((soShopsRegion || []).map(s => chFetch(String(s.id)))); adSpend = per.flat().filter(r => !isNonNew(r.channel_name || r.name || r.visit_source_name)).reduce((a, r) => a + (Number(r.ad_spend) || 0), 0); }
+                    setAcqPrev({ from: pFrom, to: pTo, cust, adSpend });
+                } catch { acqPrevKeyRef.current = ''; }
+            };
             // マーケ集計 手動除外リスト（全社共有）を取得
             const acqLoadExcluded = async () => {
                 try { const r = await fetch('/api/plan-store?type=acqexclude'); const j = await r.json().catch(() => null); if (j && j.ids && typeof j.ids === 'object') setAcqExcluded(j.ids); } catch {}
@@ -4831,7 +4876,7 @@
                 } catch {}
             };
             useEffect(() => {
-                if ((currentPage === 'salonone' || currentPage === 'mktg') && ['acq', 'forced', 'customers', 'storemedia'].includes(soView) && soShops.length) { acqFetchCustomers(); acqFetchForced(); acqLoadExcluded(); acqFetchSoflMap(); }
+                if ((currentPage === 'salonone' || currentPage === 'mktg') && ['acq', 'forced', 'customers', 'storemedia'].includes(soView) && soShops.length) { acqFetchCustomers(); acqFetchForced(); acqLoadExcluded(); acqFetchSoflMap(); if (soView === 'acq') acqFetchPrev(); }
                 // 注: soShops.length を依存に含め、店舗一覧が後から届いても再取得されるようにする（マーケタブ直リンク対策）
             }, [currentPage, soView, soFrom, soTo, soShopSel, soShops.length, soRegion]);
             const [zkZoom, setZkZoom] = useState(() => (typeof window !== 'undefined' && window.innerWidth < 640) ? 0.5 : 1); // 全体管理シートの表示倍率（既定=スマホ50%/PC100%。スマホは指ピンチでも拡大縮小可）
@@ -7186,6 +7231,7 @@
                     acqFetchForced(true);                        // 強制リンク別（施策リンクのタイトル/媒体/メニュー解決用）
                     acqLoadExcluded();                           // 手動除外リスト
                     acqFetchSoflMap(true);                       // 施策リンクマップ（末尾同期をキックして当日分も取り込む）
+                    acqPrevKeyRef.current = ''; acqFetchPrev(true); // 前月同日比コホート
                 }
             };
 
@@ -17489,6 +17535,8 @@
                                         const sales = ltvSum;
                                         const avgLtv = booking ? Math.round(ltvSum / booking) : 0;
                                         const bookCPA = booking > 0 && adSpend > 0 ? Math.round(adSpend / booking) : 0;
+                                        const visitCPA = visit > 0 && adSpend > 0 ? Math.round(adSpend / visit) : 0;
+                                        const cancelRateAll = booking > 0 ? Math.round(cancel / booking * 1000) / 10 : 0;
                                         const buyCPA = join > 0 && adSpend > 0 ? Math.round(adSpend / join) : 0;
                                         const roas = adSpend > 0 ? Math.round(sales / adSpend * 100) : 0;
                                         const ltvCac = (avgLtv > 0 && buyCPA > 0) ? Math.round(avgLtv / buyCPA * 10) / 10 : 0;
@@ -17502,20 +17550,38 @@
                                         if (!custRows.length && !chs.length) return (<div className="bg-white border border-slate-200 rounded-2xl p-8 text-center"><TrendingUp size={28} className="text-slate-300 mx-auto mb-3" /><p className="text-slate-600 font-black text-sm">獲得データがありません</p><p className="text-slate-400 font-bold text-xs mt-1">期間・店舗を変えるか「Sync」で再取得してください。</p></div>);
                                         // ホバー解説の共通枕詞（受付日ベースのコホート定義＋選択中の期間・店舗・媒体）
                                         const _coh = `対象＝受付日時(received_at)が ${soFrom}〜${soTo} の新規客${acqMediaSel ? `／媒体「${acqMediaSel}」` : ''}${(soShopSel && soShopSel.length) ? '／選択店舗' : '／全店'}。来店が翌月でも含み、前月受付は除外。`;
+                                        // ── 前月同日比（期間を1ヶ月前へずらしたコホート・acqPrev）──
+                                        const _pFrom = soShiftMonth(soFrom, -1), _pTo = soShiftMonth(soTo, -1);
+                                        const _prevReady = !!(acqPrev && acqPrev.from === _pFrom && acqPrev.to === _pTo);
+                                        let pBooking = 0, pVisit = 0, pCancel = 0, pJoin = 0, pSales = 0, pAd = 0, pBookCPA = 0, pVisitCPA = 0, pCAC = 0, pVisitRate = 0, pCancelRate = 0, pJoinRate = 0;
+                                        if (_prevReady) {
+                                            const pf = (acqPrev.cust || []).filter(c => { const m = shopMeta[String(c.shop_id)]; if (!m || m.cc !== soRegion) return false; if (isJunkCust(c)) return false; if (acqExclSet[custIdOf(c)]) return false; const d = String(c.received_at || '').slice(0, 10); return d && d >= _pFrom && d <= _pTo; });
+                                            const pc = acqMediaSel ? pf.filter(c => (c.visit_source_name || '未設定') === acqMediaSel) : pf;
+                                            pBooking = pc.length; pVisit = pc.filter(isVisited).length; pCancel = pc.filter(isCancelled).length; pJoin = pc.filter(c => c.joined).length; pSales = pc.reduce((a, c) => a + (Number(c.ltv) || 0), 0);
+                                            pAd = Number(acqPrev.adSpend) || 0;
+                                            pBookCPA = pBooking > 0 && pAd > 0 ? Math.round(pAd / pBooking) : 0; pVisitCPA = pVisit > 0 && pAd > 0 ? Math.round(pAd / pVisit) : 0; pCAC = pJoin > 0 && pAd > 0 ? Math.round(pAd / pJoin) : 0;
+                                            pVisitRate = pBooking > 0 ? Math.round(pVisit / pBooking * 1000) / 10 : 0; pCancelRate = pBooking > 0 ? Math.round(pCancel / pBooking * 1000) / 10 : 0; pJoinRate = pVisit > 0 ? Math.round(pJoin / pVisit * 1000) / 10 : 0;
+                                        }
+                                        // 前月比ヘルパ: momR=比率%（件数・金額）／ momP=ポイント差（率）。higher=大きいほど良い。
+                                        const momR = (cur, prev, higher = true) => { if (!_prevReady || prev == null || prev === 0 || !isFinite(prev)) return null; const v = Math.round((cur - prev) / prev * 1000) / 10; return { v, good: higher ? v >= 0 : v <= 0, unit: '%' }; };
+                                        const momP = (cur, prev, higher = true) => { if (!_prevReady) return null; const v = Math.round((cur - prev) * 10) / 10; return { v, good: higher ? v >= 0 : v <= 0, unit: 'pt' }; };
+                                        const _momTip = _prevReady ? ` 前月同日比＝${_pFrom}〜${_pTo} の同コホートと比較。` : '';
                                         const kpi = [
                                             { label: '広告費', val: yenOr(adSpend, adSpend > 0), c: 'from-rose-500 to-orange-500', tip: `SalonOne「媒体別(by-channel)」の広告費(ad_spend)合計。${_coh} 期間・店舗・媒体フィルタに連動。SalonOneに入力が無い媒体は0。` },
-                                            { label: '広告クリック', val: clicks ? clicks.toLocaleString() : '—', c: 'from-slate-500 to-slate-600', tip: `SalonOne「媒体別」のクリック数(clicks)合計。広告連携が設定された媒体のみ数値化（未設定は0）。` },
-                                            { label: '新規予約', val: booking.toLocaleString() + '件', c: 'from-blue-500 to-indigo-500', tip: `${_coh} この母集団の人数＝新規予約数。新規顧客一覧(new-customers)から算出。` },
-                                            { label: '予約CPA', val: yenOr(bookCPA, bookCPA > 0), c: 'from-cyan-500 to-blue-500', tip: `広告費 ÷ 新規予約数。1件の新規予約を獲得するのにかかった広告費。` },
-                                            { label: '新規来店', val: visit.toLocaleString() + '名', c: 'from-amber-500 to-yellow-500', tip: `新規予約のうち初回来店を完了した人数(visited_completed/first_appointment_status=completed)。${_coh}` },
-                                            { label: '来店率', val: rate(visit, booking) + '%', c: 'from-yellow-500 to-amber-500', tip: `新規来店 ÷ 新規予約。予約から実際の来店に至った割合。` },
-                                            { label: '購入(入会)', val: join.toLocaleString() + '名', c: 'from-emerald-500 to-teal-500', tip: `新規客のうち入会(joined=サブスク/チケット等の購入)した人数。${_coh}` },
-                                            { label: '入会率', val: rate(join, visit) + '%', c: 'from-teal-500 to-emerald-600', tip: `入会(購入) ÷ 新規来店。来店した人がどれだけ入会に至ったか。` },
-                                            { label: 'CAC', val: yenOr(buyCPA, buyCPA > 0), c: 'from-rose-500 to-pink-500', tip: `CAC＝広告費 ÷ 入会数。1件の入会を獲得するのにかかった広告費（＝購入CPA）。` },
-                                            { label: '売上', val: soYen(sales), c: 'from-emerald-600 to-green-600', tip: `新規客のLTV累計（会計完了予約の売上を取得時点まで合算）。${_coh} ※現状は全期間のLTV累計です（「来店3回目まで」の絞りは未適用）。` },
+                                            { label: '新規予約', val: booking.toLocaleString() + '件', c: 'from-blue-500 to-indigo-500', d: momR(booking, pBooking, true), tip: `${_coh} この母集団の人数＝新規予約数。新規顧客一覧(new-customers)から算出。${_momTip}` },
+                                            { label: '予約CPA', val: yenOr(bookCPA, bookCPA > 0), c: 'from-cyan-500 to-blue-500', d: momR(bookCPA, pBookCPA, false), tip: `広告費 ÷ 新規予約数。1件の新規予約を獲得するのにかかった広告費。${_momTip}` },
+                                            { label: '新規来店', val: visit.toLocaleString() + '名', c: 'from-amber-500 to-yellow-500', d: momR(visit, pVisit, true), tip: `新規予約のうち初回来店を完了した人数(visited_completed/first_appointment_status=completed)。${_coh}${_momTip}` },
+                                            { label: '来店率', val: rate(visit, booking) + '%', c: 'from-yellow-500 to-amber-500', d: momP(rate(visit, booking), pVisitRate, true), tip: `新規来店 ÷ 新規予約。予約から実際の来店に至った割合。${_momTip}` },
+                                            { label: '来店CPA', val: yenOr(visitCPA, visitCPA > 0), c: 'from-indigo-500 to-blue-500', d: momR(visitCPA, pVisitCPA, false), tip: `広告費 ÷ 新規来店数。1件の来店を獲得するのにかかった広告費。${_momTip}` },
+                                            { label: 'キャンセル数', val: cancel.toLocaleString() + '件', c: 'from-rose-500 to-red-500', d: momR(cancel, pCancel, false), tip: `新規予約のうち実際にキャンセルされた件数（first_appointment_status=cancelled）。未来店（来店待ち）は含まない。${_coh}${_momTip}` },
+                                            { label: 'キャンセル率', val: cancelRateAll + '%', c: 'from-red-500 to-rose-600', d: momP(cancelRateAll, pCancelRate, false), tip: `キャンセル ÷ 新規予約。※来店率＋キャンセル率＋未来店率＝100%（未来店＝まだ来店していない予約＝来店待ち）。${_momTip}` },
+                                            { label: '購入(入会)', val: join.toLocaleString() + '名', c: 'from-emerald-500 to-teal-500', d: momR(join, pJoin, true), tip: `新規客のうち入会(joined=サブスク/チケット等の購入)した人数。${_coh}${_momTip}` },
+                                            { label: '入会率', val: rate(join, visit) + '%', c: 'from-teal-500 to-emerald-600', d: momP(rate(join, visit), pJoinRate, true), tip: `入会(購入) ÷ 新規来店。来店した人がどれだけ入会に至ったか。${_momTip}` },
+                                            { label: 'CAC', val: yenOr(buyCPA, buyCPA > 0), c: 'from-rose-500 to-pink-500', d: momR(buyCPA, pCAC, false), tip: `CAC＝広告費 ÷ 入会数。1件の入会を獲得するのにかかった広告費（＝購入CPA）。${_momTip}` },
+                                            { label: '売上', val: soYen(sales), c: 'from-emerald-600 to-green-600', d: momR(sales, pSales, true), tip: `新規客のLTV累計（会計完了予約の売上を取得時点まで合算）。${_coh}${_momTip}` },
                                             { label: 'ROAS', val: roas ? roas + '%' : '—', c: 'from-violet-500 to-purple-500', tip: `売上(LTV累計) ÷ 広告費 ×100。投じた広告費の何倍を売上で回収したか。` },
                                             { label: '平均LTV', val: avgLtv ? soYen(avgLtv) : (acqCustLoading ? '…' : '—'), note: custRows.length ? `新規${custRows.length.toLocaleString()}名の会計累計` : '', c: 'from-pink-500 to-rose-500', tip: `売上(LTV累計) ÷ 新規客数。新規1名あたりの累計売上（会計完了ベース・取得時点まで）。` },
-                                            { label: 'LTV/CAC', val: ltvCac ? ltvCac + '倍' : (acqCustLoading ? '…' : '—'), note: '平均LTV÷購入CPA', c: 'from-violet-500 to-fuchsia-500', tip: `平均LTV ÷ 購入CPA(CAC)。1名の獲得コストに対して累計売上が何倍か。目安は3倍以上。` },
+                                            { label: 'LTV/CAC', val: ltvCac ? ltvCac + '倍' : (acqCustLoading ? '…' : '—'), note: '平均LTV÷CAC', c: 'from-violet-500 to-fuchsia-500', tip: `平均LTV ÷ CAC(購入CPA)。1名の獲得コストに対して累計売上が何倍か。目安は3倍以上。` },
                                         ];
                                         // ファネル（クリック→新規予約→来店→購入）
                                         const funnel = [
@@ -17556,6 +17622,7 @@
                                                             <InfoTip text={k.tip} />
                                                         </div>
                                                         <div className="text-lg md:text-xl font-black text-slate-900 tracking-tight">{k.val}</div>
+                                                        {k.d && <div className={`text-[9px] font-black mt-0.5 ${k.d.good ? 'text-emerald-600' : 'text-rose-500'}`}>{k.d.v >= 0 ? '▲' : '▼'}{Math.abs(k.d.v)}{k.d.unit} <span className="text-slate-400 font-bold">前月比</span></div>}
                                                         {k.note && <div className="text-[9px] font-bold text-slate-400 mt-0.5">{k.note}</div>}
                                                     </div>
                                                 ))}
@@ -17568,14 +17635,13 @@
                                                     <table className="w-full text-[12px] whitespace-nowrap">
                                                         <thead><tr className="text-slate-400 font-black border-b border-slate-200">
                                                             <ThSort label="媒体" k="name" sort={acqMediaSort} setSort={setAcqMediaSort} align="left" tip={TIP.media} />
-                                                            <ThSort label="広告費" k="adSpend" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.adSpend} /><ThSort label="クリック" k="clicks" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.clicks} /><ThSort label="新規予約" k="booking" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.booking} /><ThSort label="予約CPA" k="bcpa" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.bcpa} /><ThSort label="来店CPA" k="vcpa" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.vcpa} /><ThSort label="来店" k="visit" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.visit} /><ThSort label="来店率" k="visitRate" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.visitRate} /><ThSort label="キャンセル" k="cancel" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.cancel} /><ThSort label="キャンセル率" k="cancelRate" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.cancelRate} /><ThSort label="未来店" k="pending" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.pending} /><ThSort label="購入" k="join" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.join} /><ThSort label="入会率" k="joinRate" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.joinRate} /><ThSort label="CAC" k="cac" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.cac} /><ThSort label="売上" k="sales" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.sales} /><ThSort label="ROAS" k="roas" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.roas} />
+                                                            <ThSort label="広告費" k="adSpend" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.adSpend} /><ThSort label="新規予約" k="booking" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.booking} /><ThSort label="予約CPA" k="bcpa" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.bcpa} /><ThSort label="来店CPA" k="vcpa" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.vcpa} /><ThSort label="来店" k="visit" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.visit} /><ThSort label="来店率" k="visitRate" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.visitRate} /><ThSort label="キャンセル" k="cancel" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.cancel} /><ThSort label="キャンセル率" k="cancelRate" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.cancelRate} /><ThSort label="未来店" k="pending" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.pending} /><ThSort label="購入" k="join" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.join} /><ThSort label="入会率" k="joinRate" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.joinRate} /><ThSort label="CAC" k="cac" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.cac} /><ThSort label="売上" k="sales" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.sales} /><ThSort label="ROAS" k="roas" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.roas} />
                                                         </tr></thead>
                                                         <tbody>
                                                             {rows.map((c, i) => { const bcpa = (c.adSpend > 0 && c.booking > 0) ? Math.round(c.adSpend / c.booking) : 0; const vcpa = (c.adSpend > 0 && c.visit > 0) ? Math.round(c.adSpend / c.visit) : 0; const cac = (c.adSpend > 0 && c.join > 0) ? Math.round(c.adSpend / c.join) : 0; const cr = c.adSpend > 0 ? Math.round(c.sales / c.adSpend * 100) : 0; return (
                                                                 <tr key={i} className="border-b border-slate-100 hover:bg-slate-50">
                                                                     <td className="py-2 px-2 font-bold text-slate-800 sticky left-0 bg-white">{c.name}</td>
                                                                     <td className="py-2 px-2 text-right font-bold text-slate-600">{c.adSpend > 0 ? soYen(c.adSpend) : '—'}</td>
-                                                                    <td className="py-2 px-2 text-right text-slate-500">{c.clicks ? c.clicks.toLocaleString() : '—'}</td>
                                                                     <td className="py-2 px-2 text-right font-bold text-slate-700">{(c.booking || 0).toLocaleString()}</td>
                                                                     <td className="py-2 px-2 text-right text-cyan-600 font-bold">{bcpa ? soYen(bcpa) : '—'}</td>
                                                                     <td className="py-2 px-2 text-right text-cyan-700 font-bold">{vcpa ? soYen(vcpa) : '—'}</td>
@@ -17594,7 +17660,6 @@
                                                             <tr className="font-black bg-slate-50">
                                                                 <td className="py-2 px-2 sticky left-0 bg-slate-50">合計</td>
                                                                 <td className="py-2 px-2 text-right">{adSpend > 0 ? soYen(adSpend) : '—'}</td>
-                                                                <td className="py-2 px-2 text-right">{clicks ? clicks.toLocaleString() : '—'}</td>
                                                                 <td className="py-2 px-2 text-right">{booking.toLocaleString()}</td>
                                                                 <td className="py-2 px-2 text-right text-cyan-600">{bookCPA ? soYen(bookCPA) : '—'}</td>
                                                                 <td className="py-2 px-2 text-right text-cyan-700">{adSpend > 0 && visit > 0 ? soYen(Math.round(adSpend / visit)) : '—'}</td>

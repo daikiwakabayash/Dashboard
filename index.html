@@ -2060,7 +2060,7 @@
 
             const [currentPage, setCurrentPage] = useState(() => {
                 // プッシュ通知/PWAからの深いリンク（/?tab=board|chat）を最優先で開く
-                try { const t = new URLSearchParams(window.location.search).get('tab'); if (t && ['board', 'chat', 'mktg', 'salonone', 'zenkanri', 'patrol'].includes(t)) return t; } catch (e) {}
+                try { const t = new URLSearchParams(window.location.search).get('tab'); if (t && ['board', 'chat', 'mktg', 'salonone', 'zenkanri', 'patrol', 'meo'].includes(t)) return t; } catch (e) {}
                 // 読み込み直したときの入口は「チャット」（チャットを使える本部/管理者のみ。
                 // 使えないアカウントは全体管理シート）。前回のタブは復元せず、毎回この入口から。
                 return authState.root ? 'chat' : 'zenkanri';
@@ -3152,6 +3152,66 @@
                 } catch {}
             };
             useEffect(() => { if (currentPage === 'patrol' && !patrolLoadedRef.current) { patrolLoadedRef.current = true; patrolLoadCfg(); } }, [currentPage]);
+            // ── MEO対策（Googleマップ）: 口コミ数・評価の増減トレンド＋要対応アラート＋口コミ依頼リンク＋AI返信下書き ──
+            const [meoData, setMeoData] = useState({ shops: {}, googleEnabled: false, loaded: false });
+            const [meoBusy, setMeoBusy] = useState(false);
+            const [meoProgress, setMeoProgress] = useState(null); // {done,total,label}
+            const [meoReplyFor, setMeoReplyFor] = useState(null); // AI返信下書きモーダル対象 {name, drafts, loading}
+            const meoBusyRef = useRef(false);
+            const meoLoadedRef = useRef(false);
+            const meoLoad = async () => {
+                try { const r = await fetch('/api/plan-store?type=meo', { cache: 'no-store' }); const j = await r.json(); setMeoData({ shops: (j && j.shops) || {}, googleEnabled: !!(j && j.googleEnabled), loaded: true }); } catch { setMeoData(d => ({ ...d, loaded: true })); }
+            };
+            useEffect(() => { if (currentPage === 'meo' && !meoLoadedRef.current) { meoLoadedRef.current = true; meoLoad(); } }, [currentPage]);
+            // 店舗の検索クエリ（patrolの設定を流用→無ければ「NAORU整体 <店舗名>」）
+            const meoQueryFor = (shopName) => { const q = (patrolCfg.queries || {})[shopName]; return (q && String(q).trim()) || `NAORU整体 ${shopName}`; };
+            // 全店スキャン（1店ずつPlacesで取得＝サーバーが履歴保存）。レート＆コスト配慮で直列。
+            const meoScanAll = async () => {
+                if (meoBusyRef.current) return;
+                const shops = (soShops || []).filter(s => s && s.name);
+                if (!shops.length) { alert('店舗が読み込まれていません。「SalonOne売上」タブを一度開いてからお試しください。'); return; }
+                meoBusyRef.current = true; setMeoBusy(true);
+                try {
+                    for (let i = 0; i < shops.length; i++) {
+                        const sh = shops[i];
+                        setMeoProgress({ done: i, total: shops.length, label: `${sh.name} を取得中…` });
+                        try {
+                            const r = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'meo', action: 'scanone', name: sh.name, query: meoQueryFor(sh.name) }) });
+                            const j = await r.json().catch(() => null);
+                            if (j && j.error === 'google_not_configured') { alert('Googleマップ連携（GOOGLE_PLACES_API_KEY）が未設定です。設定後に再度お試しください。'); break; }
+                            if (j && j.ok && j.shop) setMeoData(d => ({ ...d, shops: { ...d.shops, [sh.name]: j.shop } }));
+                        } catch {}
+                    }
+                    setMeoProgress({ done: shops.length, total: shops.length, label: '完了' });
+                    await meoLoad();
+                } catch { alert('MEOスキャン中にエラーが発生しました。'); }
+                finally { meoBusyRef.current = false; setMeoBusy(false); setTimeout(() => setMeoProgress(null), 1200); }
+            };
+            const meoCopy = (text) => { try { navigator.clipboard.writeText(String(text || '')); } catch {} };
+            // 店舗チャットへMEOサマリ＋口コミ依頼リンクを投稿
+            const meoPostToStore = async (rec) => {
+                if (!rec) return;
+                let room = (chatData.rooms || []).find(r => r.kind === 'store' && soShopNorm(r.shop) === soShopNorm(rec.name));
+                if (!room) { try { chatEnsuredRef.current = ''; await chatEnsureRooms(soShopsRaw, soStaffs); } catch {} room = (chatData.rooms || []).find(r => r.kind === 'store' && soShopNorm(r.shop) === soShopNorm(rec.name)); }
+                if (!room) { alert(`「${rec.name}」の店舗チャットが見つかりませんでした。`); return; }
+                const d = rec.deltas || {};
+                const lines = [`🗺️ MEO（Googleマップ）状況`, `・口コミ ${d.count || 0}件（今月 ${d.newThisMonth >= 0 ? '+' + d.newThisMonth : d.newThisMonth ?? '—'}件）／評価 ★${(rec.latest && rec.latest.rating) || '—'}`];
+                (rec.flags || []).filter(f => f.level === 'warn').forEach(f => lines.push(`⚠️ ${f.title}`));
+                if (rec.reviewUrl) lines.push('', `▼口コミのお願い（このリンクを患者様へ）`, rec.reviewUrl);
+                try { await chatPost({ action: 'send', roomId: room.id, msg: { fromStaffId: '__ai__', fromName: '🤖 MEO', fromShop: rec.name, text: lines.join('\n'), mentions: [], replyTo: null } }); alert(`「${rec.name}」の店舗チャットに投稿しました。`); } catch {}
+            };
+            // AIで口コミ返信文を下書き（直近レビューに対して）
+            const meoDraftReplies = async (rec) => {
+                setMeoReplyFor({ name: rec.name, drafts: '', loading: true });
+                try {
+                    const reviews = (rec.latest && Array.isArray(rec.latest.reviews)) ? rec.latest.reviews : [];
+                    if (!reviews.length) { setMeoReplyFor({ name: rec.name, drafts: '直近の口コミが取得できませんでした（Placesは最新5件まで）。', loading: false }); return; }
+                    const q = `NAORU整体「${rec.name}」のGoogle口コミへの返信文を、口コミごとに丁寧・簡潔（100字前後）に日本語で下書きしてください。感謝→具体の一言→また来たくなる一文。★が低い口コミは真摯に謝意と改善姿勢を示す。店名・過度な宣伝は避ける。\n\n【口コミ】\n` + reviews.map((r, i) => `${i + 1}. ★${r.rating ?? '?'}（${r.when || ''}）: ${r.text || '(本文なし)'}`).join('\n');
+                    const r = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent: 'faq', question: q, history: [], dataContext: '' }) });
+                    const j = await r.json().catch(() => null);
+                    setMeoReplyFor({ name: rec.name, drafts: (j && j.message) ? String(j.message).replace(/^\s*NEEDS_HQ\b[:：]?\s*/, '') : '生成できませんでした。', loading: false });
+                } catch { setMeoReplyFor({ name: rec.name, drafts: '通信エラーが発生しました。', loading: false }); }
+            };
             // 全店を巡回: 各店の当月/先月をSalonOneから取得→サーバー(?type=patrol&action=analyze)で分析
             const patrolRun = async () => {
                 if (patrolBusyRef.current) return;
@@ -19353,6 +19413,91 @@
                         );
                     })()}
 
+                    {currentPage === 'meo' && authState.root && (() => {
+                        const orderIdx = (name) => { const nn = soShopNorm(name); let i = SO_SHOP_ORDER.findIndex(o => soShopNorm(o) === nn); if (i < 0) i = SO_SHOP_ORDER.findIndex(o => { const on = soShopNorm(o); return nn.length >= 2 && (on.includes(nn) || nn.includes(on)); }); return i < 0 ? 9999 : i; };
+                        const list = Object.values(meoData.shops || {}).sort((a, b) => orderIdx(a.name) - orderIdx(b.name));
+                        const warnShops = list.filter(s => (s.flags || []).some(f => f.level === 'warn'));
+                        const totalReviews = list.reduce((a, s) => a + ((s.deltas && s.deltas.count) || 0), 0);
+                        const newThisMonth = list.reduce((a, s) => a + ((s.deltas && s.deltas.newThisMonth > 0) ? s.deltas.newThisMonth : 0), 0);
+                        const badge = (n) => n > 0 ? `+${n}` : (n < 0 ? String(n) : '±0');
+                        return (
+                        <div className="max-w-[1400px] mx-auto px-4 md:px-6 py-6 space-y-4">
+                            <header className="flex items-start gap-3 flex-wrap">
+                                <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-500 text-white flex items-center justify-center text-xl shrink-0">🗺️</div>
+                                <div className="min-w-0">
+                                    <h1 className="text-xl md:text-2xl font-black text-slate-900">MEO対策</h1>
+                                    <p className="text-[12px] md:text-[13px] text-slate-500 font-bold">Googleマップの口コミ数・評価の増減を全店で追跡。要対応店の抽出／口コミ依頼リンク発行／AI返信下書きまで。</p>
+                                </div>
+                            </header>
+                            {!meoData.googleEnabled && (
+                                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-[12px] font-bold text-amber-800">⚠️ Googleマップ連携が未設定です。環境変数 <b>GOOGLE_PLACES_API_KEY</b>（Places API New）を設定すると、口コミ数・評価・増減の取得が有効になります。設定後に「全店スキャン」を押してください。</div>
+                            )}
+                            {/* サマリ＋操作 */}
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
+                                {[{ l: '口コミ総数', v: totalReviews.toLocaleString(), c: 'from-emerald-500 to-teal-500' }, { l: '今月の新規口コミ', v: '+' + newThisMonth, c: 'from-blue-500 to-indigo-500' }, { l: '要対応店', v: warnShops.length + '店', c: 'from-rose-500 to-orange-500' }, { l: '取得済み店舗', v: list.length + '店', c: 'from-slate-500 to-slate-600' }].map((k, i) => (
+                                    <div key={i} className="bg-white border border-slate-200 rounded-2xl p-3 shadow-sm"><div className={`inline-block text-[10px] font-black text-white px-2 py-0.5 rounded-full bg-gradient-to-r ${k.c} mb-1`}>{k.l}</div><div className="text-lg md:text-xl font-black text-slate-900">{k.v}</div></div>
+                                ))}
+                            </div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                                <button onClick={meoScanAll} disabled={meoBusy || !meoData.googleEnabled} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 text-white text-[13px] font-black shadow hover:opacity-95 disabled:opacity-50 transition">{meoBusy ? '取得中…' : `🔄 全店スキャン（${(soShops || []).length}店舗）`}</button>
+                                {meoProgress && <span className="text-[12px] font-bold text-slate-500 inline-flex items-center gap-1.5"><Loader2 size={14} className="animate-spin" />{meoProgress.label}（{meoProgress.done}/{meoProgress.total}）</span>}
+                            </div>
+                            {/* スコアボード */}
+                            {list.length === 0 ? (
+                                <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center"><div className="text-4xl mb-2">🗺️</div><div className="text-[14px] font-black text-slate-500">まだデータがありません</div><div className="text-[12px] font-bold text-slate-400 mt-1">「全店スキャン」を押すと各店のGoogle口コミ数・評価を取得し、次回以降は増減が表示されます。</div></div>
+                            ) : (
+                                <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
+                                    <div className="flex items-center gap-2 mb-3 flex-wrap"><MapPin size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">口コミ スコアボード</h2><span className="text-[10px] font-bold text-slate-400">出店順・増減は前回スキャン比／今月頭比</span></div>
+                                    <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
+                                        <table className="w-full text-[12px] whitespace-nowrap">
+                                            <thead><tr className="text-slate-400 font-black border-b border-slate-200">
+                                                <th className="text-left pb-2 px-2 sticky left-0 bg-white">店舗</th><th className="text-right pb-2 px-2">口コミ数</th><th className="text-right pb-2 px-2">前回比</th><th className="text-right pb-2 px-2">今月新規</th><th className="text-right pb-2 px-2">評価</th><th className="text-right pb-2 px-2">写真</th><th className="text-center pb-2 px-2">HP</th><th className="text-center pb-2 px-2">TEL</th><th className="text-center pb-2 px-2">時間</th><th className="text-right pb-2 px-2">スコア</th><th className="text-left pb-2 px-2">要対応</th><th className="text-center pb-2 px-2">操作</th>
+                                            </tr></thead>
+                                            <tbody>
+                                                {list.map((s, i) => { const d = s.deltas || {}; const lt = s.latest || {}; const warns = (s.flags || []).filter(f => f.level === 'warn'); const dot = (ok) => ok ? <span className="text-emerald-600 font-black">✓</span> : <span className="text-rose-400 font-black">×</span>; return (
+                                                    <tr key={i} className="border-b border-slate-100 hover:bg-slate-50 align-top">
+                                                        <td className="py-2 px-2 font-bold text-slate-800 sticky left-0 bg-white">{s.name}</td>
+                                                        <td className="py-2 px-2 text-right font-black text-slate-900">{(d.count || 0).toLocaleString()}</td>
+                                                        <td className={`py-2 px-2 text-right font-bold ${d.deltaPrev > 0 ? 'text-emerald-600' : d.deltaPrev < 0 ? 'text-rose-500' : 'text-slate-400'}`}>{d.deltaPrev == null ? '—' : badge(d.deltaPrev)}</td>
+                                                        <td className={`py-2 px-2 text-right font-bold ${d.newThisMonth > 0 ? 'text-emerald-600' : d.newThisMonth === 0 ? 'text-rose-500' : 'text-slate-400'}`}>{d.newThisMonth == null ? '—' : badge(d.newThisMonth)}</td>
+                                                        <td className="py-2 px-2 text-right font-bold text-slate-700">{lt.rating != null ? '★' + lt.rating : '—'}</td>
+                                                        <td className="py-2 px-2 text-right text-slate-600">{('photoCount' in lt) ? lt.photoCount : '—'}</td>
+                                                        <td className="py-2 px-2 text-center">{('websiteUri' in lt) ? dot(!!lt.websiteUri) : '—'}</td>
+                                                        <td className="py-2 px-2 text-center">{('phone' in lt) ? dot(!!lt.phone) : '—'}</td>
+                                                        <td className="py-2 px-2 text-center">{('hasHours' in lt) ? dot(!!lt.hasHours) : '—'}</td>
+                                                        <td className="py-2 px-2 text-right font-black" style={{ color: s.score >= 70 ? '#059669' : s.score >= 40 ? '#d97706' : '#e11d48' }}>{s.score}</td>
+                                                        <td className="py-2 px-2 text-left max-w-[220px]"><div className="flex flex-wrap gap-1">{warns.length ? warns.map((f, k) => <span key={k} className="text-[10px] font-black px-1.5 py-0.5 rounded bg-rose-50 text-rose-600">{f.title}</span>) : <span className="text-[10px] font-bold text-emerald-600">✓ 良好</span>}</div></td>
+                                                        <td className="py-2 px-2 text-center"><div className="flex flex-col gap-1 items-stretch">
+                                                            {s.reviewUrl && <button onClick={() => meoCopy(s.reviewUrl)} className="text-[10px] font-black px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 whitespace-nowrap">口コミ依頼リンクをコピー</button>}
+                                                            <button onClick={() => meoDraftReplies(s)} className="text-[10px] font-black px-2 py-1 rounded-lg bg-violet-50 text-violet-700 hover:bg-violet-100 whitespace-nowrap">AIで返信下書き</button>
+                                                            <button onClick={() => meoPostToStore(s)} className="text-[10px] font-black px-2 py-1 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 whitespace-nowrap">店舗チャットに共有</button>
+                                                        </div></td>
+                                                    </tr>
+                                                ); })}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 増減は「全店スキャン」を実行するたびにスナップショットを保存して算出（初回は基準値のみ）。写真枚数はPlacesが返す枚数、口コミ返信の有無・全口コミ・マップ検索順位は公式APIで取得不可のため対象外。口コミ依頼リンクは各店の「クチコミを書く」URLです。</p>
+                                </div>
+                            )}
+                            <div className="text-[11px] text-slate-400 font-bold leading-relaxed">💡 MEOを伸ばすコツ：①施術後に口コミ依頼リンク/QRで毎日お願いする ②全口コミに24〜48hで返信（AI下書き活用）③写真を週1更新 ④HP・電話・営業時間・カテゴリを埋める。要対応店は上のアラートから着手を。</div>
+                            {/* AI返信下書きモーダル */}
+                            {meoReplyFor && (
+                                <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setMeoReplyFor(null)}>
+                                    <div className="bg-white rounded-2xl max-w-lg w-full max-h-[80vh] overflow-y-auto p-5 shadow-xl" onClick={e => e.stopPropagation()}>
+                                        <div className="flex items-center gap-2 mb-3"><span className="text-lg">🤖</span><h3 className="font-black text-slate-900">口コミ返信 下書き — {meoReplyFor.name}</h3><button onClick={() => setMeoReplyFor(null)} className="ml-auto text-slate-400 hover:text-slate-600"><X size={18} /></button></div>
+                                        {meoReplyFor.loading ? <div className="py-10 flex justify-center"><Loader2 size={26} className="animate-spin text-emerald-500" /></div> : (<>
+                                            <pre className="whitespace-pre-wrap text-[13px] text-slate-700 font-medium leading-relaxed bg-slate-50 rounded-xl p-3">{meoReplyFor.drafts}</pre>
+                                            <button onClick={() => meoCopy(meoReplyFor.drafts)} className="mt-3 px-3 py-2 rounded-lg bg-emerald-600 text-white text-[12px] font-black hover:bg-emerald-700">全文コピー</button>
+                                            <p className="text-[11px] text-slate-400 font-bold mt-2">※ Googleビジネスプロフィールを開き、各口コミに貼り付けて返信してください（返信の投稿は公式APIが無いため手動です）。</p>
+                                        </>)}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                        );
+                    })()}
+
                     {currentPage === 'faqadmin' && authState.root && (() => {
                         const shopList = (soShops.length ? soShops : soDemoShops);
                         const list = faqAdmin.list || [];
@@ -23655,6 +23800,7 @@
                     // 事業計画はスタッフ/オーナーには当面非表示（本部(hq)・管理者(root)のみ）
                     { id: 'planning', label: '事業計画', icon: <Target size={18} />, mobileIcon: <Target size={18} />, rootOnly: true },
                     { id: 'patrol', label: 'AIパトロール', icon: <span className="text-[17px] leading-none">🔎</span>, mobileIcon: <span className="text-[17px] leading-none">🔎</span>, rootOnly: true },
+                    { id: 'meo', label: 'MEO対策', icon: <span className="text-[17px] leading-none">🗺️</span>, mobileIcon: <span className="text-[17px] leading-none">🗺️</span>, rootOnly: true },
                 ] },
                 { label: '店舗運営', accent: { pill: 'bg-violet-50 text-violet-700', dot: 'bg-violet-500', chip: 'group-hover:bg-violet-50 group-hover:text-violet-600' }, items: [
                     { id: 'settlement', label: '返金明細書', icon: <Banknote size={18} />, mobileIcon: <Banknote size={18} />, hideForStaff: true },

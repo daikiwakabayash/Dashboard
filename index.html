@@ -2249,7 +2249,8 @@
                 setSoRegion(homeRegion);
             }, [authState.authenticated, authState.root, homeRegion, soShopsMine.length]);
             // 国スコープを適用した店舗（SalonOne売上・マーケの店舗ユニバース）。全体管理/組織図は soShops(全件) を使う。
-            const soShopsRegion = useMemo(() => (soShops || []).filter(s => soShopCountry(s) === soRegion), [soShops, soRegion]);
+            //   非root(owner/staff)は管轄店舗(soShopsMine)のみ＝読み込みを軽く。root/hqは全店。
+            const soShopsRegion = useMemo(() => ((authState.root ? soShops : soShopsMine) || []).filter(s => soShopCountry(s) === soRegion), [soShops, soShopsMine, authState.root, soRegion]);
             const [soStaffs, setSoStaffs] = useState([]);       // スタッフ一覧
             const [soLoading, setSoLoading] = useState(false);
             const [soError, setSoError] = useState(null);
@@ -24024,7 +24025,7 @@
                 { label: '経営・分析', accent: { pill: 'bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500', chip: 'group-hover:bg-emerald-50 group-hover:text-emerald-600' }, items: [
                     { id: 'zenkanri', label: '全体管理シート', icon: <BarChart3 size={18} />, mobileIcon: <BarChart3 size={18} /> },
                     { id: 'salonone', label: 'SalonOne売上', icon: <Calendar size={18} />, mobileIcon: <Calendar size={18} /> },
-                    { id: 'mktg', label: 'マーケティング', icon: <TrendingUp size={18} />, mobileIcon: <TrendingUp size={18} />, rootOnly: true },
+                    { id: 'mktg', label: 'マーケティング', icon: <TrendingUp size={18} />, mobileIcon: <TrendingUp size={18} /> },
                     { id: 'square', label: 'サブスク分析', icon: <CreditCard size={18} />, mobileIcon: <CreditCard size={18} /> },
                     // 事業計画はスタッフ/オーナーには当面非表示（本部(hq)・管理者(root)のみ）
                     { id: 'planning', label: '事業計画', icon: <Target size={18} />, mobileIcon: <Target size={18} />, rootOnly: true },

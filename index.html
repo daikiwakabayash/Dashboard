@@ -2007,22 +2007,24 @@
                 setAuthError('');
                 try {
                     // 高速化: settlement-auth と サロンワンSSO を並列で試行（サロンワンユーザーの待ち時間短縮）。
-                    // settlementが成功すれば優先（本社root/オーナー）、失敗ならSSOの結果を使う。
+                    // settlementが成功すれば優先（本社root/オーナー）。ただし settlement-auth(GAS)が遅い時に
+                    // サロンワンstaffが待たされるのを防ぐため settlement には短いタイムアウトを掛け、SSOへ即フォールバックする。
                     const id = authId.trim();
-                    const settlementP = fetch('/api/settlement-auth', {
+                    const rawSettlementP = fetch('/api/settlement-auth', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ action: 'login', owner: id || undefined, password: pw })
                     }).then(r => r.json()).catch(() => ({ ok: false }));
                     // root（本社）はサロンワンSSOの対象外＝無駄なリクエスト/レート消費を避ける
                     const ssoP = (id && id.toLowerCase() !== 'root') ? soLogin(id, pw) : Promise.resolve({ ok: false });
-                    const data = await settlementP;
-                    if (data.ok) {
+                    // settlement を最大3.5秒待つ（遅ければ _timeout で先に進む）
+                    const settlementFast = Promise.race([rawSettlementP, new Promise(res => setTimeout(() => res({ ok: false, _timeout: true }), 3500))]);
+                    // settlement成功時の状態反映（本社root/オーナー）
+                    const applySettlement = (data) => {
                         const role0 = data.role || (data.root ? 'root' : 'owner');
                         const eff0 = !!data.root || isHqRole(role0);           // 本部(hq)は root権限
                         const shops = eff0 ? null : (Array.isArray(data.shops) ? data.shops : []);
                         const role = role0, staffId = data.staffId || '', staffName = data.staffName || '';
-                        // まず即ログイン完了（体感速度）。role/staff の拡張情報(accountmeta)は後追いでマージ。
                         persistAuth(data.owner || '', data.token, eff0, shops, role, staffId, staffName, 'settlement');
                         setAuthState({ checking: false, authenticated: true, token: data.token, owner: data.owner || '', root: eff0, shops, role, staffId, staffName, provider: 'settlement' });
                         setAuthPassword(''); setAuthId('');
@@ -2036,25 +2038,39 @@
                                 setAuthState(s => ({ ...s, root: eff, shops: eff ? null : s.shops, role: r, staffId: si, staffName: sn }));
                             }).catch(() => {});
                         }
+                    };
+                    const applySso = (so) => {
+                        const ns = authStateFromSo(so.user);
+                        try { localStorage.setItem('naoru_so_user', JSON.stringify(so.user || {})); } catch {}
+                        persistAuth(ns.owner, ns.token, ns.root, ns.shops, ns.role, ns.staffId, ns.staffName, 'salonone');
+                        setAuthState(ns);
+                        setAuthPassword(''); setAuthId('');
+                    };
+                    const data = await settlementFast;
+                    if (data.ok) {
+                        applySettlement(data);
                     } else if (id) {
-                        // 本社/オーナー(settlement)で不一致 → 並列で走らせたサロンワンSSOの結果を使う
+                        // settlement不一致 or タイムアウト → 並列で走らせたサロンワンSSOの結果を使う（体感速度）
                         const so = await ssoP;
                         if (so.ok) {
-                            const ns = authStateFromSo(so.user);
-                            try { localStorage.setItem('naoru_so_user', JSON.stringify(so.user || {})); } catch {}
-                            persistAuth(ns.owner, ns.token, ns.root, ns.shops, ns.role, ns.staffId, ns.staffName, 'salonone');
-                            setAuthState(ns);
-                            setAuthPassword(''); setAuthId('');
+                            applySso(so);
                         } else {
-                            // サロンワン側の失敗理由を明示（settlementの誤メッセージで隠さない）
-                            const msg = so.code === 'too_many_login_attempts' ? 'ログイン試行が多すぎます。数分おいてお試しください'
-                                : so.code === 'invalid_credentials' ? 'IDまたはパスワードが正しくありません（サロンワンの最新のPASSでお試しください）'
-                                : so.code === 'user_auth_required' ? 'このキーではログインできません。管理者にご連絡ください'
-                                : (so.code ? `ログインに失敗しました（${so.code}）` : (data.error || 'IDまたはパスワードが正しくありません'));
-                            setAuthError(msg);
+                            // SSOも失敗。settlementがタイムアウトしていた可能性 → 実結果を待って再判定（オーナーの取りこぼし防止）
+                            const real = data._timeout ? await rawSettlementP : data;
+                            if (real.ok) applySettlement(real);
+                            else {
+                                const msg = so.code === 'too_many_login_attempts' ? 'ログイン試行が多すぎます。数分おいてお試しください'
+                                    : so.code === 'invalid_credentials' ? 'IDまたはパスワードが正しくありません（サロンワンの最新のPASSでお試しください）'
+                                    : so.code === 'user_auth_required' ? 'このキーではログインできません。管理者にご連絡ください'
+                                    : (so.code ? `ログインに失敗しました（${so.code}）` : (real.error || 'IDまたはパスワードが正しくありません'));
+                                setAuthError(msg);
+                            }
                         }
                     } else {
-                        setAuthError(data.error || 'ログインに失敗しました');
+                        // ID未入力（本社root共有PASS）でタイムアウトなら実結果を待つ
+                        const real = data._timeout ? await rawSettlementP : data;
+                        if (real.ok) applySettlement(real);
+                        else setAuthError(real.error || 'ログインに失敗しました');
                     }
                 } catch (err) {
                     setAuthError('サーバーに接続できません');
@@ -3120,13 +3136,20 @@
             };
 
             // ── 「AIに質問」タブ（個別のAI相談。グループ@AIと同じエンジン・同じナレッジ。他者に通知しない個人用） ──
-            const [askMsgs, setAskMsgs] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_askai_v1') || '[]'); } catch { return []; } });
+            // AIに質問の履歴は「アカウントごと」に端末保存（他のアカウントの相談内容が見えないように）。
+            //   キー = naoru_askai_v1_<staffId|owner|staffName>。同じアカウントなら履歴保持、別アカウントは別履歴。
+            const askAcctKey = `naoru_askai_v1_${authState.staffId || authState.owner || authState.staffName || 'anon'}`;
+            const [askMsgs, setAskMsgs] = useState([]);
+            const askOwnerRef = useRef('');
             const [askInput, setAskInput] = useState('');
             const [askBusy, setAskBusy] = useState(false);
             const [askImgs, setAskImgs] = useState([]);   // 添付画像 [{dataUrl, mediaType, data(base64)}]
             const askBusyRef = useRef(false);
             const askEndRef = useRef(null);
-            useEffect(() => { try { localStorage.setItem('naoru_askai_v1', JSON.stringify(askMsgs.slice(-100))); } catch {} }, [askMsgs]);
+            // アカウントが変わったら、そのアカウントの履歴を読み込む（別アカウントの内容は表示しない）
+            useEffect(() => { askOwnerRef.current = askAcctKey; try { setAskMsgs(JSON.parse(localStorage.getItem(askAcctKey) || '[]')); } catch { setAskMsgs([]); } }, [askAcctKey]);
+            // 保存は「今読み込んでいるアカウントのキー」にのみ書く（切替直後の取り違え防止）
+            useEffect(() => { if (askOwnerRef.current !== askAcctKey) return; try { localStorage.setItem(askAcctKey, JSON.stringify(askMsgs.slice(-100))); } catch {} }, [askMsgs, askAcctKey]);
             useEffect(() => { if (currentPage === 'askai') requestAnimationFrame(() => { try { askEndRef.current && askEndRef.current.scrollIntoView({ behavior: 'smooth' }); } catch {} }); }, [askMsgs, currentPage, askBusy]);
             // 画像を縮小しbase64化（Vision用・アップロードはしない）
             const askAttachImage = (file) => new Promise((resolve) => {

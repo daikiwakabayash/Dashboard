@@ -6818,9 +6818,10 @@
                     const gross = Number(raw.gross_sales != null ? raw.gross_sales : raw.digest_sales) || 0;
                     const karte = Number(raw.gross_count) || 0;                                        // カルテ枚数＝会計数
                     const newc = Number(raw.new_visit_count != null ? raw.new_visit_count : raw.new_count) || 0; // 新規来店
-                    // group_by=shop は by_staff を返さないため、セラピスト数は既存値（CSV/上書き/前回取得）を維持する。
+                    // group_by=shop は by_staff を返さないため、セラピスト数は在籍ロスター（staffs）で補完（0名だらけ防止）。無ければ既存値。
                     const prev = sh.months[ym] || (ycache[sh.id] || {})[ym] || {};
-                    const ther = hasStaff ? countTherapists(raw.by_staff || raw.byStaff || []) : (Number(prev.ther) || 0);
+                    const rosterN = stTherapistRoster(sh.id).length;
+                    const ther = hasStaff ? countTherapists(raw.by_staff || raw.byStaff || []) : (rosterN || Number(prev.ther) || 0);
                     const data = { gross, karte, newc, ther };
                     sh.months[ym] = data;
                     (ycache[sh.id] = ycache[sh.id] || {})[ym] = data;                                  // キャッシュにも保存

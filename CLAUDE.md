@@ -213,6 +213,8 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
 Googleマップの口コミ数・評価を全店で追跡し、集客増につなげる。タブ=`経営・分析`＞`MEO対策`（id=`meo`・rootのみ・?tab=meo）。
 - **データ源**: Places API (New) Text Search（`GOOGLE_PLACES_API_KEY` 必須・サーバー隠蔽）。`lib/places.js` の detailed FieldMask で 口コミ数/評価/最新5レビュー/営業時間/HP/電話/写真枚数 を取得。
 - **増減の自動反映**: 「全店スキャン」で各店を1店ずつ `?type=meo&action=scanone` に投げ、サーバーが日付つきスナップショット（`lib/meo.js` recordSnapshot）を保存。次回以降 前回比・今月新規・約30日比を算出（`computeDeltas`）。
+- **日次自動スキャン（Vercel Cron）**: `vercel.json` の `crons` が毎日 `GET /api/plan-store?type=meo&action=cronscan`（20:00 UTC=05:00 JST）を実行。全店を同時実行5・時間バジェット55秒でスキャンしスナップショットを蓄積（今日未スキャン優先・当日済みはskip・cronは旧API新着口コミ取得をスキップして高速化）。→ **翌月以降は「今月の獲得口コミ数」がスナップショット純増から手動操作なしで正確に出る**。任意で `CRON_SECRET`（Vercel環境変数）を設定するとcronのAuthorizationヘッダを検証。
+- **今月獲得口コミ数の即時推定**: スナップショットがまだ貯まっていない初回は、`reviewsInMonth`（`lib/meo.js`）で「Placesの直近レビュー(publishTime)の当月分」を下限推定として表示（≥＝5件頭打ち）。⚠️ Places API(New)は口コミを**関連度順・最大5件**でしか返さず新着が漏れるため、旧API(Place Details)の `reviews_sort=newest`（`buildLegacyReviewsRequest`/`parseLegacyReviews`）を試行するが、**キーが旧API未有効(REQUEST_DENIED)なら日次スナップショット純増が唯一の正確値**。
 - **要対応アラート**（`meoFlags`）: 口コミ<20件・評価<4.0・今月新規0件・直近★2以下・HP/電話/営業時間 未設定・写真<10枚。MEOスコア（`meoScore` 0-100）も表示。
 - **打ち手**: 各店の「口コミ依頼リンク（writereview URL）コピー」／「AIで返信下書き」（直近レビューへ・`api/chat` agent:'faq'・返信投稿はGBPで手動）／「店舗チャットに共有」。
 - ⚠️ 公式APIで取得不可: オーナー返信の有無・全口コミ・マップ検索順位。数字は捏造せずPlacesの実データのみ。

@@ -466,8 +466,61 @@ export default async function handler(req, res) {
         mapsUri: (latest && latest.mapsUri) || '',
       };
     };
+    // 1店をPlacesでスキャンして parse 済み place を返す（POST scanone と 日次cron で共用）。
+    //   withLegacy=true のときだけ旧API(新着口コミ)も試す（cronはスナップショット目的なので不要＝高速化）。
+    const scanShop = async (query, { withLegacy = true } = {}) => {
+      const def = buildSearchRequest(String(query || '').slice(0, 200), { detailed: true });
+      if (!def) return { error: 'invalid_query' };
+      const r = await fetch(def.url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': GKEY, 'X-Goog-FieldMask': def.fieldMask }, body: JSON.stringify(def.body) });
+      if (!r.ok) return { error: `places_http_${r.status}` };
+      const place = parsePlacesResponse(await r.json().catch(() => null));
+      if (!place) return { error: 'no_result' };
+      if (withLegacy) {
+        try {
+          const legReq = buildLegacyReviewsRequest(place.placeId, { sort: 'newest' });
+          if (legReq) {
+            const lj = await (await fetch(`${legReq.url}&key=${encodeURIComponent(GKEY)}`)).json().catch(() => null);
+            const newest = parseLegacyReviews(lj);
+            if (newest.length) place.reviewsNewest = newest;
+            else if (lj && lj.status && lj.status !== 'OK') place.legacyReviewsStatus = String(lj.status);
+          }
+        } catch (e) { /* 旧API不可でもNew APIの口コミで継続 */ }
+      }
+      return { place };
+    };
     try {
       if (req.method === 'GET') {
+        // ── 日次自動スキャン（Vercel Cron）: 全店を1日1回スキャンしてスナップショットを蓄積 ──
+        //   これで翌月以降は「今月の獲得口コミ数」がスナップショット純増から手動操作なしで正確に出る。
+        if (String(req.query.action || '') === 'cronscan') {
+          const secret = process.env.CRON_SECRET || '';
+          if (secret && String(req.headers.authorization || '') !== `Bearer ${secret}`) return res.status(401).json({ ok: false, error: 'unauthorized' });
+          if (!GKEY) return res.status(200).json({ ok: false, error: 'google_not_configured' });
+          const started = Date.now(); const BUDGET_MS = 55000; const today = jstYmd();
+          const cur = await loadAll();
+          const shops = { ...(cur.shops || {}) };
+          // 今日未スキャンを優先（最終スナップショット日が古い順）
+          const entries = Object.entries(shops).filter(([n, rec]) => rec && (rec.query || n))
+            .sort((a, b) => { const da = (a[1].history || []).slice(-1)[0]?.date || ''; const db = (b[1].history || []).slice(-1)[0]?.date || ''; return String(da).localeCompare(String(db)); });
+          let scanned = 0, failed = 0, skipped = 0, idx = 0;
+          const worker = async () => {
+            while (idx < entries.length) {
+              if (Date.now() - started > BUDGET_MS) return;
+              const [nm, rec] = entries[idx++];
+              if (((rec.history || []).slice(-1)[0]?.date) === today) { skipped++; continue; } // 今日は済み
+              try {
+                const { place, error } = await scanShop(rec.query || nm, { withLegacy: false });
+                if (error || !place) { failed++; continue; }
+                rec.history = recordSnapshot(rec.history, { date: today, count: place.userRatingCount, rating: place.rating });
+                rec.latest = place; rec.placeId = place.placeId || rec.placeId || ''; rec.updatedAt = new Date().toISOString();
+                scanned++;
+              } catch (e) { failed++; }
+            }
+          };
+          await Promise.all(Array.from({ length: Math.min(5, entries.length || 1) }, worker));
+          await blobSet(MEO_KEY, { shops }, hasKV, hasSB, gas);
+          return res.status(200).json({ ok: true, scanned, failed, skipped, total: entries.length, ms: Date.now() - started });
+        }
         const cur = await loadAll();
         const shops = {};
         for (const [name, rec] of Object.entries(cur.shops || {})) shops[name] = decorate(name, rec || {});
@@ -486,27 +539,13 @@ export default async function handler(req, res) {
       if (action === 'scanone' && name) {
         if (!GKEY) return res.status(200).json({ ok: false, error: 'google_not_configured', googleEnabled: false });
         const query = String(body.query || name).slice(0, 200);
-        const def = buildSearchRequest(query, { detailed: true });
-        if (!def) return res.status(400).json({ ok: false, error: 'invalid_query' });
         let place = null;
         try {
-          const r = await fetch(def.url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': GKEY, 'X-Goog-FieldMask': def.fieldMask }, body: JSON.stringify(def.body) });
-          if (!r.ok) return res.status(200).json({ ok: false, error: `places_http_${r.status}` });
-          place = parsePlacesResponse(await r.json().catch(() => null));
+          const r = await scanShop(query, { withLegacy: true }); // 手動スキャンは旧API(新着口コミ)も試す
+          if (r.error) return res.status(200).json({ ok: false, error: r.error });
+          place = r.place;
         } catch (e) { return res.status(200).json({ ok: false, error: String((e && e.message) || e) }); }
         if (!place) return res.status(200).json({ ok: false, error: 'no_result' });
-        // 「今月の新規口コミ」を掴むため、旧API(Place Details)で"新着順"の口コミも取得（キーが旧API有効時のみ）。
-        //   Places API(New) の reviews は関連度順・最大5件で今月分が漏れるため。失敗時はNew APIの口コミにフォールバック。
-        try {
-          const legReq = buildLegacyReviewsRequest(place.placeId, { sort: 'newest' });
-          if (legReq) {
-            const lr = await fetch(`${legReq.url}&key=${encodeURIComponent(GKEY)}`);
-            const lj = await lr.json().catch(() => null);
-            const newest = parseLegacyReviews(lj);
-            if (newest.length) place.reviewsNewest = newest;
-            else if (lj && lj.status && lj.status !== 'OK') place.legacyReviewsStatus = String(lj.status); // 例: REQUEST_DENIED（旧API未有効）
-          }
-        } catch (e) { /* 旧API不可でもNew APIの口コミで継続 */ }
         const cur = await loadAll();
         const shops = { ...(cur.shops || {}) };
         const prev = shops[name] || {};

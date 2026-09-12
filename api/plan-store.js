@@ -17,7 +17,8 @@ import { getVotingState, validateVote, upsertVote, removeVote, isPeriodPublished
 import { ensureBaseRooms, extractLinks, toggleReaction, genId } from '../lib/chat.js';
 import { videoEmbed } from '../lib/board.js';
 import { analyzeStore, couponReminderItems, buildStoreMessage } from '../lib/patrol.js';
-import { buildSearchRequest, parsePlacesResponse } from '../lib/places.js';
+import { buildSearchRequest, parsePlacesResponse, reviewRequestUrl } from '../lib/places.js';
+import { recordSnapshot, computeDeltas, meoFlags, meoScore, alertWeight, jstYmd } from '../lib/meo.js';
 
 // Vercel KV / Upstash Redis / Vercel Redis いずれの環境変数名でも動くよう両対応（REST APIは共通）
 const KV_URL = () => process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_REST_API_URL || '';
@@ -52,6 +53,7 @@ const KNOWLEDGE_KEY = 'naoru:knowledge:v1';   // { docs:[{id,title,body,shopScop
 const KNOWCAND_KEY = 'naoru:knowcand:v1';     // { cands:[{id,ts,roomId,shop,fromName,question,answer}] } 本部チャット回答のナレッジ候補（承認でFAQ化）
 const PATROL_KEY = 'naoru:patrol:v1';         // { addresses:{shopName:{hp,hotpepper}}, queries:{shopName:検索クエリ} } AIパトロール設定（住所照合・Google検索クエリ上書き）
 const ACQEXCLUDE_KEY = 'naoru:acqexclude:v1'; // { ids:{ customer_id: {by,name,shop,at} } } マーケ集計から手動除外した予約（スタッフのテスト予約でキャンセル率等が狂うのを防ぐ・全社共有）
+const MEO_KEY = 'naoru:meo:v1';               // { shops:{ 店舗名:{ history:[{date,count,rating}], latest:{...Places}, placeId, query, updatedAt } } } MEO（Googleマップ）口コミ数・評価の履歴と最新情報
 
 // ── Webプッシュ送信（VAPID設定時のみ動作・未設定なら黙ってスキップ） ──
 const VAPID_PUBLIC = () => process.env.VAPID_PUBLIC_KEY || '';
@@ -396,6 +398,72 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, ids: next });
       }
       return res.status(400).json({ ok: false, error: 'invalid acqexclude action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── MEO（Googleマップ最適化）: ?type=meo ──
+  // 各店の口コミ数・評価の履歴を保存し、増減トレンド・要対応アラート・口コミ依頼リンクを返す。
+  // scanone=1店をPlacesで取得しスナップショット保存（フロントが全店ぶんループ）。GOOGLE_PLACES_API_KEY 未設定でも履歴表示は可能。
+  const isMeo = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'meo';
+  if (isMeo) {
+    const GKEY = process.env.GOOGLE_PLACES_API_KEY || '';
+    const googleEnabled = !!GKEY;
+    const hasStore = !!(hasKV || hasSB || gas);
+    if (!hasStore) return res.status(200).json({ shops: {}, googleEnabled, configured: false });
+    const loadAll = async () => { const c = (await blobGet(MEO_KEY, hasKV, hasSB, gas)) || {}; return (c.shops && typeof c.shops === 'object') ? c : { shops: {} }; };
+    // 1店の履歴＋最新から、表示用（増減・アラート・スコア・口コミ依頼URL）を組み立てる
+    const decorate = (name, rec) => {
+      const history = Array.isArray(rec.history) ? rec.history : [];
+      const latest = (rec.latest && typeof rec.latest === 'object') ? rec.latest : {};
+      const deltas = computeDeltas(history);
+      return {
+        name, placeId: rec.placeId || '', query: rec.query || '', updatedAt: rec.updatedAt || '',
+        latest, history, deltas,
+        flags: meoFlags(latest, deltas), score: meoScore(latest),
+        reviewUrl: reviewRequestUrl(rec.placeId || (latest && latest.placeId) || ''),
+        mapsUri: (latest && latest.mapsUri) || '',
+      };
+    };
+    try {
+      if (req.method === 'GET') {
+        const cur = await loadAll();
+        const shops = {};
+        for (const [name, rec] of Object.entries(cur.shops || {})) shops[name] = decorate(name, rec || {});
+        return res.status(200).json({ shops, googleEnabled, configured: true });
+      }
+      const body = req.body || {};
+      const action = String(body.action || '');
+      const name = String(body.name || '').slice(0, 80);
+      if (action === 'setquery' && name) {
+        const cur = await loadAll();
+        const shops = { ...(cur.shops || {}) };
+        shops[name] = { ...(shops[name] || {}), query: String(body.query || '').slice(0, 200) };
+        await blobSet(MEO_KEY, { shops }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, shop: decorate(name, shops[name]) });
+      }
+      if (action === 'scanone' && name) {
+        if (!GKEY) return res.status(200).json({ ok: false, error: 'google_not_configured', googleEnabled: false });
+        const query = String(body.query || name).slice(0, 200);
+        const def = buildSearchRequest(query, { detailed: true });
+        if (!def) return res.status(400).json({ ok: false, error: 'invalid_query' });
+        let place = null;
+        try {
+          const r = await fetch(def.url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': GKEY, 'X-Goog-FieldMask': def.fieldMask }, body: JSON.stringify(def.body) });
+          if (!r.ok) return res.status(200).json({ ok: false, error: `places_http_${r.status}` });
+          place = parsePlacesResponse(await r.json().catch(() => null));
+        } catch (e) { return res.status(200).json({ ok: false, error: String((e && e.message) || e) }); }
+        if (!place) return res.status(200).json({ ok: false, error: 'no_result' });
+        const cur = await loadAll();
+        const shops = { ...(cur.shops || {}) };
+        const prev = shops[name] || {};
+        const history = recordSnapshot(prev.history, { date: jstYmd(), count: place.userRatingCount, rating: place.rating });
+        shops[name] = { history, latest: place, placeId: place.placeId || prev.placeId || '', query, updatedAt: new Date().toISOString() };
+        await blobSet(MEO_KEY, { shops }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, shop: decorate(name, shops[name]) });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid meo action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
     }

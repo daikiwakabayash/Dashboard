@@ -4628,6 +4628,15 @@
             // ── 全体管理シート（店舗×月のマトリクス）状態 ──
             const [zkData, setZkData] = useState(null);          // { year, months:[YYYY-MM], shops:[{id,name,therapist,months:{ym:{gross,karte,newc}}}] }
             const [zkLoading, setZkLoading] = useState(false);
+            const zkScrollRef = useRef(null);                    // 全体管理シートのスクロール枠（開いたとき当月＝最下部へ自動スクロール）
+            const zkScrolledRef = useRef(false);
+            // 全体管理シートを開いたら、当月（最下行）が見えるよう自動で最下部までスクロール（1回だけ）。
+            useEffect(() => {
+                if (currentPage !== 'zenkanri') { zkScrolledRef.current = false; return; }
+                if (!zkData || zkScrolledRef.current) return;
+                zkScrolledRef.current = true;
+                requestAnimationFrame(() => setTimeout(() => { try { const el = zkScrollRef.current; if (el) el.scrollTop = el.scrollHeight; } catch {} }, 200));
+            }, [currentPage, zkData]);
             const [zkProgress, setZkProgress] = useState({ done: 0, total: 0 });
             const [zkError, setZkError] = useState(null);
             const [zkYear, setZkYear] = useState(new Date().getFullYear());
@@ -4787,6 +4796,7 @@
             // 事業計画相談: SalonOneデータ駆動（店舗選択・月次実績）
             const [planSoShopId, setPlanSoShopId] = useState('');   // 選択中SalonOne店舗ID（''=全店）
             const [planSoData, setPlanSoData] = useState(null);     // SalonOne月次実績 { shopId, months:[{month,summary,channels,retention}] }
+            const [planMonthSel, setPlanMonthSel] = useState('');   // 事業計画の対象月（''=最新月／'YYYY-MM'）。前月対比もこの月基準
             const [planSoLoading, setPlanSoLoading] = useState(false);
             const planSoReqRef = useRef(0);
             // staffが事業計画を開いたら自分の店舗の計画を自動表示
@@ -11167,11 +11177,15 @@
                     const mktNew = (row.channels || []).reduce((a, c) => a + (c.visit || 0), 0);
                     const cpa = adSpend > 0 && mktNew > 0 ? Math.round(adSpend / mktNew) : 0;
                     return { sales, newVisit, joins, enrollRate, churnRate, adSpend, cpa,
+                             activeCount: num(rt, 'active_count'),
                              newSales: s ? (s.newSales || 0) : 0, repeatSales: s ? (s.repeatSales || 0) : 0 };
                 };
                 const withData = (planSoData.months || []).filter(r => r.summary || (r.retention && r.retention.summary));
-                const latest = withData[withData.length - 1] || null;
-                const prev = withData[withData.length - 2] || null;
+                // 対象月（planMonthSel）が指定されていればその月を、無ければ最新月を「当月」とする。前月対比はその1つ前の月。
+                let latIdx = withData.length - 1;
+                if (planMonthSel) { const i = withData.findIndex(r => String(r.month) === String(planMonthSel)); if (i >= 0) latIdx = i; }
+                const latest = withData[latIdx] || null;
+                const prev = withData[latIdx - 1] || null;
                 const cur = latest ? rowMetrics(latest) : { sales: 0, newVisit: 0, joins: 0, enrollRate: 0, churnRate: 0, adSpend: 0, cpa: 0 };
                 const pv = prev ? rowMetrics(prev) : { sales: 0, newVisit: 0, joins: 0, adSpend: 0 };
                 const mediaBreakdown = ((latest && latest.channels) || []).map(c => ({
@@ -11193,7 +11207,7 @@
                     latestMonth: latest ? ymLabel(latest.month) : '', prevMonth: prev ? ymLabel(prev.month) : '',
                     totalSales: cur.sales, totalNewCount: cur.newVisit, totalNewEnroll: cur.joins, enrollRate: cur.enrollRate,
                     churnRate: cur.churnRate, cpa: cur.cpa, totalAdSpend: cur.adSpend, prevSales: pv.sales, prevNewCount: pv.newVisit,
-                    newSales: cur.newSales, repeatSales: cur.repeatSales,
+                    newSales: cur.newSales, repeatSales: cur.repeatSales, activeMembers: cur.activeCount || 0,
                     // 前月値（前月対比の即時表示用）
                     prevEnrollRate: pv.enrollRate || 0, prevChurnRate: pv.churnRate || 0, prevCpa: pv.cpa || 0,
                     prevNewSales: pv.newSales || 0, prevRepeatSales: pv.repeatSales || 0, prevNewEnroll: pv.joins || 0,
@@ -18860,7 +18874,7 @@
                                         <span className="text-xs font-black text-slate-600 w-10 text-center">{Math.round(zkZoom * 100)}%</span>
                                         <button onClick={() => setZkZoom(z => Math.min(1, Math.round((z + 0.1) * 10) / 10))} disabled={zkZoom >= 1} className="w-7 h-7 flex items-center justify-center bg-white border border-slate-200 rounded-lg text-slate-600 font-black hover:bg-slate-50 disabled:opacity-40">＋</button>
                                     </div>
-                                    <div className="block overflow-auto rounded-2xl border border-slate-200 bg-white shadow-sm" style={{ maxHeight: '90vh', WebkitOverflowScrolling: 'touch' }}>
+                                    <div ref={zkScrollRef} className="block overflow-auto rounded-2xl border border-slate-200 bg-white shadow-sm" style={{ maxHeight: '90vh', WebkitOverflowScrolling: 'touch' }}>
                                         <table className="border-collapse" style={{ minWidth: 'max-content', fontSize: '13px', zoom: zkZoom }}>
                                             <tbody>
                                                 {months.map((ym, mi) => {
@@ -20659,6 +20673,11 @@
                                 <h2 className="text-lg md:text-2xl font-black italic flex items-center gap-2">
                                     <Target size={24} className="text-brand-500" /> 事業計画相談
                                 </h2>
+                                <div className="flex items-center gap-2 flex-wrap">
+                                <select value={planMonthSel} onChange={(e) => { setPlanMonthSel(e.target.value); setPlanMessages([]); }} title="事業計画の対象月（前月対比もこの月基準）" className="px-3 py-2 md:py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs md:text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-brand-400">
+                                    <option value="">最新月（自動）</option>
+                                    {(((planSoData && planSoData.months) || []).filter(m => m && m.month).map(m => m.month).sort().reverse()).map(ym => { const [y, mo] = String(ym).split('-'); return <option key={ym} value={ym}>{`${y}年${parseInt(mo)}月`}</option>; })}
+                                </select>
                                 <div className="relative flex-1 sm:flex-none" ref={planBranchMenuRef}>
                                     <button
                                         onClick={() => setPlanBranchMenuOpen(!planBranchMenuOpen)}
@@ -20693,6 +20712,7 @@
                                         </div>
                                     </PortalDropdown>
                                 </div>
+                                </div>
                             </div>
 
                             {(() => {
@@ -20709,13 +20729,15 @@
                                 const repeatMoM = pctMoM(a.repeatSales || 0, a.prevRepeatSales || 0);
                                 const enrollDelta = hasPrev ? (a.enrollRate - (a.prevEnrollRate || 0)) : null;
                                 const churnDelta = hasPrev ? (a.churnRate - (a.prevChurnRate || 0)) : null;
-                                // 前月対比バッジ生成: pt=ポイント差(率指標) / invert=下降が良い指標(退会率・CPA)
+                                // 前月対比バッジ生成: pt=率指標の差(入会率/退会率) / invert=下降が良い指標(退会率・CPA)
+                                // ※表記は全て「%」・小数点は四捨五入で削る（例: +13.77 → +14%）。
                                 const mkDelta = (val, opt = {}) => {
                                     if (val == null || (typeof val === 'number' && isNaN(val))) return null;
                                     const pt = !!opt.pt, invert = !!opt.invert;
-                                    const dir = val > 0 ? 'up' : val < 0 ? 'down' : null;
-                                    const good = val === 0 ? true : (invert ? val < 0 : val > 0);
-                                    const txt = (pt ? '前月差 ' : '前月比 ') + (val >= 0 ? '+' : '') + val + (pt ? 'pt' : '%');
+                                    const v = Math.round(val);
+                                    const dir = v > 0 ? 'up' : v < 0 ? 'down' : null;
+                                    const good = v === 0 ? true : (invert ? v < 0 : v > 0);
+                                    const txt = (pt ? '前月差 ' : '前月比 ') + (v >= 0 ? '+' : '') + v + '%';
                                     return { txt, dir, good };
                                 };
                                 const kpis = [
@@ -20840,6 +20862,8 @@
                                                 if (matched && matched.arpu > 0) { arpu = Math.round(matched.arpu); arpuScope = '当店'; }
                                                 else if (sqMetrics.arpu > 0) { arpu = Math.round(sqMetrics.arpu); arpuScope = '全店'; }
                                             }
+                                            // Squareが無くてもSalonOneだけで自動計算するフォールバック: ARPU ≒ 継続売上 ÷ 在籍会員数
+                                            if (arpu === 0 && (a.activeMembers || 0) > 0 && (a.repeatSales || 0) > 0) { arpu = Math.round(a.repeatSales / a.activeMembers); arpuScope = 'SalonOne(継続売上÷会員数)'; }
                                             // LTV = 1人あたり月平均売上 × 平均継続月数
                                             let ltv = 0, ltvEst = false;
                                             if (arpu > 0 && retentionMonths > 0) { ltv = arpu * retentionMonths; }
@@ -20896,9 +20920,9 @@
                                                             </div>
                                                         ))}
                                                     </div>
-                                                    {!sqMetrics && (
+                                                    {ltv === 0 && (
                                                         <p className="text-[10px] text-amber-500 font-bold mt-2 leading-relaxed">
-                                                            ※ LTV・Unit Economics は「サブスク分析（Square）」の読み込み後に表示されます。
+                                                            ※ LTV・Unit Economics は 継続売上と在籍会員数（SalonOne）または「サブスク分析（Square）」から自動計算されます。データ取得後に表示されます。
                                                         </p>
                                                     )}
                                                 </div>

@@ -4,6 +4,44 @@ import {
   buildStoreMessage, summarizeReports, PATROL_THRESHOLDS,
 } from '../lib/patrol.js';
 
+describe('月の進捗を考慮した按分（フロー指標）', () => {
+  const store = { name: 'A', cur: { newCount: 5, gross: 153460, joinRate: 40, hasData: true }, prev: { newCount: 17, gross: 478800, hasData: true } };
+  it('月初(12/30経過)は「前月ペース比」で判定＝単純な-71%では警告しない', () => {
+    // 前月17名×(12/30)=6.8名が基準 → 今月5名は pace -26% だが、着地見込みは 12〜13名
+    const r = analyzeStore(store, PATROL_THRESHOLDS, { progress: 12 / 30, elapsedDays: 12, totalDays: 30 });
+    const nd = r.items.find(i => i.code === 'new_drop');
+    // 着地見込みが前月17に近い/上回るケースは警告文言に「ペース比」「着地見込」が入る
+    if (nd) expect(nd.title).toMatch(/ペース比|着地見込/);
+    // 売上も同様にペース比で判定
+    const sd = r.items.find(i => i.code === 'sales_drop');
+    if (sd) expect(sd.title).toMatch(/ペース比|着地見込/);
+  });
+  it('確定月(progress=1)は従来どおり単純な前月比', () => {
+    const r = analyzeStore(store, PATROL_THRESHOLDS, { progress: 1 });
+    const nd = r.items.find(i => i.code === 'new_drop');
+    expect(nd).toBeTruthy();
+    expect(nd.title).toContain('前月比');
+  });
+  it('入会率は比率指標なので按分の影響を受けない', () => {
+    const s2 = { name: 'B', cur: { newCount: 10, gross: 100, joinRate: 20, hasData: true }, prev: { newCount: 10, gross: 100, hasData: true } };
+    const r = analyzeStore(s2, PATROL_THRESHOLDS, { progress: 0.4, elapsedDays: 12, totalDays: 30 });
+    expect(r.items.find(i => i.code === 'join_low')).toBeTruthy();
+  });
+});
+
+describe('MEO: 新規来店に対する口コミ獲得率', () => {
+  it('新規が多いのに今月口コミが少ないと警告', () => {
+    const store = { name: 'C', cur: { newCount: 20, gross: 100, joinRate: 40, hasData: true }, prev: { newCount: 20, gross: 100, hasData: true }, meo: { newReviewsThisMonth: 1, totalReviews: 80 } };
+    const r = analyzeStore(store, PATROL_THRESHOLDS, { progress: 1 });
+    expect(r.items.find(i => i.code === 'meo_capture_low')).toBeTruthy();
+  });
+  it('獲得率が高ければ good', () => {
+    const store = { name: 'D', cur: { newCount: 20, gross: 100, joinRate: 40, hasData: true }, prev: { newCount: 20, gross: 100, hasData: true }, meo: { newReviewsThisMonth: 8, totalReviews: 80 } };
+    const r = analyzeStore(store, PATROL_THRESHOLDS, { progress: 1 });
+    expect(r.items.find(i => i.code === 'meo_capture_ok')).toBeTruthy();
+  });
+});
+
 const codes = (r) => r.items.map(i => i.code);
 
 describe('pctChange', () => {

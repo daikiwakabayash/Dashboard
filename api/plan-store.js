@@ -715,6 +715,15 @@ export default async function handler(req, res) {
         const wantPlaces = body.wantPlaces !== false && googleEnabled;
         const jstNow = new Date(Date.now() + 9 * 3600 * 1000); // JST基準でクーポン月初判定
         const couponItems = couponReminderItems(jstNow);       // 月初のみ（各店メッセージに合流）
+        // 月の進捗（当月は途中経過なのでフロー指標を按分比較する）。elapsed/total（JST基準）。
+        const elapsedDays = jstNow.getUTCDate();
+        const totalDays = new Date(Date.UTC(jstNow.getUTCFullYear(), jstNow.getUTCMonth() + 1, 0)).getUTCDate();
+        const progress = totalDays > 0 ? elapsedDays / totalDays : 1;
+        const anOpts = { progress, elapsedDays, totalDays };
+        // MEOスナップショット（口コミの今月増加数）を店舗名でひける形にする（あれば口コミ獲得率チェックに使う）。
+        let meoShops = {};
+        try { const mc = (await blobGet(MEO_KEY, hasKV, hasSB, gas)) || {}; meoShops = (mc.shops && typeof mc.shops === 'object') ? mc.shops : {}; } catch { meoShops = {}; }
+        const meoFor = (nm) => { const rec = meoShops[nm]; if (!rec || !Array.isArray(rec.history)) return null; const dl = computeDeltas(rec.history); return { newReviewsThisMonth: dl.newThisMonth, totalReviews: dl.count }; };
         const reports = [];
         for (const st of stores) {
           const name = String((st && st.name) || '');
@@ -726,7 +735,7 @@ export default async function handler(req, res) {
             if (p && !p.error) places = p; else if (p && p.error) placesError = p.error;
             await new Promise(r => setTimeout(r, 120)); // Places レート制限に配慮
           }
-          const rep = analyzeStore({ name, cur: (st && st.cur) || {}, prev: (st && st.prev) || {}, places, addresses: addresses[name] || {} });
+          const rep = analyzeStore({ name, cur: (st && st.cur) || {}, prev: (st && st.prev) || {}, places, addresses: addresses[name] || {}, meo: meoFor(name) }, undefined, anOpts);
           const items = [...rep.items, ...couponItems];
           const message = buildStoreMessage(name, items, { date: jstNow });
           reports.push({ shop: name, items, places, placesError, message });

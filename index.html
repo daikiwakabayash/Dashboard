@@ -7152,10 +7152,13 @@
             // 店舗別タブ／マーケタブを開いたら（期間変更時も）全店を出店順で集計。マーケの店舗×媒体一覧も同データを使用。
             const soShopLoadedKeyRef = useRef('');
             useEffect(() => {
-                if (currentPage !== 'salonone' || !soShops.length) return;
-                if (soView !== 'shops' && soView !== 'marketing') return;
+                if (!soShops.length) return;
+                // 店舗別売上タブ（shops/marketing）に加え、マーケティングタブの店舗系ビューでも取得しておく。
+                // → 店舗別/店舗×媒体コホートの広告費（SalonOne by-channel由来）＝CPA/CAC/ROAS をSalonOneの入力から自動反映するため。
+                const onSalonShops = currentPage === 'salonone' && (soView === 'shops' || soView === 'marketing');
+                const onMktg = currentPage === 'mktg' && ['acq', 'storemedia', 'customers', 'forced'].includes(soView);
+                if (!onSalonShops && !onMktg) return;
                 const key = `${soFrom}_${soTo}`;
-                // 同一期間で取得済み（実データあり）なら再取得しない（shops↔marketing切替の二重取得を防止）
                 if (soShopLoadedKeyRef.current === key && soShopRows.some(r => r.active && !r.loading)) return;
                 soShopLoadedKeyRef.current = key;
                 loadShopBreakdown();
@@ -17280,7 +17283,11 @@
                                         const _adRange = `${soFrom}_${soTo}`;
                                         const _adBucket = (soAdSpend && soAdSpend[_adRange]) || {};
                                         const _adShopsMap = (_adBucket.__shops__ && typeof _adBucket.__shops__ === 'object') ? _adBucket.__shops__ : {};
-                                        const adForShop = (shopName) => { for (const [nm, row] of Object.entries(_adShopsMap)) { if (soShopNorm(nm) === soShopNorm(shopName)) return (row && typeof row === 'object') ? row : {}; } return {}; };
+                                        // SalonOne由来の店舗別広告費（by-channel ad_spend）を soShopRows から取り込む＝SalonOneに入力した広告費を自動反映。
+                                        //   { 正規化店舗名: { 媒体: 円 } }。SalonOneに値があればこれを優先し、無ければ手動入力ストア(_adShopsMap)にフォールバック。
+                                        const _soAdByShop = {};
+                                        (soShopRows || []).forEach(r => { if (!r || !r.name || !Array.isArray(r.channels)) return; const by = {}; let tot = 0; r.channels.forEach(c => { const v = Number(c.adSpend) || 0; if (c.name && v > 0) { by[c.name] = (by[c.name] || 0) + v; tot += v; } }); if (tot > 0) _soAdByShop[soShopNorm(r.name)] = by; });
+                                        const adForShop = (shopName) => { const so = _soAdByShop[soShopNorm(shopName)]; if (so) return so; for (const [nm, row] of Object.entries(_adShopsMap)) { if (soShopNorm(nm) === soShopNorm(shopName)) return (row && typeof row === 'object') ? row : {}; } return {}; };
                                         const adShopTotal = (shopName) => { const r = adForShop(shopName); return Object.values(r).reduce((a, v) => a + (Number(v) || 0), 0); };
                                         // 出店順（SO_SHOP_ORDER）で店舗を並べるためのインデックス。名称は soPlanCoreOf で正規化して照合。
                                         const _shopOrderIdx = {}; SO_SHOP_ORDER.forEach((n, i) => { _shopOrderIdx[soPlanCoreOf(n)] = i; });

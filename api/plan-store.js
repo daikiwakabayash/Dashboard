@@ -17,7 +17,7 @@ import { getVotingState, validateVote, upsertVote, removeVote, isPeriodPublished
 import { ensureBaseRooms, extractLinks, toggleReaction, genId } from '../lib/chat.js';
 import { videoEmbed } from '../lib/board.js';
 import { analyzeStore, couponReminderItems, buildStoreMessage } from '../lib/patrol.js';
-import { buildSearchRequest, parsePlacesResponse, reviewRequestUrl } from '../lib/places.js';
+import { buildSearchRequest, parsePlacesResponse, reviewRequestUrl, buildLegacyReviewsRequest, parseLegacyReviews } from '../lib/places.js';
 import { recordSnapshot, computeDeltas, meoFlags, meoScore, alertWeight, jstYmd, reviewsInMonth } from '../lib/meo.js';
 
 // Vercel KV / Upstash Redis / Vercel Redis いずれの環境変数名でも動くよう両対応（REST APIは共通）
@@ -448,9 +448,12 @@ export default async function handler(req, res) {
       const latest = (rec.latest && typeof rec.latest === 'object') ? rec.latest : {};
       const deltas = computeDeltas(history);
       // 「今月獲得口コミ数」の即時推定（スナップショット履歴が1点だけの初回でも出す）。
-      //   Placesが返す直近レビュー（最大5件）の publishTime から当月分をカウント＝下限値。
-      //   スナップショット純増(deltas.newThisMonth)が計測可能ならそちらを正、なければこの下限値を採用。
-      const seen = reviewsInMonth((latest && Array.isArray(latest.reviews)) ? latest.reviews : []);
+      //   旧API(Place Details)で取れた"新着順"口コミ(reviewsNewest)を優先。無ければ New APIの関連度順レビューで代替。
+      //   publishTime から当月分をカウント＝下限値（5件返却の頭打ちあり）。スナップショット純増が測れればそれを正。
+      const revForMonth = (latest && Array.isArray(latest.reviewsNewest) && latest.reviewsNewest.length)
+        ? latest.reviewsNewest
+        : ((latest && Array.isArray(latest.reviews)) ? latest.reviews : []);
+      const seen = reviewsInMonth(revForMonth);
       const monthReviews = (typeof deltas.newThisMonth === 'number')
         ? { value: deltas.newThisMonth, source: 'snapshot', atLeast: false }   // 履歴からの純増（正確）
         : { value: seen.count, source: 'recent', atLeast: !!seen.capped };     // 直近レビューからの下限推定
@@ -492,6 +495,18 @@ export default async function handler(req, res) {
           place = parsePlacesResponse(await r.json().catch(() => null));
         } catch (e) { return res.status(200).json({ ok: false, error: String((e && e.message) || e) }); }
         if (!place) return res.status(200).json({ ok: false, error: 'no_result' });
+        // 「今月の新規口コミ」を掴むため、旧API(Place Details)で"新着順"の口コミも取得（キーが旧API有効時のみ）。
+        //   Places API(New) の reviews は関連度順・最大5件で今月分が漏れるため。失敗時はNew APIの口コミにフォールバック。
+        try {
+          const legReq = buildLegacyReviewsRequest(place.placeId, { sort: 'newest' });
+          if (legReq) {
+            const lr = await fetch(`${legReq.url}&key=${encodeURIComponent(GKEY)}`);
+            const lj = await lr.json().catch(() => null);
+            const newest = parseLegacyReviews(lj);
+            if (newest.length) place.reviewsNewest = newest;
+            else if (lj && lj.status && lj.status !== 'OK') place.legacyReviewsStatus = String(lj.status); // 例: REQUEST_DENIED（旧API未有効）
+          }
+        } catch (e) { /* 旧API不可でもNew APIの口コミで継続 */ }
         const cur = await loadAll();
         const shops = { ...(cur.shops || {}) };
         const prev = shops[name] || {};

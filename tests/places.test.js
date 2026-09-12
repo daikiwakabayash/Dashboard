@@ -2,7 +2,39 @@ import { describe, it, expect } from 'vitest';
 import {
   buildSearchRequest, parsePlacesResponse, normalizeAddress, addressMatch,
   PLACES_TEXT_SEARCH_URL, PLACES_FIELD_MASK,
+  buildLegacyReviewsRequest, parseLegacyReviews,
 } from '../lib/places.js';
+
+describe('buildLegacyReviewsRequest（旧API・新着口コミ）', () => {
+  it('placeIdが空なら null', () => {
+    expect(buildLegacyReviewsRequest('')).toBeNull();
+  });
+  it('reviews_sort=newest と fields=reviews を含む（keyは含めない）', () => {
+    const req = buildLegacyReviewsRequest('ChIJxxxx', { sort: 'newest' });
+    expect(req.url).toContain('place_id=ChIJxxxx');
+    expect(req.url).toContain('reviews_sort=newest');
+    expect(req.url).toContain('fields=reviews');
+    expect(req.url).not.toContain('key=');
+  });
+});
+
+describe('parseLegacyReviews（旧API口コミ整形）', () => {
+  it('status!=OK は空配列（旧API未有効などのフォールバック）', () => {
+    expect(parseLegacyReviews({ status: 'REQUEST_DENIED' })).toEqual([]);
+    expect(parseLegacyReviews(null)).toEqual([]);
+  });
+  it('time(UNIX秒)を publishTime(ISO) に変換し最大5件', () => {
+    const t = Math.floor(Date.UTC(2026, 8, 10, 3, 0, 0) / 1000); // 2026-09-10
+    const j = { status: 'OK', result: { reviews: [
+      { rating: 5, text: 'よかった', author_name: '田中', relative_time_description: '1週間前', time: t },
+      ...Array.from({ length: 6 }, () => ({ rating: 4, text: 'x', time: t })),
+    ] } };
+    const out = parseLegacyReviews(j);
+    expect(out.length).toBe(5);
+    expect(out[0].publishTime).toBe(new Date(t * 1000).toISOString());
+    expect(out[0].author).toBe('田中');
+  });
+});
 
 describe('buildSearchRequest', () => {
   it('空クエリは null', () => {

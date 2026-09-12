@@ -4786,7 +4786,12 @@
                         const per = await Promise.all(ids.map(id => fetchOne(id)));
                         rows = per.flat();
                     } else {
-                        rows = await fetchOne(''); // 日本は全店1リクエスト
+                        // 日本: 全店1リクエスト － ただし海外(Australia/Malaysia)の強制リンクは除外（別管理のため）。
+                        //   海外店舗は少数なので per-shop で取得し、その forced_link_id をブランド全店結果から差し引く。
+                        const overseasIds = (soShopsRaw || []).filter(s => soShopCountry(s) !== 'jp').map(s => String(s.id));
+                        const [brandRows, ...ovArrs] = await Promise.all([fetchOne(''), ...overseasIds.map(id => fetchOne(id))]);
+                        const exclude = new Set(ovArrs.flat().map(r => String(r.forced_link_id)));
+                        rows = (brandRows || []).filter(r => !exclude.has(String(r.forced_link_id)));
                     }
                     setAcqForced(rows); acqCachePut('naoru_acqforced_v1', key, rows, 8);
                 } catch { if (!(cached && cached.rows)) setAcqForced([]); acqForcedKeyRef.current = ''; }
@@ -7091,7 +7096,23 @@
                             const [ch, st, rt] = await Promise.all([fetchResource('marketing/by-channel'), fetchResource('marketing/by-staff'), fetchResource('marketing/retention')]);
                             if (stale()) return; // 店舗が切り替わっていたら古いマーケ応答を破棄
                             const okData = arr => arr.filter(r => r.status === 200).map(r => (r.json && r.json.data) || []);
-                            setSoChannels(normalizeMkChannels({ data: soMergeChannels(okData(ch)) }));
+                            let mergedCh = soMergeChannels(okData(ch));
+                            // ★日本(全店・未選択)はブランド全店集計に Australia/Malaysia の媒体別が混ざるため、海外店舗ぶんを差し引く（別管理）
+                            if (soRegion === 'jp' && !ids.length) {
+                                const ovIds = (soShopsRaw || []).filter(s => soShopCountry(s) !== 'jp').map(s => String(s.id));
+                                if (ovIds.length) {
+                                    const ovRes = await Promise.all(ovIds.map(id => soDoOne('marketing/by-channel', id, {})));
+                                    if (!stale()) {
+                                        const ovMerged = soMergeChannels(ovRes.filter(r => r.status === 200).map(r => (r.json && r.json.data) || []));
+                                        const ovMap = {}; ovMerged.forEach(c => { ovMap[c.name] = c; });
+                                        const NUM = ['booking_count', 'visit_count', 'remaining_count', 'cancel_count', 'join_count', 'sales', 'ad_spend', 'impressions', 'clicks'];
+                                        mergedCh = mergedCh.map(c => { const o = ovMap[c.name]; if (!o) return c; const r = { ...c }; NUM.forEach(x => { r[x] = Math.max(0, (Number(c[x]) || 0) - (Number(o[x]) || 0)); }); return r; })
+                                            .filter(c => NUM.some(x => (Number(c[x]) || 0) > 0));
+                                    }
+                                }
+                            }
+                            if (stale()) return;
+                            setSoChannels(normalizeMkChannels({ data: mergedCh }));
                             setSoStaffMk(normalizeMkStaff({ data: soMergeMkStaff(okData(st)) }));
                             setSoRetention(normalizeMkRetention(soMergeRetention(rt.filter(r => r.status === 200).map(r => (r.json && r.json.data) || r.json))));
                         } catch (e) { console.error('[salonone] marketing fetch error:', e); }

@@ -35,10 +35,15 @@ describe('computeDeltas', () => {
     expect(d.delta30).toBe(8);            // 約30日前(8/5=30)→38
     expect(d.hasHistory).toBe(true);
   });
-  it('履歴1件なら比較なし', () => {
+  it('履歴1件なら比較なし・今月新規は計測不能(null)', () => {
     const d = computeDeltas([{ date: '2026-09-12', count: 10, rating: 4.0 }], jst(2026, 9, 12));
     expect(d.deltaPrev).toBe(null);
+    expect(d.newThisMonth).toBe(null);   // 基準が1点だけ＝±0ではなく「—」
     expect(d.hasHistory).toBe(false);
+  });
+  it('先月末の基準があれば今月新規を算出', () => {
+    const d = computeDeltas([{ date: '2026-08-31', count: 30, rating: 4.2 }, { date: '2026-09-12', count: 35, rating: 4.3 }], jst(2026, 9, 12));
+    expect(d.newThisMonth).toBe(5); // 8/31基準(30)→35
   });
 });
 

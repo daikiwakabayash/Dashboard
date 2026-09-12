@@ -50,7 +50,7 @@ api/                # ⚠️ Vercel Hobbyの関数数上限(12)対策で「1エ�
   feedback.js       # フィードバックAPI（GAS連携・取得/送信）
   health.js         # ヘルスチェック（env.planStore で保存先の有効状態も返す）
   salonone.js       # SalonOne 分析APIプロキシ（APIキー隠蔽・GET限定・許可リスト）
-  plan-store.js     # SalonOne計画の目標・アクション共有ストア（全デバイス同期）。保存先=Vercel KV(推奨) or Supabase or GAS。未設定時はlocalStorage継続。?type=allowance で手当（領収書）の提出・個人別生産性も同ストアに保存（submit/delete/recordProductivity）。?type=thanksgift でサンクスギフト投票を保存（vote/delete・投票期間と自分不可はサーバー側でも強制）。?type=chat で社内チャット（rooms/messages/reads/dir・画像別キー）。?type=board で掲示板（全社発信）を保存（post/comment/deleteComment/uploadImage/uploadFile/pin/delete/read・画像はchatと同じ別キー、ファイルは naoru:board:file:<id>）。コメントは post.comments[{id,parentId,fromStaffId,fromName,text,mentions,createdAt}]＝投稿への返信・@メンション対応（メンション/返信先/投稿者へweb-push通知）。?type=push でWebプッシュ購読（config/subscribe/unsubscribe）。掲示板投稿・グループ/DM/全社アナウンスのチャット送信時に、購読者へ web-push で通知送信（VAPID未設定なら無効）。?type=chat で社内チャットを保存（rooms/messages/reads/dir・画像は別キー naoru:chat:img:<id>・ensureRooms/createRoom/send/react/read/uploadImage/deleteMsg/deleteRoom）。?type=patrol でAIパトロール（analyze=各店のSalonOne実績＋Googleマップを`lib/patrol.js`/`lib/places.js`で分析し注意喚起項目＋店舗チャット文面を返す／places=単店ルックアップ／config=住所照合・検索クエリ保存 naoru:patrol:v1）。GoogleはPlaces API(New)・`GOOGLE_PLACES_API_KEY`未設定でもSalonOneのみで動作。?type=acqexclude でマーケ集計の手動除外（テスト予約対策・add/remove・`naoru:acqexclude:v1`={ids:{customer_id:{by,name,shop,at}}}）＝新規顧客一覧の「除外」で保存し、フロントは custRowsAll でこのIDを全マーケ指標から除外（全社共有）
+  plan-store.js     # SalonOne計画の目標・アクション共有ストア（全デバイス同期）。保存先=Vercel KV(推奨) or Supabase or GAS。未設定時はlocalStorage継続。?type=allowance で手当（領収書）の提出・個人別生産性も同ストアに保存（submit/delete/recordProductivity）。?type=thanksgift でサンクスギフト投票を保存（vote/delete・投票期間と自分不可はサーバー側でも強制）。?type=chat で社内チャット（rooms/messages/reads/dir・画像別キー）。?type=board で掲示板（全社発信）を保存（post/comment/deleteComment/uploadImage/uploadFile/pin/delete/read・画像はchatと同じ別キー、ファイルは naoru:board:file:<id>）。コメントは post.comments[{id,parentId,fromStaffId,fromName,text,mentions,createdAt}]＝投稿への返信・@メンション対応（メンション/返信先/投稿者へweb-push通知）。?type=push でWebプッシュ購読（config/subscribe/unsubscribe）。掲示板投稿・グループ/DM/全社アナウンスのチャット送信時に、購読者へ web-push で通知送信（VAPID未設定なら無効）。?type=chat で社内チャットを保存（rooms/messages/reads/dir・画像は別キー naoru:chat:img:<id>・ensureRooms/createRoom/send/react/read/uploadImage/deleteMsg/deleteRoom）。?type=patrol でAIパトロール（analyze=各店のSalonOne実績＋Googleマップを`lib/patrol.js`/`lib/places.js`で分析し注意喚起項目＋店舗チャット文面を返す／places=単店ルックアップ／config=住所照合・検索クエリ保存 naoru:patrol:v1）。GoogleはPlaces API(New)・`GOOGLE_PLACES_API_KEY`未設定でもSalonOneのみで動作。?type=acqexclude でマーケ集計の手動除外（テスト予約対策・add/remove・`naoru:acqexclude:v1`={ids:{customer_id:{by,name,shop,at}}}）＝新規顧客一覧の「除外」で保存し、フロントは custRowsAll でこのIDを全マーケ指標から除外（全社共有）。?type=meo でMEO（Googleマップ）口コミ数・評価の履歴（`naoru:meo:v1`={shops:{店舗名:{history:[{date,count,rating}],latest,placeId,query}}}）＝GET=全店ボード（増減/アラート/スコア/口コミ依頼URLを算出）／scanone=1店Placesスキャン＋履歴保存／setquery。`GOOGLE_PLACES_API_KEY`必須（未設定でも履歴表示は可）。?type=sbcache で店舗別売上の全社共有キャッシュ（確定した過去月を`naoru:sb:<from_to>`に保存→全デバイス即表示・SalonOne再取得ゼロ・save/GET）
   tasks.js          # タスク系API
   settlement.js     # 返金明細書ディスパッチャ → /api/settlement-auth|owners|store（?fn=auth/owners/store・rewrite）
   square.js         # Squareディスパッチャ → /api/square/metrics|settlement|test（?fn=metrics/settlement/test・rewrite）
@@ -67,7 +67,8 @@ lib/
   events.js         # 勉強会・イベント日程 ロジック（日付解釈・過ぎた予定の判定＝グレーアウト・セクション定義）。tests/events.test.js
   geo.js            # 組織図の地理順（店舗名→都道府県ランク北→南・海外最下部・地域グルーピング）。tests/geo.test.js
   patrol.js         # AIパトロール ロジック（SalonOne前月比の異常検知・入会率/クチコミ/住所照合の判定・クーポン月初リマインド・店舗チャット文面生成）。tests/patrol.test.js
-  places.js         # Google Places API (New) 連携（Text Searchリクエスト組立・レスポンス解析・住所正規化/一致判定）。tests/places.test.js
+  places.js         # Google Places API (New) 連携（Text Searchリクエスト組立・レスポンス解析・住所正規化/一致判定・detailed=口コミ本文/営業時間/HP/電話/写真・reviewRequestUrl）。tests/places.test.js
+  meo.js            # MEO（Googleマップ）ロジック（口コミ数・評価の履歴スナップショット/増減算出・要対応アラート・MEOスコア）。tests/meo.test.js
   settlement.js     # 返金明細書 共通ロジック（オーナー認証トークン・スナップショット・計算・期日/注意書き）
   handlers/         # api/ ディスパッチャから呼ばれる実ハンドラ群（Serverless Functionにカウントされない）
     settlement-auth.js / settlement-owners.js / settlement-store.js
@@ -206,6 +207,14 @@ FC店舗ごとの「返金明細書」を SalonOne（現金/HPB/スクエア売�
 - **投稿**: 「🤖 AIパトロール」名義で店舗ルーム（`kind==='store'`）へ送信（`chatPost` send）。ルーム未生成時は `chatEnsureRooms` で生成。単店「この店舗チャットに投稿」／「要対応店に一括投稿」／「クーポン点検を全店に送る」。
 - **住所・検索設定**: 各店のHP/ホットペッパー住所とGoogle検索クエリ上書きを `?type=patrol&action=config`（`naoru:patrol:v1`）に保存。住所一致チェックに使用。
 - **フェーズ**: ①SalonOne実績＋クーポンリマインド（外部連携不要・常時可）②Googleマップ連携（`GOOGLE_PLACES_API_KEY` 設定で有効）。⚠️ ホットペッパーのクチコミ/クーポンは公式読み取りAPIが無いため未自動化（クーポン点検はリマインド方式）。数字は捏造せずSalonOne/Placesの実データのみ。
+
+## MEO対策（Googleマップ最適化・root/hq専用）
+Googleマップの口コミ数・評価を全店で追跡し、集客増につなげる。タブ=`経営・分析`＞`MEO対策`（id=`meo`・rootのみ・?tab=meo）。
+- **データ源**: Places API (New) Text Search（`GOOGLE_PLACES_API_KEY` 必須・サーバー隠蔽）。`lib/places.js` の detailed FieldMask で 口コミ数/評価/最新5レビュー/営業時間/HP/電話/写真枚数 を取得。
+- **増減の自動反映**: 「全店スキャン」で各店を1店ずつ `?type=meo&action=scanone` に投げ、サーバーが日付つきスナップショット（`lib/meo.js` recordSnapshot）を保存。次回以降 前回比・今月新規・約30日比を算出（`computeDeltas`）。
+- **要対応アラート**（`meoFlags`）: 口コミ<20件・評価<4.0・今月新規0件・直近★2以下・HP/電話/営業時間 未設定・写真<10枚。MEOスコア（`meoScore` 0-100）も表示。
+- **打ち手**: 各店の「口コミ依頼リンク（writereview URL）コピー」／「AIで返信下書き」（直近レビューへ・`api/chat` agent:'faq'・返信投稿はGBPで手動）／「店舗チャットに共有」。
+- ⚠️ 公式APIで取得不可: オーナー返信の有無・全口コミ・マップ検索順位。数字は捏造せずPlacesの実データのみ。
 
 ## 勉強会・イベント日程（共有編集グリッド）／組織図
 - **勉強会・イベントタブ**: スプレッドシート風の共有編集表。3セクション（勉強会／飲み会などのイベント／部活）。各セルはtextareaで直接編集→**自動保存**（デバウンス700ms・`upsertRow`）。行の追加/削除可。**日付が過ぎた行は自動グレーアウト**（`lib/events.js` の `parseEventDate`/`isPastEvent`・毎週/未定は対象外）。保存=`/api/plan-store?type=events`（sections別・行単位upsert/delete）。編集中(`evEditingRef`)はポーリング取り込みを止めて入力消失を防止。

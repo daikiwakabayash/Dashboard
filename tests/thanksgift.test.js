@@ -2,10 +2,36 @@ import { describe, it, expect } from 'vitest';
 import {
   toJst, ymOf, prevYM, monthLabel, getVotingState,
   voteId, validateVote, upsertVote, removeVote, receivedFor, tallyRanking, listPeriods,
+  autoPublishAtMs, isAutoPublished, isPeriodPublished, autoPublishLabel,
 } from '../lib/thanksgift.js';
 
 // JSTの壁時計の指定日時をUTC epochで作る（JST = UTC+9）
 const jst = (y, m, d, hh = 0, mm = 0) => new Date(Date.UTC(y, m - 1, d, hh - 9, mm));
+
+describe('自動公開（翌月の第2火曜13:00 JST）', () => {
+  it('8月分は9月の第2火曜(9/8)13:00に公開', () => {
+    expect(autoPublishLabel('2026-08')).toBe('2026年9月8日(火) 13:00');
+    expect(isAutoPublished('2026-08', jst(2026, 9, 8, 12, 59))).toBe(false); // 直前は未公開
+    expect(isAutoPublished('2026-08', jst(2026, 9, 8, 13, 0))).toBe(true);   // 13:00ちょうどで公開
+    expect(isAutoPublished('2026-08', jst(2026, 9, 12))).toBe(true);
+  });
+  it('9月分は10月の第2火曜(10/13)13:00に公開', () => {
+    expect(autoPublishLabel('2026-09')).toBe('2026年10月13日(火) 13:00');
+    expect(isAutoPublished('2026-09', jst(2026, 10, 13, 12, 59))).toBe(false);
+    expect(isAutoPublished('2026-09', jst(2026, 10, 13, 13, 0))).toBe(true);
+  });
+  it('年跨ぎ: 12月分は翌年1月の第2火曜に公開', () => {
+    // 2027-01-01 は金曜 → 第1火曜1/5・第2火曜1/12
+    expect(autoPublishLabel('2026-12')).toBe('2027年1月12日(火) 13:00');
+  });
+  it('実効公開: 手動非公開が最優先・手動公開は前倒し', () => {
+    const now = jst(2026, 9, 12); // 8月分は自動公開済みのタイミング
+    expect(isPeriodPublished('2026-08', [], [], now)).toBe(true);            // 自動公開
+    expect(isPeriodPublished('2026-08', [], ['2026-08'], now)).toBe(false);  // 本部が緊急で非公開
+    expect(isPeriodPublished('2026-09', [], [], now)).toBe(false);           // まだ自動公開前
+    expect(isPeriodPublished('2026-09', ['2026-09'], [], now)).toBe(true);   // 本部が前倒し公開
+  });
+});
 
 describe('prevYM / monthLabel', () => {
   it('前月（年跨ぎ）', () => {

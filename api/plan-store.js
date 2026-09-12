@@ -13,7 +13,7 @@
 // GET  /api/plan-store            → { goals:{...}, actions:[...], configured:boolean }
 // POST /api/plan-store {goals,actions} → { ok:true }
 
-import { getVotingState, validateVote, upsertVote, removeVote } from '../lib/thanksgift.js';
+import { getVotingState, validateVote, upsertVote, removeVote, isPeriodPublished, autoPublishLabel, listPeriods } from '../lib/thanksgift.js';
 import { ensureBaseRooms, extractLinks, toggleReaction, genId } from '../lib/chat.js';
 import { videoEmbed } from '../lib/board.js';
 import { analyzeStore, couponReminderItems, buildStoreMessage } from '../lib/patrol.js';
@@ -1371,8 +1371,10 @@ export default async function handler(req, res) {
       const votes = Array.isArray(cur.votes) ? cur.votes : [];
       const log = Array.isArray(cur.log) ? cur.log : []; // 送信履歴（追記のみ・編集履歴を残す）
       const test = (cur.test && typeof cur.test === 'object') ? cur.test : { open: false, period: '' };
-      // 公開済みの対象月（root が【公開】した月のみ、受け取った側に感謝内容が表示される）
+      // 公開済みの対象月。published=本部が手動で【前倒し公開】した月／unpublished=本部が緊急で【非公開に戻した】月。
+      // 実効公開＝手動非公開でない かつ（手動公開 or 自動公開スケジュール到達）。自動公開＝翌月第2火曜13:00 JST（lib/thanksgift.js）。
       const published = Array.isArray(cur.published) ? cur.published.filter(p => /^\d{4}-\d{2}$/.test(String(p))).map(String) : [];
+      const unpublished = Array.isArray(cur.unpublished) ? cur.unpublished.filter(p => /^\d{4}-\d{2}$/.test(String(p))).map(String) : [];
       // 全店ディレクトリ（店舗・スタッフ）: SSOでスコープされたスタッフでも「他店」へ感謝を送れるよう、
       // 広い閲覧権限のセッション（root/brand_admin等）が保存した全店の店舗・スタッフ一覧を共有する。
       const dir = (cur.dir && typeof cur.dir === 'object') ? { shops: Array.isArray(cur.dir.shops) ? cur.dir.shops : [], staff: Array.isArray(cur.dir.staff) ? cur.dir.staff : [], updatedAt: cur.dir.updatedAt || '' } : { shops: [], staff: [], updatedAt: '' };
@@ -1385,7 +1387,13 @@ export default async function handler(req, res) {
         ? { ...base, open: true, targetMonth: String(test.period), test: true }
         : { ...base, test: false };
       if (req.method === 'GET') {
-        return res.status(200).json({ votes, log, votingState: state, test, published, dir, merges, configured: true });
+        // 実効公開（自動公開スケジュール＋本部の手動上書き）を算出してフロントへ返す。
+        const now = Date.now();
+        const periods = [...new Set([...listPeriods(votes), ...published, ...unpublished])];
+        const effectivePublished = periods.filter(p => isPeriodPublished(p, published, unpublished, now));
+        const publishSchedule = {};
+        periods.forEach(p => { publishSchedule[p] = { effective: isPeriodPublished(p, published, unpublished, now), manualPub: published.includes(p), manualHide: unpublished.includes(p), autoLabel: autoPublishLabel(p) }; });
+        return res.status(200).json({ votes, log, votingState: state, test, published: effectivePublished, publishManual: published, publishHidden: unpublished, publishSchedule, dir, merges, configured: true });
       }
       const body = req.body || {};
       const action = body.action;
@@ -1408,13 +1416,13 @@ export default async function handler(req, res) {
           staff: mergeById(dir.staff, body.staff, ['name', 'shopId', 'deleted']).slice(0, 8000),
           updatedAt: new Date().toISOString(),
         };
-        await blobSet(THANKSGIFT_KEY, { votes, log, test, published, dir: nextDir, merges }, hasKV, hasSB, gas);
+        await blobSet(THANKSGIFT_KEY, { votes, log, test, published, unpublished, dir: nextDir, merges }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true, dir: nextDir });
       }
       // テストモードの切替（root用UIから。期間外でも指定月を受付にできる）
       if (action === 'settest') {
         const nextTest = { open: !!body.open, period: String(body.period || '') };
-        await blobSet(THANKSGIFT_KEY, { votes, log, test: nextTest, published, dir, merges }, hasKV, hasSB, gas);
+        await blobSet(THANKSGIFT_KEY, { votes, log, test: nextTest, published, unpublished, dir, merges }, hasKV, hasSB, gas);
         const st2 = (nextTest.open && /^\d{4}-\d{2}$/.test(nextTest.period))
           ? { ...base, open: true, targetMonth: nextTest.period, test: true }
           : { ...base, test: false };
@@ -1423,11 +1431,12 @@ export default async function handler(req, res) {
       // 公開/非公開の切替（root用UIから。指定した対象月の感謝を受け取った側に表示するか）
       if (action === 'publish' && /^\d{4}-\d{2}$/.test(String(body.period || ''))) {
         const p = String(body.period);
-        const set = new Set(published);
-        if (body.publish === false) set.delete(p); else set.add(p);
-        const nextPublished = [...set];
-        await blobSet(THANKSGIFT_KEY, { votes, log, test, published: nextPublished, dir, merges }, hasKV, hasSB, gas);
-        return res.status(200).json({ ok: true, published: nextPublished });
+        const pub = new Set(published), unpub = new Set(unpublished);
+        if (body.publish === false) { unpub.add(p); pub.delete(p); }   // 緊急で非公開に戻す（自動公開も上書きで隠す）
+        else { pub.add(p); unpub.delete(p); }                          // 前倒しで公開（非公開上書きを解除）
+        const nextPublished = [...pub], nextUnpublished = [...unpub];
+        await blobSet(THANKSGIFT_KEY, { votes, log, test, published: nextPublished, unpublished: nextUnpublished, dir, merges }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, published: nextPublished, unpublished: nextUnpublished });
       }
       if (action === 'vote' && body.vote) {
         const v = body.vote;
@@ -1447,7 +1456,7 @@ export default async function handler(req, res) {
         // 送信履歴に追記（編集も1件ずつ残す）。上限3000件でリングバッファ。
         const already = votes.some(x => x && x.id === `${rec.period}__${rec.fromStaffId}`);
         const nextLog = [...log, { ...rec, action: already ? 'edit' : 'submit', id: `${rec.period}__${rec.fromStaffId}__${Date.now()}` }].slice(-3000);
-        await blobSet(THANKSGIFT_KEY, { votes: next, log: nextLog, test, published, dir, merges }, hasKV, hasSB, gas);
+        await blobSet(THANKSGIFT_KEY, { votes: next, log: nextLog, test, published, unpublished, dir, merges }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true, id: `${rec.period}__${rec.fromStaffId}` });
       }
       if (action === 'delete' && body.period && body.fromStaffId) {
@@ -1456,7 +1465,7 @@ export default async function handler(req, res) {
         }
         const next = removeVote(votes, String(body.period), String(body.fromStaffId));
         const nextLog = [...log, { period: String(body.period), fromStaffId: String(body.fromStaffId), action: 'delete', createdAt: new Date().toISOString(), id: `${body.period}__${body.fromStaffId}__${Date.now()}` }].slice(-3000);
-        await blobSet(THANKSGIFT_KEY, { votes: next, log: nextLog, test, published, dir, merges }, hasKV, hasSB, gas);
+        await blobSet(THANKSGIFT_KEY, { votes: next, log: nextLog, test, published, unpublished, dir, merges }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true });
       }
       // 管理者用: 指定(period+fromStaffId)の票を votes と log の両方から完全削除（テストデータ整理）。
@@ -1465,7 +1474,7 @@ export default async function handler(req, res) {
         const keyset = new Set(body.items.map(it => `${String(it.period)}__${String(it.fromStaffId)}`));
         const nextVotes = votes.filter(v => !keyset.has(`${String(v.period)}__${String(v.fromStaffId)}`));
         const nextLog = log.filter(l => !keyset.has(`${String(l.period)}__${String(l.fromStaffId)}`));
-        await blobSet(THANKSGIFT_KEY, { votes: nextVotes, log: nextLog, test, published, dir, merges }, hasKV, hasSB, gas);
+        await blobSet(THANKSGIFT_KEY, { votes: nextVotes, log: nextLog, test, published, unpublished, dir, merges }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true, removedVotes: votes.length - nextVotes.length, removedLog: log.length - nextLog.length });
       }
       // 管理者用: スタッフ名寄せ（重複登録の統合）。fromId 宛/発の全票を toId へ付け替え、
@@ -1500,7 +1509,7 @@ export default async function handler(req, res) {
         // dir から重複スタッフを非表示化（deleted）し、merges に記録。
         const nextDir = { ...dir, staff: (dir.staff || []).map(s => String(s.id) === fromId ? { ...s, deleted: true } : s) };
         const nextMerges = { ...merges, [fromId]: toId };
-        await blobSet(THANKSGIFT_KEY, { votes: nextVotes, log: nextLog, test, published, dir: nextDir, merges: nextMerges }, hasKV, hasSB, gas);
+        await blobSet(THANKSGIFT_KEY, { votes: nextVotes, log: nextLog, test, published, unpublished, dir: nextDir, merges: nextMerges }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true, changed, votes: nextVotes.length, merges: nextMerges });
       }
       return res.status(400).json({ ok: false, error: 'invalid thanksgift action' });

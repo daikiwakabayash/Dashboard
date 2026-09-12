@@ -403,6 +403,35 @@ export default async function handler(req, res) {
     }
   }
 
+  // ── 店舗別売上の共有キャッシュ（確定した過去月は全社で1回だけ集計・全デバイス即表示）: ?type=sbcache ──
+  // pkey='YYYY-MM-DD_YYYY-MM-DD'（from_確定to）。確定月のみ保存し、以後は誰が開いても再取得不要にする。
+  const isSbCache = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'sbcache';
+  if (isSbCache) {
+    const hasStore = !!(hasKV || hasSB || gas);
+    const pkeyOf = (v) => { const s = String(v || ''); return /^\d{4}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2}$/.test(s) ? s : ''; };
+    if (!hasStore) return res.status(200).json({ shops: null, configured: false });
+    try {
+      if (req.method === 'GET') {
+        const pkey = pkeyOf(req.query.pkey);
+        if (!pkey) return res.status(200).json({ shops: null, configured: true });
+        const cur = (await blobGet(`naoru:sb:${pkey}`, hasKV, hasSB, gas)) || null;
+        return res.status(200).json({ shops: (cur && cur.shops) || null, ts: (cur && cur.ts) || 0, configured: true });
+      }
+      const body = req.body || {};
+      if (body.action === 'save') {
+        const pkey = pkeyOf(body.pkey);
+        if (!pkey) return res.status(400).json({ ok: false, error: 'invalid_pkey' });
+        const shops = (body.shops && typeof body.shops === 'object' && !Array.isArray(body.shops)) ? body.shops : null;
+        if (!shops || Object.keys(shops).length > 300) return res.status(400).json({ ok: false, error: 'invalid_shops' });
+        await blobSet(`naoru:sb:${pkey}`, { shops, ts: Date.now() }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(400).json({ ok: false, error: 'invalid sbcache action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
   // ── MEO（Googleマップ最適化）: ?type=meo ──
   // 各店の口コミ数・評価の履歴を保存し、増減トレンド・要対応アラート・口コミ依頼リンクを返す。
   // scanone=1店をPlacesで取得しスナップショット保存（フロントが全店ぶんループ）。GOOGLE_PLACES_API_KEY 未設定でも履歴表示は可能。

@@ -6196,7 +6196,19 @@
                 let sbCacheAll = {}; try { sbCacheAll = JSON.parse(localStorage.getItem(SB_CACHE_KEY) || '{}') || {}; } catch { sbCacheAll = {}; }
                 const pc = sbCacheAll[pkey];
                 const cacheFresh = !forceAll && pc && (periodConfirmed || (Date.now() - (pc.ts || 0) < 20 * 60 * 1000));
-                const cached = (cacheFresh && pc.shops && typeof pc.shops === 'object') ? pc.shops : {};
+                let cached = (cacheFresh && pc.shops && typeof pc.shops === 'object') ? pc.shops : {};
+                // 確定した過去月は「全社共有サーバーキャッシュ」を優先（他デバイス/初回でもSalonOne再取得ゼロで即表示）。
+                if (periodConfirmed && !forceAll && Object.keys(cached).length === 0) {
+                    try {
+                        const sr = await fetch(`/api/plan-store?type=sbcache&pkey=${encodeURIComponent(pkey)}`, { cache: 'no-store' });
+                        const sj = await sr.json().catch(() => null);
+                        if (soShopReqRef.current !== reqId) return; // 途中で別月へ切替えたら破棄
+                        if (sj && sj.shops && typeof sj.shops === 'object' && Object.keys(sj.shops).length) {
+                            cached = sj.shops;
+                            try { sbCacheAll[pkey] = { ts: Date.now(), shops: { ...cached } }; localStorage.setItem(SB_CACHE_KEY, JSON.stringify(sbCacheAll)); } catch {}
+                        }
+                    } catch {}
+                }
                 // 保存先（既存キャッシュを引き継ぎつつ今回の取得分を追記）
                 const scache = (sbCacheAll[pkey] = { ts: Date.now(), shops: { ...cached } });
                 // ── 行の生成: 「SalonOneが返す全店舗＝導入済み」を実データ源にする（全体管理シートと同じ思想）。
@@ -6296,6 +6308,10 @@
                     if (keys.length > 8) keys.map(k => [k, sbCacheAll[k].ts || 0]).sort((a, b) => a[1] - b[1]).slice(0, keys.length - 8).forEach(([k]) => delete sbCacheAll[k]);
                     localStorage.setItem(SB_CACHE_KEY, JSON.stringify(sbCacheAll));
                 } catch {}
+                // 確定した過去月を全社共有サーバーキャッシュへ保存（今回実取得した分＝以後は全デバイス即表示）。
+                if (periodConfirmed && targets.length > 0 && Object.keys(scache.shops).length) {
+                    try { fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'sbcache', action: 'save', pkey, shops: scache.shops }) }).catch(() => {}); } catch {}
+                }
                 setSoShopLoading(false);
             };
             const soAiAnalyze = async () => {

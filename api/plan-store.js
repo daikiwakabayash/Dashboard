@@ -19,6 +19,7 @@ import { videoEmbed } from '../lib/board.js';
 import { analyzeStore, couponReminderItems, buildStoreMessage } from '../lib/patrol.js';
 import { buildSearchRequest, parsePlacesResponse, reviewRequestUrl, buildLegacyReviewsRequest, parseLegacyReviews } from '../lib/places.js';
 import { recordSnapshot, computeDeltas, meoFlags, meoScore, alertWeight, jstYmd, reviewsInMonth } from '../lib/meo.js';
+import { mergeAppointments, flatten as soflFlatten } from '../lib/soflmap.js';
 
 // Vercel KV / Upstash Redis / Vercel Redis いずれの環境変数名でも動くよう両対応（REST APIは共通）
 const KV_URL = () => process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_REST_API_URL || '';
@@ -54,6 +55,7 @@ const KNOWCAND_KEY = 'naoru:knowcand:v1';     // { cands:[{id,ts,roomId,shop,fro
 const PATROL_KEY = 'naoru:patrol:v1';         // { addresses:{shopName:{hp,hotpepper}}, queries:{shopName:検索クエリ} } AIパトロール設定（住所照合・Google検索クエリ上書き）
 const ACQEXCLUDE_KEY = 'naoru:acqexclude:v1'; // { ids:{ customer_id: {by,name,shop,at} } } マーケ集計から手動除外した予約（スタッフのテスト予約でキャンセル率等が狂うのを防ぐ・全社共有）
 const MEO_KEY = 'naoru:meo:v1';               // { shops:{ 店舗名:{ history:[{date,count,rating}], latest:{...Places}, placeId, query, updatedAt } } } MEO（Googleマップ）口コミ数・評価の履歴と最新情報
+const SOFL_KEY = 'naoru:soflmap:v1';          // { cust:{ customer_id:{fl,ca} }, cursor, updatedAt, stats } appointmentsを差分同期した「顧客→施策リンクID」対応表（新規顧客一覧へJOINして施策リンク別を再構築）
 
 // ── Webプッシュ送信（VAPID設定時のみ動作・未設定なら黙ってスキップ） ──
 const VAPID_PUBLIC = () => process.env.VAPID_PUBLIC_KEY || '';
@@ -555,6 +557,79 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, shop: decorate(name, shops[name]) });
       }
       return res.status(400).json({ ok: false, error: 'invalid meo action' });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── 施策リンク（強制リンク）背景同期: ?type=soflmap ────────────────────────
+  //   appointments を updated_at 昇順カーソルで差分同期し「顧客→施策リンクID」対応表を作る。
+  //   GET                 → { cust:{customer_id:forced_link_id}, caughtUp, count, updatedAt, configured }
+  //   GET  action=sync    → 1回分ページング（手動・初回バックフィルの継続）
+  //   GET  action=cronsync→ 日次Cron（同上・CRON_SECRET任意）
+  const isSofl = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'soflmap';
+  if (isSofl) {
+    const hasStore = !!(hasKV || hasSB || gas);
+    if (!hasStore) return res.status(200).json({ cust: {}, configured: false });
+    const SO_KEY = process.env.SALONONE_API_KEY || '';
+    const SO_BASE = (process.env.SALONONE_API_BASE || 'https://salonone.net/api/analytics/v1').replace(/\/+$/, '');
+    const loadState = async () => {
+      const c = (await blobGet(SOFL_KEY, hasKV, hasSB, gas)) || {};
+      return { cust: (c.cust && typeof c.cust === 'object') ? c.cust : {}, cursor: c.cursor || '', caughtUp: !!c.caughtUp, updatedAt: c.updatedAt || '', stats: c.stats || {} };
+    };
+    // appointments を1ページ取得（キーのみ＝ブランド全店。ログイン必須解除キー前提）
+    const fetchAppts = async (cursor) => {
+      const u = new URL(SO_BASE + '/appointments');
+      u.searchParams.set('limit', '1000');
+      if (cursor) u.searchParams.set('cursor', cursor);
+      const r = await fetch(u.toString(), { headers: { 'X-SalonOne-Api-Key': SO_KEY, 'Accept': 'application/json' } });
+      if (!r.ok) return { error: `so_http_${r.status}` };
+      const j = await r.json().catch(() => null);
+      if (!j) return { error: 'parse_error' };
+      const rows = Array.isArray(j.data) ? j.data : [];
+      const meta = j.meta || {};
+      return { rows, hasMore: !!meta.has_more, nextCursor: meta.next_cursor || '' };
+    };
+    // 差分同期を1回実行（時間バジェット内で複数ページ）。resumable: 最後の非nullカーソルを保存。
+    const runSync = async () => {
+      if (!SO_KEY) return { ok: false, error: 'salonone_not_configured' };
+      const started = Date.now(); const BUDGET_MS = 45000; const MAX_PAGES = 40;
+      const st = await loadState();
+      let cursor = st.cursor || '';
+      let cust = st.cust;
+      let pages = 0, fetched = 0, mapped0 = Object.keys(cust).length, hadError = null;
+      let reachedEnd = false;
+      while (pages < MAX_PAGES) {
+        if (Date.now() - started > BUDGET_MS) break;
+        const p = await fetchAppts(cursor);
+        if (p.error) { hadError = p.error; break; }
+        pages++; fetched += p.rows.length;
+        mergeAppointments(cust, p.rows);
+        if (p.nextCursor) cursor = p.nextCursor;   // 非nullのみ前進（末尾でnullでも位置を失わない）
+        if (!p.hasMore) { reachedEnd = true; break; } // 末尾＝追いついた（cursorは最後の非nullを保持）
+      }
+      const stats = { pages, fetched, mapped: Object.keys(cust).length, added: Object.keys(cust).length - mapped0, ms: Date.now() - started, error: hadError || undefined, at: new Date().toISOString() };
+      await blobSet(SOFL_KEY, { cust, cursor, caughtUp: reachedEnd ? true : st.caughtUp, updatedAt: new Date().toISOString(), stats }, hasKV, hasSB, gas);
+      return { ok: !hadError, reachedEnd, stats };
+    };
+    try {
+      if (req.method === 'GET') {
+        const action = String(req.query.action || '');
+        if (action === 'sync' || action === 'cronsync') {
+          if (action === 'cronsync') {
+            const secret = process.env.CRON_SECRET || '';
+            if (secret && String(req.headers.authorization || '') !== `Bearer ${secret}`) return res.status(401).json({ ok: false, error: 'unauthorized' });
+          }
+          const r = await runSync();
+          return res.status(200).json({ configured: true, ...r });
+        }
+        const st = await loadState();
+        return res.status(200).json({ cust: soflFlatten(st.cust), caughtUp: st.caughtUp, count: Object.keys(st.cust).length, updatedAt: st.updatedAt, stats: st.stats, configured: true });
+      }
+      // POST でも sync を許可（手動トリガ用）
+      const body = req.body || {};
+      if (String(body.action || '') === 'sync') { const r = await runSync(); return res.status(200).json({ configured: true, ...r }); }
+      return res.status(400).json({ ok: false, error: 'invalid soflmap action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
     }

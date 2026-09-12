@@ -17427,7 +17427,27 @@
                                         // 汎用ソート（クリックで昇順/降順トグル）。valOf(row,key) が数値/文字列を返す。
                                         const applySort = (arr, sort, valOf) => { const a = [...arr]; a.sort((x, y) => { const vx = valOf(x, sort.key), vy = valOf(y, sort.key); if (typeof vx === 'string' || typeof vy === 'string') return sort.dir === 'asc' ? String(vx).localeCompare(String(vy)) : String(vy).localeCompare(String(vx)); return sort.dir === 'asc' ? vx - vy : vy - vx; }); return a; };
                                         // ソート可能な列見出し（クリックで方向トグル・現在列に▲▼）
-                                        const ThSort = ({ label, k, sort, setSort, align }) => (<th onClick={() => setSort(s => ({ key: k, dir: s.key === k && s.dir === 'desc' ? 'asc' : 'desc' }))} className={`text-${align || 'right'} pb-2 px-2 cursor-pointer select-none whitespace-nowrap ${sort.key === k ? 'text-emerald-600' : 'hover:text-slate-600'}`}>{label}{sort.key === k ? (sort.dir === 'desc' ? ' ▼' : ' ▲') : ''}</th>);
+                                        // 列見出し（クリックで並び替え）。tip があればカーソルで算出ロジックを表示（表は横スクロールで浮動チップが切れるためネイティブtitleを使用）。
+                                        const ThSort = ({ label, k, sort, setSort, align, tip }) => (<th onClick={() => setSort(s => ({ key: k, dir: s.key === k && s.dir === 'desc' ? 'asc' : 'desc' }))} title={tip || undefined} className={`text-${align || 'right'} pb-2 px-2 cursor-pointer select-none whitespace-nowrap ${sort.key === k ? 'text-emerald-600' : 'hover:text-slate-600'}`}>{label}{tip ? ' ⓘ' : ''}{sort.key === k ? (sort.dir === 'desc' ? ' ▼' : ' ▲') : ''}</th>);
+                                        // マーケ各表 共通の列ロジック解説（受付日ベースのコホート定義・最新版）
+                                        const TIP = {
+                                            media: '媒体（visit_source）。受付日が期間内の新規客をこの媒体で分類',
+                                            adSpend: '広告費：SalonOne媒体別(by-channel)の入力値。海外店舗ぶんは日本タブから除外',
+                                            clicks: '広告クリック数：SalonOneの媒体設定に入力がある場合のみ',
+                                            booking: '新規予約：受付日(received_at)が期間内の新規客の人数（1人1行・キャンセル/テスト/海外は除外）。来店が翌月でも受付月に計上',
+                                            bcpa: '予約CPA＝広告費 ÷ 新規予約数',
+                                            vcpa: '来店CPA＝広告費 ÷ 新規来店数',
+                                            visit: '新規来店：新規予約のうち初回来店を完了した人数',
+                                            visitRate: '来店率＝新規来店 ÷ 新規予約',
+                                            cancel: 'キャンセル＝新規予約 − 新規来店',
+                                            cancelRate: 'キャンセル率＝キャンセル ÷ 新規予約',
+                                            join: '購入(入会)：新規客のうち入会した人数。受付月のコホートに計上（例:9/30受付→10月入会でも9月の入会）',
+                                            joinRate: '購入率(入会率)＝購入 ÷ 新規来店',
+                                            cac: 'CAC(購入CPA)＝広告費 ÷ 購入数',
+                                            sales: '売上：新規客のLTV累計（会計完了・取得時点まで）',
+                                            roas: 'ROAS＝売上 ÷ 広告費 ×100',
+                                            ltv: 'LTV：会計完了予約の累計（取得時点まで）',
+                                        };
                                         const isVisited = (c) => c.visited_completed === true || c.first_appointment_status === 'completed';
                                         // 広告費・クリックはby-channel（媒体）から。それ以外（予約/来店/入会/売上）はコホート(custRows)から。
                                         const isNonNew = (n) => { n = String(n || ''); return n === '既存' || n === '未設定' || /会員/.test(n) || /\d+\s*分/.test(n); };
@@ -17516,47 +17536,15 @@
                                                     </div>
                                                 ))}
                                             </div>
-                                            {/* 獲得ファネル */}
-                                            <div className="bg-gradient-to-br from-emerald-50 to-teal-50 border border-emerald-100 rounded-2xl p-4 md:p-6">
-                                                <div className="flex items-center gap-2 mb-4"><TrendingUp size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">獲得ファネル <span className="text-slate-400 font-bold text-sm">/ クリック→予約→来店→購入</span></h2></div>
-                                                <div className="flex items-stretch gap-1.5 md:gap-3 overflow-x-auto">
-                                                    {funnel.map((f, i) => (
-                                                        <React.Fragment key={i}>
-                                                            <div className="flex-1 min-w-[80px] text-center">
-                                                                <div className={`rounded-xl py-3 md:py-4 font-black ${f.color}`}>
-                                                                    <div className="text-[11px] font-bold opacity-80">{f.k}</div>
-                                                                    <div className="text-xl md:text-2xl">{(f.v || 0).toLocaleString()}</div>
-                                                                </div>
-                                                                {i > 0 && <div className="text-[10px] font-black text-slate-500 mt-1">転換 {rate(f.v, funnel[i - 1].v)}%</div>}
-                                                            </div>
-                                                        </React.Fragment>
-                                                    ))}
-                                                </div>
-                                                {!clicks && <div className="text-[11px] text-slate-400 font-bold mt-3">※ 広告クリック/インプレッションはSalonOneの媒体設定に入力がある場合のみ表示されます（0の媒体は広告連携未設定）。問い合わせ数は広告媒体側の指標のため現状は非対象です。</div>}
-                                            </div>
-                                            {/* 今月の重要インサイト */}
-                                            {insights.length > 0 && (
-                                                <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
-                                                    <div className="flex items-center gap-2 mb-3"><span className="text-lg">💡</span><h2 className="text-base md:text-lg font-black text-slate-900">重要インサイト</h2><span className="text-[10px] font-bold text-slate-400">実データからの示唆</span></div>
-                                                    <div className="space-y-2">
-                                                        {insights.map((ins, i) => (
-                                                            <div key={i} className="flex items-start gap-3 p-2.5 rounded-xl bg-slate-50">
-                                                                <span className="w-6 h-6 shrink-0 rounded-full bg-emerald-600 text-white text-[12px] font-black flex items-center justify-center">{i + 1}</span>
-                                                                <div className="min-w-0 flex-1"><div className="text-[13px] font-black text-slate-800">{ins.t}</div><div className="text-[11px] font-semibold text-slate-500 mt-0.5">{ins.d}</div></div>
-                                                                <span className={`shrink-0 text-[10px] font-black px-2 py-0.5 rounded-full ${ins.c}`}>{ins.tag}</span>
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                </div>
-                                            )}
+                                            {/* 獲得ファネル・重要インサイトは非表示（ユーザー要望・日本/海外とも） */}
                                             {/* 媒体別コホート */}
                                             <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
                                                 <div className="flex items-center gap-2 mb-3"><Megaphone size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">媒体別 獲得コホート</h2><span className="px-2 py-0.5 bg-emerald-600 text-white rounded-full text-[10px] font-black">SalonOne実データ</span><InfoTip text={`媒体別に「受付日時が ${soFrom}〜${soTo} の新規客」を分解。予約/来店/入会/売上はコホート(新規客一覧)から、広告費・クリックはSalonOne媒体別(by-channel)から媒体名で名寄せ。予約CPA=広告費÷予約、来店CPA=広告費÷来店、CAC=広告費÷入会、キャンセル=予約−来店、売上=LTV累計。`} /></div>
                                                 <div className="overflow-x-auto">
                                                     <table className="w-full text-[12px] whitespace-nowrap">
                                                         <thead><tr className="text-slate-400 font-black border-b border-slate-200">
-                                                            <ThSort label="媒体" k="name" sort={acqMediaSort} setSort={setAcqMediaSort} align="left" />
-                                                            <ThSort label="広告費" k="adSpend" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="クリック" k="clicks" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="新規予約" k="booking" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="予約CPA" k="bcpa" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="来店CPA" k="vcpa" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="来店" k="visit" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="来店率" k="visitRate" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="キャンセル" k="cancel" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="キャンセル率" k="cancelRate" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="購入" k="join" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="購入率" k="joinRate" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="CAC" k="cac" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="売上" k="sales" sort={acqMediaSort} setSort={setAcqMediaSort} /><ThSort label="ROAS" k="roas" sort={acqMediaSort} setSort={setAcqMediaSort} />
+                                                            <ThSort label="媒体" k="name" sort={acqMediaSort} setSort={setAcqMediaSort} align="left" tip={TIP.media} />
+                                                            <ThSort label="広告費" k="adSpend" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.adSpend} /><ThSort label="クリック" k="clicks" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.clicks} /><ThSort label="新規予約" k="booking" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.booking} /><ThSort label="予約CPA" k="bcpa" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.bcpa} /><ThSort label="来店CPA" k="vcpa" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.vcpa} /><ThSort label="来店" k="visit" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.visit} /><ThSort label="来店率" k="visitRate" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.visitRate} /><ThSort label="キャンセル" k="cancel" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.cancel} /><ThSort label="キャンセル率" k="cancelRate" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.cancelRate} /><ThSort label="購入" k="join" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.join} /><ThSort label="購入率" k="joinRate" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.joinRate} /><ThSort label="CAC" k="cac" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.cac} /><ThSort label="売上" k="sales" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.sales} /><ThSort label="ROAS" k="roas" sort={acqMediaSort} setSort={setAcqMediaSort} tip={TIP.roas} />
                                                         </tr></thead>
                                                         <tbody>
                                                             {rows.map((c, i) => { const bcpa = (c.adSpend > 0 && c.booking > 0) ? Math.round(c.adSpend / c.booking) : 0; const vcpa = (c.adSpend > 0 && c.visit > 0) ? Math.round(c.adSpend / c.visit) : 0; const cac = (c.adSpend > 0 && c.join > 0) ? Math.round(c.adSpend / c.join) : 0; const cr = c.adSpend > 0 ? Math.round(c.sales / c.adSpend * 100) : 0; return (
@@ -17622,7 +17610,7 @@
                                                     <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
                                                         <table className="w-full text-[12px] whitespace-nowrap">
                                                             <thead><tr className="text-slate-400 font-black border-b border-slate-200">
-                                                                <ThSort label="店舗" k="order" sort={acqShopSort} setSort={setAcqShopSort} align="left" /><ThSort label="広告費" k="ad" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="新規予約" k="booking" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="予約CPA" k="bcpa" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="来店CPA" k="vcpa" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="来店" k="visit" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="来店率" k="visitRate" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="キャンセル" k="cancel" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="キャンセル率" k="cancelRate" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="購入" k="join" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="購入率" k="joinRate" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="CAC" k="cac" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="LTV合計" k="ltv" sort={acqShopSort} setSort={setAcqShopSort} /><ThSort label="平均LTV" k="avgLtv" sort={acqShopSort} setSort={setAcqShopSort} />
+                                                                <ThSort label="店舗" k="order" sort={acqShopSort} setSort={setAcqShopSort} align="left" tip="店舗（出店順）。受付日が期間内の新規客をこの店舗で分類" /><ThSort label="広告費" k="ad" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.adSpend} /><ThSort label="新規予約" k="booking" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.booking} /><ThSort label="予約CPA" k="bcpa" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.bcpa} /><ThSort label="来店CPA" k="vcpa" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.vcpa} /><ThSort label="来店" k="visit" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.visit} /><ThSort label="来店率" k="visitRate" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.visitRate} /><ThSort label="キャンセル" k="cancel" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.cancel} /><ThSort label="キャンセル率" k="cancelRate" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.cancelRate} /><ThSort label="購入" k="join" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.join} /><ThSort label="購入率" k="joinRate" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.joinRate} /><ThSort label="CAC" k="cac" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.cac} /><ThSort label="LTV合計" k="ltv" sort={acqShopSort} setSort={setAcqShopSort} tip="LTV合計：この店舗の新規客のLTV累計の合計" /><ThSort label="平均LTV" k="avgLtv" sort={acqShopSort} setSort={setAcqShopSort} tip="平均LTV＝LTV合計 ÷ 新規予約数" />
                                                             </tr></thead>
                                                             <tbody>
                                                                 {shopRows.map((r, i) => { const bcpa = r.ad > 0 && r.booking > 0 ? Math.round(r.ad / r.booking) : 0; const vcpa = r.ad > 0 && r.visit > 0 ? Math.round(r.ad / r.visit) : 0; const cac = r.ad > 0 && r.join > 0 ? Math.round(r.ad / r.join) : 0; return (
@@ -17765,7 +17753,7 @@
                                                     <div className="overflow-x-auto">
                                                         <table className="w-full text-[12px] whitespace-nowrap">
                                                             <thead><tr className="text-slate-400 font-black border-b border-slate-200">
-                                                                <th className="text-left pb-2 px-2 sticky left-0 bg-white">強制リンク（フォーム）</th><th className="text-left pb-2 px-2">媒体</th><th className="text-left pb-2 px-2">メニュー</th><th className="text-right pb-2 px-2">予約</th><th className="text-right pb-2 px-2">来店</th><th className="text-right pb-2 px-2">来店率</th><th className="text-right pb-2 px-2">キャンセル率</th><th className="text-right pb-2 px-2">入会</th><th className="text-right pb-2 px-2">入会率</th><th className="text-right pb-2 px-2">売上</th><th className="text-right pb-2 px-2">客単価</th><th className="text-right pb-2 px-2">CPA</th>
+                                                                <th className="text-left pb-2 px-2 sticky left-0 bg-white" title="予約フォーム名。名前が完全一致するものを全店・URLをまたいで合算（1文字でも違えば別）。×N＝合算フォーム数">強制リンク（フォーム） ⓘ</th><th className="text-left pb-2 px-2" title="このフォームの媒体（visit_source）。複数媒体が混在する場合は最多＋『他N』">媒体</th><th className="text-left pb-2 px-2" title="このフォームに紐づくメニュー名">メニュー</th><th className="text-right pb-2 px-2" title="予約件数（予約日ベース・キャンセルや重複予約も含む）。※媒体別コホートの新規予約は受付日ベースの新規客数で基準が異なる">予約 ⓘ</th><th className="text-right pb-2 px-2" title="このフォーム経由の来店件数">来店</th><th className="text-right pb-2 px-2" title="来店率＝来店 ÷ 予約">来店率</th><th className="text-right pb-2 px-2" title="キャンセル率＝キャンセル ÷ 予約">キャンセル率</th><th className="text-right pb-2 px-2" title="入会件数（SalonOneが強制リンク単位で集計する場合のみ・未集計は0）">入会</th><th className="text-right pb-2 px-2" title="入会率＝入会 ÷ 来店">入会率</th><th className="text-right pb-2 px-2" title="このフォーム経由の売上">売上</th><th className="text-right pb-2 px-2" title="客単価＝売上 ÷ 来店">客単価</th><th className="text-right pb-2 px-2" title="CPA＝広告費 ÷ 予約（強制リンク単位で広告費が入力されている場合のみ）">CPA</th>
                                                             </tr></thead>
                                                             <tbody>
                                                                 {fl.map((r, i) => (
@@ -17863,7 +17851,7 @@
                                                                 </div>
                                                                 <div className="overflow-x-auto -mx-3 px-3 md:mx-0 md:px-0">
                                                                     <table className="w-full text-[11px] whitespace-nowrap">
-                                                                        <thead><tr className="text-slate-400 font-black border-b border-slate-200"><th className="text-left pb-1.5 px-1.5">媒体</th><th className="text-right pb-1.5 px-1.5">予約</th><th className="text-right pb-1.5 px-1.5">来店</th><th className="text-right pb-1.5 px-1.5">来店率</th><th className="text-right pb-1.5 px-1.5">ｷｬﾝｾﾙ</th><th className="text-right pb-1.5 px-1.5">ｷｬﾝｾﾙ率</th><th className="text-right pb-1.5 px-1.5">入会</th><th className="text-right pb-1.5 px-1.5">入会率</th><th className="text-right pb-1.5 px-1.5">広告費</th><th className="text-right pb-1.5 px-1.5">予約CPA</th><th className="text-right pb-1.5 px-1.5">来店CPA</th><th className="text-right pb-1.5 px-1.5">LTV</th></tr></thead>
+                                                                        <thead><tr className="text-slate-400 font-black border-b border-slate-200"><th className="text-left pb-1.5 px-1.5" title={TIP.media}>媒体 ⓘ</th><th className="text-right pb-1.5 px-1.5" title={TIP.booking}>予約 ⓘ</th><th className="text-right pb-1.5 px-1.5" title={TIP.visit}>来店</th><th className="text-right pb-1.5 px-1.5" title={TIP.visitRate}>来店率</th><th className="text-right pb-1.5 px-1.5" title={TIP.cancel}>ｷｬﾝｾﾙ</th><th className="text-right pb-1.5 px-1.5" title={TIP.cancelRate}>ｷｬﾝｾﾙ率</th><th className="text-right pb-1.5 px-1.5" title={TIP.join}>入会</th><th className="text-right pb-1.5 px-1.5" title={TIP.joinRate}>入会率</th><th className="text-right pb-1.5 px-1.5" title={TIP.adSpend}>広告費 ⓘ</th><th className="text-right pb-1.5 px-1.5" title={TIP.bcpa}>予約CPA</th><th className="text-right pb-1.5 px-1.5" title={TIP.vcpa}>来店CPA</th><th className="text-right pb-1.5 px-1.5" title={TIP.ltv}>LTV</th></tr></thead>
                                                                         <tbody>
                                                                             {(() => { const st = rows.reduce((a, m) => ({ booking: a.booking + m.booking, visit: a.visit + m.visit, cancel: a.cancel + m.cancel, join: a.join + m.join, ltv: a.ltv + m.ltv }), { booking: 0, visit: 0, cancel: 0, join: 0, ltv: 0 }); const tcpa = s.ad > 0 && st.booking > 0 ? Math.round(s.ad / st.booking) : 0; const tvcpa = s.ad > 0 && st.visit > 0 ? Math.round(s.ad / st.visit) : 0; return (
                                                                                 <tr className="border-b-2 border-slate-200 bg-slate-50 font-black">

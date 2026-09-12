@@ -12991,16 +12991,20 @@
                             const qHit = (s) => !!q && (String(dispName(s.id, s.name)).includes(q) || String(s.name || '').includes(q)); // 検索一致
                             // 既定＝在籍ロスター（読み込み不要・即表示）。楽トレ/ヘルプ/受付/役職は除外。＋プロフィール上書き。root非表示も除外。
                             // ⚠️ 検索中は施術者/予約可の絞り込みを緩め、名前一致するスタッフ（オーナー/受付/役職含む）も表示する。
+                            // 検索語が「店舗名」に一致した店舗は、その店舗の在籍スタッフを“全員”表示する
+                            // （＝店舗名で検索した時にスタッフが0名になるバグの修正）。スタッフ名で当てた店舗のみ名前一致で絞る。
+                            const shopNameHit = (name) => !!q && String(name).includes(q);
                             const rosterStaff = (id, name) => {
-                                const base = (soStaffs || []).filter(s => String(s.shop_id) === String(id) && !s.deleted && !reassigned.has(String(s.id)) && !hidden.has(String(s.id)) && (q ? qHit(s) : (!isNonTherapistName(s.name) && s.acceptsRes !== false))).map(s => ({ id: String(s.id), name: dispName(s.id, s.name) }));
-                                const added = (profStaffByShop[name] || []).filter(x => !hidden.has(String(x.id)) && (!q || String(x.name || dispName(x.id) || '').includes(q))).map(x => ({ id: x.id, name: x.name || dispName(x.id) || (((soStaffs || []).find(s => String(s.id) === x.id) || {}).name) || 'スタッフ' }));
+                                const showAll = !q || shopNameHit(name); // 検索なし or 店舗名一致 → 在籍全員（絞り込みを緩めない）
+                                const base = (soStaffs || []).filter(s => String(s.shop_id) === String(id) && !s.deleted && !reassigned.has(String(s.id)) && !hidden.has(String(s.id)) && (showAll ? (!isNonTherapistName(s.name) && s.acceptsRes !== false) : qHit(s))).map(s => ({ id: String(s.id), name: dispName(s.id, s.name) }));
+                                const added = (profStaffByShop[name] || []).filter(x => !hidden.has(String(x.id)) && (showAll || String(x.name || dispName(x.id) || '').includes(q))).map(x => ({ id: x.id, name: x.name || dispName(x.id) || (((soStaffs || []).find(s => String(s.id) === x.id) || {}).name) || 'スタッフ' }));
                                 const seen = new Set(); const out = [];
                                 for (const s of [...base, ...added]) { if (seen.has(s.id)) continue; seen.add(s.id); out.push(s); }
                                 return out;
                             };
-                            // 売上モード時：その月に売上>0のスタッフ。未取得はnull（集計中）。root非表示も除外。検索中は施術者絞り込みを緩める。
-                            const salesStaff = (id) => { const s = orgSales[`${id}__${orgMonth}`]; if (!s) return null; return s.filter(x => x.gross > 0 && !hidden.has(String(x.id)) && (q ? qHit(x) : !isNonTherapistName(x.name))).sort((a, b) => b.gross - a.gross).map(x => ({ id: String(x.id), name: dispName(x.id, x.name) })); };
-                            const staffFor = (id, name) => orgSalesMode ? salesStaff(id) : rosterStaff(id, name); // null=集計中(売上モードのみ)
+                            // 売上モード時：その月に売上>0のスタッフ。未取得はnull（集計中）。root非表示も除外。店舗名一致時は施術者を全員表示。
+                            const salesStaff = (id, name) => { const s = orgSales[`${id}__${orgMonth}`]; if (!s) return null; const showAll = !q || shopNameHit(name); return s.filter(x => x.gross > 0 && !hidden.has(String(x.id)) && (showAll ? !isNonTherapistName(x.name) : qHit(x))).sort((a, b) => b.gross - a.gross).map(x => ({ id: String(x.id), name: dispName(x.id, x.name) })); };
+                            const staffFor = (id, name) => orgSalesMode ? salesStaff(id, name) : rosterStaff(id, name); // null=集計中(売上モードのみ)
                             const nameMatch = (sh) => { if (String(sh.name).includes(q)) return true; if (ownersForShop(sh.name).some(o => String(o.name).includes(q))) return true; const ss = staffFor(sh.id, sh.name) || []; return ss.some(s => String(s.name).includes(q)); };
                             const shops = q ? allShops.filter(nameMatch) : allShops;
                             const regionGroups = (() => {

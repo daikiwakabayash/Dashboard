@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { jstYmd, recordSnapshot, computeDeltas, meoFlags, meoScore, alertWeight, MEO_THRESHOLDS } from '../lib/meo.js';
+import { jstYmd, recordSnapshot, computeDeltas, meoFlags, meoScore, alertWeight, reviewsInMonth, MEO_THRESHOLDS } from '../lib/meo.js';
 
 const jst = (y, m, d, hh = 0) => new Date(Date.UTC(y, m - 1, d, hh - 9));
 
@@ -44,6 +44,30 @@ describe('computeDeltas', () => {
   it('先月末の基準があれば今月新規を算出', () => {
     const d = computeDeltas([{ date: '2026-08-31', count: 30, rating: 4.2 }, { date: '2026-09-12', count: 35, rating: 4.3 }], jst(2026, 9, 12));
     expect(d.newThisMonth).toBe(5); // 8/31基準(30)→35
+  });
+});
+
+describe('reviewsInMonth（直近レビューから当月分の下限推定）', () => {
+  const now = jst(2026, 9, 12, 12);
+  it('publishTimeが当月のレビューを数える', () => {
+    const reviews = [
+      { publishTime: '2026-09-10T02:00:00Z' }, // JST 9/10
+      { publishTime: '2026-09-01T00:30:00Z' }, // JST 9/1 09:30
+      { publishTime: '2026-08-30T12:00:00Z' }, // 先月
+    ];
+    const r = reviewsInMonth(reviews, now);
+    expect(r.count).toBe(2);
+    expect(r.capped).toBe(false);
+  });
+  it('直近5件すべてが当月なら capped=true（＝5件以上の可能性）', () => {
+    const reviews = Array.from({ length: 5 }, (_, i) => ({ publishTime: `2026-09-0${i + 1}T05:00:00Z` }));
+    const r = reviewsInMonth(reviews, now);
+    expect(r.count).toBe(5);
+    expect(r.capped).toBe(true);
+  });
+  it('when フィールドや空でも落ちない', () => {
+    expect(reviewsInMonth(null, now)).toEqual({ count: 0, capped: false });
+    expect(reviewsInMonth([{ when: '2026-09-05T05:00:00Z' }], now).count).toBe(1);
   });
 });
 

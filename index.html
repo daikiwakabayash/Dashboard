@@ -19467,13 +19467,24 @@
 
                     {currentPage === 'meo' && authState.root && (() => {
                         const orderIdx = (name) => { const nn = soShopNorm(name); let i = SO_SHOP_ORDER.findIndex(o => soShopNorm(o) === nn); if (i < 0) i = SO_SHOP_ORDER.findIndex(o => { const on = soShopNorm(o); return nn.length >= 2 && (on.includes(nn) || nn.includes(on)); }); return i < 0 ? 9999 : i; };
+                        // 今月獲得口コミ数の実効値: スナップショット純増(newThisMonth)が計測可能ならそれを正、
+                        //   まだ1点しか無い初回はサーバーが直近レビュー(publishTime)から数えた当月分(monthReviews)を下限推定として使う。
+                        const monthRev = (s) => {
+                            const mr = s && s.monthReviews;
+                            if (mr && typeof mr.value === 'number') return { value: mr.value, source: mr.source || 'snapshot', atLeast: !!mr.atLeast, has: true };
+                            const d = (s && s.deltas) || {};
+                            if (typeof d.newThisMonth === 'number') return { value: d.newThisMonth, source: 'snapshot', atLeast: false, has: true };
+                            return { value: 0, source: 'none', atLeast: false, has: false };
+                        };
                         // 並び替え用の値（口コミ数・今月新規・評価・写真・スコアで昇降順）。既定=出店順。
-                        const meoValOf = (s, k) => { const d = s.deltas || {}, lt = s.latest || {}; switch (k) { case 'order': return orderIdx(s.name); case 'count': return d.count || 0; case 'newThisMonth': return d.newThisMonth == null ? -1 : d.newThisMonth; case 'rating': return lt.rating == null ? -1 : lt.rating; case 'photo': return ('photoCount' in lt) ? (lt.photoCount || 0) : -1; case 'score': return s.score || 0; default: return orderIdx(s.name); } };
+                        const meoValOf = (s, k) => { const d = s.deltas || {}, lt = s.latest || {}; switch (k) { case 'order': return orderIdx(s.name); case 'count': return d.count || 0; case 'newThisMonth': { const m = monthRev(s); return m.has ? m.value : -1; } case 'rating': return lt.rating == null ? -1 : lt.rating; case 'photo': return ('photoCount' in lt) ? (lt.photoCount || 0) : -1; case 'score': return s.score || 0; default: return orderIdx(s.name); } };
                         const meoTh = ({ label, k, align }) => (<th onClick={() => setMeoSort(st => ({ key: k, dir: st.key === k && st.dir === 'desc' ? 'asc' : 'desc' }))} className={`text-${align || 'right'} pb-2 px-2 cursor-pointer select-none whitespace-nowrap ${meoSort.key === k ? 'text-emerald-600' : 'hover:text-slate-600'}`}>{label}{meoSort.key === k ? (meoSort.dir === 'desc' ? ' ▼' : ' ▲') : ''}</th>);
                         const list = Object.values(meoData.shops || {}).sort((a, b) => { const va = meoValOf(a, meoSort.key), vb = meoValOf(b, meoSort.key); const d = meoSort.dir === 'asc' ? va - vb : vb - va; return d || (orderIdx(a.name) - orderIdx(b.name)); });
                         const warnShops = list.filter(s => (s.flags || []).some(f => f.level === 'warn'));
                         const totalReviews = list.reduce((a, s) => a + ((s.deltas && s.deltas.count) || 0), 0);
-                        const newThisMonth = list.reduce((a, s) => a + ((s.deltas && s.deltas.newThisMonth > 0) ? s.deltas.newThisMonth : 0), 0);
+                        const newThisMonth = list.reduce((a, s) => { const m = monthRev(s); return a + (m.value > 0 ? m.value : 0); }, 0);
+                        // 直近レビューからの下限推定（atLeast）を含む場合は合計に「≥」を付ける
+                        const newThisMonthAtLeast = list.some(s => { const m = monthRev(s); return m.source === 'recent' && m.value > 0 && m.atLeast; });
                         const badge = (n) => n > 0 ? `+${n}` : (n < 0 ? String(n) : '±0');
                         return (
                         <div className="max-w-[1400px] mx-auto px-4 md:px-6 py-6 space-y-4">
@@ -19489,7 +19500,7 @@
                             )}
                             {/* サマリ＋操作 */}
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
-                                {[{ l: '口コミ総数', v: totalReviews.toLocaleString(), c: 'from-emerald-500 to-teal-500' }, { l: '今月の新規口コミ', v: '+' + newThisMonth, c: 'from-blue-500 to-indigo-500' }, { l: '要対応店', v: warnShops.length + '店', c: 'from-rose-500 to-orange-500' }, { l: '取得済み店舗', v: list.length + '店', c: 'from-slate-500 to-slate-600' }].map((k, i) => (
+                                {[{ l: '口コミ総数', v: totalReviews.toLocaleString(), c: 'from-emerald-500 to-teal-500' }, { l: '今月の新規口コミ', v: (newThisMonthAtLeast ? '≥+' : '+') + newThisMonth, c: 'from-blue-500 to-indigo-500' }, { l: '要対応店', v: warnShops.length + '店', c: 'from-rose-500 to-orange-500' }, { l: '取得済み店舗', v: list.length + '店', c: 'from-slate-500 to-slate-600' }].map((k, i) => (
                                     <div key={i} className="bg-white border border-slate-200 rounded-2xl p-3 shadow-sm"><div className={`inline-block text-[10px] font-black text-white px-2 py-0.5 rounded-full bg-gradient-to-r ${k.c} mb-1`}>{k.l}</div><div className="text-lg md:text-xl font-black text-slate-900">{k.v}</div></div>
                                 ))}
                             </div>
@@ -19514,7 +19525,12 @@
                                                         <td className="py-2 px-2 font-bold text-slate-800 sticky left-0 bg-white">{s.name}</td>
                                                         <td className="py-2 px-2 text-right font-black text-slate-900">{(d.count || 0).toLocaleString()}</td>
                                                         <td className={`py-2 px-2 text-right font-bold ${d.deltaPrev > 0 ? 'text-emerald-600' : d.deltaPrev < 0 ? 'text-rose-500' : 'text-slate-400'}`}>{d.deltaPrev == null ? '—' : badge(d.deltaPrev)}</td>
-                                                        <td className={`py-2 px-2 text-right font-bold ${d.newThisMonth > 0 ? 'text-emerald-600' : d.newThisMonth === 0 ? 'text-slate-400' : 'text-rose-500'}`}>{d.newThisMonth == null ? '—' : (<span title={`今月 増えた ${d.addedThisMonth ?? '—'}件 / 消えた ${d.deletedThisMonth ?? 0}件 / 純増 ${d.newThisMonth}件`}>{badge(d.newThisMonth)}{d.deletedThisMonth > 0 && <span className="ml-1 text-[9px] text-rose-500 font-black">▼{d.deletedThisMonth}</span>}</span>)}</td>
+                                                        {(() => { const m = monthRev(s); const cls = m.value > 0 ? 'text-emerald-600' : m.value === 0 ? 'text-slate-400' : 'text-rose-500'; return (
+                                                        <td className={`py-2 px-2 text-right font-bold ${cls}`}>{!m.has ? '—' : (m.source === 'recent'
+                                                            ? (<span title={`直近レビュー(最大5件)のうち今月投稿は${m.value}件${m.atLeast ? '以上' : ''}。全店スキャンを重ねるとスナップショット純増で正確化されます。`}>{m.atLeast ? '≥' : ''}{badge(m.value)}<span className="ml-1 text-[9px] text-blue-400 font-black">推定</span></span>)
+                                                            : (<span title={`今月 増えた ${d.addedThisMonth ?? '—'}件 / 消えた ${d.deletedThisMonth ?? 0}件 / 純増 ${m.value}件`}>{badge(m.value)}{d.deletedThisMonth > 0 && <span className="ml-1 text-[9px] text-rose-500 font-black">▼{d.deletedThisMonth}</span>}</span>)
+                                                        )}</td>
+                                                        ); })()}
                                                         <td className="py-2 px-2 text-right font-bold text-slate-700">{lt.rating != null ? '★' + lt.rating : '—'}</td>
                                                         <td className="py-2 px-2 text-right text-slate-600" title="GoogleのAPIは写真を最大10件までしか返しません（10=10件以上の可能性）">{('photoCount' in lt) ? (lt.photoCount >= 10 ? '10+' : lt.photoCount) : '—'}</td>
                                                         <td className="py-2 px-2 text-center">{('websiteUri' in lt) ? dot(!!lt.websiteUri) : '—'}</td>
@@ -19532,7 +19548,7 @@
                                             </tbody>
                                         </table>
                                     </div>
-                                    <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 見出しをクリックで昇順/降順に並べ替え（既定＝出店順）。<b>今月新規</b>は「全店スキャン」を実行するたびにスナップショットを保存して算出するため、<b>初回は基準値のみで「—」表示</b>、2回目以降のスキャンから増加分が出ます（月をまたぐと今月分をリセット計測）。<b>今月新規</b>＝純増（増−減）。Googleが口コミを削除した場合は、今月のピーク値からの減少を<b className="text-rose-500">▼N</b>で表示（数字にマウスで「増えた/消えた/純増」の内訳）。数値の精度はスキャン頻度に比例（週1推奨）。<b>写真「10+」</b>＝GoogleのPlaces APIは写真を最大10件までしか返さないため、10は「10件以上」の意味です（正確な総数はGoogleビジネスプロフィール側で確認）。口コミ返信の有無・全口コミ・マップ検索順位は公式APIで取得不可のため対象外。</p>
+                                    <p className="text-[11px] text-slate-400 mt-3 font-bold">※ 見出しをクリックで昇順/降順に並べ替え（既定＝出店順）。<b>今月新規</b>は「全店スキャン」を実行するたびにスナップショットを保存して算出します。まだ履歴が1回分しか無い初回でも、Googleが返す<b>直近レビュー（最大5件）の投稿日から当月分を数えた下限値</b>を<b className="text-blue-500">推定</b>として表示（<b>≥</b>付き＝直近5件すべてが当月＝それ以上の可能性）。2回目以降のスキャンが貯まると、より正確な<b>スナップショット純増</b>に自動で切り替わります（月をまたぐと今月分をリセット計測）。<b>今月新規</b>＝純増（増−減）。Googleが口コミを削除した場合は、今月のピーク値からの減少を<b className="text-rose-500">▼N</b>で表示（数字にマウスで「増えた/消えた/純増」の内訳）。数値の精度はスキャン頻度に比例（週1推奨）。<b>写真「10+」</b>＝GoogleのPlaces APIは写真を最大10件までしか返さないため、10は「10件以上」の意味です（正確な総数はGoogleビジネスプロフィール側で確認）。口コミ返信の有無・全口コミ・マップ検索順位は公式APIで取得不可のため対象外。</p>
                                 </div>
                             )}
                             <div className="text-[11px] text-slate-400 font-bold leading-relaxed">💡 MEOを伸ばすコツ：①施術後に口コミ依頼リンク/QRで毎日お願いする ②全口コミに24〜48hで返信（AI下書き活用）③写真を週1更新 ④HP・電話・営業時間・カテゴリを埋める。要対応店は上のアラートから着手を。</div>

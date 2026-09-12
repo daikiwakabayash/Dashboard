@@ -18,7 +18,7 @@ import { ensureBaseRooms, extractLinks, toggleReaction, genId } from '../lib/cha
 import { videoEmbed } from '../lib/board.js';
 import { analyzeStore, couponReminderItems, buildStoreMessage } from '../lib/patrol.js';
 import { buildSearchRequest, parsePlacesResponse, reviewRequestUrl } from '../lib/places.js';
-import { recordSnapshot, computeDeltas, meoFlags, meoScore, alertWeight, jstYmd } from '../lib/meo.js';
+import { recordSnapshot, computeDeltas, meoFlags, meoScore, alertWeight, jstYmd, reviewsInMonth } from '../lib/meo.js';
 
 // Vercel KV / Upstash Redis / Vercel Redis いずれの環境変数名でも動くよう両対応（REST APIは共通）
 const KV_URL = () => process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_REST_API_URL || '';
@@ -447,9 +447,17 @@ export default async function handler(req, res) {
       const history = Array.isArray(rec.history) ? rec.history : [];
       const latest = (rec.latest && typeof rec.latest === 'object') ? rec.latest : {};
       const deltas = computeDeltas(history);
+      // 「今月獲得口コミ数」の即時推定（スナップショット履歴が1点だけの初回でも出す）。
+      //   Placesが返す直近レビュー（最大5件）の publishTime から当月分をカウント＝下限値。
+      //   スナップショット純増(deltas.newThisMonth)が計測可能ならそちらを正、なければこの下限値を採用。
+      const seen = reviewsInMonth((latest && Array.isArray(latest.reviews)) ? latest.reviews : []);
+      const monthReviews = (typeof deltas.newThisMonth === 'number')
+        ? { value: deltas.newThisMonth, source: 'snapshot', atLeast: false }   // 履歴からの純増（正確）
+        : { value: seen.count, source: 'recent', atLeast: !!seen.capped };     // 直近レビューからの下限推定
       return {
         name, placeId: rec.placeId || '', query: rec.query || '', updatedAt: rec.updatedAt || '',
         latest, history, deltas,
+        reviewsSeenThisMonth: seen.count, reviewsSeenCapped: seen.capped, monthReviews,
         flags: meoFlags(latest, deltas), score: meoScore(latest),
         reviewUrl: reviewRequestUrl(rec.placeId || (latest && latest.placeId) || ''),
         mapsUri: (latest && latest.mapsUri) || '',

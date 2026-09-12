@@ -1500,6 +1500,28 @@
         const SQUARE_CACHE_KEY = 'square_data_cache_v6'; // v6: locationIdデータ整合性修正
         const UI_STATE_KEY = 'dashboard_ui_state';
         const CACHE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7日間はキャッシュをそのまま表示（最新化は再読み込み/SYNCで）
+        // ── 店舗の国分類（日本/オーストラリア/マレーシア）。lib/country.js と同基準（テスト対象は lib 側）──
+        //   SalonOne海外 area_id を最優先（900000341=馬来 / 900000342=豪州）。無ければ住所/名前で推定・既定=日本。
+        const SO_AREA_COUNTRY = { '900000341': 'my', '900000342': 'au' };
+        const SO_COUNTRY_LABEL = { jp: '日本', au: 'オーストラリア', my: 'マレーシア' };
+        const SO_COUNTRY_SHORT = { jp: '日本', au: '豪州', my: '馬来' };
+        const SO_COUNTRY_FLAG = { jp: '🇯🇵', au: '🇦🇺', my: '🇲🇾' };
+        function soShopCountry(s) {
+            const aid = String((s && s.area_id) || '').trim();
+            if (SO_AREA_COUNTRY[aid]) return SO_AREA_COUNTRY[aid];
+            const t = `${(s && s.address) || ''} ${(s && s.name) || ''}`;
+            if (/Malaysia|Kuala\s*Lumpur|Selangor|Petaling|Damansara|Mont\s*Kiara|Bukit\s*Jalil|Desa\s*Park|Sunway|Jalan/i.test(t)) return 'my';
+            if (/Australia|Brisbane|\bQLD\b|\bNSW\b|\bVIC\b|Ascot|Gravatt|Racecourse/i.test(t)) return 'au';
+            return 'jp';
+        }
+        // アクセス店舗配列から主な国（単一国ユーザー＝その国／混在・日本は jp）。海外スタッフを自国スコープに寄せる用。
+        function soPrimaryCountry(shops) {
+            const list = Array.isArray(shops) ? shops : [];
+            if (!list.length) return 'jp';
+            const set = new Set(list.map(soShopCountry));
+            if (set.size === 1) return [...set][0];
+            return set.has('jp') ? 'jp' : [...set][0];
+        }
         // ── IndexedDB 軽量KVキャッシュ ──
         // Squareの全店データはlocalStorageの容量上限(~5MB)を超えて保存に失敗し、毎回再取得になっていた。
         // IndexedDB（数百MB可）に保存してキャッシュを確実に永続化する。値はオブジェクトをそのまま格納。
@@ -2197,7 +2219,21 @@
                 return arr.filter(s => pats.some(p => String(s.name || '').includes(p)));
             }, [soShopsRaw, authState.root, authState.shops]);
             // SalonOne /shops レスポンスを店舗配列に変換（削除済み店舗は除外）
-            const soShopsFromResp = (j) => (j && (j.data || j) || []).filter(s => !s.deleted_at).map(s => ({ id: String(s.id ?? s.shop_id ?? ''), name: s.name || s.shop_name || `店舗${s.id}`, area_id: String(s.area_id ?? '') }));
+            const soShopsFromResp = (j) => (j && (j.data || j) || []).filter(s => !s.deleted_at).map(s => ({ id: String(s.id ?? s.shop_id ?? ''), name: s.name || s.shop_name || `店舗${s.id}`, area_id: String(s.area_id ?? ''), timezone: String(s.timezone || ''), address: String(s.address || '') }));
+            // ── 国スコープ（日本/豪州/馬来）: SalonOne売上・マーケはこの国だけを表示・取得する（全体管理シート/組織図は全件のまま）──
+            //   既定はユーザーの店舗から自動（日本スタッフ=jp・海外スタッフ=自国）。root/hqは日本既定＋「海外」タブで切替。
+            const homeRegion = useMemo(() => authState.root ? 'jp' : soPrimaryCountry(soShopsMine), [authState.root, soShopsMine]);
+            const [soRegion, setSoRegion] = useState('jp');
+            const soRegionInitRef = useRef(false);
+            useEffect(() => { // 初回・権限確定時に自国へ寄せる（海外スタッフが日本を読み込まないように）
+                if (!authState.authenticated) return;
+                if (soRegionInitRef.current) return;
+                if (!authState.root && soShopsMine.length === 0) return; // 店舗一覧が届くまで待つ
+                soRegionInitRef.current = true;
+                setSoRegion(homeRegion);
+            }, [authState.authenticated, authState.root, homeRegion, soShopsMine.length]);
+            // 国スコープを適用した店舗（SalonOne売上・マーケの店舗ユニバース）。全体管理/組織図は soShops(全件) を使う。
+            const soShopsRegion = useMemo(() => (soShops || []).filter(s => soShopCountry(s) === soRegion), [soShops, soRegion]);
             const [soStaffs, setSoStaffs] = useState([]);       // スタッフ一覧
             const [soLoading, setSoLoading] = useState(false);
             const [soError, setSoError] = useState(null);
@@ -4668,7 +4704,7 @@
             };
             const acqIsPastPeriod = () => { try { return soTo < new Date().toISOString().slice(0, 10); } catch { return false; } };
             const acqFetchCustomers = async (force = false) => {
-                const key = `${soFrom}_${soTo}_${(soShopSel || []).join(',')}`;
+                const key = `${soRegion}_${soFrom}_${soTo}_${(soShopSel || []).join(',')}`; // ★国スコープをキーに（国切替で再取得）
                 if (acqCustLoading) return;
                 const cached = acqCacheGet('naoru_acqcust_v1', key);
                 if (cached && Array.isArray(cached.rows)) {
@@ -4679,7 +4715,8 @@
                 acqLoadedKeyRef.current = key;
                 if (!(cached && cached.rows)) setAcqCustLoading(true); // キャッシュが無い時だけスピナー表示
                 try {
-                    const ids = (soShopSel && soShopSel.length) ? soShopSel : ['']; // '' = ブランド全店（1系列でページング）
+                    // ★国スコープ: 選択があればそれ／日本は全店1系列（''）／海外は自国の店舗のみ（日本データを読み込まない＝軽量化）
+                    const ids = (soShopSel && soShopSel.length) ? soShopSel : (soRegion === 'jp' ? [''] : (soShopsRegion || []).map(s => String(s.id)));
                     let all = [];
                     for (const sid of ids) {
                         let cursor = '', guard = 0;
@@ -4736,7 +4773,7 @@
             useEffect(() => {
                 if ((currentPage === 'salonone' || currentPage === 'mktg') && ['acq', 'forced', 'customers', 'storemedia'].includes(soView) && soShops.length) { acqFetchCustomers(); acqFetchForced(); acqLoadExcluded(); }
                 // 注: soShops.length を依存に含め、店舗一覧が後から届いても再取得されるようにする（マーケタブ直リンク対策）
-            }, [currentPage, soView, soFrom, soTo, soShopSel, soShops.length]);
+            }, [currentPage, soView, soFrom, soTo, soShopSel, soShops.length, soRegion]);
             const [zkZoom, setZkZoom] = useState(() => (typeof window !== 'undefined' && window.innerWidth < 640) ? 0.5 : 1); // 全体管理シートの表示倍率（既定=スマホ50%/PC100%。スマホは指ピンチでも拡大縮小可）
             const [soStoreMenuOpen, setSoStoreMenuOpen] = useState(false);
             const [soStoreSearch, setSoStoreSearch] = useState('');
@@ -6252,7 +6289,7 @@
                 const forceAll = !!opts.force;
                 const reqId = ++soShopReqRef.current;
                 setSoShopLoading(true);
-                const shopList = soShops.length ? soShops : [];
+                const shopList = soShopsRegion.length ? soShopsRegion : []; // ★国スコープ（海外を日本タブから除外・海外タブは自国のみ）
                 const cto = soConfirmedTo();  // 確定分の締め日（当日は除外）
                 // ── キャッシュ: 期間(pkey)ごとに店舗結果を保存し、再取得を回避して高速化 ──
                 // 過去の確定期間は永続キャッシュ、当月(進行中)は20分TTLで再利用。
@@ -6925,13 +6962,19 @@
                         const p = new URLSearchParams({ resource, from: soFrom, to: cto, ...(shopId ? { shop_id: shopId } : {}), ...extra });
                         return soFetchRetry(`${SALONONE_API_URL}?${p.toString()}`);
                     };
-                    const allShopIds = (soShops || []).map(s => String(s.id)).filter(Boolean);
+                    // ★国スコープ: 全店フォールバックは「選択中の国の店舗」のみ（日本タブに海外を混ぜない・海外タブは自国のみ）
+                    const allShopIds = (soShopsRegion || []).map(s => String(s.id)).filter(Boolean);
                     const fetchResource = async (resource, extra = {}, onShop = null) => {
                         if (ids.length) {
                             return mapPool(ids, id => soDoOne(resource, id, extra), 6, onShop);
                         }
-                        // 全店: まずブランド全店(shop_id無し)で試す。SalonOneが invalid_request 等で拒否する場合は
-                        // 全店をper-shopで取得してマージ（soMergeSummary/正規化が複数店を合算）。
+                        // 海外スコープ（豪州/馬来）は店舗数が少ないので per-shop で自国のみ取得（ブランド全店集計＝日本混在を避ける）。
+                        if (soRegion !== 'jp') {
+                            if (!allShopIds.length) return [];
+                            return mapPool(allShopIds, id => soDoOne(resource, id, extra), 6, onShop);
+                        }
+                        // 日本（全店）: まずブランド全店(shop_id無し)で試す。SalonOneが invalid_request 等で拒否する場合は
+                        // 自国全店をper-shopで取得してマージ（soMergeSummary/正規化が複数店を合算）。
                         const brand = await soDoOne(resource, '', extra);
                         const brandOk = brand && brand.status === 200 && brand.json && brand.json.data && !brand.json.error;
                         // ⚡ 認証必須キー等で user_auth_required/invalid_token が返る場合、per-shop に散らしても
@@ -7141,7 +7184,7 @@
                 if (currentPage !== 'salonone' && currentPage !== 'mktg') return;
                 soInitialized.current = true;
                 fetchSalonOneData();
-            }, [currentPage, soFrom, soTo, soShopSel]);
+            }, [currentPage, soFrom, soTo, soShopSel, soRegion]);
 
             // 全店表示の売上サマリ(sales/summary)は SalonOne がブランド一括取得を許可せず(422)、
             // per-shop合算が必要。初回に店舗一覧(soShops)が未取得のままfetchが走ると soSummary が
@@ -7159,7 +7202,8 @@
                 const mViews = ['acq', 'forced', 'customers', 'storemedia'];
                 if (currentPage === 'mktg' && !mViews.includes(soView)) setSoView('acq');
                 if (currentPage === 'salonone' && (mViews.includes(soView) || soView === 'marketing')) setSoView('shops');
-            }, [currentPage]);
+                if (currentPage === 'salonone' && soView === 'plan' && soRegion !== 'jp') setSoView('shops'); // 海外は計画なし
+            }, [currentPage, soRegion]);
 
             // 店舗選択が変わったらスタッフ選択をリセット
             useEffect(() => { setSoStaffSel([]); }, [soShopSel]);
@@ -7179,11 +7223,11 @@
                 const onSalonShops = currentPage === 'salonone' && (soView === 'shops' || soView === 'marketing');
                 const onMktg = currentPage === 'mktg' && ['acq', 'storemedia', 'customers', 'forced'].includes(soView);
                 if (!onSalonShops && !onMktg) return;
-                const key = `${soFrom}_${soTo}`;
+                const key = `${soRegion}_${soFrom}_${soTo}`; // ★国スコープをキーに含める（国切替で再取得）
                 if (soShopLoadedKeyRef.current === key && soShopRows.some(r => r.active && !r.loading)) return;
                 soShopLoadedKeyRef.current = key;
                 loadShopBreakdown();
-            }, [currentPage, soView, soFrom, soTo, soShops.length]);
+            }, [currentPage, soView, soFrom, soTo, soShops.length, soRegion]);
 
             // クリエイティブ分析タブ（媒体×メニュー）: 開いた/店舗/期間が変わったら受付履歴を再集計
             useEffect(() => {
@@ -11773,7 +11817,9 @@
             return (
                 <div className="h-[100dvh] overflow-hidden bg-gradient-to-br from-ink-50 via-[#F8F9FB] to-brand-50/40 flex">
                     {/* Sidebar */}
-                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} authRoot={authState.root} authIsHq={authIsHq} authOwner={authState.owner} authRole={authRole} authStaffName={authState.staffName} authDisplayName={acctDisplayName} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} chatUnread={chatUnreadTotal} boardUnread={boardUnreadTotal} eventsUnread={evUnreadTotal} mobileNavOpen={mobileNavOpen} setMobileNavOpen={setMobileNavOpen} />
+                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} authRoot={authState.root} authIsHq={authIsHq} authOwner={authState.owner} authRole={authRole} authStaffName={authState.staffName} authDisplayName={acctDisplayName} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} chatUnread={chatUnreadTotal} boardUnread={boardUnreadTotal} eventsUnread={evUnreadTotal} mobileNavOpen={mobileNavOpen} setMobileNavOpen={setMobileNavOpen}
+                        soRegion={soRegion} homeRegion={homeRegion} hasOverseas={(soShopsRaw || []).some(s => soShopCountry(s) !== 'jp')}
+                        onNav={(item) => { const r = item.region || homeRegion; if (r !== soRegion) { setSoRegion(r); setSoShopSel([]); setSoStaffSel([]); } setCurrentPage(item.id); }} />
                     {/* ルーム削除の確認（スマホ/PC共通の確実なポップアップ） */}
                     {chatDeleteAsk && (
                         <div className="fixed inset-0 z-[120] bg-black/45 flex items-center justify-center p-4" onClick={() => setChatDeleteAsk(null)}>
@@ -16754,7 +16800,7 @@
                         {/* ===== SalonOne 売上分析タブ ===== */}
                         {(currentPage === 'salonone' || currentPage === 'mktg') && (() => {
                             const isMktg = currentPage === 'mktg';
-                            const shopOptions = (soShops.length ? soShops : soDemoShops);
+                            const shopOptions = (soShopsRegion.length ? soShopsRegion : (soRegion === 'jp' ? soDemoShops : [])); // ★国スコープ（店舗フィルタも自国のみ）
                             // オーナー→SalonOne店舗ID のグループ（該当店舗があるオーナーのみ）
                             const ownerGroups = (() => {
                                 const groups = {};
@@ -16865,7 +16911,8 @@
                                                     <div className="inline-flex items-center gap-1 md:gap-2 px-2 md:px-3 py-0.5 md:py-1 bg-emerald-100 text-emerald-700 rounded-full text-[10px] md:text-xs font-black uppercase tracking-widest mb-1">
                                                         <Activity size={10} className="md:hidden" /><Activity size={14} className="hidden md:block" /> SalonOne
                                                     </div>
-                                                    <h1 className="text-xl md:text-3xl font-black tracking-tight text-slate-900 italic">{isMktg ? 'マーケティング分析' : 'SalonOne 売上分析'}</h1>
+                                                    <h1 className="text-xl md:text-3xl font-black tracking-tight text-slate-900 italic flex items-center gap-2">{isMktg ? 'マーケティング分析' : 'SalonOne 売上分析'}
+                                                        {soRegion !== 'jp' && <span className="not-italic inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] md:text-sm font-black bg-amber-100 text-amber-700 align-middle">{SO_COUNTRY_FLAG[soRegion]} {SO_COUNTRY_LABEL[soRegion]}</span>}</h1>
                                                 </div>
                                             </div>
                                             <div className="flex items-center gap-2 md:gap-3 flex-wrap">
@@ -16990,7 +17037,8 @@
                                                 { k: 'shops', label: '店舗', icon: <MapPin size={15} /> },
                                                 { k: 'staff', label: 'スタッフ', icon: <Users size={15} /> },
                                                 { k: 'daily', label: '日報', icon: <Calendar size={15} /> },
-                                                { k: 'plan', label: '計画', icon: <Target size={15} /> },
+                                                // 計画は日本のみ（海外は計画不要）
+                                                ...(soRegion === 'jp' ? [{ k: 'plan', label: '計画', icon: <Target size={15} /> }] : []),
                                             ]
                                         ).map(t => (
                                             <button key={t.k} onClick={() => setSoView(t.k)}
@@ -17278,7 +17326,7 @@
                                     {['acq', 'forced', 'customers', 'storemedia'].includes(soView) && (() => {
                                         // ── 集計の起点＝「受付日時(received_at)が選択期間内の新規予約」を1コホートとして追跡（来店が翌月でも含む）──
                                         // 店舗メタ（id→店舗名・海外判定）。海外(AU=900000342 / MY=900000341)は除外し、日本の店舗のみ対象。
-                                        const shopMeta = {}; (soShopsRaw || []).forEach(s => { const aid = String(s.area_id || ''); shopMeta[String(s.id)] = { name: s.name, overseas: aid === '900000341' || aid === '900000342' }; });
+                                        const shopMeta = {}; (soShopsRaw || []).forEach(s => { const cc = soShopCountry(s); shopMeta[String(s.id)] = { name: s.name, cc, overseas: cc !== 'jp' }; });
                                         const WDAY = ['日', '月', '火', '水', '木', '金', '土'];
                                         // テスト予約・明らかにおかしい予約データを全指標から除外（スタッフのテスト投入で数値が汚れるのを防止）
                                         const isJunkCust = (c) => {
@@ -17295,7 +17343,7 @@
                                         const custIdOf = (c) => String(c.customer_id != null ? c.customer_id : (c.customer_code || ''));
                                         // 全媒体のコホート（媒体フィルタ前）。custRows は媒体フィルタ適用後（KPI/一覧/店舗別に反映）。
                                         const custRowsAll = (acqCust || []).filter(c => {
-                                            const m = shopMeta[String(c.shop_id)]; if (!m || m.overseas) return false;
+                                            const m = shopMeta[String(c.shop_id)]; if (!m || m.cc !== soRegion) return false; // ★国スコープ（日本タブ=日本のみ／海外タブ=自国のみ）
                                             if (isJunkCust(c)) return false;
                                             if (acqExclSet[custIdOf(c)]) return false;       // 手動除外＝全指標からカウントしない
                                             const d = String(c.received_at || '').slice(0, 10);
@@ -17304,7 +17352,7 @@
                                         const mediaOptions = Array.from(new Set(custRowsAll.map(c => c.visit_source_name || '未設定'))).sort();
                                         const custRows = acqMediaSel ? custRowsAll.filter(c => (c.visit_source_name || '未設定') === acqMediaSel) : custRowsAll;
                                         // 手動除外された予約（当期間・日本のみ）＝新規顧客一覧で「除外済みを表示」時に復帰用として出す
-                                        const acqExclRows = (acqCust || []).filter(c => { const m = shopMeta[String(c.shop_id)]; if (!m || m.overseas) return false; if (!acqExclSet[custIdOf(c)]) return false; const d = String(c.received_at || '').slice(0, 10); return d && d >= soFrom && d <= soTo; });
+                                        const acqExclRows = (acqCust || []).filter(c => { const m = shopMeta[String(c.shop_id)]; if (!m || m.cc !== soRegion) return false; if (!acqExclSet[custIdOf(c)]) return false; const d = String(c.received_at || '').slice(0, 10); return d && d >= soFrom && d <= soTo; });
                                         // 店舗別 広告費（__shops__[店舗名][媒体]）を店舗名の正規化一致で引くヘルパ
                                         const _adRange = `${soFrom}_${soTo}`;
                                         const _adBucket = (soAdSpend && soAdSpend[_adRange]) || {};
@@ -23882,7 +23930,10 @@
             );
         };
 
-        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authIsHq = false, authOwner = '', authRole = 'root', authStaffName = '', authDisplayName = '', collapsed = false, setCollapsed = () => {}, chatUnread = 0, boardUnread = 0, eventsUnread = 0, mobileNavOpen = false, setMobileNavOpen = () => {} }) => {
+        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authIsHq = false, authOwner = '', authRole = 'root', authStaffName = '', authDisplayName = '', collapsed = false, setCollapsed = () => {}, chatUnread = 0, boardUnread = 0, eventsUnread = 0, mobileNavOpen = false, setMobileNavOpen = () => {}, soRegion = 'jp', homeRegion = 'jp', hasOverseas = false, onNav = null }) => {
+            const goNav = (item) => { if (onNav) onNav(item); else setCurrentPage(item.id); };
+            // ナビ項目のアクティブ判定（海外タブは国スコープも一致していること）
+            const isActive = (item) => currentPage === item.id && ((item.region || homeRegion) === soRegion);
             const acctName = authDisplayName || ((authRoot && !authIsHq) ? '管理者' : (authStaffName || authOwner || 'アカウント'));
             const acctInit = String(acctName || 'A').trim().charAt(0) || 'A';
             // カテゴリー別にグルーピング（見やすさ・高級感のため）
@@ -23906,6 +23957,13 @@
                     { id: 'patrol', label: 'AIパトロール', icon: <span className="text-[17px] leading-none">🔎</span>, mobileIcon: <span className="text-[17px] leading-none">🔎</span>, rootOnly: true },
                     { id: 'meo', label: 'MEO対策', icon: <span className="text-[17px] leading-none">🗺️</span>, mobileIcon: <span className="text-[17px] leading-none">🗺️</span>, rootOnly: true },
                 ] },
+                // 海外（root/hq専用・海外店舗がある場合のみ）。日本タブとは別枠で豪州/馬来をそれぞれ売上・マーケで表示。
+                { label: '海外', overseasOnly: true, accent: { pill: 'bg-amber-50 text-amber-700', dot: 'bg-amber-500', chip: 'group-hover:bg-amber-50 group-hover:text-amber-600' }, items: [
+                    { key: 'au-salonone', id: 'salonone', region: 'au', label: '豪州 売上', icon: <span className="text-[17px] leading-none">🇦🇺</span>, mobileIcon: <span className="text-[17px] leading-none">🇦🇺</span>, rootOnly: true },
+                    { key: 'au-mktg', id: 'mktg', region: 'au', label: '豪州 マーケ', icon: <span className="text-[17px] leading-none">🇦🇺</span>, mobileIcon: <span className="text-[17px] leading-none">🇦🇺</span>, rootOnly: true },
+                    { key: 'my-salonone', id: 'salonone', region: 'my', label: '馬来 売上', icon: <span className="text-[17px] leading-none">🇲🇾</span>, mobileIcon: <span className="text-[17px] leading-none">🇲🇾</span>, rootOnly: true },
+                    { key: 'my-mktg', id: 'mktg', region: 'my', label: '馬来 マーケ', icon: <span className="text-[17px] leading-none">🇲🇾</span>, mobileIcon: <span className="text-[17px] leading-none">🇲🇾</span>, rootOnly: true },
+                ] },
                 { label: '店舗運営', accent: { pill: 'bg-violet-50 text-violet-700', dot: 'bg-violet-500', chip: 'group-hover:bg-violet-50 group-hover:text-violet-600' }, items: [
                     { id: 'settlement', label: '返金明細書', icon: <Banknote size={18} />, mobileIcon: <Banknote size={18} />, hideForStaff: true },
                     { id: 'allowance', label: '手当・領収書', icon: <FileText size={18} />, mobileIcon: <FileText size={18} /> },
@@ -23917,7 +23975,9 @@
                 ] },
             ];
             const canShow = (it) => (authRoot || !it.rootOnly) && !(it.hideForStaff && authRole === 'staff') && (!it.thanksOnly || authRole === 'staff' || authRole === 'owner' || authRoot);
-            const visSections = navSections.map(s => ({ ...s, items: s.items.filter(canShow) })).filter(s => s.items.length);
+            const visSections = navSections
+                .filter(s => !s.overseasOnly || hasOverseas)   // 海外セクションは海外店舗がある時だけ
+                .map(s => ({ ...s, items: s.items.filter(canShow) })).filter(s => s.items.length);
             const menuItems = visSections.flatMap(s => s.items); // モバイル下部ナビ用のフラット一覧
 
             const alertCount = cpaAlerts.length;
@@ -24003,15 +24063,15 @@
                                     {collapsed && si > 0 && <div className="mx-3 my-2 h-px bg-ink-100" />}
                                     <div className="space-y-1">
                                         {sec.items.map(item => {
-                                            const active = currentPage === item.id;
+                                            const active = isActive(item);
                                             // アイコンチップ: 既定=淡いグレー / ホバー=カテゴリ色 / 選択=（展開時）半透明白・（折畳時）ブランドグラデ
                                             const chipCls = active
                                                 ? (collapsed ? 'bg-gradient-to-br from-brand-500 to-brand-600 text-white shadow-md shadow-brand-500/30' : 'bg-white/20 text-white')
                                                 : `bg-ink-50 text-ink-400 ${(sec.accent && sec.accent.chip) || 'group-hover:bg-brand-50 group-hover:text-brand-600'}`;
                                             return (
                                             <button
-                                                key={item.id}
-                                                onClick={() => setCurrentPage(item.id)}
+                                                key={item.key || item.id}
+                                                onClick={() => goNav(item)}
                                                 title={collapsed ? item.label : undefined}
                                                 className={`w-full flex items-center gap-3 rounded-xl text-[13px] transition-all duration-150 relative group ${collapsed ? 'justify-center px-0 py-1.5' : 'pl-2 pr-2.5 py-1.5'} ${
                                                     active
@@ -24113,9 +24173,9 @@
                                             <div className="px-1 pb-2"><span className={`inline-flex items-center gap-1.5 pl-1.5 pr-2.5 py-1 rounded-md text-[11px] font-bold tracking-wide ${(sec.accent && sec.accent.pill) || 'bg-ink-50 text-ink-500'}`}><span className={`w-1.5 h-1.5 rounded-full ${(sec.accent && sec.accent.dot) || 'bg-ink-300'}`} />{sec.label}</span></div>
                                             <div className="space-y-1">
                                                 {sec.items.map(item => {
-                                                    const active = currentPage === item.id;
+                                                    const active = isActive(item);
                                                     return (
-                                                    <button key={item.id} onClick={() => { setCurrentPage(item.id); setMobileNavOpen(false); }} className={`w-full flex items-center gap-3 rounded-xl text-[14px] pl-2 pr-3 py-1.5 transition ${active ? 'bg-gradient-to-r from-brand-500 to-brand-600 text-white font-bold shadow-md shadow-brand-500/25' : 'text-ink-700 font-semibold hover:bg-ink-50 active:bg-ink-50'}`}>
+                                                    <button key={item.key || item.id} onClick={() => { goNav(item); setMobileNavOpen(false); }} className={`w-full flex items-center gap-3 rounded-xl text-[14px] pl-2 pr-3 py-1.5 transition ${active ? 'bg-gradient-to-r from-brand-500 to-brand-600 text-white font-bold shadow-md shadow-brand-500/25' : 'text-ink-700 font-semibold hover:bg-ink-50 active:bg-ink-50'}`}>
                                                         <span className={`shrink-0 w-9 h-9 flex items-center justify-center rounded-lg transition-colors ${active ? 'bg-white/20 text-white' : `bg-ink-50 text-ink-400 ${(sec.accent && sec.accent.chip) || 'group-hover:bg-brand-50'}`}`}>{item.icon}</span>
                                                         <span className="truncate">{item.label}</span>
                                                         {item.badge > 0 && <span className={`ml-auto min-w-[18px] h-[18px] flex items-center justify-center text-[10px] font-bold rounded-full px-1 ${active ? 'bg-white/25 text-white' : 'bg-brand-500 text-white'}`}>{item.badge > 99 ? '99+' : item.badge}</span>}

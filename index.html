@@ -4747,7 +4747,7 @@
                 if (!(cached && cached.rows)) setAcqCustLoading(true); // キャッシュが無い時だけスピナー表示
                 try {
                     // ★国スコープ: 選択があればそれ／日本は全店1系列（''）／海外は自国の店舗のみ（日本データを読み込まない＝軽量化）
-                    const ids = (soShopSel && soShopSel.length) ? soShopSel : (soRegion === 'jp' ? [''] : (soShopsRegion || []).map(s => String(s.id)));
+                    const ids = (soShopSel && soShopSel.length) ? soShopSel : ((authState.root && soRegion === 'jp') ? [''] : (soShopsRegion || []).map(s => String(s.id))); // root日本=全店1本／非root・海外=管轄店舗のみ（軽量＋権限スコープ）
                     let all = [];
                     for (const sid of ids) {
                         let cursor = '', guard = 0;
@@ -4786,10 +4786,10 @@
                 };
                 try {
                     let rows = [];
-                    if (soShopSel && soShopSel.length === 1) {
-                        rows = await fetchOne(soShopSel[0]);
-                    } else if (soRegion !== 'jp') {
-                        // ★海外は自国の店舗ぶんだけ取得して結合（forced_link_id は店舗固有なので重複しない）＝その国の予約フォームのみ
+                    if (soShopSel && soShopSel.length) {
+                        rows = (await Promise.all(soShopSel.map(id => fetchOne(String(id))))).flat();
+                    } else if (soRegion !== 'jp' || !authState.root) {
+                        // ★海外／非root＝自分の管轄店舗ぶんだけ取得して結合（forced_link_id は店舗固有なので重複しない・軽量＋権限スコープ）
                         const ids = (soShopsRegion || []).map(s => String(s.id));
                         const per = await Promise.all(ids.map(id => fetchOne(id)));
                         rows = per.flat();
@@ -4836,7 +4836,7 @@
                 if (!force && acqPrevKeyRef.current === key) return;
                 acqPrevKeyRef.current = key;
                 try {
-                    const ids = (soShopSel && soShopSel.length) ? soShopSel : (soRegion === 'jp' ? [''] : (soShopsRegion || []).map(s => String(s.id)));
+                    const ids = (soShopSel && soShopSel.length) ? soShopSel : ((authState.root && soRegion === 'jp') ? [''] : (soShopsRegion || []).map(s => String(s.id))); // root日本=全店1本／非root・海外=管轄店舗のみ（軽量＋権限スコープ）
                     // 新規顧客一覧（前月同日コホート）
                     let cust = [];
                     for (const sid of ids) {
@@ -17451,6 +17451,9 @@
                                         // ── 集計の起点＝「受付日時(received_at)が選択期間内の新規予約」を1コホートとして追跡（来店が翌月でも含む）──
                                         // 店舗メタ（id→店舗名・海外判定）。海外(AU=900000342 / MY=900000341)は除外し、日本の店舗のみ対象。
                                         const shopMeta = {}; (soShopsRaw || []).forEach(s => { const cc = soShopCountry(s); shopMeta[String(s.id)] = { name: s.name, cc, overseas: cc !== 'jp' }; });
+                                        // 権限スコープ: 非root(owner/staff)は管轄店舗(soShopsRegion)のみ。root/hqは国内全店。
+                                        const _allowShopIds = new Set((soShopsRegion || []).map(s => String(s.id)));
+                                        const _inScope = (c) => authState.root || _allowShopIds.has(String(c.shop_id));
                                         const WDAY = ['日', '月', '火', '水', '木', '金', '土'];
                                         // テスト予約・明らかにおかしい予約データを全指標から除外（スタッフのテスト投入で数値が汚れるのを防止）
                                         const isJunkCust = (c) => {
@@ -17468,6 +17471,7 @@
                                         // 全媒体のコホート（媒体フィルタ前）。custRows は媒体フィルタ適用後（KPI/一覧/店舗別に反映）。
                                         const custRowsAll = (acqCust || []).filter(c => {
                                             const m = shopMeta[String(c.shop_id)]; if (!m || m.cc !== soRegion) return false; // ★国スコープ（日本タブ=日本のみ／海外タブ=自国のみ）
+                                            if (!_inScope(c)) return false;                  // ★権限スコープ（非rootは管轄店舗のみ）
                                             if (isJunkCust(c)) return false;
                                             if (acqExclSet[custIdOf(c)]) return false;       // 手動除外＝全指標からカウントしない
                                             const d = String(c.received_at || '').slice(0, 10);
@@ -17476,7 +17480,7 @@
                                         const mediaOptions = Array.from(new Set(custRowsAll.map(c => c.visit_source_name || '未設定'))).sort();
                                         const custRows = acqMediaSel ? custRowsAll.filter(c => (c.visit_source_name || '未設定') === acqMediaSel) : custRowsAll;
                                         // 手動除外された予約（当期間・日本のみ）＝新規顧客一覧で「除外済みを表示」時に復帰用として出す
-                                        const acqExclRows = (acqCust || []).filter(c => { const m = shopMeta[String(c.shop_id)]; if (!m || m.cc !== soRegion) return false; if (!acqExclSet[custIdOf(c)]) return false; const d = String(c.received_at || '').slice(0, 10); return d && d >= soFrom && d <= soTo; });
+                                        const acqExclRows = (acqCust || []).filter(c => { const m = shopMeta[String(c.shop_id)]; if (!m || m.cc !== soRegion) return false; if (!_inScope(c)) return false; if (!acqExclSet[custIdOf(c)]) return false; const d = String(c.received_at || '').slice(0, 10); return d && d >= soFrom && d <= soTo; });
                                         // 店舗別 広告費（__shops__[店舗名][媒体]）を店舗名の正規化一致で引くヘルパ
                                         const _adRange = `${soFrom}_${soTo}`;
                                         const _adBucket = (soAdSpend && soAdSpend[_adRange]) || {};
@@ -17555,7 +17559,7 @@
                                         const _prevReady = !!(acqPrev && acqPrev.from === _pFrom && acqPrev.to === _pTo);
                                         let pBooking = 0, pVisit = 0, pCancel = 0, pJoin = 0, pSales = 0, pAd = 0, pBookCPA = 0, pVisitCPA = 0, pCAC = 0, pVisitRate = 0, pCancelRate = 0, pJoinRate = 0;
                                         if (_prevReady) {
-                                            const pf = (acqPrev.cust || []).filter(c => { const m = shopMeta[String(c.shop_id)]; if (!m || m.cc !== soRegion) return false; if (isJunkCust(c)) return false; if (acqExclSet[custIdOf(c)]) return false; const d = String(c.received_at || '').slice(0, 10); return d && d >= _pFrom && d <= _pTo; });
+                                            const pf = (acqPrev.cust || []).filter(c => { const m = shopMeta[String(c.shop_id)]; if (!m || m.cc !== soRegion) return false; if (!_inScope(c)) return false; if (isJunkCust(c)) return false; if (acqExclSet[custIdOf(c)]) return false; const d = String(c.received_at || '').slice(0, 10); return d && d >= _pFrom && d <= _pTo; });
                                             const pc = acqMediaSel ? pf.filter(c => (c.visit_source_name || '未設定') === acqMediaSel) : pf;
                                             pBooking = pc.length; pVisit = pc.filter(isVisited).length; pCancel = pc.filter(isCancelled).length; pJoin = pc.filter(c => c.joined).length; pSales = pc.reduce((a, c) => a + (Number(c.ltv) || 0), 0);
                                             pAd = Number(acqPrev.adSpend) || 0;

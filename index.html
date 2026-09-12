@@ -4738,7 +4738,7 @@
             };
             // 強制リンク別 実績（1リクエスト）。全店＝shop_id無し、単一店選択時のみ絞り込み。
             const acqFetchForced = async (force = false) => {
-                const key = `${soFrom}_${soTo}_${(soShopSel || []).join(',')}`;
+                const key = `${soRegion}_${soFrom}_${soTo}_${(soShopSel || []).join(',')}`; // ★国スコープをキーに
                 const cached = acqCacheGet('naoru_acqforced_v1', key);
                 if (cached && Array.isArray(cached.rows)) {
                     setAcqForced(cached.rows);
@@ -4747,12 +4747,24 @@
                 if (!force && acqForcedKeyRef.current === key) return;
                 acqForcedKeyRef.current = key;
                 if (!(cached && cached.rows)) setAcqForcedLoading(true);
-                try {
+                const fetchOne = async (shopId) => {
                     const p = new URLSearchParams({ resource: 'marketing/by-forced-link', from: soFrom, to: soTo });
-                    if (soShopSel && soShopSel.length === 1) p.set('shop_id', soShopSel[0]);
-                    let j = null;
-                    for (let a = 0; a < 4; a++) { try { const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`); if (r.status === 429 || r.status >= 500) { await new Promise(x => setTimeout(x, 800 * (a + 1))); continue; } j = await r.json().catch(() => null); break; } catch { await new Promise(x => setTimeout(x, 600 * (a + 1))); } }
-                    const rows = (j && j.data && Array.isArray(j.data.rows)) ? j.data.rows : [];
+                    if (shopId) p.set('shop_id', shopId);
+                    for (let a = 0; a < 4; a++) { try { const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`); if (r.status === 429 || r.status >= 500) { await new Promise(x => setTimeout(x, 800 * (a + 1))); continue; } const j = await r.json().catch(() => null); return (j && j.data && Array.isArray(j.data.rows)) ? j.data.rows : []; } catch { await new Promise(x => setTimeout(x, 600 * (a + 1))); } }
+                    return [];
+                };
+                try {
+                    let rows = [];
+                    if (soShopSel && soShopSel.length === 1) {
+                        rows = await fetchOne(soShopSel[0]);
+                    } else if (soRegion !== 'jp') {
+                        // ★海外は自国の店舗ぶんだけ取得して結合（forced_link_id は店舗固有なので重複しない）＝その国の予約フォームのみ
+                        const ids = (soShopsRegion || []).map(s => String(s.id));
+                        const per = await Promise.all(ids.map(id => fetchOne(id)));
+                        rows = per.flat();
+                    } else {
+                        rows = await fetchOne(''); // 日本は全店1リクエスト
+                    }
                     setAcqForced(rows); acqCachePut('naoru_acqforced_v1', key, rows, 8);
                 } catch { if (!(cached && cached.rows)) setAcqForced([]); acqForcedKeyRef.current = ''; }
                 finally { setAcqForcedLoading(false); }
@@ -6340,8 +6352,9 @@
                     return cached[String(sh.id)] ? { ...base, ...cached[String(sh.id)], loading: false } : base;
                 }).sort((a, b) => (a.order - b.order) || String(a.name).localeCompare(b.name));
                 activeRows.forEach((r, i) => { r.order = i; });   // 出店順に連番を採番（#列・並べ替え用）
-                // SalonOne未導入の固定店舗（データ源なし）＝末尾に「未導入」で表示（全店ロースターの可視化）
-                const inactiveRows = SO_SHOP_ORDER
+                // SalonOne未導入の固定店舗（データ源なし）＝末尾に「未導入」で表示（全店ロースターの可視化）。
+                //   ⚠️ 固定リスト SO_SHOP_ORDER は日本の出店順。海外スコープでは日本店舗を出さない（自国の導入店のみ表示）。
+                const inactiveRows = soRegion !== 'jp' ? [] : SO_SHOP_ORDER
                     .map((name, i) => ({ i, name }))
                     .filter((x) => !matchedFixed.has(x.i))
                     .map((x, k) => ({ order: activeRows.length + k, name: x.name, id: null, active: false, loading: false, ...zeros }));

@@ -2275,6 +2275,9 @@
             const [acqForced, setAcqForced] = useState([]);   // 獲得分析: 強制リンク別 実績（/marketing/by-forced-link・初回オファー/訴求）
             const [acqForcedLoading, setAcqForcedLoading] = useState(false);
             const acqForcedKeyRef = useRef('');
+            // 施策リンク背景同期マップ（顧客id→施策リンクid）。新規顧客一覧(コホート)へJOINして施策リンク別を再構築する。
+            const [acqSoflMap, setAcqSoflMap] = useState({});  // { customer_id: forced_link_id }（全社共有・plan-store ?type=soflmap）
+            const acqSoflSyncedRef = useRef(false);            // このセッションで一度だけ末尾同期をキック
             const [soView, setSoView] = useState('shops');   // サブタブ: shops | staff | marketing | acq | daily | plan（概要は廃止）
             // クリエイティブ分析タブ（媒体×メニュー・受付履歴 appointments 集計）
             const [soCreative, setSoCreative] = useState({ rows: [], kpi: null, loading: false, ready: false, error: '' });
@@ -4798,6 +4801,21 @@
                 } catch { if (!(cached && cached.rows)) setAcqForced([]); acqForcedKeyRef.current = ''; }
                 finally { setAcqForcedLoading(false); }
             };
+            // 施策リンクマップ（顧客id→施策リンクid）を取得。新規顧客一覧のコホートにJOINして施策リンク別を作る。
+            //   マップはappointmentsを差分同期して作る（初回は日次cronで数分蓄積）。ここでは取得のみ＝軽量。
+            //   force（更新ボタン）時は末尾同期を1回キックして当日の予約も取り込む（fire-and-forget・待たない）。
+            const acqFetchSoflMap = async (force = false) => {
+                try {
+                    const r = await fetch('/api/plan-store?type=soflmap');
+                    const j = await r.json().catch(() => null);
+                    if (j && j.cust && typeof j.cust === 'object') setAcqSoflMap(j.cust);
+                    // 追いついている(caughtUp)なら末尾同期は軽い（1ページ）。セッション初回 or 更新時にだけキック。
+                    if ((force || !acqSoflSyncedRef.current) && j && j.caughtUp) {
+                        acqSoflSyncedRef.current = true;
+                        fetch('/api/plan-store?type=soflmap&action=sync').then(() => fetch('/api/plan-store?type=soflmap')).then(x => x.json()).then(x => { if (x && x.cust) setAcqSoflMap(x.cust); }).catch(() => {});
+                    }
+                } catch {}
+            };
             // マーケ集計 手動除外リスト（全社共有）を取得
             const acqLoadExcluded = async () => {
                 try { const r = await fetch('/api/plan-store?type=acqexclude'); const j = await r.json().catch(() => null); if (j && j.ids && typeof j.ids === 'object') setAcqExcluded(j.ids); } catch {}
@@ -4812,7 +4830,7 @@
                 } catch {}
             };
             useEffect(() => {
-                if ((currentPage === 'salonone' || currentPage === 'mktg') && ['acq', 'forced', 'customers', 'storemedia'].includes(soView) && soShops.length) { acqFetchCustomers(); acqFetchForced(); acqLoadExcluded(); }
+                if ((currentPage === 'salonone' || currentPage === 'mktg') && ['acq', 'forced', 'customers', 'storemedia'].includes(soView) && soShops.length) { acqFetchCustomers(); acqFetchForced(); acqLoadExcluded(); acqFetchSoflMap(); }
                 // 注: soShops.length を依存に含め、店舗一覧が後から届いても再取得されるようにする（マーケタブ直リンク対策）
             }, [currentPage, soView, soFrom, soTo, soShopSel, soShops.length, soRegion]);
             const [zkZoom, setZkZoom] = useState(() => (typeof window !== 'undefined' && window.innerWidth < 640) ? 0.5 : 1); // 全体管理シートの表示倍率（既定=スマホ50%/PC100%。スマホは指ピンチでも拡大縮小可）
@@ -7164,8 +7182,9 @@
                     acqLoadedKeyRef.current = '';
                     acqForcedKeyRef.current = '';
                     acqFetchCustomers(true);                      // 新規顧客一覧（コホート）
-                    acqFetchForced(true);                        // 強制リンク別
+                    acqFetchForced(true);                        // 強制リンク別（施策リンクのタイトル/媒体/メニュー解決用）
                     acqLoadExcluded();                           // 手動除外リスト
+                    acqFetchSoflMap(true);                       // 施策リンクマップ（末尾同期をキックして当日分も取り込む）
                 }
             };
 
@@ -17718,64 +17737,87 @@
                                                 </div>
                                                 );
                                             })()}
-                                            {/* 強制リンク別 実績（初回オファー/訴求の効果）＝サブタブ「強制リンク別」 */}
-                                            {soView === 'forced' && (acqForcedLoading || (acqForced && acqForced.length > 0)) && (() => {
-                                                // ★同じ名前（title 完全一致）の強制リンクは店舗・URLをまたいで合算（1文字でも違えば別扱い）。
-                                                //   目的: 「ホームページ新規 3,500円」等の同一オファーを合計し、金額/訴求ごとの入会率・キャンセル率・CPAを比較できるように。
-                                                const _fmap = {};
-                                                (acqForced || []).forEach(r => {
-                                                    if (!((r.booking_count || 0) > 0)) return;
-                                                    const t = String(r.title || '（無題）');
-                                                    if (/テスト|てすと|ﾃｽﾄ|test/i.test(t + String(r.menu_name || '') + String(r.visit_source_name || ''))) return;
-                                                    const e = _fmap[t] || (_fmap[t] = { title: t, _media: {}, _menu: {}, booking: 0, visit: 0, cancel: 0, join: 0, sales: 0, ad_spend: 0, forms: 0 });
-                                                    e.booking += Number(r.booking_count) || 0; e.visit += Number(r.visit_count) || 0;
-                                                    e.cancel += Number(r.cancel_count) || 0; e.join += Number(r.join_count) || 0;
-                                                    e.sales += Number(r.sales) || 0; e.ad_spend += Number(r.ad_spend) || 0; e.forms++;
-                                                    if (r.visit_source_name) e._media[r.visit_source_name] = (e._media[r.visit_source_name] || 0) + 1;
-                                                    if (r.menu_name) e._menu[r.menu_name] = (e._menu[r.menu_name] || 0) + 1;
+                                            {/* 施策リンク別（初回オファー/訴求の効果）＝サブタブ「強制リンク別」。新規顧客一覧(コホート)に施策リンクをJOINして再構築 */}
+                                            {soView === 'forced' && (acqCustLoading || custRowsAll.length > 0 || acqForcedLoading) && (() => {
+                                                // ★新規顧客一覧（受付日コホート・1人1行・キャンセル/テスト/海外除外）に、施策リンクマップ(顧客→施策リンクid)をJOIN。
+                                                //   タイトル/媒体/メニューは by-forced-link(acqForced) で id→文言を解決し、同じ文言は合算（1文字でも違えば別）。
+                                                //   → 「肩こり1,000円 vs 腰痛3,000円」などオファー単位で 予約/来店率/キャンセル率/入会率/CPA をコホート基準で比較。
+                                                const _linkMeta = {};  // forced_link_id → {t:title, m:media, n:menu}
+                                                (acqForced || []).forEach(r => { if (r && r.forced_link_id != null) _linkMeta[String(r.forced_link_id)] = { t: String(r.title || ''), m: r.visit_source_name || '', n: r.menu_name || '' }; });
+                                                // 媒体別の広告費（by-channel）とコホート予約数＝施策リンクCPAの配分元（施策リンク単位の広告費はSalonOneに無いため媒体費を予約数で按分）
+                                                const _mediaCohortBooking = {}; custRowsAll.forEach(c => { const m = c.visit_source_name || '未設定'; _mediaCohortBooking[m] = (_mediaCohortBooking[m] || 0) + 1; });
+                                                const _mediaSpend = (m) => { const ch = chByName[m]; return ch ? (Number(ch.adSpend) || 0) : 0; };
+                                                const _groups = {};
+                                                custRowsAll.forEach(c => {
+                                                    const flid = acqSoflMap[String(c.customer_id)];
+                                                    const meta = (flid != null) ? _linkMeta[String(flid)] : null;
+                                                    const title = (meta && meta.t) ? meta.t : (flid != null ? `リンク#${flid}` : '');
+                                                    const key = (flid != null && title) ? `t:${title}` : '__none__';
+                                                    const g = _groups[key] || (_groups[key] = { key, title: key === '__none__' ? 'リンクなし' : title, media: key === '__none__' ? '' : ((meta && meta.m) || (c.visit_source_name || '')), menu: (meta && meta.n) || '', booking: 0, visit: 0, cancel: 0, join: 0, ltv: 0, _flids: new Set(), _media: {} });
+                                                    if (flid != null) g._flids.add(String(flid));
+                                                    g.booking++;
+                                                    if (isVisited(c)) g.visit++; else g.cancel++;
+                                                    if (c.joined) g.join++;
+                                                    g.ltv += Number(c.ltv) || 0;
+                                                    if (c.visit_source_name) g._media[c.visit_source_name] = (g._media[c.visit_source_name] || 0) + 1;
                                                 });
-                                                const _lbl = (m) => { const ks = Object.keys(m); if (!ks.length) return '—'; if (ks.length === 1) return ks[0]; const top = ks.sort((a, b) => m[b] - m[a])[0]; return `${top} 他${ks.length - 1}`; };
-                                                const fl = Object.values(_fmap).map(e => ({
-                                                    title: e.title, forms: e.forms,
-                                                    media: _lbl(e._media), menu: _lbl(e._menu),
-                                                    booking: e.booking, visit: e.visit,
-                                                    visitRate: e.booking > 0 ? Math.round(e.visit / e.booking * 1000) / 10 : 0,
-                                                    cancelRate: e.booking > 0 ? Math.round(e.cancel / e.booking * 1000) / 10 : 0,
-                                                    join: e.join, joinRate: e.visit > 0 ? Math.round(e.join / e.visit * 1000) / 10 : 0,
-                                                    sales: e.sales, avgPrice: e.visit > 0 ? Math.round(e.sales / e.visit) : 0,
-                                                    cpa: e.ad_spend > 0 && e.booking > 0 ? Math.round(e.ad_spend / e.booking) : 0,
-                                                })).sort((a, b) => b.booking - a.booking).slice(0, 60);
+                                                const fl = Object.values(_groups)
+                                                    .filter(g => !/テスト|てすと|ﾃｽﾄ|test/i.test(g.title))   // テスト用の施策リンクは表示から除外
+                                                    .map(g => {
+                                                        const mediaKeys = Object.keys(g._media);
+                                                        const media = g.key === '__none__' ? (mediaKeys.length <= 1 ? (mediaKeys[0] || '—') : `${mediaKeys.length}媒体`) : (g.media || (mediaKeys[0] || '—'));
+                                                        // CPA: リンク単体の媒体費を予約数で按分（媒体費 × このリンクの予約 / その媒体のコホート予約）
+                                                        const cpaMedia = g.key === '__none__' ? null : g.media;
+                                                        const spendM = cpaMedia ? _mediaSpend(cpaMedia) : 0;
+                                                        const baseB = cpaMedia ? (_mediaCohortBooking[cpaMedia] || 0) : 0;
+                                                        const alloc = (spendM > 0 && baseB > 0) ? spendM * g.booking / baseB : 0;
+                                                        return {
+                                                            title: g.title, forms: g._flids.size, media, menu: g.menu,
+                                                            booking: g.booking, visit: g.visit,
+                                                            visitRate: g.booking > 0 ? Math.round(g.visit / g.booking * 1000) / 10 : 0,
+                                                            cancelRate: g.booking > 0 ? Math.round(g.cancel / g.booking * 1000) / 10 : 0,
+                                                            join: g.join, joinRate: g.visit > 0 ? Math.round(g.join / g.visit * 1000) / 10 : 0,
+                                                            sales: g.ltv, avgPrice: g.booking > 0 ? Math.round(g.ltv / g.booking) : 0,
+                                                            adSpend: Math.round(alloc), vcpa: (alloc > 0 && g.visit > 0) ? Math.round(alloc / g.visit) : 0,
+                                                            none: g.key === '__none__',
+                                                        };
+                                                    }).sort((a, b) => b.booking - a.booking).slice(0, 80);
                                                 return (
                                                 <div className="bg-white border border-slate-200 rounded-2xl p-4 md:p-6">
-                                                    <div className="flex items-center gap-2 mb-3 flex-wrap"><TrendingUp size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">強制リンク別 実績</h2><span className="text-[10px] font-bold text-slate-400">{acqForcedLoading ? '読み込み中…' : '同名フォームは全店合算・予約数の多い順'}</span><InfoTip text={`予約フォーム（強制リンク）を「名前が完全一致するもの同士で合算」して表示（1文字でも違えば別）。店舗・URLが違っても同じ名前なら合計。予約/来店/売上を合算し、来店率=来店÷予約、キャンセル率=キャンセル÷予約、客単価=売上÷来店、CPA=広告費÷予約（強制リンクに広告費入力がある場合のみ）。初回オファー額(1,000/2,000/3,000円)や訴求(肩こり/腰痛)ごとに来店率・キャンセル率を比較する用途。※これは予約ベース（キャンセル/重複含む）で、入会はSalonOneが強制リンク単位で集計しないため非表示。入会率を含む正確な獲得指標は「媒体別/店舗別コホート」（受付日ベース）を参照。`} /></div>
-                                                    {acqForcedLoading && !fl.length ? (
+                                                    <div className="flex items-center gap-2 mb-3 flex-wrap"><TrendingUp size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">施策リンク別 実績</h2><span className="text-[10px] font-bold text-slate-400">{(acqCustLoading || acqForcedLoading) ? '読み込み中…' : '同名リンクは合算・受付日コホート基準・予約数の多い順'}</span><InfoTip text={`新規顧客一覧（受付日が期間内の新規客・1人1行・キャンセル/テスト/海外を除外）に、各顧客の獲得時の施策リンク（強制リンク）を紐づけて集計。同じ文言のリンクは店舗をまたいで合算（1文字でも違えば別）。予約=新規客数、来店=初回来店した人数、来店率=来店÷予約、キャンセル率=(予約−来店)÷予約、入会率=入会÷来店、売上=LTV累計、客単価=売上÷予約。来店CPA=その媒体の広告費をリンクの予約数で按分し来店数で割った概算。施策リンクが取れない直接予約等は「リンクなし」に集約（媒体は選択されているので表示）。目的: どの初回オファー額(1,000/2,000/3,500円)・訴求(肩こり/腰痛/股関節)が入会率が高くキャンセル率が低くCPAが良いかを比較する。`} /></div>
+                                                    {(acqCustLoading || acqForcedLoading) && !fl.length ? (
                                                         <div className="flex items-center justify-center py-8"><Loader2 size={24} className="animate-spin text-emerald-500" /></div>
+                                                    ) : !fl.length ? (
+                                                        <div className="text-center py-8 text-slate-400 font-black text-sm">この期間の新規客データがありません。</div>
                                                     ) : (
                                                     <div className="overflow-x-auto">
                                                         <table className="w-full text-[12px] whitespace-nowrap">
                                                             <thead><tr className="text-slate-400 font-black border-b border-slate-200">
-                                                                <th className="text-left pb-2 px-2 sticky left-0 bg-white" title="予約フォーム名。名前が完全一致するものを全店・URLをまたいで合算（1文字でも違えば別）。×N＝合算フォーム数">強制リンク（フォーム） ⓘ</th><th className="text-left pb-2 px-2" title="このフォームの媒体（visit_source）。複数媒体が混在する場合は最多＋『他N』">媒体</th><th className="text-left pb-2 px-2" title="このフォームに紐づくメニュー名">メニュー</th><th className="text-right pb-2 px-2" title="予約件数（予約日ベース・キャンセルや重複予約も含む）。※媒体別コホートの新規予約は受付日ベースの新規客数で基準が異なる">予約 ⓘ</th><th className="text-right pb-2 px-2" title="このフォーム経由の来店件数">来店</th><th className="text-right pb-2 px-2" title="来店率＝来店 ÷ 予約">来店率</th><th className="text-right pb-2 px-2" title="キャンセル率＝キャンセル ÷ 予約">キャンセル率</th><th className="text-right pb-2 px-2" title="このフォーム経由の売上">売上</th><th className="text-right pb-2 px-2" title="客単価＝売上 ÷ 来店">客単価</th><th className="text-right pb-2 px-2" title="CPA＝広告費 ÷ 予約（強制リンク単位で広告費が入力されている場合のみ）">CPA</th>
+                                                                <th className="text-left pb-2 px-2 sticky left-0 bg-white" title="施策リンク（予約フォーム）名。獲得時に顧客が使ったリンクを新規顧客一覧に紐づけ、同じ文言を合算（1文字でも違えば別）。×N＝合算したリンク数">施策リンク ⓘ</th><th className="text-left pb-2 px-2" title="このリンクの媒体（visit_source）。リンクなしは新規客の媒体を集約">媒体</th><th className="text-left pb-2 px-2" title="このリンクに紐づくメニュー名（by-forced-link由来）">メニュー</th><th className="text-right pb-2 px-2" title="予約＝受付日が期間内の新規客数（1人1行・キャンセル/テスト/海外を除外）。来店が翌月でも受付月に計上">予約 ⓘ</th><th className="text-right pb-2 px-2" title="来店＝新規客のうち初回来店を完了した人数">来店</th><th className="text-right pb-2 px-2" title="来店率＝来店 ÷ 予約">来店率</th><th className="text-right pb-2 px-2" title="キャンセル率＝(予約−来店) ÷ 予約">キャンセル率</th><th className="text-right pb-2 px-2" title="入会＝新規客のうち入会した人数（受付月コホート）">入会</th><th className="text-right pb-2 px-2" title="入会率＝入会 ÷ 来店">入会率</th><th className="text-right pb-2 px-2" title="売上＝新規客のLTV累計（会計完了・取得時点まで）">売上</th><th className="text-right pb-2 px-2" title="客単価＝売上 ÷ 予約">客単価</th><th className="text-right pb-2 px-2" title="広告費(按分)＝その媒体の広告費を、媒体内のリンクへ予約数で按分した概算（施策リンク単位の広告費はSalonOneに無いため）">広告費 ⓘ</th><th className="text-right pb-2 px-2" title="来店CPA＝按分広告費 ÷ 来店数。1来店あたりの獲得コスト概算">来店CPA ⓘ</th>
                                                             </tr></thead>
                                                             <tbody>
                                                                 {fl.map((r, i) => (
-                                                                    <tr key={r.title || i} className="border-b border-slate-100 hover:bg-slate-50">
-                                                                        <td className="py-2 px-2 font-bold text-slate-800 sticky left-0 bg-white max-w-[240px] truncate" title={r.title + (r.forms > 1 ? `（${r.forms}フォーム合算）` : '')}>{r.title}{r.forms > 1 && <span className="ml-1 text-[9px] font-black text-emerald-600">×{r.forms}</span>}</td>
+                                                                    <tr key={r.title || i} className={`border-b border-slate-100 hover:bg-slate-50 ${r.none ? 'opacity-70' : ''}`}>
+                                                                        <td className="py-2 px-2 font-bold text-slate-800 sticky left-0 bg-white max-w-[240px] truncate" title={r.title + (r.forms > 1 ? `（${r.forms}リンク合算）` : '')}>{r.title}{r.forms > 1 && <span className="ml-1 text-[9px] font-black text-emerald-600">×{r.forms}</span>}</td>
                                                                         <td className="py-2 px-2 text-slate-500">{r.media}</td>
-                                                                        <td className="py-2 px-2 text-slate-500 max-w-[180px] truncate" title={r.menu}>{r.menu}</td>
+                                                                        <td className="py-2 px-2 text-slate-500 max-w-[180px] truncate" title={r.menu}>{r.menu || '—'}</td>
                                                                         <td className="py-2 px-2 text-right font-bold text-slate-700">{r.booking.toLocaleString()}</td>
                                                                         <td className="py-2 px-2 text-right font-bold text-slate-700">{r.visit.toLocaleString()}</td>
                                                                         <td className="py-2 px-2 text-right text-slate-500">{r.visitRate}%</td>
                                                                         <td className={`py-2 px-2 text-right font-bold ${r.cancelRate >= 20 ? 'text-rose-500' : 'text-slate-500'}`}>{r.cancelRate}%</td>
+                                                                        <td className="py-2 px-2 text-right font-bold text-slate-700">{r.join.toLocaleString()}</td>
+                                                                        <td className={`py-2 px-2 text-right font-bold ${r.joinRate >= 55 ? 'text-emerald-600' : 'text-slate-500'}`}>{r.joinRate}%</td>
                                                                         <td className="py-2 px-2 text-right font-bold text-slate-900">{soYen(r.sales)}</td>
                                                                         <td className="py-2 px-2 text-right text-slate-600">{r.avgPrice ? soYen(r.avgPrice) : '—'}</td>
-                                                                        <td className="py-2 px-2 text-right text-slate-500">{r.cpa ? soYen(r.cpa) : '—'}</td>
+                                                                        <td className="py-2 px-2 text-right text-slate-500">{r.adSpend ? soYen(r.adSpend) : '—'}</td>
+                                                                        <td className="py-2 px-2 text-right text-slate-500">{r.vcpa ? soYen(r.vcpa) : '—'}</td>
                                                                     </tr>
                                                                 ))}
                                                             </tbody>
                                                         </table>
                                                     </div>
                                                     )}
-                                                    <p className="text-[11px] text-slate-400 mt-3 font-bold">※ <b>名前が完全一致する予約フォームは全店・URLをまたいで合算</b>（1文字でも違えば別扱い）。「×N」＝合算したフォーム数。初回オファー額・肩こり/腰痛訴求などタイトルに現れる違いで、入会率・キャンセル率・CPAを比較できます。CPAは強制リンク単位で広告費が入力されている場合のみ。<br/><b className="text-slate-500">⚠️ ここは「予約件数（予約日ベース・キャンセルや重複予約も含む）」</b>です。ダッシュボード/媒体別・店舗別コホートの「新規予約」は<b className="text-slate-500">「受付日ベースの新規客数（1人1行・キャンセル/テスト/海外を除外）」</b>のため、同じ媒体でも数字は一致しません（例: HPコホート139=新規客数 ／ 強制リンクHP新規限定166=フォーム経由の予約件数）。目的が「新規客の質」か「どのオファーが予約を集めるか」かの違いです。</p>
+                                                    <p className="text-[11px] text-slate-400 mt-3 font-bold">※ <b>受付日コホート（新規顧客一覧）を施策リンク別に集計</b>。「媒体別/店舗別コホート」と同じ母集団（受付日ベース・1人1行・キャンセル/テスト/海外除外）なので、媒体別コホートの合計と一致します（例: HP=新規客数ベースで一貫）。<b>同じ文言のリンクは合算</b>（1文字でも違えば別・「×N」＝合算リンク数）。施策リンクが取れない直接予約等は<b>「リンクなし」</b>に集約（媒体は表示）。<br/><b className="text-slate-500">広告費・来店CPAは概算</b>です＝施策リンク単位の広告費はSalonOneに無いため、<b>その媒体の広告費を媒体内リンクへ予約数で按分</b>して算出しています（媒体全体では実額と一致）。初回オファー額・訴求ごとに入会率・キャンセル率・CPAを比較してください。</p>
                                                 </div>
                                                 );
                                             })()}
@@ -17910,6 +17952,9 @@
                                                     <div className="text-center text-slate-400 font-bold text-[13px] py-8">この期間の新規客データはありません。</div>
                                                 ) : (() => {
                                                     const staffName = (id) => { const s = (soStaffs || []).find(x => String(x.id) === String(id)); return s ? s.name : (id ? '—' : '未割当'); };
+                                                    // 施策リンク解決: 顧客→施策リンクid(acqSoflMap) → タイトル(by-forced-link)。取れなければ空＝リンクなし。
+                                                    const _lmeta = {}; (acqForced || []).forEach(r => { if (r && r.forced_link_id != null) _lmeta[String(r.forced_link_id)] = String(r.title || ''); });
+                                                    const linkOf = (c) => { const flid = acqSoflMap[String(c.customer_id)]; if (flid == null) return ''; return _lmeta[String(flid)] || `リンク#${flid}`; };
                                                     const stLabel = (s) => s === 'completed' ? '来店済' : s === 'booked' ? '予約済' : s === 'cancelled' ? 'キャンセル' : (s || '—');
                                                     const stCls = (s) => s === 'completed' ? 'bg-emerald-50 text-emerald-700' : s === 'booked' ? 'bg-amber-50 text-amber-700' : s === 'cancelled' ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-500';
                                                     const fmt = (s) => { s = String(s || ''); return s.length >= 16 ? s.slice(5, 16).replace('T', ' ') : '—'; };
@@ -17927,7 +17972,7 @@
                                                     <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
                                                         <table className="w-full text-[12px] whitespace-nowrap">
                                                             <thead><tr className="text-slate-400 font-black border-b border-slate-200">
-                                                                <th className="text-left pb-2 px-2">受付日時</th><th className="text-left pb-2 px-2">初回来店予定</th><th className="text-left pb-2 px-2">店舗</th><th className="text-left pb-2 px-2">顧客名</th><th className="text-left pb-2 px-2">担当</th><th className="text-left pb-2 px-2">媒体</th><th className="text-center pb-2 px-2">状態</th><th className="text-center pb-2 px-2">購入</th><th className="text-right pb-2 px-2">LTV</th><th className="text-center pb-2 px-2">操作</th>
+                                                                <th className="text-left pb-2 px-2">受付日時</th><th className="text-left pb-2 px-2">初回来店予定</th><th className="text-left pb-2 px-2">店舗</th><th className="text-left pb-2 px-2">顧客名</th><th className="text-left pb-2 px-2">担当</th><th className="text-left pb-2 px-2">媒体</th><th className="text-left pb-2 px-2" title="獲得時に使った施策リンク（強制リンク）。appointmentsを差分同期して顧客に紐づけ。直接予約等はリンクなし">施策リンク ⓘ</th><th className="text-center pb-2 px-2">状態</th><th className="text-center pb-2 px-2">購入</th><th className="text-right pb-2 px-2">LTV</th><th className="text-center pb-2 px-2">操作</th>
                                                             </tr></thead>
                                                             <tbody>
                                                                 {list.map(({ c, ex }, i) => (
@@ -17938,6 +17983,7 @@
                                                                         <td className={`py-2 px-2 font-bold ${ex ? 'text-slate-500 line-through' : 'text-slate-800'}`}>{c.customer_name || '（非公開）'}</td>
                                                                         <td className="py-2 px-2 text-slate-600">{staffName(c.staff_id)}</td>
                                                                         <td className="py-2 px-2 text-slate-600">{c.visit_source_name || '未設定'}</td>
+                                                                        <td className="py-2 px-2 text-slate-600 max-w-[180px] truncate" title={linkOf(c) || 'リンクなし'}>{linkOf(c) || <span className="text-slate-300">リンクなし</span>}</td>
                                                                         <td className="py-2 px-2 text-center"><span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${stCls(c.first_appointment_status)}`}>{stLabel(c.first_appointment_status)}</span></td>
                                                                         <td className="py-2 px-2 text-center font-black">{c.joined ? <span className="text-emerald-600">○</span> : <span className="text-slate-300">-</span>}</td>
                                                                         <td className="py-2 px-2 text-right font-bold text-slate-900">{c.ltv ? soYen(c.ltv) : '¥0'}</td>

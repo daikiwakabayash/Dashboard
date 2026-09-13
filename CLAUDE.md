@@ -38,6 +38,7 @@ Vercelにpushすると自動デプロイ。
 | `tests/plan-calc.test.js` | 事業計画データ計算（店舗別集計・媒体別CPA・ランキング） |
 | `tests/html-structure.test.js` | フロントエンド構造検証（認証・API・セキュリティ） |
 | `tests/thanksgift.test.js` | サンクスギフト（投票期間判定・1人1票・自分不可・ランキング集計） |
+| `tests/cohort.test.js` | コホートLTV/継続（来店/課金ベース離反判定・LTV/ARPU/継続率カーブ・店舗×加入月集計） |
 
 ## ファイル構成
 ```
@@ -66,6 +67,7 @@ lib/
   board.js          # 掲示板（全社発信）ロジック（新着集計・並び替え・リンク抽出・動画URL埋め込み判定）。tests/board.test.js
   events.js         # 勉強会・イベント日程 ロジック（日付解釈・過ぎた予定の判定＝グレーアウト・セクション定義）。tests/events.test.js
   geo.js            # 組織図の地理順（店舗名→都道府県ランク北→南・海外最下部・地域グルーピング）。tests/geo.test.js
+  cohort.js         # コホートLTV/継続分析（加入月コホート起点でLTV/ARPU/継続率・離反(チャーン)月齢・平均継続月数）。データ源非依存＝churnMonthを外から渡す設計。churnOf=来店ベース離反(最終来店月の翌月が丸々空→前月離反/現在月-最終来店≥2で確定)、churnFromBilling=Square課金ベース離反。buildCohort/buildCohortMatrix=店舗×加入月・全店合算・有限期間(horizon)・獲得あたり/入会あたりLTV。tests/cohort.test.js。フロント「コホートLTV/継続」タブに同ロジックを内蔵
   patrol.js         # AIパトロール ロジック（SalonOne前月比の異常検知・入会率/クチコミ/住所照合の判定・クーポン月初リマインド・店舗チャット文面生成）。tests/patrol.test.js
   places.js         # Google Places API (New) 連携（Text Searchリクエスト組立・レスポンス解析・住所正規化/一致判定・detailed=口コミ本文/営業時間/HP/電話/写真・reviewRequestUrl）。tests/places.test.js
   meo.js            # MEO（Googleマップ）ロジック（口コミ数・評価の履歴スナップショット/増減算出・要対応アラート・MEOスコア）。tests/meo.test.js

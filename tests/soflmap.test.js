@@ -1,5 +1,17 @@
 import { describe, it, expect } from 'vitest';
-import { mergeAppointment, mergeAppointments, flatten, linkMetaFromForced, buildLinkCohort } from '../lib/soflmap.js';
+import { mergeAppointment, mergeAppointments, mergeDismissed, flatten, linkMetaFromForced, buildLinkCohort } from '../lib/soflmap.js';
+
+describe('mergeDismissed（予約取り消し＝dismissed の顧客を集める）', () => {
+  it('dismissed_at がある予約の顧客IDだけ集める（キャンセルは対象外）', () => {
+    const set = mergeDismissed({}, [
+      { customer_id: 1, dismissed_at: '2026-09-10 01:40:29', cancelled_at: '2026-09-10 01:56' }, // 取り消し
+      { customer_id: 2, dismissed_at: null, cancelled_at: '2026-09-09 00:01' },                   // 通常キャンセル
+      { customer_id: 3, dismissed_at: '2026-09-11 10:00' },                                        // 取り消し
+      { customer_id: null, dismissed_at: '2026-09-11 10:00' },                                     // 顧客なしは無視
+    ]);
+    expect(set).toEqual({ '1': 1, '3': 1 });
+  });
+});
 
 describe('mergeAppointment（顧客→施策リンク帰属）', () => {
   it('customer_id か forced_link_id が無い行は無視', () => {

@@ -2278,6 +2278,7 @@
             const acqForcedKeyRef = useRef('');
             // 施策リンク背景同期マップ（顧客id→施策リンクid）。新規顧客一覧(コホート)へJOINして施策リンク別を再構築する。
             const [acqSoflMap, setAcqSoflMap] = useState({});  // { customer_id: forced_link_id }（全社共有・plan-store ?type=soflmap）
+            const [acqDismissed, setAcqDismissed] = useState({}); // { customer_id: 1 } 予約取り消し(dismissed＝スタッフのテスト予約)。コホートから完全除外
             const acqSoflSyncedRef = useRef(false);            // このセッションで一度だけ末尾同期をキック
             // 前月同日比（ダッシュボードKPIの前月比）: 期間を1ヶ月前へずらしたコホート＋広告費
             const [acqPrev, setAcqPrev] = useState(null);      // { from, to, cust:[...], adSpend } or null
@@ -4813,10 +4814,11 @@
                     const r = await fetch('/api/plan-store?type=soflmap');
                     const j = await r.json().catch(() => null);
                     if (j && j.cust && typeof j.cust === 'object') setAcqSoflMap(j.cust);
+                    if (j && j.dismissed && typeof j.dismissed === 'object') setAcqDismissed(j.dismissed); // 予約取り消し（テスト予約）
                     // 追いついている(caughtUp)なら末尾同期は軽い（1ページ）。セッション初回 or 更新時にだけキック。
                     if ((force || !acqSoflSyncedRef.current) && j && j.caughtUp) {
                         acqSoflSyncedRef.current = true;
-                        fetch('/api/plan-store?type=soflmap&action=sync').then(() => fetch('/api/plan-store?type=soflmap')).then(x => x.json()).then(x => { if (x && x.cust) setAcqSoflMap(x.cust); }).catch(() => {});
+                        fetch('/api/plan-store?type=soflmap&action=sync').then(() => fetch('/api/plan-store?type=soflmap')).then(x => x.json()).then(x => { if (x && x.cust) setAcqSoflMap(x.cust); if (x && x.dismissed) setAcqDismissed(x.dismissed); }).catch(() => {});
                     }
                 } catch {}
             };
@@ -17467,6 +17469,7 @@
                                             const m = shopMeta[String(c.shop_id)]; if (!m || m.cc !== soRegion) return false; // ★国スコープ（日本タブ=日本のみ／海外タブ=自国のみ）
                                             if (!_inScope(c)) return false;                  // ★権限スコープ（非rootは管轄店舗のみ）
                                             if (!_shopOk(c)) return false;                   // ★店舗フィルタ（選択店舗のみ）
+                                            if (acqDismissed[String(c.customer_id)]) return false; // ★予約取り消し(SalonOne dismiss＝スタッフのテスト予約)は予約にもキャンセルにも数えない
                                             if (isJunkCust(c)) return false;
                                             if (acqExclSet[custIdOf(c)]) return false;       // 手動除外＝全指標からカウントしない
                                             const d = String(c.received_at || '').slice(0, 10);
@@ -17554,7 +17557,7 @@
                                         const _prevReady = !!(acqPrev && acqPrev.from === _pFrom && acqPrev.to === _pTo);
                                         let pBooking = 0, pVisit = 0, pCancel = 0, pJoin = 0, pSales = 0, pAd = 0, pBookCPA = 0, pVisitCPA = 0, pCAC = 0, pVisitRate = 0, pCancelRate = 0, pJoinRate = 0;
                                         if (_prevReady) {
-                                            const pf = (acqPrev.cust || []).filter(c => { const m = shopMeta[String(c.shop_id)]; if (!m || m.cc !== soRegion) return false; if (!_inScope(c)) return false; if (isJunkCust(c)) return false; if (acqExclSet[custIdOf(c)]) return false; const d = String(c.received_at || '').slice(0, 10); return d && d >= _pFrom && d <= _pTo; });
+                                            const pf = (acqPrev.cust || []).filter(c => { const m = shopMeta[String(c.shop_id)]; if (!m || m.cc !== soRegion) return false; if (!_inScope(c)) return false; if (!_shopOk(c)) return false; if (acqDismissed[String(c.customer_id)]) return false; if (isJunkCust(c)) return false; if (acqExclSet[custIdOf(c)]) return false; const d = String(c.received_at || '').slice(0, 10); return d && d >= _pFrom && d <= _pTo; });
                                             const pc = acqMediaSel ? pf.filter(c => (c.visit_source_name || '未設定') === acqMediaSel) : pf;
                                             pBooking = pc.length; pVisit = pc.filter(isVisited).length; pCancel = pc.filter(isCancelled).length; pJoin = pc.filter(c => c.joined).length; pSales = pc.reduce((a, c) => a + (Number(c.ltv) || 0), 0);
                                             pAd = Number(acqPrev.adSpend) || 0;

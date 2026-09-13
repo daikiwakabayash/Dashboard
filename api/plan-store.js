@@ -19,7 +19,7 @@ import { videoEmbed } from '../lib/board.js';
 import { analyzeStore, couponReminderItems, buildStoreMessage } from '../lib/patrol.js';
 import { buildSearchRequest, parsePlacesResponse, reviewRequestUrl, buildLegacyReviewsRequest, parseLegacyReviews } from '../lib/places.js';
 import { recordSnapshot, computeDeltas, meoFlags, meoScore, alertWeight, jstYmd, reviewsInMonth } from '../lib/meo.js';
-import { mergeAppointments, flatten as soflFlatten } from '../lib/soflmap.js';
+import { mergeAppointments, mergeDismissed, flatten as soflFlatten } from '../lib/soflmap.js';
 
 // Vercel KV / Upstash Redis / Vercel Redis いずれの環境変数名でも動くよう両対応（REST APIは共通）
 const KV_URL = () => process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_REST_API_URL || '';
@@ -575,7 +575,7 @@ export default async function handler(req, res) {
     const SO_BASE = (process.env.SALONONE_API_BASE || 'https://salonone.net/api/analytics/v1').replace(/\/+$/, '');
     const loadState = async () => {
       const c = (await blobGet(SOFL_KEY, hasKV, hasSB, gas)) || {};
-      return { cust: (c.cust && typeof c.cust === 'object') ? c.cust : {}, cursor: c.cursor || '', caughtUp: !!c.caughtUp, updatedAt: c.updatedAt || '', stats: c.stats || {} };
+      return { cust: (c.cust && typeof c.cust === 'object') ? c.cust : {}, dismissed: (c.dismissed && typeof c.dismissed === 'object') ? c.dismissed : {}, cursor: c.cursor || '', caughtUp: !!c.caughtUp, updatedAt: c.updatedAt || '', stats: c.stats || {} };
     };
     // appointments を1ページ取得（キーのみ＝ブランド全店。ログイン必須解除キー前提）
     const fetchAppts = async (cursor) => {
@@ -591,12 +591,13 @@ export default async function handler(req, res) {
       return { rows, hasMore: !!meta.has_more, nextCursor: meta.next_cursor || '' };
     };
     // 差分同期を1回実行（時間バジェット内で複数ページ）。resumable: 最後の非nullカーソルを保存。
-    const runSync = async () => {
+    const runSync = async (reset = false) => {
       if (!SO_KEY) return { ok: false, error: 'salonone_not_configured' };
       const started = Date.now(); const BUDGET_MS = 45000; const MAX_PAGES = 40;
       const st = await loadState();
-      let cursor = st.cursor || '';
+      let cursor = reset ? '' : (st.cursor || '');   // reset=先頭から全再スキャン（dismissed遡及収集用）
       let cust = st.cust;
+      let dismissed = st.dismissed;
       let pages = 0, fetched = 0, mapped0 = Object.keys(cust).length, hadError = null;
       let reachedEnd = false;
       while (pages < MAX_PAGES) {
@@ -605,11 +606,12 @@ export default async function handler(req, res) {
         if (p.error) { hadError = p.error; break; }
         pages++; fetched += p.rows.length;
         mergeAppointments(cust, p.rows);
+        mergeDismissed(dismissed, p.rows);          // 予約取り消し（dismissed_at）の顧客IDを収集
         if (p.nextCursor) cursor = p.nextCursor;   // 非nullのみ前進（末尾でnullでも位置を失わない）
         if (!p.hasMore) { reachedEnd = true; break; } // 末尾＝追いついた（cursorは最後の非nullを保持）
       }
-      const stats = { pages, fetched, mapped: Object.keys(cust).length, added: Object.keys(cust).length - mapped0, ms: Date.now() - started, error: hadError || undefined, at: new Date().toISOString() };
-      await blobSet(SOFL_KEY, { cust, cursor, caughtUp: reachedEnd ? true : st.caughtUp, updatedAt: new Date().toISOString(), stats }, hasKV, hasSB, gas);
+      const stats = { pages, fetched, mapped: Object.keys(cust).length, dismissed: Object.keys(dismissed).length, added: Object.keys(cust).length - mapped0, ms: Date.now() - started, error: hadError || undefined, at: new Date().toISOString() };
+      await blobSet(SOFL_KEY, { cust, dismissed, cursor, caughtUp: reachedEnd ? true : st.caughtUp, updatedAt: new Date().toISOString(), stats }, hasKV, hasSB, gas);
       return { ok: !hadError, reachedEnd, stats };
     };
     try {
@@ -620,11 +622,11 @@ export default async function handler(req, res) {
             const secret = process.env.CRON_SECRET || '';
             if (secret && String(req.headers.authorization || '') !== `Bearer ${secret}`) return res.status(401).json({ ok: false, error: 'unauthorized' });
           }
-          const r = await runSync();
+          const r = await runSync(String(req.query.reset || '') === '1');
           return res.status(200).json({ configured: true, ...r });
         }
         const st = await loadState();
-        return res.status(200).json({ cust: soflFlatten(st.cust), caughtUp: st.caughtUp, count: Object.keys(st.cust).length, updatedAt: st.updatedAt, stats: st.stats, configured: true });
+        return res.status(200).json({ cust: soflFlatten(st.cust), dismissed: st.dismissed, caughtUp: st.caughtUp, count: Object.keys(st.cust).length, dismissedCount: Object.keys(st.dismissed).length, updatedAt: st.updatedAt, stats: st.stats, configured: true });
       }
       // POST でも sync を許可（手動トリガ用）
       const body = req.body || {};

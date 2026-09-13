@@ -17946,12 +17946,74 @@
                                                     .map(s => ({ ...s, ad: acqMediaSel ? (Number(adForShop(s.name)[acqMediaSel]) || 0) : adShopTotal(s.name) }))
                                                     .filter(s => !_q2 || String(s.name || '').includes(_q2))
                                                     .sort((a, b) => (shopOrderOf(a.name) - shopOrderOf(b.name)) || String(a.name).localeCompare(String(b.name))); // 出店順（同順位は店名で安定化）
+                                                // 全店舗合計（媒体別・媒体フィルタ連動）: コホートは custRows、広告費は在圏全店の adForShop を媒体別に合算
+                                                const aggMedia = {};
+                                                custRows.forEach(c => { const m = c.visit_source_name || '未設定'; const o = aggMedia[m] = aggMedia[m] || { name: m, booking: 0, visit: 0, cancel: 0, join: 0, ltv: 0 }; o.booking++; if (c.visited_completed === true || c.first_appointment_status === 'completed') o.visit++; if (c.first_appointment_status === 'cancelled') o.cancel++; if (c.joined) o.join++; o.ltv += Number(c.ltv) || 0; });
+                                                const aggAd = {};
+                                                (soShopsRegion || []).forEach(sh => { const row = adForShop(sh.name) || {}; for (const [md, v] of Object.entries(row)) { const n = Number(v) || 0; if (n > 0 && (!acqMediaSel || md === acqMediaSel)) aggAd[md] = (aggAd[md] || 0) + n; } });
+                                                const aggRows = Object.values(aggMedia).sort((a, b) => b.booking - a.booking);
+                                                const aggAdTotal = Object.values(aggAd).reduce((a, v) => a + v, 0);
+                                                const aggCPA = aggAdTotal > 0 && booking > 0 ? Math.round(aggAdTotal / booking) : 0;
+                                                const aggVCPA = aggAdTotal > 0 && visit > 0 ? Math.round(aggAdTotal / visit) : 0;
+                                                const aggCAC = aggAdTotal > 0 && join > 0 ? Math.round(aggAdTotal / join) : 0;
                                                 return (
                                                 <div className="space-y-4">
                                                     <div className="flex items-center gap-2 flex-wrap">
                                                         <Grid3x3 size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">店舗×媒体 内訳</h2><InfoTip text={`各店の新規（受付日時が ${soFrom}〜${soTo}・日本のみ・テスト予約除外）を媒体別に分解。1行目「合計」＝その店の全媒体合計。予約/来店/来店率/キャンセル/入会/入会率はコホートから、広告費は店舗別・媒体別入力＋SalonOne由来、予約CPA=広告費÷予約、来店CPA=広告費÷来店、LTV=会計累計。媒体フィルタ適用中はその媒体のみ。`} />
                                                         <span className="text-[10px] font-bold text-slate-400">各店の新規を媒体別に分解（出店順）</span>
                                                         <div className="ml-auto flex items-center gap-1.5"><Search size={13} className="text-slate-400" /><input value={acqShopSearch} onChange={e => setAcqShopSearch(e.target.value)} placeholder="店舗名で絞り込み" className="w-32 md:w-44 px-2.5 py-1 text-[12px] font-bold border border-slate-200 rounded-lg focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none" />{acqShopSearch && <button onClick={() => setAcqShopSearch('')} className="text-slate-400 hover:text-slate-600"><X size={14} /></button>}</div>
+                                                    </div>
+                                                    {/* 全店舗合計（媒体フィルタ連動・一番上） */}
+                                                    <div className="bg-gradient-to-br from-emerald-50 to-white border-2 border-emerald-300 rounded-2xl p-3 md:p-4 shadow-sm">
+                                                        <div className="flex items-center justify-between mb-3 gap-x-3 gap-y-1 flex-wrap">
+                                                            <div className="flex items-center gap-2"><Grid3x3 size={16} className="text-emerald-600" /><h3 className="text-sm font-black text-emerald-800">全店舗合計{acqMediaSel ? `（${acqMediaSel}）` : ''}</h3></div>
+                                                            <div className="flex items-center gap-3 text-[11px] font-black flex-wrap">
+                                                                <span className="text-slate-500">新規 <span className="text-slate-900 text-sm">{booking.toLocaleString()}</span>件</span>
+                                                                <span className="text-slate-400">広告費 <span className="text-slate-700">{aggAdTotal > 0 ? soYen(aggAdTotal) : '—'}</span></span>
+                                                                <span className="text-cyan-600">予約CPA <span className="text-sm">{aggCPA ? soYen(aggCPA) : '—'}</span></span>
+                                                                <span className="text-indigo-600">来店CPA <span className="text-sm">{aggVCPA ? soYen(aggVCPA) : '—'}</span></span>
+                                                                <span className="text-rose-600">CAC <span className="text-sm">{aggCAC ? soYen(aggCAC) : '—'}</span></span>
+                                                            </div>
+                                                        </div>
+                                                        <div className="overflow-x-auto -mx-3 px-3 md:mx-0 md:px-0">
+                                                            <table className="w-full text-[11px] whitespace-nowrap">
+                                                                <thead><tr className="text-slate-400 font-black border-b border-emerald-200"><th className="text-left pb-1.5 px-1.5" title={TIP.media}>媒体 ⓘ</th><th className="text-right pb-1.5 px-1.5" title={TIP.booking}>予約 ⓘ</th><th className="text-right pb-1.5 px-1.5" title={TIP.visit}>来店</th><th className="text-right pb-1.5 px-1.5" title={TIP.visitRate}>来店率</th><th className="text-right pb-1.5 px-1.5" title={TIP.cancel}>ｷｬﾝｾﾙ</th><th className="text-right pb-1.5 px-1.5" title={TIP.cancelRate}>ｷｬﾝｾﾙ率</th><th className="text-right pb-1.5 px-1.5" title={TIP.join}>入会</th><th className="text-right pb-1.5 px-1.5" title={TIP.joinRate}>入会率</th><th className="text-right pb-1.5 px-1.5" title={TIP.adSpend}>広告費 ⓘ</th><th className="text-right pb-1.5 px-1.5" title={TIP.bcpa}>予約CPA</th><th className="text-right pb-1.5 px-1.5" title={TIP.vcpa}>来店CPA</th><th className="text-right pb-1.5 px-1.5" title={TIP.cac}>CAC ⓘ</th><th className="text-right pb-1.5 px-1.5" title={TIP.ltv}>LTV</th></tr></thead>
+                                                                <tbody>
+                                                                    <tr className="border-b-2 border-emerald-200 bg-emerald-50 font-black">
+                                                                        <td className="py-1.5 px-1.5 text-emerald-900">合計</td>
+                                                                        <td className="py-1.5 px-1.5 text-right text-slate-900">{booking.toLocaleString()}</td>
+                                                                        <td className="py-1.5 px-1.5 text-right text-slate-800">{visit.toLocaleString()}</td>
+                                                                        <td className="py-1.5 px-1.5 text-right text-slate-500">{pct(visit, booking)}%</td>
+                                                                        <td className="py-1.5 px-1.5 text-right text-rose-600">{cancel.toLocaleString()}</td>
+                                                                        <td className="py-1.5 px-1.5 text-right text-rose-500">{pct(cancel, booking)}%</td>
+                                                                        <td className="py-1.5 px-1.5 text-right text-emerald-700">{join.toLocaleString()}</td>
+                                                                        <td className="py-1.5 px-1.5 text-right text-slate-500">{pct(join, visit)}%</td>
+                                                                        <td className="py-1.5 px-1.5 text-right text-slate-700">{aggAdTotal > 0 ? soYen(aggAdTotal) : '—'}</td>
+                                                                        <td className="py-1.5 px-1.5 text-right text-cyan-700">{aggCPA ? soYen(aggCPA) : '—'}</td>
+                                                                        <td className="py-1.5 px-1.5 text-right text-indigo-700">{aggVCPA ? soYen(aggVCPA) : '—'}</td>
+                                                                        <td className="py-1.5 px-1.5 text-right text-rose-700">{aggCAC ? soYen(aggCAC) : '—'}</td>
+                                                                        <td className="py-1.5 px-1.5 text-right text-slate-900">{soYen(aggRows.reduce((a, m) => a + m.ltv, 0))}</td>
+                                                                    </tr>
+                                                                    {aggRows.map((m, mi) => { const mad = aggAd[m.name] || 0; const mcpa = mad > 0 && m.booking > 0 ? Math.round(mad / m.booking) : 0; const mvcpa = mad > 0 && m.visit > 0 ? Math.round(mad / m.visit) : 0; const mcac = mad > 0 && m.join > 0 ? Math.round(mad / m.join) : 0; return (
+                                                                        <tr key={mi} className="border-b border-emerald-100">
+                                                                            <td className="py-1.5 px-1.5 font-bold text-slate-700">{m.name}</td>
+                                                                            <td className="py-1.5 px-1.5 text-right font-bold text-slate-800">{m.booking}</td>
+                                                                            <td className="py-1.5 px-1.5 text-right text-slate-600">{m.visit}</td>
+                                                                            <td className="py-1.5 px-1.5 text-right text-slate-400">{pct(m.visit, m.booking)}%</td>
+                                                                            <td className="py-1.5 px-1.5 text-right text-rose-500">{m.cancel}</td>
+                                                                            <td className="py-1.5 px-1.5 text-right text-rose-400">{pct(m.cancel, m.booking)}%</td>
+                                                                            <td className="py-1.5 px-1.5 text-right font-black text-emerald-600">{m.join}</td>
+                                                                            <td className="py-1.5 px-1.5 text-right text-slate-400">{pct(m.join, m.visit)}%</td>
+                                                                            <td className="py-1.5 px-1.5 text-right text-slate-600">{mad > 0 ? soYen(mad) : '—'}</td>
+                                                                            <td className="py-1.5 px-1.5 text-right text-cyan-600 font-bold">{mcpa ? soYen(mcpa) : '—'}</td>
+                                                                            <td className="py-1.5 px-1.5 text-right text-indigo-600 font-bold">{mvcpa ? soYen(mvcpa) : '—'}</td>
+                                                                            <td className="py-1.5 px-1.5 text-right text-rose-600 font-bold">{mcac ? soYen(mcac) : '—'}</td>
+                                                                            <td className="py-1.5 px-1.5 text-right font-bold text-slate-800">{soYen(m.ltv)}</td>
+                                                                        </tr>
+                                                                    ); })}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
                                                     </div>
                                                     {/* 店舗ごとの媒体内訳（出店順・スマホは1列） */}
                                                     <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 md:gap-4">

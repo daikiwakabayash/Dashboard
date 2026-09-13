@@ -4742,10 +4742,20 @@
                 } catch {}
             };
             const acqIsPastPeriod = () => { try { return soTo < new Date().toISOString().slice(0, 10); } catch { return false; } };
+            // 受付日コホート取得用の終端拡張: SalonOneの new-customers の from/to は「予約(来店)日」ベースで絞られるため、
+            // 受付が期間内でも来店/入会が翌月以降になる新規客がAPIから返らない（例:8/31受付→9/3来店は8月フィルターで欠落）。
+            // 終端を「翌々月末」まで広げて取得し、クライアントで received_at を [soFrom,soTo] に絞る＝正しい受付日コホート。
+            const soCohortTo = (ymd) => {
+                const [y, m] = String(ymd || '').split('-').map(Number);
+                if (!y || !m) return ymd;
+                const d = new Date(Date.UTC(y, m + 2, 0)); // 翌々月末（m は1始まり: 8月→10/31, 9月→11/30）
+                const p2 = (n) => String(n).padStart(2, '0');
+                return `${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())}`;
+            };
             const acqFetchCustomers = async (force = false) => {
                 const key = `${soRegion}_${soFrom}_${soTo}_${(soShopSel || []).join(',')}`; // ★国スコープをキーに（国切替で再取得）
                 if (acqCustLoading) return;
-                const cached = acqCacheGet('naoru_acqcust_v1', key);
+                const cached = acqCacheGet('naoru_acqcust_v2', key); // v2: 受付日コホート取得の終端拡張で旧キャッシュを無効化
                 if (cached && Array.isArray(cached.rows)) {
                     setAcqCust(cached.rows);                    // キャッシュを即表示（スピナー無し・体感高速）
                     if (!force && acqIsPastPeriod()) { acqLoadedKeyRef.current = key; return; } // 過去＝確定。再取得しない（「更新」時は無視）
@@ -4760,7 +4770,7 @@
                     for (const sid of ids) {
                         let cursor = '', guard = 0;
                         do {
-                            const p = new URLSearchParams({ resource: 'marketing/new-customers', from: soFrom, to: soTo, limit: '1000' });
+                            const p = new URLSearchParams({ resource: 'marketing/new-customers', from: soFrom, to: soCohortTo(soTo), limit: '1000' }); // ★終端を翌々月末まで拡張＝受付が期間内で来店/入会が翌月以降の新規客も取得（received_atで後段絞込）
                             if (sid) p.set('shop_id', sid);
                             if (cursor) p.set('cursor', cursor);
                             let j = null;
@@ -4769,9 +4779,9 @@
                             all = all.concat(Array.isArray(j.data) ? j.data : []);
                             cursor = (j.meta && j.meta.has_more) ? j.meta.next_cursor : '';
                             guard++;
-                        } while (cursor && guard < 10 && all.length < 8000);
+                        } while (cursor && guard < 30 && all.length < 30000); // 終端拡張で最大3ヶ月ぶん返るため取得上限を引き上げ（取りこぼし防止）
                     }
-                    setAcqCust(all); acqCachePut('naoru_acqcust_v1', key, all, 4); // 最新4期間分をキャッシュ
+                    setAcqCust(all); acqCachePut('naoru_acqcust_v2', key, all, 4); // 最新4期間分をキャッシュ（v2＝終端拡張版）
                 } catch { if (!(cached && cached.rows)) setAcqCust([]); acqLoadedKeyRef.current = ''; }
                 finally { setAcqCustLoading(false); }
             };
@@ -4851,7 +4861,7 @@
                     for (const sid of ids) {
                         let cursor = '', guard = 0;
                         do {
-                            const p = new URLSearchParams({ resource: 'marketing/new-customers', from: pFrom, to: pTo, limit: '1000' });
+                            const p = new URLSearchParams({ resource: 'marketing/new-customers', from: pFrom, to: soCohortTo(pTo), limit: '1000' }); // ★前月コホートも終端拡張（受付日ベースに統一）
                             if (sid) p.set('shop_id', sid);
                             if (cursor) p.set('cursor', cursor);
                             let j = null;
@@ -4860,7 +4870,7 @@
                             cust = cust.concat(Array.isArray(j.data) ? j.data : []);
                             cursor = (j.meta && j.meta.has_more) ? j.meta.next_cursor : '';
                             guard++;
-                        } while (cursor && guard < 10 && cust.length < 8000);
+                        } while (cursor && guard < 30 && cust.length < 30000);
                     }
                     // 広告費（前月・媒体別by-channel）: JP=全店1リクエスト／海外=自国店舗ぶん合算。新規媒体のみ合算。
                     const isNonNew = (n) => { n = String(n || ''); return n === '既存' || n === '未設定' || /会員/.test(n) || /\d+\s*分/.test(n); };

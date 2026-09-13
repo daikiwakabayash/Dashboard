@@ -483,12 +483,13 @@
         .stagger-3 { animation-delay: 0.15s; }
         .stagger-4 { animation-delay: 0.2s; }
         .stagger-5 { animation-delay: 0.25s; }
-        /* 施策リンク別テーブルのヘッダー行を縦スクロール時に固定（列バーが常に見える）。
+        /* テーブルのヘッダー行（列バー）を縦スクロール時に固定して常に見えるようにする。
            overflow-x だけだと overflow-y も auto になりページスクロールで sticky が効かないため、
            ラッパー自体を max-height の縦スクロール領域にして thead を上端固定する。 */
-        .so-flsticky { max-height: 72vh; overflow-y: auto; }
-        .so-flsticky thead th { position: sticky; top: 0; z-index: 10; background: #fff; box-shadow: inset 0 -1px 0 #e2e8f0; }
-        .so-flsticky thead th:first-child { z-index: 20; }
+        .so-flsticky { max-height: calc(100vh - 140px); overflow-y: auto; }   /* 施策リンク別＝可能な限り下まで広げる */
+        .so-shopsticky { max-height: calc(100vh - 200px); overflow-y: auto; } /* 店舗別コホート */
+        .so-flsticky thead th, .so-shopsticky thead th { position: sticky; top: 0; z-index: 10; background: #fff; box-shadow: inset 0 -1px 0 #e2e8f0; }
+        .so-flsticky thead th:first-child, .so-shopsticky thead th:first-child { z-index: 20; }
     </style>
     <!-- pdf.js は財務PDF機能でのみ使用。deferで初回描画をブロックしない（deferはDOMContentLoaded前に順序実行される） -->
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -17706,7 +17707,7 @@
                                                         <div className="ml-auto flex items-center gap-1.5"><Search size={13} className="text-slate-400" /><input value={acqShopSearch} onChange={e => setAcqShopSearch(e.target.value)} placeholder="店舗名で絞り込み" className="w-32 md:w-44 px-2.5 py-1 text-[12px] font-bold border border-slate-200 rounded-lg focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none" />{acqShopSearch && <button onClick={() => setAcqShopSearch('')} className="text-slate-400 hover:text-slate-600"><X size={14} /></button>}</div>
                                                     </div>
                                                     <p className="text-[10px] text-slate-400 font-bold mb-2">見出しをクリックで並び替え（既定＝出店順）。例: 来店・購入の多い順、CPAの安い順、広告費の高い順。</p>
-                                                    <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
+                                                    <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0 so-shopsticky">
                                                         <table className="w-full text-[12px] whitespace-nowrap">
                                                             <thead><tr className="text-slate-400 font-black border-b border-slate-200">
                                                                 <ThSort label="店舗" k="order" sort={acqShopSort} setSort={setAcqShopSort} align="left" tip="店舗（出店順）。受付日が期間内の新規客をこの店舗で分類" /><ThSort label="広告費" k="ad" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.adSpend} /><ThSort label="新規予約" k="booking" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.booking} /><ThSort label="予約CPA" k="bcpa" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.bcpa} /><ThSort label="来店CPA" k="vcpa" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.vcpa} /><ThSort label="来店" k="visit" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.visit} /><ThSort label="来店率" k="visitRate" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.visitRate} /><ThSort label="キャンセル" k="cancel" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.cancel} /><ThSort label="キャンセル率" k="cancelRate" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.cancelRate} /><ThSort label="未来店" k="pending" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.pending} /><ThSort label="購入" k="join" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.join} /><ThSort label="入会率" k="joinRate" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.joinRate} /><ThSort label="CAC" k="cac" sort={acqShopSort} setSort={setAcqShopSort} tip={TIP.cac} /><ThSort label="LTV合計" k="ltv" sort={acqShopSort} setSort={setAcqShopSort} tip="LTV合計：この店舗の新規客のLTV累計の合計" /><ThSort label="平均LTV" k="avgLtv" sort={acqShopSort} setSort={setAcqShopSort} tip="平均LTV＝LTV合計 ÷ 新規予約数" />
@@ -17910,7 +17911,6 @@
                                                         </table>
                                                     </div>
                                                     )}
-                                                    <p className="text-[11px] text-slate-400 mt-3 font-bold">※ <b>受付日コホート（新規顧客一覧）を施策リンク別に集計</b>。「媒体別/店舗別コホート」と同じ母集団（受付日ベース・1人1行・キャンセル/テスト/海外除外）なので、媒体別コホートの合計と一致します（例: HP=新規客数ベースで一貫）。<b>同じ文言のリンクは合算</b>（1文字でも違えば別・「×N」＝合算リンク数）。施策リンクが取れない直接予約等は<b>「リンクなし」</b>に集約（媒体は表示）。<br/><b className="text-slate-500">広告費・来店CPAは概算</b>です＝施策リンク単位の広告費はSalonOneに無いため、<b>その媒体の広告費を媒体内リンクへ予約数で按分</b>して算出しています（媒体全体では実額と一致）。初回オファー額・訴求ごとに入会率・キャンセル率・CPAを比較してください。</p>
                                                 </div>
                                                 );
                                             })()}
@@ -22604,8 +22604,8 @@
 
                     </div>{/* ← メインコンテンツ(flex-1)の閉じタグ。全タブをflex-1内に収める（返金明細書/手当等が右に寄るのを修正） */}
 
-                    {/* チャットアシスタント（AIアシスタントはroot専用・オーナー/スタッフには非表示。チャットタブでは送信ボタンと被るため非表示） */}
-                    {authState.root && currentPage !== 'chat' && (
+                    {/* 右下フローティングのAIチャットボットは非表示（AIは「AIに質問」タブ・グループチャットの@AIで利用）。 */}
+                    {false && (
                     <div className={`fixed bottom-6 right-6 z-50 chat-container${chatOpen ? ' chat-open' : ''}`}>
                         {/* チャットパネル */}
                         {chatOpen && (

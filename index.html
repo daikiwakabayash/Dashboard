@@ -17550,6 +17550,9 @@
                                         // 手動除外リスト（全社共有・テスト予約対策）。除外IDは全マーケ指標から「データ無し」として扱う。
                                         const acqExclSet = (acqExcluded && typeof acqExcluded === 'object') ? acqExcluded : {};
                                         const custIdOf = (c) => String(c.customer_id != null ? c.customer_id : (c.customer_code || ''));
+                                        // 来店経路が「既存」「会員」（＋「N分」等メニュー誤タグ）＝新規獲得ではないので新規集計から除外する。
+                                        //   「未設定」は"新規だが経路未入力"なので新規として残す。「紹介」「看板」等は正規の新規獲得経路なので残す。
+                                        const isExistingSrc = (n) => { n = String(n || ''); return n === '既存' || /会員/.test(n) || /\d+\s*分/.test(n); };
                                         // 全媒体のコホート（媒体フィルタ前）。custRows は媒体フィルタ適用後（KPI/一覧/店舗別に反映）。
                                         const custRowsAll = (acqCust || []).filter(c => {
                                             const m = shopMeta[String(c.shop_id)]; if (!m || m.cc !== soRegion) return false; // ★国スコープ（日本タブ=日本のみ／海外タブ=自国のみ）
@@ -17557,6 +17560,7 @@
                                             if (!_shopOk(c)) return false;                   // ★店舗フィルタ（選択店舗のみ）
                                             if (acqDismissed[String(c.customer_id)]) return false; // ★予約取り消し(SalonOne dismiss＝スタッフのテスト予約)は予約にもキャンセルにも数えない
                                             if (isJunkCust(c)) return false;
+                                            if (isExistingSrc(c.visit_source_name)) return false; // ★既存・会員は新規獲得ではないため新規集計から除外（未設定は残す）
                                             if (acqExclSet[custIdOf(c)]) return false;       // 手動除外＝全指標からカウントしない
                                             const d = String(c.received_at || '').slice(0, 10);
                                             return d && d >= soFrom && d <= soTo;

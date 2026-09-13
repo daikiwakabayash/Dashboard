@@ -375,6 +375,12 @@ export default async function handler(req, res) {
       }
     }
 
+    // ── プロンプトキャッシュ ──
+    // システムプロンプト（FAQアシスタントは定数・経営顧問はSYSTEM_PROMPT＋フィードバックで安定）を
+    // ephemeral キャッシュ対象にする。モデルに渡す内容は一字一句同じ（cache_control は課金/速度の指示のみ）
+    // なので回答は不変・速度は同等〜わずかに速くなる。全ユーザー共通のプレフィックスなので高ヒット。
+    const systemParam = [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
+
     // ── 利用可能なモデルを特定（最初の1回だけ404/400でフォールバック）──
     const MODEL_LIST = isAssistant ? ASSISTANT_MODELS : MODELS;
     let selectedModel = MODEL_LIST[0];
@@ -393,7 +399,7 @@ export default async function handler(req, res) {
         try {
           const stream = anthropic.messages.stream({
             model: selectedModel,
-            system: systemPrompt,
+            system: systemParam,
             messages,
             ...thinkingParams,
           });
@@ -447,7 +453,7 @@ export default async function handler(req, res) {
         console.log(`[chat] Trying model (non-stream): ${selectedModel}`);
         const response = await anthropic.messages.create({
           model: selectedModel,
-          system: systemPrompt,
+          system: systemParam,
           messages,
           ...thinkingParams,
         });

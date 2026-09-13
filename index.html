@@ -8168,16 +8168,18 @@
                 const stores = sqData.stores || [], plansMap = sqData.plans || {};
                 const locToStore = {};
                 for (const st of stores) for (const lid of (st.locationIds || [st.id])) locToStore[lid] = { id: st.id, name: st.name };
-                // 実サブスク（テスト/0円除外・既存 isRealSub と同基準）
+                // 会員判定は「PAIDインボイス（＝実課金・完全取得）」を基準にする。⚠️ SquareのサブスクAPIは部分取得(タイムアウト)に
+                //   なりがちなので、取得済みサブスク一覧に載っている分だけに絞ると会員が大幅に取りこぼされる（例:荻窪 実202→40）。
+                //   → 既知のテスト/0円サブスクだけを除外し、未取得サブスクのPAID実績は実会員として含める（完全＆正確）。
                 const paidSubIds = new Set();
                 for (const inv of sqData.invoices) if (inv.subscriptionId && inv.status === 'PAID') paidSubIds.add(inv.subscriptionId);
-                const isReal = (s) => { const p = plansMap[s.planVariationId]; if (p && /テスト/i.test(p.name)) return false; if (s.monthlyPrice > 0) return true; if (paidSubIds.has(s.id)) return true; if (p && p.pricingExtracted && s.monthlyPrice <= 0) return false; return true; };
-                const realSubIds = new Set(sqData.subscriptions.filter(isReal).map(s => s.id));
+                const subById = {}; for (const s of (sqData.subscriptions || [])) subById[s.id] = s;
+                const isTestSub = (sid) => { const s = subById[sid]; if (!s) return false; const p = plansMap[s.planVariationId]; if (p && /テスト/i.test(p.name || '')) return true; if (p && p.pricingExtracted && (s.monthlyPrice || 0) <= 0 && !paidSubIds.has(sid)) return true; return false; };
                 const toYM = (d) => { if (!d) return null; const dt = new Date(d); return isNaN(dt) ? null : `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`; };
-                // PAIDインボイス（実サブスクのみ）を顧客単位で集約
+                // PAIDサブスクインボイス（既知テストのみ除外）を顧客単位で集約
                 const revByCust = {}, monthsByCust = {}, custLoc = {};
                 for (const inv of sqData.invoices) {
-                    if (!inv.subscriptionId || inv.status !== 'PAID' || !realSubIds.has(inv.subscriptionId)) continue;
+                    if (!inv.subscriptionId || inv.status !== 'PAID' || isTestSub(inv.subscriptionId)) continue;
                     const cid = inv.customerId; if (cid == null) continue;
                     const ymm = toYM(inv.createdAt); if (!ymm) continue;
                     (revByCust[cid] = revByCust[cid] || {})[ymm] = (revByCust[cid][ymm] || 0) + (Number(inv.amount) || 0);
@@ -8193,7 +8195,7 @@
                     records.push({ customerId: cid, shopId: store.id, shopName: store.name, cohortMonth: months[0], joined: true, started: true, revByMonth: revByCust[cid], churnMonth: _cbChurnBilling(months, null, asOf, 2) });
                 }
                 const storeList = stores.map(s => ({ id: s.id, name: s.name })).sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
-                return { records, asOf, storeList, totalRealSubs: realSubIds.size };
+                return { records, asOf, storeList, totalMembers: records.length };
             }, [sqData]);
 
             // 店舗別サマリーをCSVダウンロード（選択中の月のデータを出力）

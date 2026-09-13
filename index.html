@@ -2199,6 +2199,10 @@
             const [sqStore, setSqStore] = useState('all');
             const [sqMonth, setSqMonth] = useState('');
             const [sqTab, setSqTab] = useState('active');
+            // コホートLTV/継続タブ
+            const [cohortStore, setCohortStore] = useState('all');   // 'all' or store.id
+            const [cohortHorizon, setCohortHorizon] = useState(12);  // 12 or 24 ヶ月
+            const [cohortView, setCohortView] = useState('retention'); // 'retention'=継続率 / 'ltv'=累計LTV
             const [sqUpChgOpen, setSqUpChgOpen] = useState({});   // 課金予定: 店舗別の開閉状態（storeName→bool）
             const [sqSort, setSqSort] = useState({ key: 'paidTotal', dir: 'desc' });
             const [sqStoreSort, setSqStoreSort] = useState({ key: 'totalSales', dir: 'desc' });
@@ -8128,6 +8132,69 @@
                     sqMonthIsFuture, mrrYM,
                 };
             }, [sqPreprocessed, sqData, sqStore, sqMonth, sqStoreLocationIds]);
+
+            // ── コホートLTV/継続（Squareベース） lib/cohort.js のフロント内蔵版（テストは tests/cohort.test.js） ──
+            // 加入月コホート起点で LTV/ARPU/継続率・離反(チャーン)月齢を算出。churnは「課金の空白ベース」
+            //   （＝1ヶ月まるまる課金が無ければ最終課金月を離反月とする＝現在月-最終課金月≥2で確定）。
+            const _cbIdx = (m) => { const t = String(m || ''); if (!/^\d{4}-\d{2}$/.test(t)) return null; const y = +t.slice(0, 4), mo = +t.slice(5, 7); return (!y || mo < 1 || mo > 12) ? null : y * 12 + (mo - 1); };
+            const _cbFrom = (i) => (i == null || !isFinite(i)) ? '' : `${Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, '0')}`;
+            const _cbDiff = (a, b) => { const ia = _cbIdx(a), ib = _cbIdx(b); return (ia == null || ib == null) ? null : ib - ia; };
+            const _cbChurnBilling = (billMonths, canceledMonth, asOf, gap = 2) => {
+                const cm = _cbIdx(canceledMonth); const idxs = (billMonths || []).map(_cbIdx).filter(v => v != null);
+                if (cm != null) { const lb = idxs.length ? Math.max(...idxs) : cm; return _cbFrom(Math.min(cm, lb)); }
+                if (!idxs.length) return null; const last = Math.max(...idxs); const now = _cbIdx(asOf);
+                return (now != null && (now - last) >= gap) ? _cbFrom(last) : null;
+            };
+            const _cbBuild = (custs, asOf, H = 24) => {
+                const rows = custs || []; const cm = (rows.find(r => r && r.cohortMonth) || {}).cohortMonth || ''; const ci = _cbIdx(cm);
+                const maxAge = (ci != null && _cbIdx(asOf) != null) ? Math.max(0, _cbIdx(asOf) - ci) : 0;
+                const size = rows.length; let joined = 0, started = 0;
+                const churnByAge = Array(H + 1).fill(0), revByAge = Array(H + 1).fill(0), activeByAge = Array(H + 1).fill(0); const lifes = [];
+                for (const r of rows) {
+                    if (!r) continue; if (r.joined) joined++; if (r.started) started++;
+                    const rev = r.revByMonth || {}; for (const k in rev) { const a = ci != null ? _cbDiff(cm, k) : null; if (a == null || a < 0 || a > H) continue; revByAge[a] += Number(rev[k]) || 0; }
+                    const ca = (r.churnMonth && ci != null) ? _cbDiff(cm, r.churnMonth) : null; if (ca != null && ca >= 0 && ca <= H) { churnByAge[ca]++; lifes.push(ca); }
+                    if (r.started) { for (let a = 0; a <= H; a++) { if (ca == null || a <= ca) activeByAge[a]++; } }
+                }
+                const ltvB = [], ltvJ = [], arpu = [], ret = []; let cum = 0;
+                for (let a = 0; a <= H; a++) { cum += revByAge[a]; ltvB.push(size > 0 ? Math.round(cum / size) : 0); ltvJ.push(joined > 0 ? Math.round(cum / joined) : 0); arpu.push(activeByAge[a] > 0 ? Math.round(revByAge[a] / activeByAge[a]) : 0); ret.push(started > 0 ? Math.round(activeByAge[a] / started * 1000) / 10 : 0); }
+                const avgLife = lifes.length ? Math.round(lifes.reduce((s, v) => s + v, 0) / lifes.length * 10) / 10 : 0;
+                const capAge = Math.min(H, maxAge);
+                return { cohortMonth: cm, size, joined, started, maxAge, churnByAge, activeByAge, revByAge, retentionByAge: ret, ltvByAgeBooking: ltvB, ltvByAgeJoin: ltvJ, arpuByAge: arpu, ltvBooking: ltvB[capAge], ltvJoin: ltvJ[capAge], avgLifetimeMonths: avgLife, churnedTotal: lifes.length };
+            };
+            // Squareの生データ（invoices/subscriptions/stores/plans）から顧客別コホートレコードを構築。
+            const sqCohortData = useMemo(() => {
+                if (!sqData || !Array.isArray(sqData.invoices) || !Array.isArray(sqData.subscriptions) || !Array.isArray(sqData.stores)) return null;
+                const stores = sqData.stores || [], plansMap = sqData.plans || {};
+                const locToStore = {};
+                for (const st of stores) for (const lid of (st.locationIds || [st.id])) locToStore[lid] = { id: st.id, name: st.name };
+                // 実サブスク（テスト/0円除外・既存 isRealSub と同基準）
+                const paidSubIds = new Set();
+                for (const inv of sqData.invoices) if (inv.subscriptionId && inv.status === 'PAID') paidSubIds.add(inv.subscriptionId);
+                const isReal = (s) => { const p = plansMap[s.planVariationId]; if (p && /テスト/i.test(p.name)) return false; if (s.monthlyPrice > 0) return true; if (paidSubIds.has(s.id)) return true; if (p && p.pricingExtracted && s.monthlyPrice <= 0) return false; return true; };
+                const realSubIds = new Set(sqData.subscriptions.filter(isReal).map(s => s.id));
+                const toYM = (d) => { if (!d) return null; const dt = new Date(d); return isNaN(dt) ? null : `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`; };
+                // PAIDインボイス（実サブスクのみ）を顧客単位で集約
+                const revByCust = {}, monthsByCust = {}, custLoc = {};
+                for (const inv of sqData.invoices) {
+                    if (!inv.subscriptionId || inv.status !== 'PAID' || !realSubIds.has(inv.subscriptionId)) continue;
+                    const cid = inv.customerId; if (cid == null) continue;
+                    const ymm = toYM(inv.createdAt); if (!ymm) continue;
+                    (revByCust[cid] = revByCust[cid] || {})[ymm] = (revByCust[cid][ymm] || 0) + (Number(inv.amount) || 0);
+                    (monthsByCust[cid] = monthsByCust[cid] || new Set()).add(ymm);
+                    if (custLoc[cid] == null) custLoc[cid] = inv.locationId;
+                }
+                const asOf = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+                const records = [];
+                for (const cid of Object.keys(revByCust)) {
+                    const months = [...monthsByCust[cid]].sort();
+                    if (!months.length) continue;
+                    const store = locToStore[custLoc[cid]] || { id: custLoc[cid], name: custLoc[cid] };
+                    records.push({ customerId: cid, shopId: store.id, shopName: store.name, cohortMonth: months[0], joined: true, started: true, revByMonth: revByCust[cid], churnMonth: _cbChurnBilling(months, null, asOf, 2) });
+                }
+                const storeList = stores.map(s => ({ id: s.id, name: s.name })).sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
+                return { records, asOf, storeList, totalRealSubs: realSubIds.size };
+            }, [sqData]);
 
             // 店舗別サマリーをCSVダウンロード（選択中の月のデータを出力）
             const downloadStoreSummaryCSV = useCallback(() => {
@@ -19721,6 +19788,126 @@
                         );
                     })()}
 
+                    {currentPage === 'cohort' && authState.root && (() => {
+                        const yen = (n) => '¥' + Math.round(Number(n) || 0).toLocaleString();
+                        const man = (n) => '¥' + (Math.round((Number(n) || 0) / 1000) / 10).toLocaleString() + '万';
+                        if (!sqData) return (
+                            <div className="p-4 md:p-6"><div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
+                                <TrendingUp size={28} className="text-slate-300 mx-auto mb-3" />
+                                <p className="text-slate-600 font-black text-sm mb-3">Squareデータ未取得</p>
+                                <button onClick={() => fetchSquareData()} className="px-6 py-3 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 font-bold text-sm">データを取得</button>
+                            </div></div>
+                        );
+                        if (!sqCohortData) return (<div className="p-6 flex items-center justify-center"><Loader2 size={28} className="animate-spin text-emerald-500" /><span className="ml-2 font-bold text-slate-500 text-sm">コホート構築中…</span></div>);
+                        if (!sqCohortData.records.length) return (<div className="p-4 md:p-6"><div className="bg-white rounded-2xl border border-slate-200 p-8 text-center"><p className="text-slate-600 font-black text-sm">サブスク（Square）の課金データがまだありません。</p></div></div>);
+                        const asOf = sqCohortData.asOf, H = cohortHorizon;
+                        const recs = cohortStore === 'all' ? sqCohortData.records : sqCohortData.records.filter(r => String(r.shopId) === String(cohortStore));
+                        const byM = {}; for (const r of recs) (byM[r.cohortMonth] = byM[r.cohortMonth] || []).push(r);
+                        const months = Object.keys(byM).filter(Boolean).sort();
+                        const cohorts = months.map(m => _cbBuild(byM[m], asOf, H));
+                        const totalMembers = recs.length;
+                        const churnedRecs = recs.filter(r => r.churnMonth);
+                        const activeNow = totalMembers - churnedRecs.length;
+                        const totalRev = recs.reduce((s, r) => s + Object.values(r.revByMonth || {}).reduce((a, v) => a + (Number(v) || 0), 0), 0);
+                        const avgLtv = totalMembers > 0 ? Math.round(totalRev / totalMembers) : 0;
+                        const lifes = churnedRecs.map(r => _cbDiff(r.cohortMonth, r.churnMonth)).filter(v => v != null && v >= 0);
+                        const avgLife = lifes.length ? Math.round(lifes.reduce((a, v) => a + v, 0) / lifes.length * 10) / 10 : 0;
+                        const ltvH = totalMembers > 0 ? Math.round(recs.reduce((s, r) => { let x = 0; const rev = r.revByMonth || {}; for (const k in rev) { const a = _cbDiff(r.cohortMonth, k); if (a != null && a >= 0 && a <= H) x += Number(rev[k]) || 0; } return s + x; }, 0) / totalMembers) : 0;
+                        const churnAgg = Array(H + 1).fill(0);
+                        cohorts.forEach(c => c.churnByAge.forEach((n, i) => { if (i <= H) churnAgg[i] += n; }));
+                        const churnedTotal = churnAgg.reduce((a, v) => a + v, 0);
+                        const churnMax = Math.max(1, ...churnAgg);
+                        const peakAge = churnAgg.indexOf(Math.max(...churnAgg));
+                        const retColor = (p) => { if (p == null) return ''; const a = Math.max(0, Math.min(1, p / 100)); return `rgba(16,185,129,${0.08 + a * 0.62})`; };
+                        const kpis = [
+                            { label: '会員（コホート総数）', val: totalMembers.toLocaleString() + '名', c: 'from-blue-500 to-indigo-500', tip: `Square課金があった実サブスク会員の総数（テスト/0円除外）。${cohortStore === 'all' ? '全店' : '選択店舗'}・加入月コホートの母集団。` },
+                            { label: '現在アクティブ', val: activeNow.toLocaleString() + '名', note: totalMembers > 0 ? `継続率 ${Math.round(activeNow / totalMembers * 1000) / 10}%` : '', c: 'from-emerald-500 to-teal-500', tip: '離反していない会員数。離反＝最終課金月の翌月が丸々課金ゼロ（現在月−最終課金月≥2ヶ月）で確定。' },
+                            { label: '平均継続月数', val: avgLife + 'ヶ月', note: `離反${churnedTotal}名の平均`, c: 'from-violet-500 to-purple-500', tip: '離反した会員の「加入→離反」までの平均月数。継続中の会員は含まない（確定分のみ）。' },
+                            { label: '平均LTV／会員', val: man(avgLtv), note: '取得時点までの実績累計', c: 'from-pink-500 to-rose-500', tip: '会員1人あたりの累計課金額（実測・現時点まで）。総課金額 ÷ 会員数。' },
+                            { label: `${H}ヶ月LTV`, val: man(ltvH), note: `加入から${H}ヶ月以内の累計`, c: 'from-amber-500 to-orange-500', tip: `加入から${H}ヶ月以内に発生した課金だけを会員数で割った有限期間LTV。若いコホートはまだ${H}ヶ月に達していない点に注意。` },
+                            { label: '総課金額', val: man(totalRev), note: 'Square実課金累計', c: 'from-emerald-600 to-green-600', tip: 'このコホート母集団のSquare課金（PAIDインボイス）累計。会員数×平均LTVと一致。' },
+                        ];
+                        return (
+                        <div className="p-4 md:p-6 space-y-4 max-w-[1400px] mx-auto">
+                            {/* ヘッダー＋コントロール */}
+                            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-[19px]">📈</span>
+                                    <h1 className="text-base md:text-lg font-black text-slate-900">コホートLTV / 継続分析</h1>
+                                    <span className="px-2 py-0.5 bg-emerald-600 text-white rounded-full text-[10px] font-black">Square実データ</span>
+                                    <InfoTip side="bottom" text={`加入月（初回課金月）コホート起点。LTV=会員1人あたりの累計課金額、継続率=各経過月に課金が続いている会員の割合、離反(チャーン)=1ヶ月まるまる課金ゼロで最終課金月に離反確定。テスト/0円サブスクは除外。数字はSquareのPAIDインボイス（サブスク分析の会員数・MRRと同じ源）。`} />
+                                    <div className="ml-auto flex items-center gap-2 flex-wrap">
+                                        <select value={cohortStore} onChange={e => setCohortStore(e.target.value)} className="px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 bg-white outline-none focus:border-emerald-400">
+                                            <option value="all">全店合計</option>
+                                            {sqCohortData.storeList.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                        </select>
+                                        <div className="flex bg-slate-100 rounded-lg p-0.5">
+                                            {[12, 24].map(h => <button key={h} onClick={() => setCohortHorizon(h)} className={`px-2.5 py-1 rounded-md text-xs font-black transition ${cohortHorizon === h ? 'bg-emerald-600 text-white shadow' : 'text-slate-500'}`}>{h}ヶ月</button>)}
+                                        </div>
+                                        <div className="flex bg-slate-100 rounded-lg p-0.5">
+                                            {[['retention', '継続率'], ['ltv', '累計LTV']].map(([k, lb]) => <button key={k} onClick={() => setCohortView(k)} className={`px-2.5 py-1 rounded-md text-xs font-black transition ${cohortView === k ? 'bg-emerald-600 text-white shadow' : 'text-slate-500'}`}>{lb}</button>)}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            {/* KPI */}
+                            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2.5">
+                                {kpis.map((k, i) => (
+                                    <div key={i} className="bg-white rounded-2xl border border-slate-200 shadow-sm p-3.5">
+                                        <div className="flex items-center gap-1"><span className={`inline-block text-[10px] font-black text-white px-2 py-0.5 rounded-full bg-gradient-to-r ${k.c}`}>{k.label}</span><InfoTip side="bottom" text={k.tip} /></div>
+                                        <div className="mt-2 text-xl md:text-2xl font-black text-slate-900">{k.val}</div>
+                                        {k.note && <div className="text-[10px] font-bold text-slate-400 mt-0.5">{k.note}</div>}
+                                    </div>
+                                ))}
+                            </div>
+                            {/* 離反月齢ヒストグラム */}
+                            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
+                                <div className="flex items-center gap-2 mb-1"><h2 className="text-sm md:text-base font-black text-slate-900">離反（チャーン）月齢の分布</h2><span className="text-[10px] font-bold text-slate-400">何ヶ月目の離反が多いか</span><InfoTip side="bottom" text="加入から何ヶ月目に離反したかの人数分布。0ヶ月目＝加入月内で離反（初回のみ）。山が立つ月齢＝その時期の満足度/継続施策が重要。離反確定分のみ（継続中は含まない）。" /></div>
+                                {churnedTotal === 0 ? (<p className="text-xs font-bold text-slate-400 py-4">まだ離反確定の会員がいません（データ蓄積中）。</p>) : (
+                                <div className="overflow-x-auto"><div className="flex items-end gap-1.5 min-w-[520px] h-[160px] mt-2">
+                                    {churnAgg.map((n, a) => (
+                                        <div key={a} className="flex-1 flex flex-col items-center justify-end h-full group relative">
+                                            <div className="text-[10px] font-black text-slate-500 mb-0.5">{n || ''}</div>
+                                            <div className={`w-full rounded-t ${a === peakAge && n > 0 ? 'bg-rose-500' : 'bg-emerald-400'}`} style={{ height: `${Math.max(n > 0 ? 6 : 0, n / churnMax * 120)}px` }}></div>
+                                            <div className="text-[9px] font-bold text-slate-400 mt-1">{a}</div>
+                                        </div>
+                                    ))}
+                                </div><div className="text-[10px] font-bold text-slate-400 mt-1 text-center">経過月数（0＝加入月）{peakAge >= 0 && churnedTotal > 0 && <span className="text-rose-500 ml-2">最多離反: {peakAge}ヶ月目（{churnAgg[peakAge]}名）</span>}</div></div>
+                                )}
+                            </div>
+                            {/* コホート三角形（継続率 or 累計LTV） */}
+                            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
+                                <div className="flex items-center gap-2 mb-2"><h2 className="text-sm md:text-base font-black text-slate-900">加入月コホート × 経過月（{cohortView === 'retention' ? '継続率' : '累計LTV／会員'}）</h2><InfoTip side="bottom" text={cohortView === 'retention' ? '各セル＝その加入月コホートが、経過nヶ月時点で課金継続している会員の割合。右にいくほど（時間が経つほど）低下＝離反。空欄はまだ到来していない月齢。' : '各セル＝その加入月コホートの、経過nヶ月時点までの1人あたり累計課金額。右にいくほど積み上がる＝LTVの成熟。空欄は未到来。'} /></div>
+                                <div className="overflow-x-auto so-shopsticky"><table className="w-full text-[11px] whitespace-nowrap">
+                                    <thead><tr className="text-slate-400 font-black border-b border-slate-200">
+                                        <th className="text-left pb-2 px-2 sticky left-0 bg-white">加入月</th>
+                                        <th className="text-right pb-2 px-2">会員</th>
+                                        {Array.from({ length: H + 1 }, (_, a) => <th key={a} className="text-right pb-2 px-2">{a}</th>)}
+                                    </tr></thead>
+                                    <tbody>
+                                        {cohorts.slice().reverse().map((c) => (
+                                            <tr key={c.cohortMonth} className="border-b border-slate-100">
+                                                <td className="py-1.5 px-2 font-black text-slate-800 sticky left-0 bg-white">{c.cohortMonth}</td>
+                                                <td className="py-1.5 px-2 text-right font-bold text-slate-600">{c.size}</td>
+                                                {Array.from({ length: H + 1 }, (_, a) => {
+                                                    const reached = a <= c.maxAge;
+                                                    if (!reached) return <td key={a} className="py-1.5 px-2 text-right text-slate-200">·</td>;
+                                                    if (cohortView === 'retention') {
+                                                        const p = c.retentionByAge[a];
+                                                        return <td key={a} className="py-1.5 px-2 text-right font-bold text-slate-700" style={{ backgroundColor: retColor(p) }}>{p}%</td>;
+                                                    }
+                                                    return <td key={a} className="py-1.5 px-2 text-right font-bold text-slate-700">{man(c.ltvByAgeBooking[a])}</td>;
+                                                })}
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table></div>
+                                <p className="text-[10px] text-slate-400 font-bold mt-2">※ 「会員」＝その月に初回課金があった実サブスク会員数（テスト/0円除外）。継続率＝各経過月に課金が続く会員の割合。累計LTV＝会員1人あたりの累計課金額。数字はSquareのPAIDインボイス（サブスク分析の会員数・MRRと同源）。離反＝1ヶ月まるまる課金ゼロで最終課金月に確定。</p>
+                            </div>
+                        </div>
+                        );
+                    })()}
+
                     {currentPage === 'patrol' && authState.root && (() => {
                         const reps = patrolReports || [];
                         const tot = reps.reduce((a, r) => { (r.items || []).forEach(i => { a[i.level] = (a[i.level] || 0) + 1; }); return a; }, {});
@@ -24175,6 +24362,7 @@
                     { id: 'salonone', label: 'SalonOne売上', icon: <Calendar size={18} />, mobileIcon: <Calendar size={18} /> },
                     { id: 'mktg', label: 'マーケティング', icon: <TrendingUp size={18} />, mobileIcon: <TrendingUp size={18} /> },
                     { id: 'square', label: 'サブスク分析', icon: <CreditCard size={18} />, mobileIcon: <CreditCard size={18} /> },
+                    { id: 'cohort', label: 'コホートLTV/継続', icon: <span className="text-[17px] leading-none">📈</span>, mobileIcon: <span className="text-[17px] leading-none">📈</span>, rootOnly: true },
                     // 事業計画はスタッフ/オーナーには当面非表示（本部(hq)・管理者(root)のみ）
                     { id: 'planning', label: '事業計画', icon: <Target size={18} />, mobileIcon: <Target size={18} />, rootOnly: true },
                     { id: 'patrol', label: 'AIパトロール', icon: <span className="text-[17px] leading-none">🔎</span>, mobileIcon: <span className="text-[17px] leading-none">🔎</span>, rootOnly: true },

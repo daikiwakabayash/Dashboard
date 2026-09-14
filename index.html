@@ -19910,6 +19910,49 @@
                                 </table></div>
                                 <p className="text-[10px] text-slate-400 font-bold mt-2">※ 「会員」＝その月に初回課金があった実サブスク会員数（テスト/0円除外）。継続率＝各経過月に課金が続く会員の割合。累計LTV＝会員1人あたりの累計課金額。数字はSquareのPAIDインボイス（サブスク分析の会員数・MRRと同源）。離反＝1ヶ月まるまる課金ゼロで最終課金月に確定。</p>
                             </div>
+                            {/* 店舗別 LTV/継続 一覧（全店比較・上の店舗セレクタに依らず全店表示） */}
+                            {(() => {
+                                const agg = {};
+                                for (const r of sqCohortData.records) {
+                                    const k = r.shopId == null ? '(不明)' : r.shopId;
+                                    const a = agg[k] = agg[k] || { shopId: k, name: r.shopName || k, members: 0, active: 0, rev: 0, lifeSum: 0, lifeN: 0 };
+                                    a.members++;
+                                    if (!r.churnMonth) a.active++;
+                                    const rev = r.revByMonth || {}; for (const mm in rev) a.rev += Number(rev[mm]) || 0;
+                                    if (r.churnMonth) { const dd = _cbDiff(r.cohortMonth, r.churnMonth); if (dd != null && dd >= 0) { a.lifeSum += dd; a.lifeN++; } }
+                                }
+                                const rows = Object.values(agg).map(a => ({ ...a, avgLtv: a.members ? Math.round(a.rev / a.members) : 0, ret: a.members ? Math.round(a.active / a.members * 1000) / 10 : 0, avgLife: a.lifeN ? Math.round(a.lifeSum / a.lifeN * 10) / 10 : 0 })).sort((x, y) => y.rev - x.rev);
+                                if (!rows.length) return null;
+                                return (
+                                    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
+                                        <div className="flex items-center gap-2 mb-2"><h2 className="text-sm md:text-base font-black text-slate-900">店舗別 LTV / 継続 一覧</h2><span className="text-[10px] font-bold text-slate-400">全店比較（総課金の多い順・{rows.length}店舗）</span><InfoTip side="bottom" text="各店舗の会員数・現在アクティブ・継続率・平均LTV(会員1人あたり累計課金)・平均継続月数・総課金。上の店舗セレクタに関わらず常に全店を表示（店舗比較用）。" /></div>
+                                        <div className="overflow-x-auto so-shopsticky"><table className="w-full text-[12px] whitespace-nowrap">
+                                            <thead><tr className="text-slate-400 font-black border-b border-slate-200">
+                                                <th className="text-left pb-2 px-2 sticky left-0 bg-white">店舗</th>
+                                                <th className="text-right pb-2 px-2">会員</th>
+                                                <th className="text-right pb-2 px-2">アクティブ</th>
+                                                <th className="text-right pb-2 px-2">継続率</th>
+                                                <th className="text-right pb-2 px-2">平均LTV/会員</th>
+                                                <th className="text-right pb-2 px-2">平均継続月数</th>
+                                                <th className="text-right pb-2 px-2">総課金額</th>
+                                            </tr></thead>
+                                            <tbody>
+                                                {rows.map((r) => (
+                                                    <tr key={r.shopId} className="border-b border-slate-100 hover:bg-slate-50">
+                                                        <td className="py-1.5 px-2 font-black text-slate-800 sticky left-0 bg-white">{r.name}</td>
+                                                        <td className="py-1.5 px-2 text-right font-bold text-slate-700">{r.members.toLocaleString()}</td>
+                                                        <td className="py-1.5 px-2 text-right text-emerald-600 font-bold">{r.active.toLocaleString()}</td>
+                                                        <td className="py-1.5 px-2 text-right text-slate-600">{r.ret}%</td>
+                                                        <td className="py-1.5 px-2 text-right font-bold text-slate-900">{man(r.avgLtv)}</td>
+                                                        <td className="py-1.5 px-2 text-right text-slate-600">{r.avgLife}ヶ月</td>
+                                                        <td className="py-1.5 px-2 text-right font-bold text-slate-700">{man(r.rev)}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table></div>
+                                    </div>
+                                );
+                            })()}
                         </div>
                         );
                     })()}

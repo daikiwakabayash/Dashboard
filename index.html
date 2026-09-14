@@ -3784,19 +3784,31 @@
                 const iv = setInterval(pull, 25000);
                 return () => { alive = false; clearInterval(iv); };
             }, [authState.authenticated]);
+            // 人物単位で重複排除（同一人物が複数タブ/端末で開いても1アイコンに集約＝スプシと同じ）。
+            //   IDは `personKey__tabId` 形式。personKey（staffId/owner/root）が同じものは最新ハートビートの1件に畳む。
+            const presenceKeyOf = (id) => String(id || '').split('__')[0] || String(id || '');
+            const presenceUnique = useMemo(() => {
+                const map = new Map();
+                for (const u of (presenceUsers || [])) {
+                    const k = presenceKeyOf(u.id);
+                    const prev = map.get(k);
+                    if (!prev || (Number(u.at) || 0) > (Number(prev.at) || 0)) map.set(k, u);
+                }
+                return [...map.values()];
+            }, [presenceUsers]);
             // 今アクセス中のアバター群（スプシ風）。max人まで重ねて表示し、超過は「+N」。ホバーで氏名＋今見ているタブ。
             const renderPresenceCluster = (max = 5) => {
-                const list = presenceUsers || [];
+                const list = presenceUnique;
                 if (!list.length) return null;
-                const meId = presenceIdRef.current;
-                const ordered = list.slice().sort((a, b) => (a.id === meId ? -1 : b.id === meId ? 1 : 0)); // 自分を先頭に
+                const meKey = presenceKeyOf(presenceIdRef.current);
+                const ordered = list.slice().sort((a, b) => (presenceKeyOf(a.id) === meKey ? -1 : presenceKeyOf(b.id) === meKey ? 1 : 0)); // 自分を先頭に
                 const shown = ordered.slice(0, max);
                 const extra = ordered.length - shown.length;
                 return (
                     <div className="flex items-center">
                         <div className="flex items-center -space-x-2">
                             {shown.map(u => {
-                                const me = u.id === meId;
+                                const me = presenceKeyOf(u.id) === meKey;
                                 const nm = u.name || 'ゲスト';
                                 const roleLbl = u.role === 'hq' ? '本部' : u.role === 'root' ? '管理者' : u.role === 'owner' ? 'オーナー' : u.role === 'staff' ? 'スタッフ' : '';
                                 return (
@@ -12247,10 +12259,10 @@
                         {/* PC上部バー（スプレッドシート風・今アクセス中のアカウントを右に表示） */}
                         {!(currentPage === 'chat' && chatRoomId) && (
                             <div className="hidden md:flex items-center gap-3 px-6 py-2 bg-white/80 backdrop-blur-md border-b border-ink-100 sticky top-0 z-40">
-                                {presenceUsers && presenceUsers.length > 0 && (
+                                {presenceUnique.length > 0 && (
                                     <span className="flex items-center gap-1.5 text-[11px] font-bold text-ink-400">
                                         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                                        今アクセス中 {presenceUsers.length}名
+                                        今アクセス中 {presenceUnique.length}名
                                     </span>
                                 )}
                                 <div className="ml-auto">{renderPresenceCluster(6)}</div>

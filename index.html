@@ -4782,6 +4782,24 @@
             const [soOwner, setSoOwner] = useState('');         // オーナー選択（空=なし）
             const [soFrom, setSoFrom] = useState(soDefaultRange.from);
             const [soTo, setSoTo] = useState(soDefaultRange.to);
+            // ── SalonOne売上の店舗スコープ（読み込み最小化）──
+            //   基本＝非root(owner/staff)は自分の管轄店舗のみ（当月＝進行中は常に自店だけ＝軽量）。
+            //   例外＝確定済みの過去月（翌月3日以降に固定）に限り「店舗」「スタッフ」タブだけ全店表示（固定データなのでキャッシュから即時）。
+            //   マーケ/サブスク/日報/計画は常に管轄店舗のみ。root/hqは常に全店。全体管理シートは別途 soShops(全件)。
+            const soIsConfirmedPast = useCallback(() => {
+                const mm = String(soTo || '').slice(0, 7); const [py, pm] = mm.split('-').map(Number);
+                if (!py || !pm) return false;
+                return new Date() >= new Date(py, pm, 3); // 翌月3日以降＝売上確定（2日締め）後で固定
+            }, [soTo]);
+            const soAllRegionShops = useMemo(() => (soShops || []).filter(s => soShopCountry(s) === soRegion), [soShops, soRegion]);
+            // 全店スコープを使うのは root か、（確定過去月 かつ SalonOne売上の「店舗/スタッフ」タブ）のときだけ。
+            const soSalesScopeAll = useMemo(() => {
+                if (authState.root) return true;
+                if (!soIsConfirmedPast()) return false;
+                return currentPage === 'salonone' && (soView === 'shops' || soView === 'staff');
+            }, [authState.root, soIsConfirmedPast, currentPage, soView]);
+            // SalonOne売上（soSummary/店舗別）の取得ユニバース。全店スコープなら国内全店、通常は管轄店舗のみ。
+            const soSalesShops = useMemo(() => (soSalesScopeAll ? soAllRegionShops : soShopsRegion), [soSalesScopeAll, soAllRegionShops, soShopsRegion]);
             // ── 全体管理シート（店舗×月のマトリクス）状態 ──
             const [zkData, setZkData] = useState(null);          // { year, months:[YYYY-MM], shops:[{id,name,therapist,months:{ym:{gross,karte,newc}}}] }
             const [zkLoading, setZkLoading] = useState(false);
@@ -6494,11 +6512,12 @@
             // 全体管理シートCSVの人数（JP店舗）。無ければnull。
             const zkCsvTherapist = (name, ym) => { const arr = (ZK_FIXED_2026.months[ym] || {})[zkCanonName(name)]; return (arr && arr[2] != null) ? Number(arr[2]) : null; };
             const SB_CACHE_KEY = 'so_shopbreak_cache_v2_digest';
+            const SO_SUMMARY_CACHE_KEY = 'so_summary_cache_v1'; // 確定過去月のsoSummary/マーケ束を保存＝店舗/スタッフ全店表示を即時化（初回のみ取得）
             const loadShopBreakdown = async (opts = {}) => {
                 const forceAll = !!opts.force;
                 const reqId = ++soShopReqRef.current;
                 setSoShopLoading(true);
-                const shopList = soShopsRegion.length ? soShopsRegion : []; // ★国スコープ（海外を日本タブから除外・海外タブは自国のみ）
+                const shopList = (soSalesShops && soSalesShops.length) ? soSalesShops : []; // ★スコープ: 通常=管轄店舗のみ／確定過去月の店舗タブ=国内全店（root=全店）
                 const cto = soConfirmedTo();  // 確定分の締め日（当日は除外）
                 // ── キャッシュ: 期間(pkey)ごとに店舗結果を保存し、再取得を回避して高速化 ──
                 // 過去の確定期間は永続キャッシュ、当月(進行中)は20分TTLで再利用。
@@ -7136,8 +7155,32 @@
                 setSoMkLoading(true);   // マーケ集計は下の非同期IIFEで別途取得するため独立フラグで管理（空表示のフラッシュを防ぐ）
                 setSoError(null);
                 try {
-                    const ids = soShopSel;
+                    // 店舗選択: 非rootは「取得ユニバース(soSalesShops)内」だけに制限（権限外の選択は無視＝当月に他店を読み込まない）。
+                    const _scopeIdSet = new Set((soSalesShops || []).map(s => String(s.id)));
+                    const ids = authState.root ? soShopSel : (soShopSel || []).map(String).filter(x => _scopeIdSet.has(x));
                     const cto = soConfirmedTo();       // 確定分の締め日（当日は除外）
+                    // ── 確定過去月の全店(店舗/スタッフ)は固定データ＝キャッシュから即時表示（初回のみ取得） ──
+                    const _sumCacheKey = `${soRegion}_${soFrom}_${cto}_${soSalesScopeAll ? 'all' : 'mine'}_${ids.join(',')}`;
+                    const _confirmed = soIsConfirmedPast();
+                    if (_confirmed && !force) {
+                        try {
+                            const all = JSON.parse(localStorage.getItem(SO_SUMMARY_CACHE_KEY) || '{}') || {};
+                            const hit = all[_sumCacheKey];
+                            if (hit && hit.summary) {
+                                setSoSetupRequired(false); setSoDemo(false); setSoError(null);
+                                setSoSummary(hit.summary);
+                                if (hit.channels) setSoChannels(hit.channels);
+                                if (hit.staffMk) setSoStaffMk(hit.staffMk);
+                                if (hit.retention) setSoRetention(hit.retention);
+                                setSoLastFetch(new Date(hit.ts || Date.now()));
+                                setSoMkLoading(false); setSoLoading(false);
+                                // 店舗/スタッフ一覧が未取得なら軽く取得（ロスター・ドロップダウン用）
+                                if (soShopsRaw.length === 0) { try { const r = await fetch(`${SALONONE_API_URL}?resource=shops&limit=1000`); const j = await r.json().catch(() => ({})); const a = soShopsFromResp(j); if (a.length) setSoShops(a); } catch {} }
+                                if (soStaffs.length === 0) { try { const r = await fetch(`${SALONONE_API_URL}?resource=staffs&limit=1000`); const j = await r.json().catch(() => ({})); const a = (j.data || j || []).map(s => ({ id: String(s.id ?? s.staff_id ?? ''), name: s.name || s.staff_name || `スタッフ${s.id}`, shop_id: String(s.shop_id ?? ''), deleted: !!s.deleted_at, acceptsRes: s.accepts_reservations !== false })); if (a.length) setSoStaffs(a); } catch {} }
+                                return;
+                            }
+                        } catch {}
+                    }
                     // 1リソースを選択店舗分（[]なら全店ブランド）取得
                     // レート制限(60/分)対策: 429/rate_limited/5xx はバックオフ再試行。
                     // 全店表示で店舗別売上の一括取得と競合しても、サマリ/マーケが取りこぼしで失敗しないようにする。
@@ -7172,14 +7215,19 @@
                         const p = new URLSearchParams({ resource, from: soFrom, to: cto, ...(shopId ? { shop_id: shopId } : {}), ...extra });
                         return soFetchRetry(`${SALONONE_API_URL}?${p.toString()}`);
                     };
-                    // ★国スコープ: 全店フォールバックは「選択中の国の店舗」のみ（日本タブに海外を混ぜない・海外タブは自国のみ）
-                    const allShopIds = (soShopsRegion || []).map(s => String(s.id)).filter(Boolean);
+                    // ★取得ユニバース: soSalesShops（通常＝管轄店舗のみ／確定過去月の店舗・スタッフ＆root＝国内全店）。
+                    const allShopIds = (soSalesShops || []).map(s => String(s.id)).filter(Boolean);
                     const fetchResource = async (resource, extra = {}, onShop = null) => {
                         if (ids.length) {
                             return mapPool(ids, id => soDoOne(resource, id, extra), 6, onShop);
                         }
                         // 海外スコープ（豪州/馬来）は店舗数が少ないので per-shop で自国のみ取得（ブランド全店集計＝日本混在を避ける）。
                         if (soRegion !== 'jp') {
+                            if (!allShopIds.length) return [];
+                            return mapPool(allShopIds, id => soDoOne(resource, id, extra), 6, onShop);
+                        }
+                        // 管轄店舗のみスコープ（非root・当月 or 日報/計画/マーケ）は自店だけper-shop取得＝ブランド全店を読みに行かない（軽量）。
+                        if (!soSalesScopeAll) {
                             if (!allShopIds.length) return [];
                             return mapPool(allShopIds, id => soDoOne(resource, id, extra), 6, onShop);
                         }
@@ -7241,10 +7289,12 @@
                     setSoSetupRequired(false);
                     setSoDemo(false);
                     const okSales = salesRes.filter(r => r.status === 200 && r.json && r.json.data).map(r => r.json.data);
+                    let _summaryObj = null;
                     if (okSales.length > 0) {
                         // 売上サマリ成功（複数店舗は合算）
                         setSoError(null);
-                        setSoSummary(normalizeSalonSummary({ data: soMergeSummary(okSales) }));
+                        _summaryObj = normalizeSalonSummary({ data: soMergeSummary(okSales) });
+                        setSoSummary(_summaryObj);
                     } else {
                         // 売上サマリ失敗 → 部分エラー表示。マーケ等は下で取得・表示する
                         const err = first.json && first.json.error;
@@ -7266,8 +7316,9 @@
                             if (stale()) return; // 店舗が切り替わっていたら古いマーケ応答を破棄
                             const okData = arr => arr.filter(r => r.status === 200).map(r => (r.json && r.json.data) || []);
                             let mergedCh = soMergeChannels(okData(ch));
-                            // ★日本(全店・未選択)はブランド全店集計に Australia/Malaysia の媒体別が混ざるため、海外店舗ぶんを差し引く（別管理）
-                            if (soRegion === 'jp' && !ids.length) {
+                            // ★日本(全店・未選択・全店スコープ)はブランド全店集計に Australia/Malaysia の媒体別が混ざるため、海外店舗ぶんを差し引く（別管理）。
+                            //   管轄店舗のみスコープ(soSalesScopeAll=false)は自店per-shop取得で海外を含まないため差し引かない（誤減算防止）。
+                            if (soRegion === 'jp' && !ids.length && soSalesScopeAll) {
                                 const ovIds = (soShopsRaw || []).filter(s => soShopCountry(s) !== 'jp').map(s => String(s.id));
                                 if (ovIds.length) {
                                     const ovRes = await Promise.all(ovIds.map(id => soDoOne('marketing/by-channel', id, {})));
@@ -7281,9 +7332,22 @@
                                 }
                             }
                             if (stale()) return;
-                            setSoChannels(normalizeMkChannels({ data: mergedCh }));
-                            setSoStaffMk(normalizeMkStaff({ data: soMergeMkStaff(okData(st)) }));
-                            setSoRetention(normalizeMkRetention(soMergeRetention(rt.filter(r => r.status === 200).map(r => (r.json && r.json.data) || r.json))));
+                            const _chObj = normalizeMkChannels({ data: mergedCh });
+                            const _stObj = normalizeMkStaff({ data: soMergeMkStaff(okData(st)) });
+                            const _rtObj = normalizeMkRetention(soMergeRetention(rt.filter(r => r.status === 200).map(r => (r.json && r.json.data) || r.json)));
+                            setSoChannels(_chObj);
+                            setSoStaffMk(_stObj);
+                            setSoRetention(_rtObj);
+                            // 確定過去月は soSummary＋マーケ束をキャッシュ＝次回以降 全店の店舗/スタッフを即時表示（取得ゼロ）。
+                            if (_confirmed && _summaryObj) {
+                                try {
+                                    const all = JSON.parse(localStorage.getItem(SO_SUMMARY_CACHE_KEY) || '{}') || {};
+                                    all[_sumCacheKey] = { ts: Date.now(), summary: _summaryObj, channels: _chObj, staffMk: _stObj, retention: _rtObj };
+                                    const keys = Object.keys(all);
+                                    if (keys.length > 16) { keys.sort((a, b) => (all[a].ts || 0) - (all[b].ts || 0)); for (let i = 0; i < keys.length - 16; i++) delete all[keys[i]]; }
+                                    localStorage.setItem(SO_SUMMARY_CACHE_KEY, JSON.stringify(all));
+                                } catch {}
+                            }
                         } catch (e) { console.error('[salonone] marketing fetch error:', e); }
                         finally { if (!stale()) setSoMkLoading(false); }
                     })();
@@ -7412,7 +7476,7 @@
                 if (currentPage !== 'salonone' && currentPage !== 'mktg') return;
                 soInitialized.current = true;
                 fetchSalonOneData();
-            }, [currentPage, soFrom, soTo, soShopSel, soRegion]);
+            }, [currentPage, soFrom, soTo, soShopSel, soRegion, soSalesScopeAll, soUniverseSig]);
 
             // 全店表示の売上サマリ(sales/summary)は SalonOne がブランド一括取得を許可せず(422)、
             // per-shop合算が必要。初回に店舗一覧(soShops)が未取得のままfetchが走ると soSummary が
@@ -7451,11 +7515,11 @@
                 const onSalonShops = currentPage === 'salonone' && (soView === 'shops' || soView === 'marketing');
                 const onMktg = currentPage === 'mktg' && ['acq', 'storemedia', 'customers', 'forced'].includes(soView);
                 if (!onSalonShops && !onMktg) return;
-                const key = `${soRegion}_${soFrom}_${soTo}`; // ★国スコープをキーに含める（国切替で再取得）
+                const key = `${soRegion}_${soFrom}_${soTo}_${soSalesScopeAll ? 'all' : 'mine'}`; // ★国スコープ＋店舗スコープをキーに（確定過去月で全店に切替時も再取得）
                 if (soShopLoadedKeyRef.current === key && soShopRows.some(r => r.active && !r.loading)) return;
                 soShopLoadedKeyRef.current = key;
                 loadShopBreakdown();
-            }, [currentPage, soView, soFrom, soTo, soShops.length, soRegion]);
+            }, [currentPage, soView, soFrom, soTo, soShops.length, soRegion, soSalesScopeAll]);
 
             // クリエイティブ分析タブ（媒体×メニュー）: 開いた/店舗/期間が変わったら受付履歴を再集計
             useEffect(() => {
@@ -17106,7 +17170,7 @@
                         {/* ===== SalonOne 売上分析タブ ===== */}
                         {(currentPage === 'salonone' || currentPage === 'mktg') && (() => {
                             const isMktg = currentPage === 'mktg';
-                            const shopOptions = (soShopsRegion.length ? soShopsRegion : (soRegion === 'jp' ? soDemoShops : [])); // ★国スコープ（店舗フィルタも自国のみ）
+                            const shopOptions = (soSalesShops.length ? soSalesShops : (soRegion === 'jp' ? soDemoShops : [])); // ★スコープ: 通常=管轄店舗のみ／確定過去月の店舗・スタッフ=国内全店（そこで他店にドリルイン可）
                             // オーナー→SalonOne店舗ID のグループ（該当店舗があるオーナーのみ）
                             const ownerGroups = (() => {
                                 const groups = {};
@@ -17114,7 +17178,8 @@
                                 return groups;
                             })();
                             // セラピスト本人ログイン時は本人のみ表示（staffId紐付け）
-                            const authStaffOnly = (isStaff && authState.staffId) ? String(authState.staffId) : null;
+                            // 本人のみ表示は「管轄スコープ時」だけ。確定過去月のスタッフタブ（全店スコープ）では全スタッフを表示。
+                            const authStaffOnly = (isStaff && authState.staffId && !soSalesScopeAll) ? String(authState.staffId) : null;
                             const staffOptions = (soStaffs.length ? soStaffs : soDemoStaffs).filter(st => !st.deleted).filter(st => soShopSel.length === 0 || soShopSel.map(String).includes(String(st.shop_id))).filter(st => !authStaffOnly || String(st.id) === authStaffOnly);
                             const shopName = soShopLabel();
                             const staffName = soStaffSel.length === 0 ? '全スタッフ' : (soStaffSel.length === 1 ? (staffOptions.find(s => String(s.id) === String(soStaffSel[0])) || {}).name || '1名' : `${soStaffSel.length}名`);

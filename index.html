@@ -8195,7 +8195,11 @@
                     records.push({ customerId: cid, shopId: store.id, shopName: store.name, cohortMonth: months[0], joined: true, started: true, revByMonth: revByCust[cid], churnMonth: _cbChurnBilling(months, null, asOf, 2) });
                 }
                 const storeList = stores.map(s => ({ id: s.id, name: s.name })).sort((a, b) => String(a.name).localeCompare(String(b.name), 'ja'));
-                return { records, asOf, storeList, totalMembers: records.length };
+                // 取得窓の起点2ヶ月は「窓の外で入会済み→窓内で初めて課金が見える」既存会員を吸い込むため、
+                //   コホート表・チャーン分布・平均継続月数からは除外する（会員総数/アクティブ/LTV等の実数は全記録で維持）。
+                const distinctMonths = [...new Set(records.map(r => r.cohortMonth).filter(Boolean))].sort();
+                const boundaryMonths = distinctMonths.slice(0, 2);
+                return { records, asOf, storeList, totalMembers: records.length, boundaryMonths };
             }, [sqData]);
 
             // 店舗別サマリーをCSVダウンロード（選択中の月のデータを出力）
@@ -19808,7 +19812,14 @@
                         if (!sqCohortData.records.length) return (<div className="p-4 md:p-6"><div className="bg-white rounded-2xl border border-slate-200 p-8 text-center"><p className="text-slate-600 font-black text-sm">サブスク（Square）の課金データがまだありません。</p></div></div>);
                         const asOf = sqCohortData.asOf, H = cohortHorizon;
                         const recs = cohortStore === 'all' ? sqCohortData.records : sqCohortData.records.filter(r => String(r.shopId) === String(cohortStore));
-                        const byM = {}; for (const r of recs) (byM[r.cohortMonth] = byM[r.cohortMonth] || []).push(r);
+                        // 取得窓の起点2ヶ月は「窓外で入会済み→窓内で初めて課金が見える」既存会員を吸い込むため、
+                        //   コホート表・チャーン分布・平均継続月数からは除外（会員総数/アクティブ/平均LTV/総課金/店舗別は全記録で維持）。
+                        const boundarySet = new Set(sqCohortData.boundaryMonths || []);
+                        const cleanRecs = recs.filter(r => !boundarySet.has(r.cohortMonth));
+                        const boundaryNote = (sqCohortData.boundaryMonths && sqCohortData.boundaryMonths.length)
+                            ? `※取得窓の起点2ヶ月（${sqCohortData.boundaryMonths.join('・')}）は窓の外で既に入会済みの会員が「初回課金」として混入するため、コホート表・離反分布・平均継続月数からは除外しています（会員総数・アクティブ・平均LTV・総課金・店舗別一覧は全会員で集計）。`
+                            : '';
+                        const byM = {}; for (const r of cleanRecs) (byM[r.cohortMonth] = byM[r.cohortMonth] || []).push(r);
                         const months = Object.keys(byM).filter(Boolean).sort();
                         const cohorts = months.map(m => _cbBuild(byM[m], asOf, H));
                         const totalMembers = recs.length;
@@ -19816,7 +19827,9 @@
                         const activeNow = totalMembers - churnedRecs.length;
                         const totalRev = recs.reduce((s, r) => s + Object.values(r.revByMonth || {}).reduce((a, v) => a + (Number(v) || 0), 0), 0);
                         const avgLtv = totalMembers > 0 ? Math.round(totalRev / totalMembers) : 0;
-                        const lifes = churnedRecs.map(r => _cbDiff(r.cohortMonth, r.churnMonth)).filter(v => v != null && v >= 0);
+                        // 平均継続月数は既存会員混入を避けるためクリーン母集団（起点2ヶ月除外）で算出
+                        const cleanChurned = cleanRecs.filter(r => r.churnMonth);
+                        const lifes = cleanChurned.map(r => _cbDiff(r.cohortMonth, r.churnMonth)).filter(v => v != null && v >= 0);
                         const avgLife = lifes.length ? Math.round(lifes.reduce((a, v) => a + v, 0) / lifes.length * 10) / 10 : 0;
                         const ltvH = totalMembers > 0 ? Math.round(recs.reduce((s, r) => { let x = 0; const rev = r.revByMonth || {}; for (const k in rev) { const a = _cbDiff(r.cohortMonth, k); if (a != null && a >= 0 && a <= H) x += Number(rev[k]) || 0; } return s + x; }, 0) / totalMembers) : 0;
                         const churnAgg = Array(H + 1).fill(0);
@@ -19869,6 +19882,7 @@
                             {/* 離反月齢ヒストグラム */}
                             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
                                 <div className="flex items-center gap-2 mb-1"><h2 className="text-sm md:text-base font-black text-slate-900">離反（チャーン）月齢の分布</h2><span className="text-[10px] font-bold text-slate-400">何ヶ月目の離反が多いか</span><InfoTip side="bottom" text="加入から何ヶ月目に離反したかの人数分布。0ヶ月目＝加入月内で離反（初回のみ）。山が立つ月齢＝その時期の満足度/継続施策が重要。離反確定分のみ（継続中は含まない）。" /></div>
+                                {boundaryNote && <p className="text-[10px] font-bold text-amber-600 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mb-1">{boundaryNote}</p>}
                                 {churnedTotal === 0 ? (<p className="text-xs font-bold text-slate-400 py-4">まだ離反確定の会員がいません（データ蓄積中）。</p>) : (
                                 <div className="overflow-x-auto"><div className="flex items-end gap-1.5 min-w-[520px] h-[160px] mt-2">
                                     {churnAgg.map((n, a) => (
@@ -19909,6 +19923,7 @@
                                     </tbody>
                                 </table></div>
                                 <p className="text-[10px] text-slate-400 font-bold mt-2">※ 「会員」＝その月に初回課金があった実サブスク会員数（テスト/0円除外）。継続率＝各経過月に課金が続く会員の割合。累計LTV＝会員1人あたりの累計課金額。数字はSquareのPAIDインボイス（サブスク分析の会員数・MRRと同源）。離反＝1ヶ月まるまる課金ゼロで最終課金月に確定。</p>
+                                {boundaryNote && <p className="text-[10px] text-amber-600 font-bold mt-1">{boundaryNote}</p>}
                             </div>
                             {/* 店舗別 LTV/継続 一覧（全店比較・上の店舗セレクタに依らず全店表示） */}
                             {(() => {

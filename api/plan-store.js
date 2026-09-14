@@ -56,6 +56,7 @@ const PATROL_KEY = 'naoru:patrol:v1';         // { addresses:{shopName:{hp,hotpe
 const ACQEXCLUDE_KEY = 'naoru:acqexclude:v1'; // { ids:{ customer_id: {by,name,shop,at} } } マーケ集計から手動除外した予約（スタッフのテスト予約でキャンセル率等が狂うのを防ぐ・全社共有）
 const MEO_KEY = 'naoru:meo:v1';               // { shops:{ 店舗名:{ history:[{date,count,rating}], latest:{...Places}, placeId, query, updatedAt } } } MEO（Googleマップ）口コミ数・評価の履歴と最新情報
 const SOFL_KEY = 'naoru:soflmap:v1';          // { cust:{ customer_id:{fl,ca} }, cursor, updatedAt, stats } appointmentsを差分同期した「顧客→施策リンクID」対応表（新規顧客一覧へJOINして施策リンク別を再構築）
+const PRESENCE_KEY = 'naoru:presence:v1';     // { users:{ id:{name,role,page,at} } } 今アクセス中のアカウント（スプシ風・上部バー表示）。at=最終ハートビート(ms)。TTL超過は都度prune
 
 // ── Webプッシュ送信（VAPID設定時のみ動作・未設定なら黙ってスキップ） ──
 const VAPID_PUBLIC = () => process.env.VAPID_PUBLIC_KEY || '';
@@ -402,6 +403,40 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: 'invalid acqexclude action' });
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ── プレゼンス（今アクセス中のアカウント・スプレッドシート風の上部バー表示）: ?type=presence ──
+  //   信頼モデルは chat/thanksgift と同じ（サーバー認証なし・UIレベル社内利用前提）。
+  //   users[id] = { name, role, page, at }。at は最終ハートビート(ms)。GET/POST 双方で TTL 超過分を prune。
+  const isPresence = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'presence';
+  if (isPresence) {
+    const PRESENCE_TTL = 75 * 1000; // 75秒ハートビートが途切れたら離脱扱い（クライアントは30秒間隔で送信）
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ users: [], configured: false });
+    try {
+      const cur = (await blobGet(PRESENCE_KEY, hasKV, hasSB, gas)) || {};
+      const users = (cur.users && typeof cur.users === 'object') ? cur.users : {};
+      const now = Date.now();
+      const prune = (map) => { const out = {}; for (const k in map) { const u = map[k]; if (u && typeof u === 'object' && (now - (Number(u.at) || 0)) < PRESENCE_TTL) out[k] = u; } return out; };
+      const toList = (map) => Object.entries(map).map(([id, u]) => ({ id, name: u.name || '', role: u.role || '', page: u.page || '', at: Number(u.at) || 0 })).sort((a, b) => b.at - a.at);
+      if (req.method === 'GET') {
+        return res.status(200).json({ users: toList(prune(users)), configured: true });
+      }
+      const body = req.body || {};
+      const id = String(body.id || '').slice(0, 80);
+      if (!id) return res.status(400).json({ ok: false, error: 'missing id' });
+      if (body.action === 'leave') {
+        const next = prune(users); delete next[id];
+        await blobSet(PRESENCE_KEY, { users: next }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, users: toList(next) });
+      }
+      // 既定=beat（ハートビート）: 自分のエントリを upsert し、TTL超過分を掃除
+      const next = prune(users);
+      next[id] = { name: String(body.name || '').slice(0, 60), role: String(body.role || '').slice(0, 20), page: String(body.page || '').slice(0, 40), at: now };
+      await blobSet(PRESENCE_KEY, { users: next }, hasKV, hasSB, gas);
+      return res.status(200).json({ ok: true, users: toList(next) });
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, users: [], error: String((err && err.message) || err) });
     }
   }
 

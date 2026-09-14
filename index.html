@@ -2115,6 +2115,7 @@
                 try { return localStorage.getItem('naoru_sidebar_collapsed') === '1'; } catch (e) { return false; }
             });
             useEffect(() => { try { localStorage.setItem('naoru_sidebar_collapsed', sidebarCollapsed ? '1' : '0'); } catch (e) {} }, [sidebarCollapsed]);
+            const [presenceUsers, setPresenceUsers] = useState([]); // 今アクセス中のアカウント（スプシ風・上部バー）
             const [mobileAcctOpen, setMobileAcctOpen] = useState(false); // スマホのアカウント/ログアウトメニュー
             const [mobileNavOpen, setMobileNavOpen] = useState(false); // スマホのハンバーガーナビ（左ドロワー）
             useEffect(() => { setMobileNavOpen(false); setMobileAcctOpen(false); }, [currentPage]); // ページ切替で閉じる
@@ -3752,6 +3753,67 @@
                 return (p && p.nameKanji) || (sid && chatResolveName(sid, '')) || authState.staffName || authState.owner || 'アカウント';
             })();
             const acctInitial = String(acctDisplayName || 'A').trim().charAt(0) || 'A';
+            // ── プレゼンス（今アクセス中のアカウント・スプレッドシート風の上部バー表示）──
+            //   タブ単位の安定ID（共有rootログインでも複数人を別アイコンで区別）。表示名は本人・page=今見ているタブ。
+            const presenceIdRef = useRef('');
+            if (!presenceIdRef.current) { try { let t = sessionStorage.getItem('naoru_presence_tab'); if (!t) { t = Math.random().toString(36).slice(2, 10); sessionStorage.setItem('naoru_presence_tab', t); } presenceIdRef.current = `${String(authState.staffId || authState.owner || (authState.root ? 'root' : 'anon'))}__${t}`; } catch { presenceIdRef.current = `anon__${Math.random().toString(36).slice(2, 10)}`; } }
+            const presencePageLabel = (id) => ({ dashboard: 'ダッシュボード', charts: 'グラフ', finance: '財務', zenkanri: '全体管理シート', salonone: 'SalonOne売上', mktg: 'マーケティング', marketing: 'マーケティング', square: 'サブスク分析', cohort: 'コホートLTV', planning: '事業計画', allowance: '手当・領収書', settlement: '返金明細書', thanksgift: 'サンクスギフト', chat: 'チャット', board: 'お知らせ', events: '勉強会・イベント', org: '組織図', askai: 'AIに質問', patrol: 'AIパトロール', meo: 'MEO対策', faqadmin: 'FAQ管理', customers: '顧客', settings: '設定' }[id] || '');
+            const presenceRole = authIsHq ? 'hq' : authState.root ? 'root' : (authRole || '');
+            // ハートビート: 30秒ごと＋タブ切替時に送信。離脱時は sendBeacon で即削除。
+            useEffect(() => {
+                if (!authState.authenticated) return;
+                let alive = true;
+                const beat = async () => {
+                    try {
+                        const r = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'presence', id: presenceIdRef.current, name: acctDisplayName, role: presenceRole, page: presencePageLabel(currentPage) }) });
+                        const j = await r.json().catch(() => null);
+                        if (alive && j && Array.isArray(j.users)) setPresenceUsers(j.users);
+                    } catch {}
+                };
+                beat();
+                const iv = setInterval(beat, 30000);
+                const leave = () => { try { const body = JSON.stringify({ type: 'presence', action: 'leave', id: presenceIdRef.current }); if (navigator.sendBeacon) navigator.sendBeacon('/api/plan-store', new Blob([body], { type: 'application/json' })); else fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }); } catch {} };
+                window.addEventListener('pagehide', leave);
+                return () => { alive = false; clearInterval(iv); window.removeEventListener('pagehide', leave); };
+            }, [authState.authenticated, acctDisplayName, presenceRole, currentPage]);
+            // 他ユーザーの反映用ポーリング（25秒ごと・GET）。
+            useEffect(() => {
+                if (!authState.authenticated) return;
+                let alive = true;
+                const pull = async () => { try { const r = await fetch('/api/plan-store?type=presence'); const j = await r.json().catch(() => null); if (alive && j && Array.isArray(j.users)) setPresenceUsers(j.users); } catch {} };
+                const iv = setInterval(pull, 25000);
+                return () => { alive = false; clearInterval(iv); };
+            }, [authState.authenticated]);
+            // 今アクセス中のアバター群（スプシ風）。max人まで重ねて表示し、超過は「+N」。ホバーで氏名＋今見ているタブ。
+            const renderPresenceCluster = (max = 5) => {
+                const list = presenceUsers || [];
+                if (!list.length) return null;
+                const meId = presenceIdRef.current;
+                const ordered = list.slice().sort((a, b) => (a.id === meId ? -1 : b.id === meId ? 1 : 0)); // 自分を先頭に
+                const shown = ordered.slice(0, max);
+                const extra = ordered.length - shown.length;
+                return (
+                    <div className="flex items-center">
+                        <div className="flex items-center -space-x-2">
+                            {shown.map(u => {
+                                const me = u.id === meId;
+                                const nm = u.name || 'ゲスト';
+                                const roleLbl = u.role === 'hq' ? '本部' : u.role === 'root' ? '管理者' : u.role === 'owner' ? 'オーナー' : u.role === 'staff' ? 'スタッフ' : '';
+                                return (
+                                    <div key={u.id} className="relative group/pres">
+                                        <span className={`w-8 h-8 rounded-full ${chatAvatarColor(nm)} inline-flex items-center justify-center text-[12px] font-semibold ring-2 ${me ? 'ring-emerald-400' : 'ring-white'} shadow-sm`}>{String(nm).trim().charAt(0) || '？'}</span>
+                                        <div className="pointer-events-none absolute top-full right-0 mt-1.5 z-[60] hidden group-hover/pres:block whitespace-nowrap bg-ink-900 text-white text-[11px] font-semibold px-2.5 py-1.5 rounded-lg shadow-xl">
+                                            <div className="flex items-center gap-1">{nm}{me && <span className="text-emerald-300">（自分）</span>}{roleLbl && <span className="text-ink-300 font-medium">・{roleLbl}</span>}</div>
+                                            {u.page && <div className="text-ink-300 font-medium mt-0.5">{u.page} を閲覧中</div>}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                        {extra > 0 && <span className="ml-1.5 w-8 h-8 rounded-full bg-ink-100 text-ink-600 inline-flex items-center justify-center text-[11px] font-bold ring-2 ring-white shadow-sm">+{extra}</span>}
+                    </div>
+                );
+            };
             const [profileEdit, setProfileEdit] = useState(null); // 編集中ドラフト or null
             const [profileView, setProfileView] = useState(null); // モバイル等でタップ表示中の pid
             // ── ボトムシートの「下スワイプで閉じる」（カードのどこでも、先頭までスクロール済みで下に引くと閉じる） ──
@@ -12175,12 +12237,25 @@
                                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
                             </button>
                             <img src="/logo.png" alt="NAORU" className="h-8 w-auto object-contain" />
-                            <button onClick={() => setMobileAcctOpen(true)} className="ml-auto flex items-center gap-2 pl-1 pr-2.5 py-1 rounded-full border border-ink-100 bg-white active:scale-95 transition">
+                            <div className="ml-auto">{renderPresenceCluster(3)}</div>
+                            <button onClick={() => setMobileAcctOpen(true)} className="ml-2 flex items-center gap-2 pl-1 pr-2.5 py-1 rounded-full border border-ink-100 bg-white active:scale-95 transition">
                                 <span className="w-7 h-7 rounded-full bg-gradient-to-br from-ink-600 to-ink-800 text-white flex items-center justify-center font-semibold text-[12px] shrink-0">{acctInitial}</span>
-                                <span className="text-[12px] font-semibold text-ink-700 max-w-[90px] truncate">{acctDisplayName}</span>
+                                <span className="text-[12px] font-semibold text-ink-700 max-w-[70px] truncate">{acctDisplayName}</span>
                                 <ChevronDown size={14} className="text-ink-300" />
                             </button>
                         </div>
+                        {/* PC上部バー（スプレッドシート風・今アクセス中のアカウントを右に表示） */}
+                        {!(currentPage === 'chat' && chatRoomId) && (
+                            <div className="hidden md:flex items-center gap-3 px-6 py-2 bg-white/80 backdrop-blur-md border-b border-ink-100 sticky top-0 z-40">
+                                {presenceUsers && presenceUsers.length > 0 && (
+                                    <span className="flex items-center gap-1.5 text-[11px] font-bold text-ink-400">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                        今アクセス中 {presenceUsers.length}名
+                                    </span>
+                                )}
+                                <div className="ml-auto">{renderPresenceCluster(6)}</div>
+                            </div>
+                        )}
                         {/* スマホ アカウントメニュー（下からのシート） */}
                         {mobileAcctOpen && (
                             <div className="md:hidden fixed inset-0 z-[95] bg-[#111827]/45 backdrop-blur-sm flex items-end" onClick={() => setMobileAcctOpen(false)}>

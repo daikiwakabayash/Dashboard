@@ -2262,6 +2262,9 @@
             // 国スコープを適用した店舗（SalonOne売上・マーケの店舗ユニバース）。全体管理/組織図は soShops(全件) を使う。
             //   非root(owner/staff)は管轄店舗(soShopsMine)のみ＝読み込みを軽く。root/hqは全店。
             const soShopsRegion = useMemo(() => ((authState.root ? soShops : soShopsMine) || []).filter(s => soShopCountry(s) === soRegion), [soShops, soShopsMine, authState.root, soRegion]);
+            // マーケ取得の店舗ユニバース署名。非root(owner/staff)は ids を soShopsRegion から作るため、
+            //   これが後から揃った時にフェッチ再実行＆キャッシュキー更新が必要（未署名だと ids=空 のまま空結果を掴んで0名固定になる）。
+            const soUniverseSig = useMemo(() => (soShopsRegion || []).map(s => String(s.id)).sort().join(','), [soShopsRegion]);
             const [soStaffs, setSoStaffs] = useState([]);       // スタッフ一覧
             const [soLoading, setSoLoading] = useState(false);
             const [soError, setSoError] = useState(null);
@@ -4757,8 +4760,10 @@
                 return `${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())}`;
             };
             const acqFetchCustomers = async (force = false) => {
-                const key = `${soRegion}_${soFrom}_${soTo}_${(soShopSel || []).join(',')}`; // ★国スコープをキーに（国切替で再取得）
+                const key = `${soRegion}_${soFrom}_${soTo}_${(soShopSel || []).join(',')}_${soUniverseSig}`; // ★国スコープ＋店舗ユニバース署名をキーに（非rootは店舗一覧が後から揃うため）
                 if (acqCustLoading) return;
+                // 非root(owner/staff)は soShopsRegion が未確定のまま呼ばれると ids=空→空結果を掴んでしまう。揃うまで待つ（署名が変われば再取得）。
+                if (!authState.root && !(soShopSel && soShopSel.length) && !(soShopsRegion || []).length) return;
                 const cached = acqCacheGet('naoru_acqcust_v2', key); // v2: 受付日コホート取得の終端拡張で旧キャッシュを無効化
                 if (cached && Array.isArray(cached.rows)) {
                     setAcqCust(cached.rows);                    // キャッシュを即表示（スピナー無し・体感高速）
@@ -4791,7 +4796,8 @@
             };
             // 強制リンク別 実績（1リクエスト）。全店＝shop_id無し、単一店選択時のみ絞り込み。
             const acqFetchForced = async (force = false) => {
-                const key = `${soRegion}_${soFrom}_${soTo}_${(soShopSel || []).join(',')}`; // ★国スコープをキーに
+                const key = `${soRegion}_${soFrom}_${soTo}_${(soShopSel || []).join(',')}_${soUniverseSig}`; // ★国スコープ＋店舗ユニバース署名をキーに
+                if (!authState.root && !(soShopSel && soShopSel.length) && !(soShopsRegion || []).length) return; // 店舗一覧が揃うまで待つ（署名が変われば再取得）
                 const cached = acqCacheGet('naoru_acqforced_v1', key);
                 if (cached && Array.isArray(cached.rows)) {
                     setAcqForced(cached.rows);
@@ -4855,7 +4861,8 @@
             // 前月同日コホート＋広告費を取得（ダッシュボードKPIの前月比用）。失敗時は前月比を出さないだけ。
             const acqFetchPrev = async (force = false) => {
                 const pFrom = soShiftMonth(soFrom, -1), pTo = soShiftMonth(soTo, -1);
-                const key = `${soRegion}_${pFrom}_${pTo}_${(soShopSel || []).join(',')}`;
+                const key = `${soRegion}_${pFrom}_${pTo}_${(soShopSel || []).join(',')}_${soUniverseSig}`;
+                if (!authState.root && !(soShopSel && soShopSel.length) && !(soShopsRegion || []).length) return; // 店舗一覧が揃うまで待つ
                 if (!force && acqPrevKeyRef.current === key) return;
                 acqPrevKeyRef.current = key;
                 try {
@@ -4900,8 +4907,8 @@
             };
             useEffect(() => {
                 if ((currentPage === 'salonone' || currentPage === 'mktg') && ['acq', 'forced', 'customers', 'storemedia'].includes(soView) && soShops.length) { acqFetchCustomers(); acqFetchForced(); acqLoadExcluded(); acqFetchSoflMap(); if (soView === 'acq') acqFetchPrev(); }
-                // 注: soShops.length を依存に含め、店舗一覧が後から届いても再取得されるようにする（マーケタブ直リンク対策）
-            }, [currentPage, soView, soFrom, soTo, soShopSel, soShops.length, soRegion]);
+                // 注: soShops.length / soUniverseSig を依存に含め、店舗一覧や管轄店舗が後から届いても再取得されるようにする（マーケタブ直リンク・staff/ownerスコープ対策）
+            }, [currentPage, soView, soFrom, soTo, soShopSel, soShops.length, soRegion, soUniverseSig]);
             const [zkZoom, setZkZoom] = useState(() => (typeof window !== 'undefined' && window.innerWidth < 640) ? 0.5 : 1); // 全体管理シートの表示倍率（既定=スマホ50%/PC100%。スマホは指ピンチでも拡大縮小可）
             const [soStoreMenuOpen, setSoStoreMenuOpen] = useState(false);
             const [soStoreSearch, setSoStoreSearch] = useState('');

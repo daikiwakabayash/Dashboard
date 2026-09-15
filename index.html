@@ -2691,8 +2691,133 @@
             // 動画/PDF/ファイルを Vercel Blob へ直接アップロード（大容量OK）。動画は5分以内。
             // 送信前の動画変換：どの端末でも「保存せずそのまま再生」できるよう、H.264 MP4(可能な端末)へ再エンコード。
             // iPhoneのHEVC/.movは受信側ブラウザで再生できないことがあるため、送信側で広く再生可能な形式に統一する。
-            // 方式=キャンバス実時間キャプチャ(MediaRecorder)。mp4録画が可能な端末(Safari/iOS)はmp4、それ以外はwebm。
+            // 高速版=WebCodecs(GPUエンコード・実時間より速い)／低速版=MediaRecorder実時間キャプチャ。
             // 変換不可・非対応・失敗時は null を返し、呼び出し側が元ファイルをそのままアップロード（安全側フォールバック）。
+
+            // mp4-muxer を遅延読込（動画を初めて送るときだけ）。UMDグローバル window.Mp4Muxer。
+            let chatMp4MuxerP = null;
+            const chatLoadMp4Muxer = () => {
+                if (window.Mp4Muxer) return Promise.resolve(window.Mp4Muxer);
+                if (chatMp4MuxerP) return chatMp4MuxerP;
+                chatMp4MuxerP = new Promise((res, rej) => {
+                    const s = document.createElement('script');
+                    s.src = 'https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.5/build/mp4-muxer.min.js';
+                    s.onload = () => res(window.Mp4Muxer || null);
+                    s.onerror = () => rej(new Error('muxer load failed'));
+                    document.head.appendChild(s);
+                });
+                return chatMp4MuxerP;
+            };
+            // 高速変換（WebCodecs）。再生せずGPUで一気にH.264 MP4化。音声はdecodeAudioData→AAC。
+            // 出力を<video>で検証し、壊れていれば null（呼び出し側が実時間版へフォールバック）。
+            const chatTranscodeVideoFast = async (file, onProgress) => {
+                let url = null, ac = null, vEnc = null, aEnc = null;
+                try {
+                    if (!window.VideoEncoder || !window.AudioEncoder || !window.VideoFrame || !window.AudioData) return null;
+                    if (!('requestVideoFrameCallback' in HTMLVideoElement.prototype)) return null;
+                    const Mux = await chatLoadMp4Muxer().catch(() => null);
+                    if (!Mux || !Mux.Muxer || !Mux.ArrayBufferTarget) return null;
+                    url = URL.createObjectURL(file);
+                    const vEl = document.createElement('video');
+                    vEl.src = url; vEl.muted = true; vEl.playsInline = true; vEl.preload = 'auto';
+                    await new Promise((res, rej) => { vEl.onloadedmetadata = () => res(); vEl.onerror = () => rej(new Error('decode')); });
+                    const iw = vEl.videoWidth, ih = vEl.videoHeight, dur = vEl.duration || 0;
+                    if (!iw || !ih || !dur || dur > 185) { URL.revokeObjectURL(url); return null; } // 長尺(>3分)は実時間版に回す（メモリ対策）
+                    const MAX = 1280, scale = Math.min(1, MAX / Math.max(iw, ih));
+                    const w = Math.max(2, Math.round(iw * scale / 2) * 2), h = Math.max(2, Math.round(ih * scale / 2) * 2);
+                    const vCfg = { codec: 'avc1.42001f', width: w, height: h, bitrate: 2200000, framerate: 30 };
+                    let vSup = false; try { vSup = (await VideoEncoder.isConfigSupported(vCfg)).supported; } catch { }
+                    if (!vSup) { URL.revokeObjectURL(url); return null; }
+                    // 音声：全体を非実時間でデコード→AAC再エンコード。音声があるのにAAC不可なら fast中断（実時間版が音声を保持）
+                    let audioBuf = null;
+                    try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) { ac = new AC(); const ab = await file.arrayBuffer(); audioBuf = await ac.decodeAudioData(ab.slice(0)); } } catch { audioBuf = null; }
+                    let aCfg = null, aSup = false;
+                    if (audioBuf && audioBuf.length) {
+                        aCfg = { codec: 'mp4a.40.2', numberOfChannels: Math.min(2, audioBuf.numberOfChannels || 1), sampleRate: audioBuf.sampleRate, bitrate: 128000 };
+                        try { aSup = (await AudioEncoder.isConfigSupported(aCfg)).supported; } catch { }
+                        if (!aSup) { URL.revokeObjectURL(url); if (ac) { try { ac.close(); } catch { } } return null; }
+                    }
+                    const muxer = new Mux.Muxer({
+                        target: new Mux.ArrayBufferTarget(),
+                        video: { codec: 'avc', width: w, height: h },
+                        ...(aSup ? { audio: { codec: 'aac', numberOfChannels: aCfg.numberOfChannels, sampleRate: aCfg.sampleRate } } : {}),
+                        fastStart: 'in-memory',
+                    });
+                    vEnc = new VideoEncoder({ output: (c, m) => { try { muxer.addVideoChunk(c, m); } catch { } }, error: () => { } });
+                    vEnc.configure(vCfg);
+                    // 音声を先にエンコード（1秒ずつ）
+                    if (aSup) {
+                        aEnc = new AudioEncoder({ output: (c, m) => { try { muxer.addAudioChunk(c, m); } catch { } }, error: () => { } });
+                        aEnc.configure(aCfg);
+                        const ch = aCfg.numberOfChannels, sr = audioBuf.sampleRate, total = audioBuf.length;
+                        const chData = []; for (let c = 0; c < ch; c++) chData.push(audioBuf.getChannelData(c));
+                        let off = 0;
+                        while (off < total) {
+                            const n = Math.min(sr, total - off);
+                            const inter = new Float32Array(n * ch);
+                            for (let i = 0; i < n; i++) for (let c = 0; c < ch; c++) inter[i * ch + c] = chData[c][off + i];
+                            const adata = new AudioData({ format: 'f32', sampleRate: sr, numberOfFrames: n, numberOfChannels: ch, timestamp: Math.round(off / sr * 1e6), data: inter });
+                            aEnc.encode(adata); adata.close(); off += n;
+                        }
+                        await aEnc.flush();
+                    }
+                    // 映像：高速再生しながらフレームをキャプチャ。タイムスタンプは元動画のmediaTimeを使うので再生速度は正しいまま。
+                    const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+                    const ctx = canvas.getContext('2d', { alpha: false });
+                    try { vEl.playbackRate = 4; } catch { }   // 速度と滑らかさ(≈15fps)のバランス
+                    let frames = 0, lastKey = -1e9;
+                    await new Promise((resolve) => {
+                        let done = false;
+                        const finish = () => { if (done) return; done = true; resolve(); };
+                        const step = (now, meta) => {
+                            if (done) return;
+                            try {
+                                const mt = (meta && typeof meta.mediaTime === 'number') ? meta.mediaTime : vEl.currentTime;
+                                ctx.drawImage(vEl, 0, 0, w, h);
+                                const ts = Math.max(0, Math.round(mt * 1e6));
+                                const key = (ts - lastKey) >= 2e6; if (key) lastKey = ts;
+                                const vf = new VideoFrame(canvas, { timestamp: ts });
+                                try { vEnc.encode(vf, { keyFrame: key }); } catch { }
+                                vf.close(); frames++;
+                                if (dur && onProgress) { try { onProgress(Math.min(99, Math.round(mt / dur * 100))); } catch { } }
+                            } catch { }
+                            if (vEl.ended) { finish(); return; }
+                            try { vEl.requestVideoFrameCallback(step); } catch { finish(); }
+                        };
+                        vEl.onended = finish;
+                        try { vEl.requestVideoFrameCallback(step); } catch { finish(); }
+                        vEl.play().catch(() => finish());
+                        setTimeout(finish, Math.max(10000, dur * 1000)); // 安全網（4x再生なら実時間の1/4で終わる想定）
+                    });
+                    await vEnc.flush();
+                    muxer.finalize();
+                    try { vEnc.close(); } catch { } try { if (aEnc) aEnc.close(); } catch { }
+                    try { vEl.pause(); } catch { }
+                    URL.revokeObjectURL(url); url = null;
+                    if (ac) { try { ac.close(); } catch { } ac = null; }
+                    if (!frames) return null;
+                    const buf = muxer.target && muxer.target.buffer;
+                    if (!buf || !buf.byteLength) return null;
+                    const blob = new Blob([buf], { type: 'video/mp4' });
+                    // 出力検証（壊れていないか）
+                    const ok = await new Promise((res) => {
+                        const tv = document.createElement('video'); const u2 = URL.createObjectURL(blob);
+                        const clean = r => { try { URL.revokeObjectURL(u2); } catch { } res(r); };
+                        tv.onloadeddata = () => clean(tv.videoWidth > 0 && tv.duration > 0.1);
+                        tv.onerror = () => clean(false);
+                        tv.src = u2; setTimeout(() => clean(false), 6000);
+                    });
+                    if (!ok) return null;
+                    const base = (file.name || 'video').replace(/\.[^.]+$/, '');
+                    return new File([blob], base + '.mp4', { type: 'video/mp4' });
+                } catch {
+                    try { if (url) URL.revokeObjectURL(url); } catch { }
+                    try { if (ac) ac.close(); } catch { }
+                    try { if (vEnc && vEnc.state !== 'closed') vEnc.close(); } catch { }
+                    try { if (aEnc && aEnc.state !== 'closed') aEnc.close(); } catch { }
+                    return null;
+                }
+            };
             const chatPickVideoMime = () => {
                 if (!window.MediaRecorder || typeof MediaRecorder.isTypeSupported !== 'function') return '';
                 const cands = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=h264,aac', 'video/mp4;codecs=avc1', 'video/mp4',
@@ -2774,12 +2899,14 @@
                     const dur = await new Promise(res => { try { const v = document.createElement('video'); v.preload = 'metadata'; v.onloadedmetadata = () => { URL.revokeObjectURL(v.src); res(v.duration || 0); }; v.onerror = () => res(0); v.src = URL.createObjectURL(file); } catch { res(0); } });
                     if (dur && dur > 305) { alert(`動画が長すぎます（${Math.round(dur)}秒）。5分（300秒）以内にしてください。`); return; }
                 }
-                // 動画は送信前にH.264 MP4等へ再エンコード（受信側が保存せずそのまま再生できるように）。実時間変換のため進捗を表示。
+                // 動画は送信前にH.264 MP4等へ再エンコード（受信側が保存せずそのまま再生できるように）。
+                // ①既にH.264 MP4なら変換不要→即アップロード ②高速版(WebCodecs) ③失敗時は実時間版 ④それも不可なら元ファイル
                 let upFile = file;
-                if (isVideo) {
+                if (isVideo && !/^video\/mp4$/i.test(file.type || '')) {
                     setChatVideoConv(0);
                     try {
-                        const conv = await chatTranscodeVideo(file, pct => setChatVideoConv(pct));
+                        let conv = await chatTranscodeVideoFast(file, pct => setChatVideoConv(pct));
+                        if (!conv || !conv.size) { setChatVideoConv(0); conv = await chatTranscodeVideo(file, pct => setChatVideoConv(pct)); }
                         if (conv && conv.size) upFile = conv;   // 変換成功→変換後を送る / 失敗(null)→元をそのまま送る
                     } catch { } finally { setChatVideoConv(null); }
                 }

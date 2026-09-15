@@ -2639,6 +2639,7 @@
             const [chatData, setChatData] = useState({ rooms: [], messages: {}, reads: {}, dir: { staff: [] }, notes: {}, configured: true, loaded: false });
             const [chatRoomId, setChatRoomId] = useState(null);       // 選択中ルーム（null=一覧表示・モバイル用）
             const [chatDraft, setChatDraft] = useState('');
+            const [chatDropActive, setChatDropActive] = useState(false); // 入力欄への画像/ファイルのドラッグ&ドロップ中ハイライト
             const [chatSending, setChatSending] = useState(false);
             const [chatMention, setChatMention] = useState(null);      // @メンション候補 {query, list:[{id,name}], index} or null
             const chatTaRef = useRef(null);                            // 本文textarea参照（メンション挿入後のカーソル復元）
@@ -2710,6 +2711,15 @@
                     alert('アップロードに失敗しました。' + ((e && e.message) ? '\n' + e.message : '') + '\n（管理者へ：VercelでBlobストレージ有効化が必要な場合があります）');
                 } finally { setChatUploading(false); }
             };
+            // 入力欄への画像/ファイルのドラッグ&ドロップ（ファイル選択を開かずに添付）。画像は縮小ステージ、その他はアップロード。
+            const chatDropFiles = async (fileList) => {
+                const files = [...(fileList || [])];
+                if (!files.length) return;
+                const imgs = files.filter(f => /^image\//.test(f.type));
+                const others = files.filter(f => !/^image\//.test(f.type));
+                try { if (imgs.length) await chatStageImages(imgs); } catch {}
+                for (const f of others.slice(0, 4)) { try { await chatUploadFile(f); } catch {} }
+            };
             const [chatListSearch, setChatListSearch] = useState('');
             // ルームのピン留め（端末ローカル・個人設定）。ピンしたルームは一覧の最上部「固定」に表示。
             const [chatPins, setChatPins] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_chat_pins') || '[]') || []; } catch { return []; } });
@@ -2742,7 +2752,17 @@
                     let ext = (type.split('/')[1] || 'dat').split('+')[0].replace('jpeg', 'jpg').replace('quicktime', 'mov');
                     const name = (baseName || ('naoru-' + Date.now())) + (String(baseName || '').includes('.') ? '' : ('.' + ext));
                     const file = new File([blob], name, { type });
-                    if (navigator.canShare && navigator.canShare({ files: [file] })) { setChatToast(''); await navigator.share({ files: [file] }); return; }
+                    // PC: 保存先フォルダを選べる保存ダイアログ（File System Access API）を優先。
+                    if (window.showSaveFilePicker) {
+                        try {
+                            const handle = await window.showSaveFilePicker({ suggestedName: name });
+                            const w = await handle.createWritable(); await w.write(blob); await w.close();
+                            setChatToast('保存しました'); setTimeout(() => setChatToast(''), 1500); return;
+                        } catch (e) { if (e && e.name === 'AbortError') { setChatToast(''); return; } /* 未対応/失敗時は下のフォールバックへ */ }
+                    }
+                    // スマホ等: 共有シート（写真/ファイルに保存）
+                    if (navigator.canShare && navigator.canShare({ files: [file] })) { setChatToast(''); try { await navigator.share({ files: [file] }); return; } catch (e) { if (e && e.name === 'AbortError') return; } }
+                    // フォールバック: 通常ダウンロード（既定のダウンロードフォルダ）
                     const objUrl = URL.createObjectURL(blob); const a = document.createElement('a');
                     a.href = objUrl; a.download = name; document.body.appendChild(a); a.click();
                     setTimeout(() => { try { URL.revokeObjectURL(objUrl); a.remove(); } catch {} }, 1500);
@@ -2769,7 +2789,9 @@
             const [orgHq, setOrgHq] = useState([]); // 本部メンバー [{owner, name, staffId}]（accountmetaのrole==='hq'）。名前解決にも使う
             // 表示名は SalonOneロスターの本名（漢字フルネーム）を優先。staffName空/ログインID化け(staff691等)でも本名で表示。
             // 本部(hq)メンバー（チャットIDが owner か staffId）も名前解決の対象に含める。
-            const chatResolveName = (id, fallback) => { const sid = String(id || ''); const s = (soStaffs || []).find(x => String(x.id) === sid); if (s && s.name) return s.name; const d = ((chatData.dir && chatData.dir.staff) || []).find(x => String(x.id) === sid); if (d && d.name) return d.name; const h = (orgHq || []).find(x => String(x.staffId) === sid || String(x.owner) === sid); if (h && h.name) return h.name; return fallback || ''; };
+            // メッセージ発言者(fromStaffId→fromName)から名前を引く辞書。SalonOneロスターや共有dirに載らないID(本部/若林等)でもDM相手名を解決できる。
+            const chatMsgNames = useMemo(() => { const m = {}; const msgs = (chatData && chatData.messages) || {}; for (const rid in msgs) { for (const x of (msgs[rid] || [])) { const fid = String(x.fromStaffId || ''); if (fid && fid !== '__ai__' && fid !== '__system__' && x.fromName && !m[fid]) m[fid] = x.fromName; } } return m; }, [chatData]);
+            const chatResolveName = (id, fallback) => { const sid = String(id || ''); const s = (soStaffs || []).find(x => String(x.id) === sid); if (s && s.name) return s.name; const d = ((chatData.dir && chatData.dir.staff) || []).find(x => String(x.id) === sid); if (d && d.name) return d.name; const h = (orgHq || []).find(x => String(x.staffId) === sid || String(x.owner) === sid); if (h && h.name) return h.name; if (chatMsgNames[sid]) return chatMsgNames[sid]; return fallback || ''; };
             const chatMyName = (authState.root && !authIsHq) ? '管理者' : (chatResolveName(chatMyId, authState.staffName || authState.owner) || 'スタッフ');
             // 名前の横の店舗: 本人が設定したプロフィールの担当店舗（先頭）を優先。未設定はSalonOne所属。
             // ※表示時に解決（profileData読み出し）。ここでは呼ばない＝profileData未宣言時のTDZ回避。
@@ -12436,10 +12458,14 @@
                             };
                             // メンバー候補: SalonOneディレクトリ＋本部(hq)メンバー（チャットID=staffId or owner）。自分は除外し、id重複は排除。
                             const dirStaff = (() => {
-                                const base = (chatData.dir.staff || []).map(s => ({ ...s, id: String(s.id) }));
-                                const seen = new Set(base.map(s => s.id));
-                                (orgHq || []).forEach(m => { const id = (m.staffId && /^\d+$/.test(m.staffId)) ? String(m.staffId) : String(m.owner); if (!id || seen.has(id)) return; seen.add(id); base.push({ id, name: m.name || id, shop: '本部' }); });
-                                return base.filter(s => s.id !== chatMyId);
+                                // 共有dir＋SalonOne全ロスター(soStaffs)＋本部(orgHq)＋過去DM相手(発言者名)を統合＝DM相手を名前で検索できるように。
+                                const map = new Map();
+                                const add = (id, name, shop) => { id = String(id || ''); if (!id || id === chatMyId || id === '__root__' || id === '__ai__' || !name) return; if (!map.has(id)) map.set(id, { id, name: String(name), shop: shop || '' }); };
+                                (chatData.dir.staff || []).forEach(s => add(s.id, s.name, s.shop));
+                                (soStaffs || []).forEach(s => { if (s.deleted) return; const sh = (soShopsRaw || []).find(x => String(x.id) === String(s.shop_id)); add(s.id, s.name, sh ? sh.name : ''); });
+                                (orgHq || []).forEach(m => { const id = (m.staffId && /^\d+$/.test(m.staffId)) ? String(m.staffId) : String(m.owner); add(id, m.name || id, '本部'); });
+                                Object.entries(chatMsgNames || {}).forEach(([id, name]) => add(id, name, ''));
+                                return [...map.values()];
                             })();
                             // 既読集計: このルームの各メンバーの既読ポインタ（reads[staffId][roomId]）
                             const activeMemberIds = activeRoom ? (Array.isArray(activeRoom.members) ? activeRoom.members.map(String) : []) : [];
@@ -12583,7 +12609,16 @@
                                                                     <button onClick={() => setChatReplyTo(null)} className="w-6 h-6 flex items-center justify-center rounded-md text-[#98A2B3] hover:bg-[#EAECF0] shrink-0"><X size={13} /></button>
                                                                 </div>
                                                             )}
-                                                            <div className="rounded-xl border border-[#EAECF0] bg-white focus-within:border-brand-400 focus-within:ring-2 focus-within:ring-brand-100 transition">
+                                                            <div
+                                                                onDragOver={e => { if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) { e.preventDefault(); if (!chatDropActive) setChatDropActive(true); } }}
+                                                                onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setChatDropActive(false); }}
+                                                                onDrop={e => { if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) { e.preventDefault(); setChatDropActive(false); chatDropFiles(e.dataTransfer.files); } }}
+                                                                className={`relative rounded-xl border bg-white transition ${chatDropActive ? 'border-brand-400 ring-2 ring-brand-200 bg-brand-50/40' : 'border-[#EAECF0] focus-within:border-brand-400 focus-within:ring-2 focus-within:ring-brand-100'}`}>
+                                                                {chatDropActive && (
+                                                                    <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-brand-50/80 border-2 border-dashed border-brand-400 pointer-events-none">
+                                                                        <span className="text-[13px] font-bold text-brand-600">ここにドロップして添付（画像・PDF等）</span>
+                                                                    </div>
+                                                                )}
                                                                 {(chatStaged.length > 0 || chatImgProg) && (
                                                                     <div className="px-3 pt-3 flex gap-2 flex-wrap">
                                                                         {chatStaged.map((s, i) => (

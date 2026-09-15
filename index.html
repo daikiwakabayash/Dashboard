@@ -2674,6 +2674,7 @@
             const [chatStaged, setChatStaged] = useState([]);          // 送信前の画像 [{id,dataUrl}]
             const [chatStagedMedia, setChatStagedMedia] = useState([]); // 送信前の動画/PDF/ファイル [{url,name,type,size,kind}]
             const [chatUploading, setChatUploading] = useState(false); // アップロード中（進捗表示）
+            const [chatVideoConv, setChatVideoConv] = useState(null);  // 動画変換の進捗 null=非変換 / 0-100=変換中%
             const [chatImgProg, setChatImgProg] = useState(null); // 画像の一括追加中の進捗 {done,total}
             const CHAT_IMG_MAX = 20; // 1回にまとめて添付できる画像枚数（LINEのアルバム的に一気に選択→送信）
             // 端末から選んだ複数画像を「一気に」ステージング（縮小→追加）。進捗を表示。
@@ -2688,6 +2689,78 @@
                 setChatImgProg(null);
             };
             // 動画/PDF/ファイルを Vercel Blob へ直接アップロード（大容量OK）。動画は5分以内。
+            // 送信前の動画変換：どの端末でも「保存せずそのまま再生」できるよう、H.264 MP4(可能な端末)へ再エンコード。
+            // iPhoneのHEVC/.movは受信側ブラウザで再生できないことがあるため、送信側で広く再生可能な形式に統一する。
+            // 方式=キャンバス実時間キャプチャ(MediaRecorder)。mp4録画が可能な端末(Safari/iOS)はmp4、それ以外はwebm。
+            // 変換不可・非対応・失敗時は null を返し、呼び出し側が元ファイルをそのままアップロード（安全側フォールバック）。
+            const chatPickVideoMime = () => {
+                if (!window.MediaRecorder || typeof MediaRecorder.isTypeSupported !== 'function') return '';
+                const cands = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=h264,aac', 'video/mp4;codecs=avc1', 'video/mp4',
+                               'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+                for (const c of cands) { try { if (MediaRecorder.isTypeSupported(c)) return c; } catch { } }
+                return '';
+            };
+            const chatTranscodeVideo = async (file, onProgress) => {
+                try {
+                    if (!window.MediaRecorder) return null;
+                    if (!HTMLCanvasElement.prototype.captureStream) return null;
+                    const mime = chatPickVideoMime();
+                    if (!mime) return null;
+                    const isMp4Out = mime.indexOf('mp4') >= 0;
+                    // mp4録画できない端末(Chrome/Android等)は、元が既にmp4ならwebm化せず元を使う（iOSで再生不可のwebmを作らない）
+                    if (!isMp4Out && /^video\/mp4$/i.test(file.type || '')) return null;
+                    const url = URL.createObjectURL(file);
+                    const v = document.createElement('video');
+                    v.src = url; v.playsInline = true; v.muted = true; v.preload = 'auto';
+                    await new Promise((res, rej) => { v.onloadedmetadata = () => res(); v.onerror = () => rej(new Error('decode')); });
+                    const iw = v.videoWidth, ih = v.videoHeight, dur = v.duration || 0;
+                    if (!iw || !ih) { URL.revokeObjectURL(url); return null; }
+                    const MAX = 1280, scale = Math.min(1, MAX / Math.max(iw, ih));
+                    const w = Math.max(2, Math.round(iw * scale / 2) * 2), h = Math.max(2, Math.round(ih * scale / 2) * 2);
+                    const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+                    const ctx = canvas.getContext('2d');
+                    const cstream = canvas.captureStream(30);
+                    // 音声：WebAudioで元動画の音声をストリームに合流（iOS Safariでも比較的安定）。失敗時は映像のみ。
+                    let ac = null;
+                    try {
+                        const AC = window.AudioContext || window.webkitAudioContext;
+                        if (AC) {
+                            ac = new AC();
+                            const srcNode = ac.createMediaElementSource(v);
+                            const dest = ac.createMediaStreamDestination();
+                            srcNode.connect(dest); // スピーカー(ac.destination)には繋がない＝変換中は無音
+                            dest.stream.getAudioTracks().forEach(t => cstream.addTrack(t));
+                            v.muted = false;
+                        }
+                    } catch { try { if (ac) ac.close(); } catch { } ac = null; }
+                    const chunks = [];
+                    let rec;
+                    try { rec = new MediaRecorder(cstream, { mimeType: mime, videoBitsPerSecond: 2500000 }); }
+                    catch { try { rec = new MediaRecorder(cstream); } catch { URL.revokeObjectURL(url); if (ac) { try { ac.close(); } catch { } } return null; } }
+                    rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+                    const stopped = new Promise(res => { rec.onstop = () => res(); });
+                    let raf = 0;
+                    const draw = () => { try { ctx.drawImage(v, 0, 0, w, h); } catch { } if (dur && onProgress) { try { onProgress(Math.min(99, Math.round(v.currentTime / dur * 100))); } catch { } } raf = requestAnimationFrame(draw); };
+                    try { if (ac && ac.state === 'suspended') await ac.resume(); } catch { }
+                    rec.start(200);
+                    try { await v.play(); } catch (e) { cancelAnimationFrame(raf); try { rec.stop(); } catch { } URL.revokeObjectURL(url); if (ac) { try { ac.close(); } catch { } } return null; }
+                    draw();
+                    await new Promise(res => { v.onended = () => res(); const iv = setInterval(() => { if (v.ended || (dur && v.currentTime >= dur - 0.05)) { clearInterval(iv); res(); } }, 400); });
+                    cancelAnimationFrame(raf);
+                    try { rec.stop(); } catch { }
+                    await stopped;
+                    try { v.pause(); } catch { }
+                    URL.revokeObjectURL(url);
+                    if (ac) { try { ac.close(); } catch { } }
+                    if (!chunks.length) return null;
+                    const outType = mime.split(';')[0];
+                    const blob = new Blob(chunks, { type: outType });
+                    if (!blob.size) return null;
+                    const ext = outType.indexOf('mp4') >= 0 ? 'mp4' : 'webm';
+                    const base = (file.name || 'video').replace(/\.[^.]+$/, '');
+                    return new File([blob], base + '.' + ext, { type: outType });
+                } catch { return null; }
+            };
             const chatUploadFile = async (file) => {
                 if (!file) return;
                 if (typeof window.__blobUpload !== 'function') { alert('ファイル送信の準備ができていません（数秒後に再度お試しください）。改善しない場合は管理者へ：VercelでBlobストレージの有効化が必要です。'); return; }
@@ -2701,12 +2774,21 @@
                     const dur = await new Promise(res => { try { const v = document.createElement('video'); v.preload = 'metadata'; v.onloadedmetadata = () => { URL.revokeObjectURL(v.src); res(v.duration || 0); }; v.onerror = () => res(0); v.src = URL.createObjectURL(file); } catch { res(0); } });
                     if (dur && dur > 305) { alert(`動画が長すぎます（${Math.round(dur)}秒）。5分（300秒）以内にしてください。`); return; }
                 }
+                // 動画は送信前にH.264 MP4等へ再エンコード（受信側が保存せずそのまま再生できるように）。実時間変換のため進捗を表示。
+                let upFile = file;
+                if (isVideo) {
+                    setChatVideoConv(0);
+                    try {
+                        const conv = await chatTranscodeVideo(file, pct => setChatVideoConv(pct));
+                        if (conv && conv.size) upFile = conv;   // 変換成功→変換後を送る / 失敗(null)→元をそのまま送る
+                    } catch { } finally { setChatVideoConv(null); }
+                }
                 setChatUploading(true);
                 try {
-                    const safe = (file.name || 'file').replace(/[^\w.\-]+/g, '_').slice(-80);
-                    const res = await window.__blobUpload(`chat/${Date.now()}-${safe}`, file, { access: 'public', handleUploadUrl: '/api/plan-store?type=blobupload', contentType: file.type || 'application/octet-stream' });
-                    const kind = isVideo ? 'video' : (/^image\//.test(file.type) ? 'image' : 'file');
-                    setChatStagedMedia(prev => [...prev, { url: res.url, name: file.name || 'file', type: file.type || '', size: file.size || 0, kind }]);
+                    const safe = (upFile.name || 'file').replace(/[^\w.\-]+/g, '_').slice(-80);
+                    const res = await window.__blobUpload(`chat/${Date.now()}-${safe}`, upFile, { access: 'public', handleUploadUrl: '/api/plan-store?type=blobupload', contentType: upFile.type || 'application/octet-stream' });
+                    const kind = isVideo ? 'video' : (/^image\//.test(upFile.type) ? 'image' : 'file');
+                    setChatStagedMedia(prev => [...prev, { url: res.url, name: file.name || 'file', type: upFile.type || '', size: upFile.size || 0, kind }]);
                 } catch (e) {
                     alert('アップロードに失敗しました。' + ((e && e.message) ? '\n' + e.message : '') + '\n（管理者へ：VercelでBlobストレージ有効化が必要な場合があります）');
                 } finally { setChatUploading(false); }
@@ -12628,11 +12710,12 @@
                                                                         {chatImgProg && <div className="w-14 h-14 rounded-lg border border-[#EAECF0] bg-[#F8F9FB] flex flex-col items-center justify-center gap-1 text-[#667085]"><span className="w-4 h-4 border-2 border-[#CBD2DC] border-t-brand-500 rounded-full animate-spin" /><span className="text-[9px] font-bold">{chatImgProg.done}/{chatImgProg.total}</span></div>}
                                                                     </div>
                                                                 )}
-                                                                {(chatStagedMedia.length > 0 || chatUploading) && (
+                                                                {(chatStagedMedia.length > 0 || chatUploading || chatVideoConv !== null) && (
                                                                     <div className="px-3 pt-3 flex gap-2 flex-wrap">
                                                                         {chatStagedMedia.map((md, i) => (
                                                                             <div key={i} className="relative flex items-center gap-2 pl-2 pr-6 py-1.5 rounded-lg border border-[#EAECF0] bg-[#F8F9FB] max-w-[220px]"><span className="text-[15px]">{md.kind === 'video' ? '🎬' : /pdf/i.test(md.type) ? '📄' : '📎'}</span><span className="text-[12px] text-[#344054] truncate">{md.name || 'ファイル'}</span><button onClick={() => setChatStagedMedia(prev => prev.filter((_, j) => j !== i))} className="absolute top-1/2 -translate-y-1/2 right-1.5 w-4 h-4 bg-[#111827] text-white rounded-full flex items-center justify-center"><X size={10} /></button></div>
                                                                         ))}
+                                                                        {chatVideoConv !== null && <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#F8F9FB] text-[12px] text-[#667085] font-semibold"><span className="w-3.5 h-3.5 border-2 border-[#CBD2DC] border-t-brand-500 rounded-full animate-spin" />動画を変換中… {chatVideoConv}%<span className="text-[11px] text-[#98A2B3] font-normal">（そのまま再生できる形式に変換中）</span></div>}
                                                                         {chatUploading && <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#F8F9FB] text-[12px] text-[#667085] font-semibold"><span className="w-3.5 h-3.5 border-2 border-[#CBD2DC] border-t-brand-500 rounded-full animate-spin" />アップロード中…</div>}
                                                                     </div>
                                                                 )}
@@ -12652,11 +12735,11 @@
                                                                     if (e.key === 'Enter' && !e.shiftKey && !chatIsMobile && !composing) { e.preventDefault(); chatSend(); }
                                                                 }} rows={1} placeholder={chatIsMobile ? `${roomTitle(activeRoom)} に投稿（@でメンション）` : `${roomTitle(activeRoom)} に投稿（Enterで送信・Shift+Enterで改行・@でメンション）`} className="w-full resize-none max-h-[120px] bg-transparent px-3.5 pt-3 pb-1.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none" style={{ minHeight: '44px' }} />
                                                                 <div className="flex items-center gap-1 px-2 pb-2">
-                                                                    <label className={`w-8 h-8 flex items-center justify-center rounded-md text-[#667085] hover:bg-[#F2F4F7] cursor-pointer transition ${chatUploading ? 'opacity-50 pointer-events-none' : ''}`} title="写真・動画を添付（動画は5分以内）">
+                                                                    <label className={`w-8 h-8 flex items-center justify-center rounded-md text-[#667085] hover:bg-[#F2F4F7] cursor-pointer transition ${(chatUploading || chatVideoConv !== null) ? 'opacity-50 pointer-events-none' : ''}`} title="写真・動画を添付（動画は5分以内）">
                                                                         <ImageIcon size={18} />
                                                                         <input type="file" accept="image/*,video/*" multiple className="hidden" onChange={async e => { const files = [...(e.target.files || [])]; e.target.value = ''; const imgs = files.filter(f => /^image\//.test(f.type)); const vids = files.filter(f => /^video\//.test(f.type)); if (imgs.length) await chatStageImages(imgs); for (const v of vids) await chatUploadFile(v); }} />
                                                                     </label>
-                                                                    <label className={`w-8 h-8 flex items-center justify-center rounded-md text-[#667085] hover:bg-[#F2F4F7] cursor-pointer transition ${chatUploading ? 'opacity-50 pointer-events-none' : ''}`} title="PDF・ファイルを添付">
+                                                                    <label className={`w-8 h-8 flex items-center justify-center rounded-md text-[#667085] hover:bg-[#F2F4F7] cursor-pointer transition ${(chatUploading || chatVideoConv !== null) ? 'opacity-50 pointer-events-none' : ''}`} title="PDF・ファイルを添付">
                                                                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
                                                                         <input type="file" accept="application/pdf,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,video/*" className="hidden" onChange={async e => { const files = [...(e.target.files || [])].slice(0, 4); e.target.value = ''; for (const f of files) { await chatUploadFile(f); } }} />
                                                                     </label>

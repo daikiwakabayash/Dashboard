@@ -2279,6 +2279,8 @@
             const [acqCust, setAcqCust] = useState([]);       // 獲得分析: 新規顧客一覧（/marketing/new-customers・受付日/LTV）
             const [acqCustLoading, setAcqCustLoading] = useState(false);
             const [acqSort, setAcqSort] = useState('new');    // 新規顧客一覧の並び順（'new'=新しい順 / 'old'=古い順）
+            const [acqLinkFilter, setAcqLinkFilter] = useState(''); // 新規顧客一覧: 施策リンクのフィルタ（''=全て / '__none__'=リンクなし / それ以外=リンク名）
+            const [acqLinkSort, setAcqLinkSort] = useState(null);   // 新規顧客一覧: 施策リンクの並び（null=受付日順のまま / 'asc' / 'desc'）
             const [acqPivotMetric, setAcqPivotMetric] = useState('booking'); // 媒体×店舗ピボットの指標（booking=新規予約/visit=来店/join=入会）
             const [acqMediaSel, setAcqMediaSel] = useState('');  // マーケ: 媒体フィルタ（''=全媒体 / visit_source_name）
             const [acqMediaSort, setAcqMediaSort] = useState({ key: 'booking', dir: 'desc' }); // 媒体別コホートの並び替え
@@ -18599,9 +18601,22 @@
                                                 <div className="flex items-center gap-2 mb-3 flex-wrap"><Users size={18} className="text-emerald-600" /><h2 className="text-base md:text-lg font-black text-slate-900">新規顧客一覧</h2><span className="text-[10px] font-bold text-slate-400">{acqCustLoading ? '読み込み中…' : `全${custRows.length.toLocaleString()}名（日本の店舗のみ・受付日時が期間内の新規客・全件表示）`}</span><InfoTip text={`SalonOne new-customers を1人1行で表示。受付日時が ${soFrom}〜${soTo} の新規客（来店が翌月でも含む・前月受付は除外）。LTVは会計完了予約の累計（取得時点まで）。顧客名は個人情報ありキーのときのみ。「除外」＝テスト予約等で、押すと全マーケ指標からデータ無しとして除外（全社共有）。`} />
                                                     <div className="ml-auto flex items-center gap-2 flex-wrap">
                                                         {acqExclRows.length > 0 && <button onClick={() => setAcqShowExcluded(v => !v)} className={`px-2.5 py-1 rounded-lg text-[11px] font-black border transition ${acqShowExcluded ? 'bg-rose-600 text-white border-rose-600' : 'bg-white text-rose-600 border-rose-200 hover:border-rose-400'}`}>除外済み {acqExclRows.length}件 {acqShowExcluded ? '隠す' : '表示'}</button>}
+                                                        {(() => {
+                                                            // 施策リンクのフィルタ候補（現在のcustRowsに存在するリンク名）
+                                                            const _lm = {}; (acqForced || []).forEach(r => { if (r && r.forced_link_id != null) _lm[String(r.forced_link_id)] = String(r.title || ''); });
+                                                            const _lof = (c) => { const f = acqSoflMap[String(c.customer_id)]; if (f == null) return ''; return _lm[String(f)] || `リンク#${f}`; };
+                                                            const opts = Array.from(new Set((custRows || []).map(_lof).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'ja'));
+                                                            return (
+                                                                <select value={acqLinkFilter} onChange={e => setAcqLinkFilter(e.target.value)} title="施策リンクで絞り込み" className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border bg-white max-w-[220px] transition ${acqLinkFilter ? 'border-emerald-400 text-emerald-700' : 'border-slate-200 text-slate-600'}`}>
+                                                                    <option value="">施策リンク：全て</option>
+                                                                    <option value="__none__">リンクなし</option>
+                                                                    {opts.map(t => <option key={t} value={t}>{t}</option>)}
+                                                                </select>
+                                                            );
+                                                        })()}
                                                         <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
-                                                            <button onClick={() => setAcqSort('new')} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${acqSort === 'new' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>新しい順</button>
-                                                            <button onClick={() => setAcqSort('old')} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${acqSort === 'old' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>古い順(9/1〜)</button>
+                                                            <button onClick={() => { setAcqLinkSort(null); setAcqSort('new'); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${(!acqLinkSort && acqSort === 'new') ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>新しい順</button>
+                                                            <button onClick={() => { setAcqLinkSort(null); setAcqSort('old'); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${(!acqLinkSort && acqSort === 'old') ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>古い順(9/1〜)</button>
                                                         </div>
                                                     </div></div>
                                                 {acqCustLoading && !custRows.length ? (
@@ -18622,15 +18637,27 @@
                                                     // 受付日時をUNIXミリ秒に変換して比較（文字列比較のブレを完全排除）。同時刻は customer_id で安定化。
                                                     const tms = (c) => { const t = Date.parse(String(c.received_at || '')); return isNaN(t) ? 0 : t; };
                                                     const cmp = (a, b) => { const ta = tms(a), tb = tms(b); if (ta !== tb) return ta - tb; return String(a.customer_id || '').localeCompare(String(b.customer_id || '')); };
-                                                    const base = [...custRows].map(c => ({ c, ex: false }));
-                                                    const exl = acqShowExcluded ? acqExclRows.map(c => ({ c, ex: true })) : [];
-                                                    // 新しい順=受付が新しいものを上に（降順）／古い順=昇順。要件は固定（変更しない）。
-                                                    const list = [...base, ...exl].sort((a, b) => acqSort === 'new' ? cmp(b.c, a.c) : cmp(a.c, b.c)).slice(0, 3000);
+                                                    let base = [...custRows].map(c => ({ c, ex: false }));
+                                                    let exl = acqShowExcluded ? acqExclRows.map(c => ({ c, ex: true })) : [];
+                                                    // 施策リンクでの絞り込み（''=全て / '__none__'=リンクなし / それ以外=リンク名一致）
+                                                    if (acqLinkFilter) {
+                                                        const keep = (o) => { const l = linkOf(o.c); return acqLinkFilter === '__none__' ? !l : (l === acqLinkFilter); };
+                                                        base = base.filter(keep); exl = exl.filter(keep);
+                                                    }
+                                                    let list = [...base, ...exl];
+                                                    if (acqLinkSort) {
+                                                        // 施策リンク名で昇順/降順（リンクなしは末尾）。同名は受付日で安定化。
+                                                        list.sort((a, b) => { const la = linkOf(a.c) || '￿', lb = linkOf(b.c) || '￿'; const r = la.localeCompare(lb, 'ja'); return (acqLinkSort === 'asc' ? r : -r) || cmp(b.c, a.c); });
+                                                    } else {
+                                                        // 新しい順=受付が新しいものを上に（降順）／古い順=昇順。
+                                                        list.sort((a, b) => acqSort === 'new' ? cmp(b.c, a.c) : cmp(a.c, b.c));
+                                                    }
+                                                    list = list.slice(0, 3000);
                                                     return (
                                                     <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
                                                         <table className="w-full text-[12px] whitespace-nowrap">
                                                             <thead><tr className="text-slate-400 font-black border-b border-slate-200">
-                                                                <th className="text-left pb-2 px-2">受付日時</th><th className="text-left pb-2 px-2">初回来店予定</th><th className="text-left pb-2 px-2">店舗</th><th className="text-left pb-2 px-2">顧客名</th><th className="text-left pb-2 px-2">担当</th><th className="text-left pb-2 px-2">媒体</th><th className="text-left pb-2 px-2">施策リンク <InfoTip side="bottom" text="獲得時に使った施策リンク（強制リンク）を、SalonOneのappointmentsを差分同期して顧客に紐づけて表示。『リンクなし』＝その媒体経由でも強制リンクを通っていない予約（例:広告は見たが店舗の通常予約フォームから予約）。ホットペッパーは常にリンクなし（HPB側の予約で自社リンクを通らないため）。直近（当日〜前日）の顧客は同期がまだ追いついておらず、後から自動でリンクが付くことがあります。" /></th><th className="text-center pb-2 px-2">状態</th><th className="text-center pb-2 px-2">購入</th><th className="text-right pb-2 px-2">LTV</th><th className="text-center pb-2 px-2">操作</th>
+                                                                <th className="text-left pb-2 px-2">受付日時</th><th className="text-left pb-2 px-2">初回来店予定</th><th className="text-left pb-2 px-2">店舗</th><th className="text-left pb-2 px-2">顧客名</th><th className="text-left pb-2 px-2">担当</th><th className="text-left pb-2 px-2">媒体</th><th onClick={() => setAcqLinkSort(s => s === 'asc' ? 'desc' : s === 'desc' ? null : 'asc')} title="クリックで施策リンク名の昇順/降順に並び替え（もう一度で解除）" className={`text-left pb-2 px-2 cursor-pointer select-none whitespace-nowrap ${acqLinkSort ? 'text-emerald-600' : 'hover:text-slate-600'}`}>施策リンク{acqLinkSort === 'asc' ? ' ▲' : acqLinkSort === 'desc' ? ' ▼' : ''} <span onClick={e => e.stopPropagation()}><InfoTip side="bottom" text="獲得時に使った施策リンク（強制リンク）を、SalonOneのappointmentsを差分同期して顧客に紐づけて表示。『リンクなし』＝その媒体経由でも強制リンクを通っていない予約（例:広告は見たが店舗の通常予約フォームから予約）。ホットペッパーは常にリンクなし（HPB側の予約で自社リンクを通らないため）。直近（当日〜前日）の顧客は同期がまだ追いついておらず、後から自動でリンクが付くことがあります。クリックで昇順/降順に並び替え、上部の「施策リンク：全て」で絞り込みできます。" /></span></th><th className="text-center pb-2 px-2">状態</th><th className="text-center pb-2 px-2">購入</th><th className="text-right pb-2 px-2">LTV</th><th className="text-center pb-2 px-2">操作</th>
                                                             </tr></thead>
                                                             <tbody>
                                                                 {list.map(({ c, ex }, i) => (

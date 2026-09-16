@@ -18637,22 +18637,25 @@
                                                     // 受付日時をUNIXミリ秒に変換して比較（文字列比較のブレを完全排除）。同時刻は customer_id で安定化。
                                                     const tms = (c) => { const t = Date.parse(String(c.received_at || '')); return isNaN(t) ? 0 : t; };
                                                     const cmp = (a, b) => { const ta = tms(a), tb = tms(b); if (ta !== tb) return ta - tb; return String(a.customer_id || '').localeCompare(String(b.customer_id || '')); };
-                                                    let base = [...custRows].map(c => ({ c, ex: false }));
-                                                    let exl = acqShowExcluded ? acqExclRows.map(c => ({ c, ex: true })) : [];
-                                                    // 施策リンクでの絞り込み（''=全て / '__none__'=リンクなし / それ以外=リンク名一致）
+                                                    // ★施策リンクは1行につき1回だけ解決し、表示・絞り込み・並び替えで同一値を共有（食い違い防止）。空白差も正規化。
+                                                    const norm = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+                                                    let rows = [
+                                                        ...custRows.map(c => ({ c, ex: false })),
+                                                        ...(acqShowExcluded ? acqExclRows.map(c => ({ c, ex: true })) : []),
+                                                    ].map(o => ({ ...o, link: linkOf(o.c) }));
+                                                    // 施策リンクでの絞り込み（''=全て / '__none__'=リンクなし / それ以外=リンク名一致・正規化して比較）
                                                     if (acqLinkFilter) {
-                                                        const keep = (o) => { const l = linkOf(o.c); return acqLinkFilter === '__none__' ? !l : (l === acqLinkFilter); };
-                                                        base = base.filter(keep); exl = exl.filter(keep);
+                                                        const want = norm(acqLinkFilter);
+                                                        rows = rows.filter(o => acqLinkFilter === '__none__' ? !o.link : (norm(o.link) === want));
                                                     }
-                                                    let list = [...base, ...exl];
                                                     if (acqLinkSort) {
                                                         // 施策リンク名で昇順/降順（リンクなしは末尾）。同名は受付日で安定化。
-                                                        list.sort((a, b) => { const la = linkOf(a.c) || '￿', lb = linkOf(b.c) || '￿'; const r = la.localeCompare(lb, 'ja'); return (acqLinkSort === 'asc' ? r : -r) || cmp(b.c, a.c); });
+                                                        rows.sort((a, b) => { const r = (a.link || '￿').localeCompare(b.link || '￿', 'ja'); return (acqLinkSort === 'asc' ? r : -r) || cmp(b.c, a.c); });
                                                     } else {
                                                         // 新しい順=受付が新しいものを上に（降順）／古い順=昇順。
-                                                        list.sort((a, b) => acqSort === 'new' ? cmp(b.c, a.c) : cmp(a.c, b.c));
+                                                        rows.sort((a, b) => acqSort === 'new' ? cmp(b.c, a.c) : cmp(a.c, b.c));
                                                     }
-                                                    list = list.slice(0, 3000);
+                                                    const list = rows.slice(0, 3000);
                                                     return (
                                                     <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
                                                         <table className="w-full text-[12px] whitespace-nowrap">
@@ -18660,7 +18663,7 @@
                                                                 <th className="text-left pb-2 px-2">受付日時</th><th className="text-left pb-2 px-2">初回来店予定</th><th className="text-left pb-2 px-2">店舗</th><th className="text-left pb-2 px-2">顧客名</th><th className="text-left pb-2 px-2">担当</th><th className="text-left pb-2 px-2">媒体</th><th onClick={() => setAcqLinkSort(s => s === 'asc' ? 'desc' : s === 'desc' ? null : 'asc')} title="クリックで施策リンク名の昇順/降順に並び替え（もう一度で解除）" className={`text-left pb-2 px-2 cursor-pointer select-none whitespace-nowrap ${acqLinkSort ? 'text-emerald-600' : 'hover:text-slate-600'}`}>施策リンク{acqLinkSort === 'asc' ? ' ▲' : acqLinkSort === 'desc' ? ' ▼' : ''} <span onClick={e => e.stopPropagation()}><InfoTip side="bottom" text="獲得時に使った施策リンク（強制リンク）を、SalonOneのappointmentsを差分同期して顧客に紐づけて表示。『リンクなし』＝その媒体経由でも強制リンクを通っていない予約（例:広告は見たが店舗の通常予約フォームから予約）。ホットペッパーは常にリンクなし（HPB側の予約で自社リンクを通らないため）。直近（当日〜前日）の顧客は同期がまだ追いついておらず、後から自動でリンクが付くことがあります。クリックで昇順/降順に並び替え、上部の「施策リンク：全て」で絞り込みできます。" /></span></th><th className="text-center pb-2 px-2">状態</th><th className="text-center pb-2 px-2">購入</th><th className="text-right pb-2 px-2">LTV</th><th className="text-center pb-2 px-2">操作</th>
                                                             </tr></thead>
                                                             <tbody>
-                                                                {list.map(({ c, ex }, i) => (
+                                                                {list.map(({ c, ex, link }, i) => (
                                                                     <tr key={custIdOf(c) || i} className={`border-b border-slate-100 ${ex ? 'bg-rose-50/60 opacity-70' : 'hover:bg-slate-50'}`}>
                                                                         <td className="py-2 px-2 font-bold text-slate-700">{fmtW(c.received_at)}{ex && <span className="ml-1 text-[9px] font-black text-rose-500">除外中</span>}</td>
                                                                         <td className="py-2 px-2 text-slate-500">{fmtW(c.reserved_at)}</td>
@@ -18668,7 +18671,7 @@
                                                                         <td className={`py-2 px-2 font-bold ${ex ? 'text-slate-500 line-through' : 'text-slate-800'}`}>{c.customer_name || '（非公開）'}</td>
                                                                         <td className="py-2 px-2 text-slate-600">{staffName(c.staff_id)}</td>
                                                                         <td className="py-2 px-2 text-slate-600">{c.visit_source_name || '未設定'}</td>
-                                                                        <td className="py-2 px-2 text-slate-600 max-w-[180px] truncate" title={linkOf(c) || 'リンクなし'}>{linkOf(c) || <span className="text-slate-300">リンクなし</span>}</td>
+                                                                        <td className="py-2 px-2 text-slate-600 max-w-[180px] truncate" title={link || 'リンクなし'}>{link || <span className="text-slate-300">リンクなし</span>}</td>
                                                                         <td className="py-2 px-2 text-center"><span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${stCls(c.first_appointment_status)}`}>{stLabel(c.first_appointment_status)}</span></td>
                                                                         <td className="py-2 px-2 text-center font-black">{c.joined ? <span className="text-emerald-600">○</span> : <span className="text-slate-300">-</span>}</td>
                                                                         <td className="py-2 px-2 text-right font-bold text-slate-900">{c.ltv ? soYen(c.ltv) : '¥0'}</td>

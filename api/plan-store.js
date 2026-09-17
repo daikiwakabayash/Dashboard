@@ -362,21 +362,52 @@ export default async function handler(req, res) {
       const metaMap = (await blobGet(ACCTMETA_KEY, hasKV, hasSB, gas).catch(() => null)) || {};
       return { passwords, shopsMap, metaMap };
     };
+    const ccSalt = () => process.env.AUTH_SALT || 'naoru-settlement-2026';
+    // 本人確認済みの主体を取り出す（cc_authz のモードとは無関係に使える）
+    const ccVerify = (action) => resolveActor(req, {
+      env: process.env,
+      verifySalonOneBearer,
+      // 未設定なら空を返す → resolveActor は root 経路を閉じる（fail closed）
+      rootToken: () => (process.env.DASHBOARD_PASSWORD ? hashOwnerToken('__root__', process.env.DASHBOARD_PASSWORD, ccSalt()) : ''),
+      verifyOwnerToken: (pw, owner, token) => verifyOwnerToken(pw, owner, token, ccSalt()),
+      loadAccounts: ccLoadAccounts,
+      skipCache: needsReverify(action),   // 取り返しがつかない操作は毎回確かめる
+    }).catch(() => null);
+
     let ccActor = actorOf();          // 既定はクライアント申告（従来どおり）
     const ccFlagsNow = normalizeFlags(await blobGet(ccKey(FLAGS_KEY), hasKV, hasSB, gas).catch(() => null));
     const ccAuthzMode = ccFlagsNow.cc_authz || 'off';
+
+    // ── 常時強制するゲート（cc_authz のモードに依存しない）──────────────────
+    // 「制御そのものを変える操作」＝フラグ変更・キルスイッチ・承認の決裁/実行 は、
+    // 観測（log）では足りない。ここだけは常にサーバー側で本人確認を要求する。
+    // cc_authz は**既存機能の観測**用であり、**新しい制御面の保護**とは別物として扱う。
+    const CONTROL_ACTIONS = new Set(['flag.change', 'killswitch.engage', 'killswitch.release',
+                                     'approval.approve', 'approval.reject', 'approval.execute']);
+    const ccActionNow = ccActionFor(ccType, body);
+    if (req.method === 'POST' && CONTROL_ACTIONS.has(ccActionNow)) {
+      const verified = await ccVerify(ccActionNow);
+      // ⚠️ 申告値(body.actor)は使わない。名乗るだけで通ってはいけない操作。
+      const okRole = !!verified && verified.verified === true && ['root', 'admin'].includes(verified.role);
+      if (!okRole) {
+        try {
+          const e = buildAuditEntry({
+            action: 'authz_deny', entity: 'authz', entityId: ccActionNow,
+            actor: verified || ccActor, source: (verified || ccActor).source,
+            note: 'control_action_requires_verified_admin',
+            after: { action: ccActionNow, decision: 'DENY', code: 'unverified_admin', mode: 'always' },
+          });
+          if (e.ok && hasKV) await kvAppendJson(ccKey(AUDIT_KEY), e.entry, AUDIT_CAP);
+        } catch (_) { /* 記録失敗で拒否は覆さない */ }
+        return res.status(403).json({ ok: false, error: 'forbidden', code: 'unverified_admin',
+          message: 'この操作には本人確認済みの管理者権限が必要です' });
+      }
+      ccActor = verified;
+    }
+
     if (ccAuthzMode !== 'off') {
-      const ccAction = ccActionFor(ccType, body);
-      const salt = process.env.AUTH_SALT || 'naoru-settlement-2026';
-      const resolved = await resolveActor(req, {
-        env: process.env,
-        verifySalonOneBearer,
-        // 未設定なら空を返す → resolveActor は root 経路を閉じる（fail closed）
-        rootToken: () => (process.env.DASHBOARD_PASSWORD ? hashOwnerToken('__root__', process.env.DASHBOARD_PASSWORD, salt) : ''),
-        verifyOwnerToken: (pw, owner, token) => verifyOwnerToken(pw, owner, token, salt),
-        loadAccounts: ccLoadAccounts,
-        skipCache: needsReverify(ccAction),   // 取り返しがつかない操作は毎回確かめる
-      }).catch(() => null);
+      const ccAction = ccActionNow;
+      const resolved = await ccVerify(ccAction);
       if (resolved) ccActor = { ...resolved };
       const target = {
         shop: String(body.shop || (body.approval && body.approval.scope && body.approval.scope.shop) || req.query.shop || ''),

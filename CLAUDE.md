@@ -241,3 +241,21 @@ Googleマップの口コミ数・評価を全店で追跡し、集客増につ�
 - 新しいビジネスロジックは `lib/` に分離してテストを書く
 - **絶対にAPIキーやトークンをコードにハードコードしない**（`.env` + Vercel環境変数を使う）
 - GAS URLはフロントに直接書かず、`/api/gas-proxy` 経由にする
+
+## チャット権限（authz / chat-policy・Phase 1）
+社内チャットの認可を Dashboard 共通基盤に一本化し、**段階公開（Rollout）で root/本部(hq) のみに公開**している。
+設計は `CHAT_EXISTING_INTEGRATION_AUDIT.md`（既存実装の調査・何を再利用するか）と `CHAT_PERMISSION_MATRIX.md`（権限表の正）。
+- **Identity / Permission の Source of Truth は SalonOne**。チャット専用ログインは作らない。
+  ログインは従来どおり `settlement-auth`（root/hq/GASオーナー）→ サロンワン `auth/login` の二段フォールバック。
+  SalonOne の `accessible_shops[].id`（＝store_id）を `authState.storeIds` に取り込み、**店舗権限をそのまま継承**（複数店舗は配列のまま全店）。店舗名は表示と移行期のフォールバックのみ。
+- **`lib/actor.js`** … 共通 actor `{tenant_id,user_id,staff_id,role,accessible_store_ids,source,verified,alt_ids,acting_for}`。
+  検証順 ①SalonOne SSO の `Authorization: Bearer`（`/me`）②`X-Chat-Token`（settlement-auth の rootトークン＝root/hq）③申告値（`verified:false`）。
+- **`lib/authz.js`** … Dashboard 共通認可。権限解決の優先順位＝**①root/HQ の Dashboard Override → ②SalonOne の正式権限 → ③DENY**。
+  店舗スコープ（`canAccessStore` は store_id が正）・Chat Rollout・`CHAT_AUTHZ_ENFORCE`・`CHAT_KILL_SWITCH`。
+- **`lib/chat-policy.js`** … チャット固有だけ（`canViewRoom`/`canPostRoom`/`canManageRoom`/`canCreateRoom`/`canInviteMember`/`filterRecipients`/DM/Broadcast/`authorizeChatAction`）。
+  DM は root/hq でも非メンバーは不可。全社アナウンスの投稿は root/hq のみ。AI(`agent`)は人間の部分集合で送信も承認も不可。
+- **段階公開（Feature Flag・再デプロイ不要）**: KV `naoru:chat:rollout` = `{root,hq,owner,manager,staff,features{...}}`。
+  既定 `root/hq のみ true`。`?type=chat` は GET/POST とも最初にこれを評価し、未公開ロールと**身元未検証セッションは 403 `chat_rollout_disabled`**（UIで隠すだけにしない）。
+  参照 `GET /api/plan-store?type=chat&rollout=1`／変更 `POST {action:'setRollout'}`（root/hq のみ）。サーバー側キャッシュ30秒。
+- 既存データ互換: Room/メッセージのスキーマは変更なし（`storeId`/`status`/`managers`/`eventId`/`tenantId` は後付けの任意フィールド）。
+  既存の店舗ルーム自動生成（`ensureRooms`）とイベントのグループ自動生成（`evSaveChat`/`evJoinChat`）は**作り直さず延長する**。

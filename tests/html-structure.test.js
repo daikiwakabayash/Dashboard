@@ -130,3 +130,31 @@ describe('index.html - セキュリティ', () => {
     expect(html).not.toMatch(/AKfycb[a-zA-Z0-9_-]+/);
   });
 });
+
+// ── チャットの段階公開（Rollout）とSalonOne権限の継承 ────────────────────
+describe('index.html - チャット Rollout / SalonOne 権限継承', () => {
+  it('SalonOne の accessible_shops から store_id を取り込んでいる', () => {
+    // 店舗権限の正は store_id（店舗名は表示・移行期のフォールバック）
+    expect(html).toContain('accessible_shops');
+    expect(html).toMatch(/storeIds/);
+    expect(html).toContain('naoru_auth_storeids');
+  });
+
+  it('チャットの公開可否をサーバー（?type=chat&rollout=1）に問い合わせている', () => {
+    expect(html).toContain("type=chat&rollout=1");
+    expect(html).toMatch(/chatLoadRollout/);
+  });
+
+  it('未公開ロールにはチャットタブを出さない（rolloutOff）', () => {
+    expect(html).toMatch(/rolloutOff/);
+    expect(html).toMatch(/canShow\s*=\s*\(it\)\s*=>\s*!it\.rolloutOff/);
+  });
+
+  it('未公開のときはチャットをポーリングしない', () => {
+    expect(html).toMatch(/if \(!authState\.authenticated \|\| !chatRollout\.allowed\) return;/);
+  });
+
+  it('店舗ルームの可視判定が store_id を優先している', () => {
+    expect(html).toMatch(/room\.storeId/);
+  });
+});

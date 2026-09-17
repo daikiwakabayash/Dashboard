@@ -5095,7 +5095,7 @@
                     setAcqCust(cached.rows);                    // キャッシュを即表示（スピナー無し・体感高速）
                     if (!force && acqIsPastPeriod()) { acqLoadedKeyRef.current = key; return; } // 過去＝確定。再取得しない（「更新」時は無視）
                 }
-                if (!force && acqLoadedKeyRef.current === key) return;    // 同一セッション内の同キー重複取得を防止（「更新」時は無視）
+                if (!force && acqIsPastPeriod() && acqLoadedKeyRef.current === key) return;    // 過去(確定)期間のみ同一キー重複取得を防止。当月(進行中)はタブ再訪のたびに裏で最新化（日中の新規受付を反映）
                 acqLoadedKeyRef.current = key;
                 if (!(cached && cached.rows)) setAcqCustLoading(true); // キャッシュが無い時だけスピナー表示
                 try {
@@ -5234,6 +5234,16 @@
             useEffect(() => {
                 if ((currentPage === 'salonone' || currentPage === 'mktg') && ['acq', 'forced', 'customers', 'storemedia'].includes(soView) && soShops.length) { acqFetchCustomers(); acqFetchForced(); acqLoadExcluded(); acqFetchSoflMap(); if (soView === 'acq') acqFetchPrev(); }
                 // 注: soShops.length / soUniverseSig を依存に含め、店舗一覧や管轄店舗が後から届いても再取得されるようにする（マーケタブ直リンク・staff/ownerスコープ対策）
+            }, [currentPage, soView, soFrom, soTo, soShopSel, soShops.length, soRegion, soUniverseSig]);
+            // 当月(進行中)の新規顧客一覧は、タブ表示中に増える新規受付を反映するため定期的に裏で最新化（約3分・タブが見えている時のみ・確定過去月はしない）
+            useEffect(() => {
+                if (!((currentPage === 'salonone' || currentPage === 'mktg') && ['acq', 'forced', 'customers', 'storemedia'].includes(soView) && soShops.length)) return;
+                if (acqIsPastPeriod()) return; // 過去(確定)は自動更新不要
+                const iv = setInterval(() => {
+                    try { if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return; } catch {}
+                    acqFetchCustomers(true); acqFetchForced(true); if (soView === 'acq') acqFetchPrev(true);
+                }, 180000);
+                return () => clearInterval(iv);
             }, [currentPage, soView, soFrom, soTo, soShopSel, soShops.length, soRegion, soUniverseSig]);
             const [zkZoom, setZkZoom] = useState(() => (typeof window !== 'undefined' && window.innerWidth < 640) ? 0.5 : 1); // 全体管理シートの表示倍率（既定=スマホ50%/PC100%。スマホは指ピンチでも拡大縮小可）
             const [soStoreMenuOpen, setSoStoreMenuOpen] = useState(false);

@@ -1,7 +1,16 @@
 # CHAT_PERMISSION_MATRIX
 
-社内チャットの権限モデル。**この表が `lib/chat-authz.js` の唯一の仕様**であり、
-フロント（表示の出し分け）とサーバー（`api/plan-store.js?type=chat`）は同じ関数を通す。
+社内チャットの権限モデル。
+**Identity / Permission の Source of Truth は SalonOne**（`CHAT_EXISTING_INTEGRATION_AUDIT.md`）。
+Dashboard 全体の共通認可は `lib/authz.js` / `lib/actor.js` が正本で、
+**この表が実装する「チャット固有のポリシー」だけ** を `lib/chat-policy.js` に置く。
+
+```
+lib/actor.js       … 誰か（tenant_id / user_id / staff_id / role / accessible_store_ids / source / verified）
+lib/authz.js       … 共通認可（店舗スコープ・Override優先順位・Rollout・enforcement）
+lib/chat-policy.js … チャット固有（canViewRoom / canPostRoom / canManageRoom / canCreateRoom /
+                      canInviteMember / filterRecipients / DM rules / Broadcast rules）
+```
 
 ---
 
@@ -70,34 +79,51 @@
 | `group`（自由グループ） | members のみ | members |
 | `dm` | members（2名）のみ。**root でも非メンバーは不可** | members |
 
-## 5. スコープの表現
+## 5. スコープの表現（lib/actor.js）
 
 ```js
 actor = {
-  tenantId: 'default',
-  actorId: 'staff_123',        // staff_id（正）／root 共有ログインは '__root__'
-  role: 'root'|'hq'|'owner'|'manager'|'staff'|'agent',
-  storeIds: ['10293','10294'], // 権限のある store_id（正）
-  shopNames: ['NAORU渋谷院'],   // 後方互換（store_id 未確定時のみ使う部分一致キー）
-  verified: true,              // サーバーで検証済みの identity か
-  actingFor: null,             // agent のときのみ
+  tenant_id: 'default',
+  user_id: '7',                        // SalonOne user_id
+  staff_id: '9',                       // SalonOne staff_id（チャットの本人ID。root共有ログインは '__root__'）
+  role: 'root'|'hq'|'owner'|'manager'|'staff'|'agent'|'system',
+  accessible_store_ids: ['10293','10294'],  // SalonOne accessible_shops[].id をそのまま継承（正）
+  store_names: ['NAORU渋谷院'],              // 移行期のフォールバック（storeId 未設定の既存ルーム用）
+  source: 'salonone'|'dashboard'|'claimed'|'system'|'agent',
+  verified: true,                      // サーバーで検証済みの identity か
+  alt_ids: ['9','7'],                  // 同一人物の別ID（user_id/staff_id の取り違え対策）
+  acting_for: null,                    // agent のときのみ
 }
 ```
 
-- **`storeIds` が正**。`shopNames` は SalonOne の store_id が未同期な移行期間のフォールバックであり、
-  Phase 2 完了後は `storeIds` のみで判定する。
-- `root` / `hq` は `storeIds` を無視して全店許可（`isTenantAdmin(actor) === true`）。
+- **`accessible_store_ids` が正**。SalonOne で複数店舗を持つ owner / manager は、その全店舗をそのまま引き継ぐ。
+  1店舗のユーザーは1店舗のみ。**Dashboard 側で通常ユーザーの店舗権限を二重管理しない。**
+- `store_names` は `storeId` を持たない既存ルーム（`store_<店舗名>`）のためだけのフォールバック。
+- `root` / `hq` は全店許可（`isTenantAdmin(actor) === true`）＋ **Dashboard Override が最優先**。
+
+### 権限解決の優先順位（`resolvePermission`）
+```
+1. root / HQ の Dashboard Override（accountmeta などサーバー側データ）
+2. SalonOne の正式 Permission（/me の role + accessible_shops[].id・Bearer 検証済み）
+3. それ以外は DENY
+```
 
 ## 6. サーバー側 enforcement
 
 `api/plan-store.js` の `?type=chat` は、すべての **write action** で以下を実行する:
 
 ```
-1. resolveActorFromRequest(req)    → 検証済み actor（lib/chat-identity.js）
+1. resolveActorFromRequest(req)    → 検証済み actor（lib/actor.js）
 2. authorizeChatAction(actor, action, ctx) → { allow, reason }
 3. allow=false かつ ENFORCE=strict → 403 { error: 'forbidden', reason }
    allow=false かつ ENFORCE=shadow → 実行はするが audit に violation を記録
 ```
+
+### Rollout（段階公開）ゲート — すべての判定より先
+`?type=chat` は GET / POST の両方で、まず **KV `naoru:chat:rollout`** を評価する。
+未公開ロール・**身元が検証できないセッション**は `403 chat_rollout_disabled`（閲覧も不可）。
+UI で隠すだけにしない。既定は `{root:true, hq:true, owner:false, manager:false, staff:false}`。
+変更は root/hq が `action:'setRollout'` で行い、**再デプロイ不要**（サーバー側キャッシュは最大30秒）。
 
 ### identity の検証優先順位
 1. `Authorization: Bearer <SalonOne access_token>` → `verifySalonOneBearer()`（`lib/salonone-auth.js`）→ `verified: true`

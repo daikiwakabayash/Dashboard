@@ -15,8 +15,9 @@
 
 import { getVotingState, validateVote, upsertVote, removeVote, isPeriodPublished, autoPublishLabel, listPeriods } from '../lib/thanksgift.js';
 import { ensureBaseRooms, extractLinks, toggleReaction, genId } from '../lib/chat.js';
-import { authorizeChatAction, canViewRoom, enforcementMode, isTenantAdmin } from '../lib/chat-authz.js';
-import { resolveActorFromRequest, withAltIds } from '../lib/chat-identity.js';
+import { resolveActorFromRequest, withAltIds } from '../lib/actor.js';
+import { enforcementMode, isTenantAdmin, chatRolloutAllows, normalizeRollout, canManageRollout, isDevOpen } from '../lib/authz.js';
+import { authorizeChatAction, canViewRoom } from '../lib/chat-policy.js';
 import { videoEmbed } from '../lib/board.js';
 import { analyzeStore, couponReminderItems, buildStoreMessage } from '../lib/patrol.js';
 import { buildSearchRequest, parsePlacesResponse, reviewRequestUrl, buildLegacyReviewsRequest, parseLegacyReviews } from '../lib/places.js';
@@ -58,7 +59,22 @@ const PATROL_KEY = 'naoru:patrol:v1';         // { addresses:{shopName:{hp,hotpe
 const ACQEXCLUDE_KEY = 'naoru:acqexclude:v1'; // { ids:{ customer_id: {by,name,shop,at} } } マーケ集計から手動除外した予約（スタッフのテスト予約でキャンセル率等が狂うのを防ぐ・全社共有）
 const MEO_KEY = 'naoru:meo:v1';               // { shops:{ 店舗名:{ history:[{date,count,rating}], latest:{...Places}, placeId, query, updatedAt } } } MEO（Googleマップ）口コミ数・評価の履歴と最新情報
 const SOFL_KEY = 'naoru:soflmap:v1';          // { cust:{ customer_id:{fl,ca} }, cursor, updatedAt, stats } appointmentsを差分同期した「顧客→施策リンクID」対応表（新規顧客一覧へJOINして施策リンク別を再構築）
+const CHAT_ROLLOUT_KEY = 'naoru:chat:rollout'; // { root,hq,owner,manager,staff, features:{...} } チャットの段階公開（Feature Flag・再デプロイ不要）
 const PRESENCE_KEY = 'naoru:presence:v1';     // { users:{ id:{name,role,page,at} } } 今アクセス中のアカウント（スプシ風・上部バー表示）。at=最終ハートビート(ms)。TTL超過は都度prune
+
+// チャット Rollout（段階公開フラグ）の短時間キャッシュ。
+// チャットGETは6秒間隔でポーリングされるため、毎回KVを読まない（変更は最大30秒で反映）。
+let _rolloutCache = { at: 0, value: null };
+const ROLLOUT_TTL_MS = 30000;
+async function readRollout(hasKV, hasSB, gas, force) {
+  const now = Date.now();
+  if (!force && _rolloutCache.value && (now - _rolloutCache.at) < ROLLOUT_TTL_MS) return _rolloutCache.value;
+  let raw = null;
+  try { raw = await blobGet(CHAT_ROLLOUT_KEY, hasKV, hasSB, gas); } catch {}
+  const value = normalizeRollout(raw);
+  _rolloutCache = { at: now, value };
+  return value;
+}
 
 // ── Webプッシュ送信（VAPID設定時のみ動作・未設定なら黙ってスキップ） ──
 const VAPID_PUBLIC = () => process.env.VAPID_PUBLIC_KEY || '';
@@ -1234,6 +1250,9 @@ export default async function handler(req, res) {
   if (isChat) {
     if (!hasKV && !hasSB && !gas) return res.status(200).json({ rooms: [], messages: {}, reads: {}, dir: { staff: [] }, configured: false });
     try {
+      // ⚠️ 画像配信は <img src="/api/plan-store?type=chat&img=..."> の素のリクエストで、
+      //    Authorization も X-Chat-* も付かない。既存の全クライアント（送信済みの画像）を壊さないため、
+      //    ここだけは Rollout ゲートより前に処理する（現行仕様と同じく「IDを知っていれば取得可能」）。
       // 画像1枚取得: GET ?type=chat&img=<id>（&raw=1 で生バイナリ配信＝LINE風に高速・ブラウザキャッシュ可）
       if (req.method === 'GET' && req.query.img) {
         const dataUrl = await blobGet(CHAT_IMG_PREFIX + String(req.query.img), hasKV, hasSB, gas);
@@ -1248,24 +1267,44 @@ export default async function handler(req, res) {
         }
         return res.status(200).json({ ok: true, dataUrl });
       }
-      // ── 認可（CHAT_PERMISSION_MATRIX.md §6 / lib/chat-authz.js）────────────────
-      // actor = 検証済み identity（SalonOne SSO の Bearer / settlement-auth の rootトークン）。
-      // どちらも無ければ body の申告値を verified:false で使う（＝従来どおりの互換動作）。
-      //   CHAT_AUTHZ_ENFORCE=strict … 権限違反を 403 で拒否する
-      //   CHAT_AUTHZ_ENFORCE=shadow … 判定だけして通し、違反をログに残す（既定・既存クライアントを壊さない）
-      //   CHAT_AUTHZ_ENFORCE=off    … 判定しない
+      // ── identity（CHAT_EXISTING_INTEGRATION_AUDIT.md §8）─────────────────────
+      // Source of Truth は SalonOne。検証の優先順位:
+      //   ①SalonOne SSO の Bearer（/me で検証）→ ②settlement-auth の rootトークン（root/本部hq）→ ③申告値(未検証)
       const authzMode = enforcementMode(process.env);
       let actor = await resolveActorFromRequest(req);
       // 本部(hq)アカウントのチャットIDは「オーナー設定」で紐付けた staffId のことがある。
       // クライアント申告ではなくサーバー側の accountmeta から別IDとして補う（DM の可視判定に効く）。
-      if (actor.verified && actor.role === 'hq' && actor.actorId) {
+      if (actor.verified && actor.role === 'hq' && actor.staff_id) {
         try {
           const meta = (await blobGet(ACCTMETA_KEY, hasKV, hasSB, gas)) || {};
-          const m = meta && meta[actor.actorId];
+          const m = meta && meta[actor.staff_id];
           if (m && m.staffId) actor = withAltIds(actor, [String(m.staffId)]);
         } catch {}
       }
       const actorIsAdmin = isTenantAdmin(actor);
+
+      // ── 段階公開（Rollout）: KV `naoru:chat:rollout` で再デプロイなしに切替 ────
+      // 既定は root/hq のみ ON。UIで隠すだけでなく**サーバー側でも拒否**する。
+      const rollout = await readRollout(hasKV, hasSB, gas, !!req.query.fresh);
+      const devOpen = isDevOpen(process.env);   // 認証未設定の開発環境のみ true
+      const rolloutOk = devOpen || chatRolloutAllows(actor, rollout);
+
+      // Rollout 設定の参照（GET ?type=chat&rollout=1）。フラグだけを返すのでゲートの前に処理する。
+      if (req.method === 'GET' && req.query.rollout) {
+        return res.status(200).json({ ok: true, rollout, allowed: rolloutOk, role: actor.role, verified: actor.verified, devOpen });
+      }
+      // Rollout 設定の変更（POST action=setRollout・root/hq のみ）。
+      if (req.method === 'POST' && (req.body || {}).action === 'setRollout') {
+        if (!canManageRollout(actor)) return res.status(403).json({ ok: false, error: 'forbidden', reason: 'admin_only' });
+        const next = normalizeRollout({ ...(req.body.rollout || {}), updatedAt: new Date().toISOString(), updatedBy: actor.staff_id });
+        await blobSet(CHAT_ROLLOUT_KEY, next, hasKV, hasSB, gas);
+        _rolloutCache = { at: Date.now(), value: next };
+        return res.status(200).json({ ok: true, rollout: next });
+      }
+      if (!rolloutOk) {
+        // 未公開ロール／身元未検証はチャットAPIを一切使えない（閲覧も送信も不可）
+        return res.status(403).json({ ok: false, error: 'chat_rollout_disabled', role: actor.role, verified: actor.verified });
+      }
       const cur = (await blobGet(CHAT_KEY, hasKV, hasSB, gas)) || {};
       const rooms = Array.isArray(cur.rooms) ? cur.rooms : [];
       // メッセージはルーム別キー(naoru:chat:m:<roomId>)に保存。
@@ -1322,18 +1361,22 @@ export default async function handler(req, res) {
       // ── action 単位の認可判定 ───────────────────────────────────────────
       // 対象ルームは既存の rooms から引く（createRoom は body.room を検査対象にする）。
       const authzRoom = action === 'createRoom'
-        ? { ...(body.room || {}), tenantId: actor.tenantId }
+        ? { ...(body.room || {}), tenantId: actor.tenant_id }
         : (rooms.find(r => r && String(r.id) === String(body.roomId || '')) || null);
-      const authzCtx = { env: process.env, knownStaff: dir.staff };
+      const authzCtx = { env: process.env, knownStaff: dir.staff, rollout };
+      if (action === 'setMembers' && Array.isArray(body.members)) {
+        const prev = (authzRoom && Array.isArray(authzRoom.members) ? authzRoom.members : []).map(String);
+        authzCtx.addMembers = body.members.map(String).filter(id => !prev.includes(id));   // 新規に招待される人だけ検査
+      }
       if (authzRoom) authzCtx.room = authzRoom;
       const verdict = authorizeChatAction(actor, String(action || ''), authzCtx);
       if (!verdict.allow) {
         if (authzMode === 'strict') return res.status(403).json({ ok: false, error: 'forbidden', reason: verdict.reason });
         if (authzMode === 'shadow') {
           // shadow は拒否せず記録のみ（Preview で十分検証してから strict に切り替える）
-          console.warn('[chat-authz] shadow-violation ' + JSON.stringify({
+          console.warn('[chat-policy] shadow-violation ' + JSON.stringify({
             action: String(action || ''), reason: verdict.reason, role: actor.role,
-            actorId: actor.actorId, verified: actor.verified, roomId: String(body.roomId || ''),
+            actorId: actor.staff_id, source: actor.source, verified: actor.verified, roomId: String(body.roomId || ''),
           }));
         }
       }

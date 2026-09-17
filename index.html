@@ -1439,7 +1439,7 @@
         const soBearerUrl = (url) => {
           if (typeof url !== 'string') return false;
           if (url.indexOf('/api/settlement-store') === 0 || url.indexOf('/api/settlement-owners') === 0) return true;
-          // チャットのサーバー側認可（lib/chat-authz.js）が「誰として操作しているか」を検証するため、
+          // チャットのサーバー側認可（lib/authz.js / lib/chat-policy.js）が「誰として操作しているか」を検証するため、
           // 共有ストアにも SSO の Bearer を付ける（plan-store は no-store なのでキャッシュ影響なし）。
           if (url.indexOf('/api/plan-store') === 0) return true;
           if (url.indexOf(SALONONE_API_URL) === 0) return url.indexOf('resource=me') !== -1;
@@ -1898,9 +1898,11 @@
                     const staffId = localStorage.getItem('naoru_auth_staffid') || '';
                     const staffName = localStorage.getItem('naoru_auth_staffname') || '';
                     const provider = localStorage.getItem('naoru_auth_provider') || 'settlement';
+                    // SalonOne の accessible_shops[].id（＝store_id）。店舗権限の正はこちら（店舗名は表示・移行用）
+                    let storeIds = []; try { storeIds = JSON.parse(localStorage.getItem('naoru_auth_storeids') || '[]') || []; } catch {}
                     // 保存トークンがあれば即ログイン状態で表示（楽観的表示）。検証はバックグラウンドで行い、無効なら後でログイン画面に戻す。
-                    return token ? { checking: false, authenticated: true, token, owner, root: root || isHqRole(role), shops, role, staffId, staffName, provider }
-                                 : { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '', provider: 'settlement' };
+                    return token ? { checking: false, authenticated: true, token, owner, root: root || isHqRole(role), shops, storeIds, role, staffId, staffName, provider }
+                                 : { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, storeIds: [], role: '', staffId: '', staffName: '', provider: 'settlement' };
                 } catch { return { checking: false, authenticated: false, token: null, owner: '', root: false, shops: null, role: '', staffId: '', staffName: '', provider: 'settlement' }; }
             });
             const [authId, setAuthId] = useState('');
@@ -1908,7 +1910,7 @@
             const [authError, setAuthError] = useState('');
             const [authLoading, setAuthLoading] = useState(false);
 
-            const persistAuth = (owner, token, root, shops, role, staffId, staffName, provider = 'settlement') => {
+            const persistAuth = (owner, token, root, shops, role, staffId, staffName, provider = 'settlement', storeIds = null) => {
                 try {
                     localStorage.setItem('naoru_auth_token', token);
                     localStorage.setItem('naoru_auth_owner', owner || '');
@@ -1918,16 +1920,21 @@
                     localStorage.setItem('naoru_auth_staffid', staffId || '');
                     localStorage.setItem('naoru_auth_staffname', staffName || '');
                     localStorage.setItem('naoru_auth_provider', provider || 'settlement');
+                    if (Array.isArray(storeIds)) localStorage.setItem('naoru_auth_storeids', JSON.stringify(storeIds));
                 } catch {}
             };
-            const clearAuth = () => { ['naoru_auth_token', 'naoru_auth_owner', 'naoru_auth_root', 'naoru_auth_shops', 'naoru_auth_role', 'naoru_auth_staffid', 'naoru_auth_staffname', 'naoru_auth_provider'].forEach(k => { try { localStorage.removeItem(k); } catch {} }); soClearTokens(); };
+            const clearAuth = () => { ['naoru_auth_token', 'naoru_auth_owner', 'naoru_auth_root', 'naoru_auth_shops', 'naoru_auth_role', 'naoru_auth_staffid', 'naoru_auth_staffname', 'naoru_auth_provider', 'naoru_auth_storeids'].forEach(k => { try { localStorage.removeItem(k); } catch {} }); soClearTokens(); };
             // サロンワンのログインユーザー → NAORU authState へ写像
             const authStateFromSo = (u) => {
                 const role = mapSalonOneRole(u && u.role);
-                const shops = role === 'root' ? null : (Array.isArray(u && u.accessible_shops) ? u.accessible_shops.map(s => s && s.name).filter(Boolean) : []);
+                const acc = Array.isArray(u && u.accessible_shops) ? u.accessible_shops : [];
+                const shops = role === 'root' ? null : acc.map(s => s && s.name).filter(Boolean);
+                // ⚠️ 店舗権限の正は store_id（accessible_shops[].id）。店舗名は表示と移行期のフォールバックにのみ使う。
+                //    複数店舗のオーナー/マネージャーは、SalonOne で持っている店舗をそのまま全部引き継ぐ。
+                const storeIds = acc.map(s => String((s && (s.id ?? s.shop_id)) || '')).filter(Boolean);
                 return {
                     checking: false, authenticated: true, token: 'salonone', owner: (u && (u.login_id || String(u.user_id || ''))) || '',
-                    root: role === 'root', shops, role, staffId: String((u && (u.staff_id ?? u.user_id)) || ''), staffName: (u && (u.staff_name || u.login_id)) || '', provider: 'salonone',
+                    root: role === 'root', shops, storeIds, role, staffId: String((u && (u.staff_id ?? u.user_id)) || ''), staffName: (u && (u.staff_name || u.login_id)) || '', provider: 'salonone',
                 };
             };
             // アカウント拡張情報（role/staffId/staffName）はKV(plan-store)に保持（GAS列に依存しない）
@@ -1944,7 +1951,7 @@
                         const me = await soFetchMe();
                         if (me && (me.user_id || me.role)) {
                             const ns = authStateFromSo(me);
-                            persistAuth(ns.owner, ns.token, ns.root, ns.shops, ns.role, ns.staffId, ns.staffName, 'salonone');
+                            persistAuth(ns.owner, ns.token, ns.root, ns.shops, ns.role, ns.staffId, ns.staffName, 'salonone', ns.storeIds);
                             setAuthState(ns);
                         } else {
                             // ネットワーク不通と失効を区別できないため、トークンが残っていれば楽観維持
@@ -2052,7 +2059,7 @@
                     const applySso = (so) => {
                         const ns = authStateFromSo(so.user);
                         try { localStorage.setItem('naoru_so_user', JSON.stringify(so.user || {})); } catch {}
-                        persistAuth(ns.owner, ns.token, ns.root, ns.shops, ns.role, ns.staffId, ns.staffName, 'salonone');
+                        persistAuth(ns.owner, ns.token, ns.root, ns.shops, ns.role, ns.staffId, ns.staffName, 'salonone', ns.storeIds);
                         setAuthState(ns);
                         setAuthPassword(''); setAuthId('');
                     };
@@ -3068,18 +3075,23 @@
                 if (room.kind === 'store') {
                     if (me.root) return true;
                     if (sid && members.includes(sid)) return true;
+                    // store_id が判るルームは store_id で判定（SalonOneのアクセス店舗をそのまま継承）
+                    const rid = String(room.storeId || '');
+                    const ids = Array.isArray(me.storeIds) ? me.storeIds.map(String) : [];
+                    if (rid && ids.length) return ids.includes(rid);
                     const shops = Array.isArray(me.shops) ? me.shops : [];
                     const rs = String(room.shop || room.name || '');
                     return shops.some(p => p && (rs.includes(p) || p.includes(rs)));
                 }
                 return !!sid && members.includes(sid);
             };
-            // 認可の actor（サーバー側 lib/chat-authz.js と同じ形。role を持たせて5ロールに対応）。
+            // 認可の actor（サーバー側 lib/actor.js と同じ考え方。store_id を正・店舗名は移行期のフォールバック）。
             // ⚠️ フロントの判定は UX であってセキュリティ境界ではない。最終判断はサーバー側（?type=chat）。
             const chatMe = {
                 staffId: chatMyId, root: chatIsRoot,
                 role: chatIsRoot ? (authIsHq ? 'hq' : 'root') : (authState.role || 'staff'),
-                shops: Array.isArray(authState.shops) ? authState.shops : [],
+                storeIds: Array.isArray(authState.storeIds) ? authState.storeIds : [],   // SalonOne の accessible_shops[].id（正）
+                shops: Array.isArray(authState.shops) ? authState.shops : [],            // 店舗名（移行期のフォールバック）
             };
             // 投稿できるルームか（全社アナウンスは本部のみ・それ以外は見えていれば投稿可）。
             const chatCanPost = (room) => {
@@ -3152,6 +3164,17 @@
                     });
                 } catch { setChatData(d => ({ ...d, loaded: true })); }
             };
+            // ── チャットの段階公開（Rollout）。サーバー(KV naoru:chat:rollout)が正・UIは追従するだけ ──
+            //    既定は root/本部(hq)のみ ON。owner/manager/staff はサーバー側でも 403 になる。
+            const [chatRollout, setChatRollout] = useState({ loaded: false, allowed: false, rollout: null });
+            const chatLoadRollout = async () => {
+                try {
+                    const r = await fetch('/api/plan-store?type=chat&rollout=1', { headers: chatAuthHeaders() });
+                    const j = await r.json().catch(() => ({}));
+                    setChatRollout({ loaded: true, allowed: !!j.allowed, rollout: j.rollout || null });
+                } catch { setChatRollout({ loaded: true, allowed: false, rollout: null }); }
+            };
+            const chatFeatureOn = (key) => !!(chatRollout.rollout && chatRollout.rollout.features && chatRollout.rollout.features[key]);
             const chatEnsuredRef = useRef('');
             const chatEnsureRooms = async (shopsRaw, staffs) => {
                 const shops = (shopsRaw || []).map(s => ({ name: s.name })).filter(s => s.name);
@@ -4683,13 +4706,22 @@
                 if (currentPage !== 'thanksgift') return;
                 if ((soShopsRaw || []).length >= 2 || (soStaffs || []).length >= 2) tgSyncDir(soShopsRaw, soStaffs);
             }, [currentPage, soShopsRaw.length, soStaffs.length]);
-            // チャット: 認証後は定期ポーリングで未読バッジ更新（チャット表示中は短間隔）
+            // チャット: 段階公開（Rollout）の状態をサーバーから取得（認証・ロールが変わるたび）
             useEffect(() => {
-                if (!authState.authenticated) return;
+                if (!authState.authenticated) { setChatRollout({ loaded: false, allowed: false, rollout: null }); return; }
+                chatLoadRollout();
+            }, [authState.authenticated, authState.role, authState.root, authState.token]);
+            // チャット: 公開されているセッションのみ定期ポーリング（未読バッジ更新・表示中は短間隔）
+            useEffect(() => {
+                if (!authState.authenticated || !chatRollout.allowed) return;
                 chatLoad();
                 const iv = setInterval(chatLoad, currentPage === 'chat' ? 6000 : 25000);
                 return () => clearInterval(iv);
-            }, [authState.authenticated, currentPage]);
+            }, [authState.authenticated, chatRollout.allowed, currentPage]);
+            // チャットが未公開のロールが ?tab=chat 等で直接開いた場合はダッシュボードへ戻す（サーバーも403で拒否する）
+            useEffect(() => {
+                if (currentPage === 'chat' && chatRollout.loaded && !chatRollout.allowed) setCurrentPage('dashboard');
+            }, [currentPage, chatRollout.loaded, chatRollout.allowed]);
             // 掲示板: 認証後に定期ポーリング（未読バッジ更新）。※開いただけでは既読にしない（未読は読むまで残す）。
             useEffect(() => {
                 if (!authState.authenticated) return;
@@ -4752,9 +4784,9 @@
             }, [currentPage]);
             // チャット: 広い権限のセッションが全社アナウンス＋店舗ルーム＋スタッフ一覧を土台生成
             useEffect(() => {
-                if (!authState.authenticated) return;
+                if (!authState.authenticated || !chatRollout.allowed) return;
                 if ((soShopsRaw || []).length >= 2 || (soStaffs || []).length >= 2) chatEnsureRooms(soShopsRaw, soStaffs);
-            }, [authState.authenticated, soShopsRaw.length, soStaffs.length]);
+            }, [authState.authenticated, chatRollout.allowed, soShopsRaw.length, soStaffs.length]);
             // チャット: ルームを開いたら既読位置を固定（未読区切り用）→サーバーの既読を更新
             useEffect(() => {
                 if (!chatRoomId) return;
@@ -12455,7 +12487,7 @@
             return (
                 <div className="h-[100dvh] overflow-hidden bg-gradient-to-br from-ink-50 via-[#F8F9FB] to-brand-50/40 flex">
                     {/* Sidebar */}
-                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} authRoot={authState.root} authIsHq={authIsHq} authOwner={authState.owner} authRole={authRole} authStaffName={authState.staffName} authDisplayName={acctDisplayName} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} chatUnread={chatUnreadTotal} boardUnread={boardUnreadTotal} eventsUnread={evUnreadTotal} mobileNavOpen={mobileNavOpen} setMobileNavOpen={setMobileNavOpen}
+                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} authRoot={authState.root} authIsHq={authIsHq} authOwner={authState.owner} authRole={authRole} authStaffName={authState.staffName} authDisplayName={acctDisplayName} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} chatOn={chatRollout.allowed} chatUnread={chatUnreadTotal} boardUnread={boardUnreadTotal} eventsUnread={evUnreadTotal} mobileNavOpen={mobileNavOpen} setMobileNavOpen={setMobileNavOpen}
                         soRegion={soRegion} homeRegion={homeRegion} hasOverseas={(soShopsRaw || []).some(s => soShopCountry(s) !== 'jp')}
                         onNav={(item) => { const r = item.region || homeRegion; if (r !== soRegion) { setSoRegion(r); setSoShopSel([]); setSoStaffSel([]); } setCurrentPage(item.id); }} />
                     {/* ルーム削除の確認（スマホ/PC共通の確実なポップアップ） */}
@@ -24901,7 +24933,7 @@
             );
         };
 
-        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authIsHq = false, authOwner = '', authRole = 'root', authStaffName = '', authDisplayName = '', collapsed = false, setCollapsed = () => {}, chatUnread = 0, boardUnread = 0, eventsUnread = 0, mobileNavOpen = false, setMobileNavOpen = () => {}, soRegion = 'jp', homeRegion = 'jp', hasOverseas = false, onNav = null }) => {
+        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authIsHq = false, authOwner = '', authRole = 'root', authStaffName = '', authDisplayName = '', collapsed = false, setCollapsed = () => {}, chatOn = false, chatUnread = 0, boardUnread = 0, eventsUnread = 0, mobileNavOpen = false, setMobileNavOpen = () => {}, soRegion = 'jp', homeRegion = 'jp', hasOverseas = false, onNav = null }) => {
             const goNav = (item) => { if (onNav) onNav(item); else setCurrentPage(item.id); };
             // ナビ項目のアクティブ判定（海外タブは国スコープも一致していること）
             const isActive = (item) => currentPage === item.id && ((item.region || homeRegion) === soRegion);
@@ -24910,10 +24942,10 @@
             // カテゴリー別にグルーピング（見やすさ・高級感のため）
             const navSections = [
                 // ⚠️ コミュニケーション機能のうち「チャット」は全ロール（root/hq/owner/manager/staff）に開放済み。
-                //    見える範囲は lib/chat-authz.js の権限（CHAT_PERMISSION_MATRIX.md）で決まる。
+                //    見える範囲は lib/chat-policy.js の権限（CHAT_PERMISSION_MATRIX.md）で決まる。
                 //    掲示板・勉強会・組織図は当面 rootOnly のまま。
                 { label: 'コミュニケーション', accent: { pill: 'bg-blue-50 text-blue-700', dot: 'bg-blue-500', chip: 'group-hover:bg-blue-50 group-hover:text-blue-600' }, items: [
-                    { id: 'chat', label: 'チャット', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, badge: chatUnread },
+                    { id: 'chat', label: 'チャット', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, badge: chatUnread, rolloutOff: !chatOn },
                     { id: 'board', label: '重要掲示板', icon: <Megaphone size={18} />, mobileIcon: <Megaphone size={18} />, badge: boardUnread, rootOnly: true },
                     { id: 'events', label: '勉強会・イベント', icon: <Calendar size={18} />, mobileIcon: <Calendar size={18} />, badge: eventsUnread, rootOnly: true },
                     { id: 'org', label: '組織図', icon: <Users size={18} />, mobileIcon: <Users size={18} />, rootOnly: true },
@@ -24947,7 +24979,8 @@
                     { id: 'faqadmin', label: 'FAQ管理（AI）', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, rootOnly: true },
                 ] },
             ];
-            const canShow = (it) => (authRoot || !it.rootOnly) && !(it.hideForStaff && authRole === 'staff') && (!it.thanksOnly || authRole === 'staff' || authRole === 'owner' || authRoot);
+            // rolloutOff … サーバー側の段階公開フラグ（KV）で未公開の機能。UIにも出さない（サーバーでも403）
+            const canShow = (it) => !it.rolloutOff && (authRoot || !it.rootOnly) && !(it.hideForStaff && authRole === 'staff') && (!it.thanksOnly || authRole === 'staff' || authRole === 'owner' || authRoot);
             const visSections = navSections
                 .filter(s => !s.overseasOnly || hasOverseas)   // 海外セクションは海外店舗がある時だけ
                 .map(s => ({ ...s, items: s.items.filter(canShow) })).filter(s => s.items.length);

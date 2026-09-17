@@ -38,7 +38,7 @@ Dashboard 内の Chat を社内コミュニケーションの中心として使�
 | 利用可能ロール | root / hq / owner / manager / staff |
 | Room の主キー | `store_id` / `event_id`（**名称変更でルームを維持**） |
 | メンバー | SalonOne 由来の `staff_id` を実体として同期（異動・退職・配属変更に追従） |
-| 認可 | `lib/chat-authz.js` を唯一の判断源とし、**フロント表示とサーバー側 API の両方で同じ関数**を通す |
+| 認可 | `lib/authz.js`・`lib/actor.js` を Dashboard 共通の正本とし、Chat 固有は `lib/chat-policy.js`。フロントとサーバーが同じ関数を通す |
 | AI | `@AI` メンション・AI Question Mode・出典 / 更新日時 / Confidence・本部エスカレ・👍👎修正 Feedback |
 | 宛先 | 自然言語 → Intent Parse → Resolve → **Preview → 人間承認 → 送信** |
 | 監査 | 全送信に `CHAT_AUDIT_MODEL.md` の 20 フィールドを記録 |
@@ -63,9 +63,10 @@ Dashboard 内の Chat を社内コミュニケーションの中心として使�
 
 ```
 lib/
-  chat-authz.js        # 権限の唯一の判断源（純粋関数・tenant対応）        … Phase 1
-  chat-identity.js     # リクエスト → 検証済み actor（SSO Bearer / owner token）… Phase 1
-  chat-rooms.js        # store/event Room のライフサイクル・membership 同期   … Phase 2
+  actor.js             # 共通 actor（SalonOne認証結果が正）                  … Phase 1
+  authz.js             # Dashboard 共通認可＋Chat Rollout（Feature Flag）    … Phase 1
+  chat-policy.js       # Chat 固有ポリシー（canViewRoom 等）                 … Phase 1
+  chat-rooms.js        # 既存 ensureRooms / evSaveChat の延長・membership 同期 … Phase 2
   chat-recipients.js   # Recipient 集合の解決・展開・重複排除・除外          … Phase 3
   chat-resolver.js     # 自然言語 → Intent → Recipient（決定的部分）         … Phase 5
   chat-audit.js        # 監査レコードの生成・検証                            … Phase 3
@@ -116,7 +117,7 @@ lib/
 
 | Phase | 内容 | 主な成果物 | 状態 |
 |-------|------|-----------|------|
-| **1** | Staff / Owner Chat Permission（5ロール + server-side authz） | `lib/chat-authz.js` / `lib/chat-identity.js` / plan-store 適用 | 実装 |
+| **1** | Chat Permission（SalonOne権限の継承 + server-side authz + Rollout） | `lib/actor.js` / `lib/authz.js` / `lib/chat-policy.js` / plan-store 適用 | 実装（**本番は root/hq のみ ON**） |
 | **2** | SalonOne Store Room 自動生成 / Event Room 自動生成 | `lib/chat-rooms.js` / store_id 移行 / membership 同期 | 予定 |
 | **3** | Multiple Recipient / DM / Recipient Preview + Audit | `lib/chat-recipients.js` / `lib/chat-audit.js` / Preview UI | 予定 |
 | **4** | @AI Mention + AI Question UX（出典 / Confidence / Feedback） | `api/chat.js` 拡張 / `?type=aifeedback` | 予定 |
@@ -149,6 +150,19 @@ main
 
 ---
 
+## 7.5 本番ロールアウト（Feature Flag）
+
+```jsonc
+// KV: naoru:chat:rollout（再デプロイ不要で変更可能・既定値もこの通り）
+{ "root": true, "hq": true, "owner": false, "manager": false, "staff": false,
+  "features": { "recipientPreview": false, "aiMention": false, "schedule": false,
+                "unreadResend": false, "smartGroup": false, "approvals": false,
+                "agentActivity": false, "authzLog": false } }
+```
+- **owner / manager / staff への公開は明示承認まで行わない。** UI で隠すだけでなく `?type=chat` が 403 を返す。
+- 新機能（複数店舗送信 / Recipient Preview / @AI / 予約送信 / 未読者再送 / Smart Group）も
+  `features.*` で root/HQ 限定に順次開放する。
+
 ## 8. 既存機能への影響（互換性の約束）
 
 - 既存の Room / Message / 既読 / リアクション / 画像 / 動画 / ノートのデータ形式は**変更しない**（追加のみ）。
@@ -162,7 +176,7 @@ main
 
 | リスク | 対策 |
 |--------|------|
-| plan-store にサーバー認証が無い（現状） | Phase 1 で `chat-identity.js` を導入。SSO Bearer / owner token を検証。未検証セッションは `unverified` として扱い、`strict` では書き込みを制限 |
+| plan-store にサーバー認証が無い（現状） | Phase 1 で `lib/actor.js` を導入。SSO Bearer / rootトークンを検証し、**未検証セッションは Rollout ゲートでチャットAPI自体を 403**（閲覧も不可） |
 | 店舗名主キーからの移行でルームが二重化 | `chat-rooms.js` の移行関数で「同一店舗の旧ID→新ID」をマージし、メッセージは旧キーを読み続ける（Phase 2） |
 | 大量送信の事故 | Recipient Preview 必須 + 件数警告 + Kill Switch + レート上限（`CHAT_RECIPIENT_RESOLVER.md` §7） |
 | AI の誤宛先 | AI は候補提示のみ。曖昧・0 件・権限外は必ず停止（`CHAT_RECIPIENT_RESOLVER.md` §6） |

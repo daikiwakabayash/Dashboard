@@ -281,6 +281,83 @@ export default async function handler(req, res) {
 
   const ccType = (req.method === 'GET' ? req.query.type : (req.body || {}).type);
   const isCC = ['ccflags', 'approval', 'agentlog', 'audit'].includes(ccType);
+
+  // ── 認可の共通経路（Command Center とチャットで同じ関数を通す）──────────
+  // ⚠️ 権限判断の正本は lib/authz.js ただ1つ。ここは呼び出し口であって、判断はしない。
+  //    第二の権限システム（旧 lib/chat-authz.js）は作らない方針。
+  const ccSalt = () => process.env.AUTH_SALT || 'naoru-settlement-2026';
+  const ccLoadAccountsShared = async () => {
+    const passwords = parseOwnerPasswords(process.env.SETTLEMENT_OWNER_PASSWORDS);
+    const shopsMap = parseOwnerShops(process.env.SETTLEMENT_OWNER_SHOPS);
+    if (kvConfigured()) {
+      const kvPass = await kvBlobGet(ACCT_PASS_KEY).catch(() => null);
+      if (kvPass && typeof kvPass === 'object') for (const [o, pw] of Object.entries(kvPass)) if (pw) passwords[o] = String(pw);
+    }
+    const metaMap = (await blobGet(ACCTMETA_KEY, hasKV, hasSB, gas).catch(() => null)) || {};
+    return { passwords, shopsMap, metaMap };
+  };
+  // 現在の cc_authz モードを読む（off なら以降の処理を一切行わない＝従来と同一動作・追加コスト0）
+  const ccReadMode = async () => {
+    if (!(hasKV || hasSB || gas)) return 'off';
+    const f = normalizeFlags(await blobGet(ccKey(FLAGS_KEY), hasKV, hasSB, gas).catch(() => null));
+    return f.cc_authz || 'off';
+  };
+  // 検証済みの主体を組み立てる。高リスク操作は Bearer の60秒キャッシュを迂回する。
+  // ── Preview 限定のロール切替（本番では絶対に効かない）──────────────────
+  // 「Preview上でroleを切り替えて検証できる状態に」するための仕組み。
+  // 本番(VERCEL_ENV==='production')では読み捨てる。記録には previewOverride:true を
+  // 必ず残すので、検証で出た記録を実際の利用実績と取り違えることがない。
+  const CC_PREVIEW = String(process.env.VERCEL_ENV || '') !== 'production';
+  const ccPreviewRole = () => {
+    if (!CC_PREVIEW) return null;
+    const h = req.headers || {};
+    const raw = String(h['x-cc-preview-role'] || (req.query && req.query.previewRole) || '').trim();
+    if (!raw) return null;
+    if (!['root', 'hq', 'headquarters', 'admin', 'owner', 'manager', 'staff', 'agent'].includes(raw)) return null;
+    const shopsRaw = String(h['x-cc-preview-shops'] || (req.query && req.query.previewShops) || '').trim();
+    const shops = shopsRaw ? shopsRaw.split(',').map(x => x.trim()).filter(Boolean) : null;
+    return {
+      id: String(h['x-cc-preview-id'] || `preview_${raw}`),
+      name: `Preview:${raw}`,
+      role: raw === 'agent' ? 'root' : raw,
+      source: raw === 'agent' ? 'agent' : 'ui',
+      shops: (raw === 'root' || raw === 'hq' || raw === 'headquarters' || raw === 'admin' || raw === 'agent') ? null : (shops || []),
+      verified: true,            // Preview 上の検証用。本番では到達しない
+      previewOverride: true,
+    };
+  };
+  const ccResolveActor = async (action, fallback) => {
+    const pv = ccPreviewRole();
+    if (pv) return pv;                                  // Preview の切替が最優先（検証用）
+    const resolved = await resolveActor(req, {
+      env: process.env,
+      verifySalonOneBearer,
+      rootToken: () => hashOwnerToken('__root__', process.env.DASHBOARD_PASSWORD || '', ccSalt()),
+      verifyOwnerToken: (pw, owner, token) => verifyOwnerToken(pw, owner, token, ccSalt()),
+      loadAccounts: ccLoadAccountsShared,
+      skipCache: needsReverify(action),
+    }).catch(() => null);
+    return resolved ? { ...resolved } : fallback;
+  };
+  // 判定＋記録。log / warn は絶対にブロックしない（既存操作を止めない）。
+  const ccRecord = async (actor, action, target, mode) => {
+    const decision = authzCan(actor, action, target);
+    const verdict = authzEnforce(mode, decision);
+    try { res.setHeader('X-CC-Authz', `${verdict.mode}:${verdict.allowed ? 'allow' : (verdict.code || 'deny')}`); } catch (_) {}
+    try {
+      const rec = decisionRecord(actor, action, target, decision, mode);
+      // Preview の切替で作った記録は、実際の利用実績と混ざらないよう必ず印を付ける
+      if (actor && actor.previewOverride) rec.previewOverride = true;
+      const e = buildAuditEntry({
+        action: decision.allow ? 'authz_allow' : 'authz_deny',
+        entity: 'authz', entityId: action,
+        actor, source: actor.source, note: rec.code || rec.decision, after: rec,
+      });
+      if (e.ok && hasKV) await kvAppendJson(ccKey(AUDIT_KEY), e.entry, AUDIT_CAP);
+    } catch (_) { /* 記録失敗で本処理を止めない */ }
+    return { decision, verdict };
+  };
+
   if (isCC) {
     const hasStore = !!(hasKV || hasSB || gas);
     // ストアが無い＝フラグを読めない＝fail closed（全新機能OFF）。既存機能には影響しない。
@@ -333,57 +410,21 @@ export default async function handler(req, res) {
       if (type === 'audit') return act === 'add' ? 'audit.write' : 'audit.read';
       return 'flag.read';
     };
-    // 環境変数＋KV からアカウントを組み立てる（GAS は遅いのでここでは読まない。AUTHORIZATION_PLAN.md §6-2 の既知の穴）
-    const ccLoadAccounts = async () => {
-      const passwords = parseOwnerPasswords(process.env.SETTLEMENT_OWNER_PASSWORDS);
-      const shopsMap = parseOwnerShops(process.env.SETTLEMENT_OWNER_SHOPS);
-      if (kvConfigured()) {
-        const kvPass = await kvBlobGet(ACCT_PASS_KEY).catch(() => null);
-        if (kvPass && typeof kvPass === 'object') for (const [o, pw] of Object.entries(kvPass)) if (pw) passwords[o] = String(pw);
-      }
-      const metaMap = (await blobGet(ACCTMETA_KEY, hasKV, hasSB, gas).catch(() => null)) || {};
-      return { passwords, shopsMap, metaMap };
-    };
     let ccActor = actorOf();          // 既定はクライアント申告（従来どおり）
-    const ccFlagsNow = normalizeFlags(await blobGet(ccKey(FLAGS_KEY), hasKV, hasSB, gas).catch(() => null));
-    const ccAuthzMode = ccFlagsNow.cc_authz || 'off';
+    const ccAuthzMode = await ccReadMode();
     if (ccAuthzMode !== 'off') {
       const ccAction = ccActionFor(ccType, body);
-      const salt = process.env.AUTH_SALT || 'naoru-settlement-2026';
-      const resolved = await resolveActor(req, {
-        env: process.env,
-        verifySalonOneBearer,
-        rootToken: () => hashOwnerToken('__root__', process.env.DASHBOARD_PASSWORD || '', salt),
-        verifyOwnerToken: (pw, owner, token) => verifyOwnerToken(pw, owner, token, salt),
-        loadAccounts: ccLoadAccounts,
-        skipCache: needsReverify(ccAction),   // 取り返しがつかない操作は毎回確かめる
-      }).catch(() => null);
-      if (resolved) ccActor = { ...resolved };
+      ccActor = await ccResolveActor(ccAction, ccActor);
       const target = {
         shop: String(body.shop || (body.approval && body.approval.scope && body.approval.scope.shop) || req.query.shop || ''),
         tenantId: String(body.tenantId || req.query.tenantId || '') || undefined,
         risk: body.risk || '', approvalStatus: body.approvalStatus || '',
         recipientCount: Number(body.recipientCount) || 0,
       };
-      const decision = authzCan(ccActor, ccAction, target);
-      const verdict = authzEnforce(ccAuthzMode, decision);
-      res.setHeader('X-CC-Authz', `${verdict.mode}:${verdict.allowed ? 'allow' : (verdict.code || 'deny')}`);
       // log / warn / enforce では **ALLOW も DENY も** 記録する。
       // 「本来どちらになるはずか」を貯めるのが目的で、拒否だけ見ていると
       // 正しく通っていた量が分からず、enforce に上げてよいか判断できない。
-      if (ccAuthzMode !== 'off') {
-        try {
-          const rec = decisionRecord(ccActor, ccAction, target, decision, ccAuthzMode);
-          const e = buildAuditEntry({
-            action: decision.allow ? 'authz_allow' : 'authz_deny',
-            entity: 'authz', entityId: ccAction,
-            actor: ccActor, source: ccActor.source,
-            note: rec.code || rec.decision,
-            after: rec,
-          });
-          if (e.ok && hasKV) await kvAppendJson(ccKey(AUDIT_KEY), e.entry, AUDIT_CAP);
-        } catch (_) { /* 記録失敗で本処理を止めない */ }
-      }
+      const { verdict } = await ccRecord(ccActor, ccAction, target, ccAuthzMode);
       if (verdict.blocked) return res.status(403).json({ ok: false, error: 'forbidden', code: verdict.code, message: verdict.reason });
     }
 
@@ -1546,6 +1587,65 @@ export default async function handler(req, res) {
       // save は rooms/dir/notes のみ書き込む（messages/reads は一切触らない＝競合しない）。
       const save = (patch) => blobSet(CHAT_KEY, { rooms, dir, notes, ...patch }, hasKV, hasSB, gas);
 
+      // ── チャットの認可計測（cc_authz）────────────────────────────────
+      // 判断源は lib/authz.js（Command Center と同じ関数・同じ記録形式）。
+      // log / warn では**絶対にブロックしない**。既存のチャットはそのまま動く。
+      const chatBody = req.body || {};
+      const chatActionName = (act) => {
+        const a = String(act || '');
+        if (a === 'send') return 'chat.send';
+        if (a === 'createRoom') {
+          const k = String((chatBody.room && chatBody.room.kind) || '');
+          return k === 'dm' ? 'chat.dm' : 'chat.group_create';
+        }
+        if (a === 'setMembers') return 'chat.member_add';
+        if (a === 'deleteRoom') return 'chat.room_archive';
+        if (a === 'deleteMsg' || a === 'noteDelete') return 'chat.send';
+        if (a === 'remapUser' || a === 'migrateMsgs') return 'flag.change';   // 管理操作
+        return 'chat.read';
+      };
+      const chatAuthzMode = await ccReadMode();
+      let chatActor = null;
+      let chatVerdict = null;
+      if (chatAuthzMode !== 'off') {
+        const act = req.method === 'GET' ? 'chat.read' : chatActionName(chatBody.action);
+        const claimed = {
+          id: String(chatBody.staffId || req.query.staffId || ''),
+          name: String(chatBody.staffName || ''),
+          role: String(req.headers['x-chat-role'] || chatBody.role || ''),
+          source: 'ui',
+        };
+        chatActor = await ccResolveActor(act, claimed);
+        // 本部アカウントは「オーナー設定」で紐付けた staffId でチャットに参加している
+        // ことがある。別IDとして持たせないと自分のDM/グループの本人判定が落ちる。
+        if (chatActor && chatActor.verified && chatActor.id) {
+          try {
+            const meta = (await blobGet(ACCTMETA_KEY, hasKV, hasSB, gas)) || {};
+            const m = meta && meta[chatActor.id];
+            if (m && m.staffId) chatActor = { ...chatActor, altIds: [...(chatActor.altIds || []), String(m.staffId)] };
+          } catch (_) {}
+        }
+        const targetRoom = String(chatBody.action || '') === 'createRoom'
+          ? (chatBody.room || null)
+          : (rooms.find(r => r && String(r.id) === String(chatBody.roomId || req.query.roomId || '')) || null);
+        const target = {
+          shop: String((targetRoom && targetRoom.shop) || chatBody.shop || ''),
+          room: targetRoom || undefined,
+          recipientCount: Number(chatBody.recipientCount) || 0,
+        };
+        const out = await ccRecord(chatActor, act, target, chatAuthzMode);
+        chatVerdict = out.verdict;
+        // enforce のときだけ拒否する。log / warn は素通し（＝今の運用では止まらない）。
+        if (chatVerdict.blocked) return res.status(403).json({ ok: false, error: 'forbidden', code: chatVerdict.code, message: chatVerdict.reason });
+      }
+      // 特権操作（他人の投稿削除・メンバー変更・ルーム削除・管理コマンド）の判定。
+      // enforce ではクライアント申告の body.root を信用せず、検証済み actor のみを見る。
+      // それ以前（off / log / warn）は従来どおり body.root を受け入れる（既存を壊さない）。
+      const chatIsAdminActor = !!(chatActor && chatActor.verified && ['root', 'admin'].includes(chatActor.role));
+      const rootOk = chatAuthzMode === 'enforce'
+        ? chatIsAdminActor
+        : (!!chatBody.root || chatIsAdminActor);
+
       if (req.method === 'GET') {
         // rooms 一覧の per-room キーをMGETでまとめて取得。空のルームは旧集約で補完。
         const keys = rooms.map(r => CHAT_MSG_PREFIX + String(r.id));
@@ -1601,7 +1701,7 @@ export default async function handler(req, res) {
         const room = rooms.find(r => r && r.id === rid);
         if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
         const isMember = (room.members || []).map(String).includes(String(body.staffId));
-        if (!(body.root || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        if (!(rootOk || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
         const oldM = (room.members || []).map(String);
         const members = [...new Set(body.members.map(String))].slice(0, 500);
         const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, members } : r);
@@ -1657,7 +1757,7 @@ export default async function handler(req, res) {
         const room = rooms.find(r => r && r.id === rid);
         if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
         const isMember = (room.members || []).map(String).includes(String(body.staffId));
-        if (!(body.root || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        if (!(rootOk || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
         const patch = {};
         if (typeof body.name === 'string') patch.name = body.name.slice(0, 60);
         // アイコン: 絵文字(icon) と 画像(iconImg=画像ID) は排他。片方を設定するともう片方はクリア。
@@ -1780,7 +1880,7 @@ export default async function handler(req, res) {
         const rid = String(body.roomId);
         const arr = (await getRoomMsgs(rid)).filter(msg => {
           if (!msg || msg.id !== String(body.msgId)) return true;
-          return !(body.root || String(msg.fromStaffId) === String(body.staffId)); // 本人/rootのみ削除可
+          return !(rootOk || String(msg.fromStaffId) === String(body.staffId)); // 本人/rootのみ削除可
         });
         await saveRoomMsgs(rid, arr);
         return res.status(200).json({ ok: true });
@@ -1791,7 +1891,7 @@ export default async function handler(req, res) {
         const rid = String(body.roomId);
         const target = rooms.find(r => r && r.id === rid);
         if (!target || target.kind === 'announce' || target.kind === 'store') return res.status(400).json({ ok: false, error: 'not_deletable' });
-        if (!(body.root || String(target.createdBy) === String(body.staffId))) return res.status(403).json({ ok: false, error: 'forbidden' });
+        if (!(rootOk || String(target.createdBy) === String(body.staffId))) return res.status(403).json({ ok: false, error: 'forbidden' });
         const nextRooms = rooms.filter(r => r && r.id !== rid);
         await save({ rooms: nextRooms }); await saveRoomMsgs(rid, []);   // ルーム削除＝そのルームのメッセージも空に（索引からも除去）
         return res.status(200).json({ ok: true });
@@ -1837,7 +1937,7 @@ export default async function handler(req, res) {
         const idx = cur.findIndex(x => x && x.id === String(body.noteId));
         if (idx < 0) return res.status(404).json({ ok: false, error: 'not_found' });
         const target = cur[idx];
-        if (!(body.root || String(target.fromStaffId) === String(body.staffId))) return res.status(403).json({ ok: false, error: 'forbidden' });
+        if (!(rootOk || String(target.fromStaffId) === String(body.staffId))) return res.status(403).json({ ok: false, error: 'forbidden' });
         const n = body.note;
         const text = String(n.text || '').slice(0, 4000);
         const imgIds = (Array.isArray(n.imgIds) ? n.imgIds : []).map(String).slice(0, 6);
@@ -1857,13 +1957,13 @@ export default async function handler(req, res) {
       }
       if (action === 'noteDelete' && body.roomId && body.noteId) {
         const rid = String(body.roomId);
-        const arr = (Array.isArray(notes[rid]) ? notes[rid] : []).filter(x => !(x.id === String(body.noteId) && (body.root || String(x.fromStaffId) === String(body.staffId))));
+        const arr = (Array.isArray(notes[rid]) ? notes[rid] : []).filter(x => !(x.id === String(body.noteId) && (rootOk || String(x.fromStaffId) === String(body.staffId))));
         await save({ notes: { ...notes, [rid]: arr } });
         return res.status(200).json({ ok: true });
       }
       // 管理: あるユーザーID(fromId)のチャット所属・発言・既読を別ID(toId)へ付け替える（root専用）。
       // 重複アカウント削除時に、旧IDで参加/受信していたルームを現アカウントに引き継ぐための復旧用。
-      if (action === 'remapUser' && body.root && body.fromId && body.toId) {
+      if (action === 'remapUser' && rootOk && body.fromId && body.toId) {
         const from = String(body.fromId), to = String(body.toId);
         let changed = 0;
         const nextRooms = rooms.map(r => {
@@ -1892,7 +1992,7 @@ export default async function handler(req, res) {
 
       // 管理: 旧集約メッセージをルーム別キーへ移行（root専用）。索引は廃止したので作らない。
       // per-roomキーが未作成のルームだけ、旧集約(CHAT_MSGS_KEY)/旧CHAT_KEY.messages から書き出す。
-      if (action === 'migrateMsgs' && body.root) {
+      if (action === 'migrateMsgs' && rootOk) {
         const agg = await loadAgg();
         let migrated = 0;
         for (const [rid, arr] of Object.entries(agg)) {

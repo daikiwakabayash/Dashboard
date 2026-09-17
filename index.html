@@ -2130,8 +2130,11 @@
                 if (!authState.authenticated) return;
                 if (!authState.root && currentPage === 'settings') setCurrentPage('salonone');
                 if (authRole === 'staff' && currentPage === 'settlement') setCurrentPage('salonone');
-                // コミュニケーション4機能（チャット/お知らせ/勉強会/組織図）は当面 本部(hq)・管理者(root) のみ。
-                if (!authState.root && ['chat', 'board', 'events', 'org'].includes(currentPage)) setCurrentPage('salonone');
+                // チャットは5ロール（root/hq/owner/manager/staff）に開放済み。
+                // 見える範囲は lib/authz.js（唯一の判断源）が決める＝ここでページごと退避しない。
+                // ⚠️ 'chat' をこの一覧に戻すと、サイドバーには出るのに開くと弾かれる状態になる。
+                // 掲示板・勉強会・組織図は当面 本部(hq)・管理者(root) のみ。
+                if (!authState.root && ['board', 'events', 'org'].includes(currentPage)) setCurrentPage('salonone');
             }, [authState.authenticated, authState.root, authRole, currentPage]);
             const [rawData, setRawData] = useState(() => {
                 try {
@@ -2808,7 +2811,7 @@
                 const run = () => {
                     const ctrl = new AbortController();
                     const t = setTimeout(() => ctrl.abort(), 20000);
-                    return fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'chat', ...payload }), signal: ctrl.signal }).finally(() => clearTimeout(t));
+                    return fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...chatAuthHeaders() }, body: JSON.stringify({ type: 'chat', ...payload }), signal: ctrl.signal }).finally(() => clearTimeout(t));
                 };
                 const p = chatWriteChain.current.then(run, run);         // 直前の書き込み完了後に実行（成否問わず）
                 chatWriteChain.current = p.then(() => {}, () => {});     // チェーンを継続（例外を握りつぶす）
@@ -3212,7 +3215,39 @@
                 }
                 return !!sid && members.includes(sid);
             };
-            const chatMe = { staffId: chatMyId, root: chatIsRoot, shops: Array.isArray(authState.shops) ? authState.shops : [] };
+            // 認可の actor（サーバー側 lib/authz.js と同じ形。role を持たせて5ロールに対応）。
+            // ⚠️ フロントの判定は UX であってセキュリティ境界ではない。最終判断はサーバー側（?type=chat）。
+            const chatMe = {
+                staffId: chatMyId, root: chatIsRoot,
+                role: chatIsRoot ? (authIsHq ? 'hq' : 'root') : (authState.role || 'staff'),
+                shops: Array.isArray(authState.shops) ? authState.shops : [],
+            };
+            // 投稿できるルームか（全社アナウンスは本部のみ・それ以外は見えていれば投稿可）。
+            const chatCanPost = (room) => {
+                if (!room) return false;
+                if (!chatRoomVisible(room, chatMe)) return false;
+                const status = String(room.status || 'active');
+                if (status !== 'active') return false;              // archived / closed は読み取り専用
+                if (room.kind === 'announce') return chatIsRoot;    // 全社一斉は root / hq のみ
+                return true;
+            };
+            // サーバー側で identity を検証してもらうためのヘッダ（SSO は Bearer がインターセプタで付く）。
+            const chatAuthHeaders = () => {
+                const h = {};
+                try {
+                    const token = localStorage.getItem('naoru_auth_token') || '';
+                    const owner = localStorage.getItem('naoru_auth_owner') || '';
+                    const role = localStorage.getItem('naoru_auth_role') || '';
+                    if (token) h['X-Chat-Token'] = token;
+                    if (owner) h['X-Chat-Owner'] = owner;
+                    if (role) h['X-Chat-Role'] = role;
+                    // Preview のロール切替（本番のサーバーは無視する）。検証中だけ付く。
+                    const pv = localStorage.getItem('naoru_cc_preview_role') || '';
+                    const pvShops = localStorage.getItem('naoru_cc_preview_shops') || '';
+                    if (pv) { h['X-CC-Preview-Role'] = pv; if (pvShops) h['X-CC-Preview-Shops'] = pvShops; }
+                } catch {}
+                return h;
+            };
             const chatLastMsgAt = (room) => { const arr = chatData.messages[room.id] || []; const m = arr[arr.length - 1]; return m ? (Date.parse(m.createdAt || '') || 0) : (Date.parse(room.createdAt || '') || 0); };
             const chatUnreadOf = (room) => {
                 const msgs = chatData.messages[room.id] || [];
@@ -3227,7 +3262,7 @@
                 // PCでテキストを選択中（ドラッグ選択→コピー）は、ポーリングの再描画で選択が消えないよう更新をスキップ
                 try { const sel = window.getSelection && window.getSelection(); if (sel && String(sel).trim().length > 0) return; } catch {}
                 try {
-                    const r = await fetch('/api/plan-store?type=chat');
+                    const r = await fetch('/api/plan-store?type=chat', { headers: chatAuthHeaders() });
                     const j = await r.json().catch(() => ({}));
                     const messages = (j.messages && typeof j.messages === 'object') ? j.messages : {};
                     // 送信中の楽観メッセージ（未確定）はサーバー結果に重ねて保持（ポーリングで消えないように）
@@ -3311,6 +3346,8 @@
                 const t = chatDraft.trim(); const imgIds = chatStaged.map(s => s.id);
                 const media = chatStagedMedia.slice();
                 if ((!t && !imgIds.length && !media.length) || !chatRoomId) return;
+                // 投稿権限が無いルーム（全社アナウンス等）へは送らない（最終判断はサーバー側）
+                if (!chatCanPost((chatData.rooms || []).find(r => r.id === chatRoomId))) return;
                 chatSendingRef.current = true; setChatSending(true);
                 const roomId = chatRoomId;
                 const tmpId = 'tmp_' + Date.now().toString(36);
@@ -12950,7 +12987,17 @@
 
                                                         <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(list, i) => openLightbox(list, i)} onReply={(msg) => { setChatReplyTo(msg); requestAnimationFrame(() => { try { chatTaRef.current && chatTaRef.current.focus(); } catch {} }); }} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} resolveShop={chatResolveShop} roomId={activeRoom ? activeRoom.id : ''} onSaveMedia={chatSaveMedia} resolveAvatar={chatAvatarImg} onOpenProfile={chatOpenProfile} onForward={setChatForward} onPin={chatPinMsg} onCaptureRange={chatCaptureRange} pinnedId={activeRoom && activeRoom.pinned ? activeRoom.pinned.id : ''} onOpenVideo={(url, name) => { setChatVideoRate(1); setChatVideoErr(false); setChatVideoView({ url, name }); }} onAddFaq={(m) => { const arr = activeMsgs || []; const idx = arr.findIndex(x => x.id === m.id); let q = ''; for (let i = idx - 1; i >= 0; i--) { const p = arr[i]; if (p && p.text && String(p.fromStaffId) !== '__ai__') { q = String(p.text).replace(/[@＠]\s*ai\b/ig, '').trim(); break; } } setFaqEdit({ q, a: String(m.text || '').replace(/^🙋\s*/, '').replace(/\n*（本部に確認します）\s*$/, '').trim(), shopScope: '' }); setCurrentPage('faqadmin'); }} />
 
+                                                        {/* 投稿権限が無いルーム（全社アナウンス＝本部のみ／アーカイブ済み）は読み取り専用バーを表示 */}
+                                                        {!chatCanPost(activeRoom) && (
+                                                            <div className="px-3 md:px-4 pt-1 pb-[max(env(safe-area-inset-bottom,0px),12px)] shrink-0">
+                                                                <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl border border-[#EAECF0] bg-[#F8F9FB] text-[12px] font-bold text-[#667085]">
+                                                                    <span className="text-[14px] leading-none">🔒</span>
+                                                                    {activeRoom && activeRoom.kind === 'announce' ? 'このルームは閲覧のみです（投稿できるのは本部のみ）' : 'このルームは閲覧のみです'}
+                                                                </div>
+                                                            </div>
+                                                        )}
                                                         {/* コンポーザー（ChatGPT/Slack風の一体型）。スマホは全画面なのでホームバー分の余白を確保 */}
+                                                        {chatCanPost(activeRoom) && (
                                                         <div className="px-3 md:px-4 pt-1 pb-[max(env(safe-area-inset-bottom,0px),12px)] shrink-0">
                                                             {chatEmojiOpen && <div className="mb-2 p-2 bg-[#F8F9FB] border border-[#EAECF0] rounded-lg flex flex-wrap gap-1">{CHAT_STAMPS.map(s => <button key={s} onClick={() => setChatDraft(d => d + s)} className="w-8 h-8 flex items-center justify-center rounded-md hover:bg-white text-xl transition">{s}</button>)}</div>}
                                                             {chatMention && chatMention.list.length > 0 && (
@@ -13031,6 +13078,7 @@
                                                                 </div>
                                                             </div>
                                                         </div>
+                                                        )}
                                                     </>
                                                 )}
                                             </div>
@@ -25311,10 +25359,11 @@
             const acctInit = String(acctName || 'A').trim().charAt(0) || 'A';
             // カテゴリー別にグルーピング（見やすさ・高級感のため）
             const navSections = [
-                // ⚠️ コミュニケーション4機能は当面「本部(hq)・管理者(root)」のみに表示（rootOnly）。
-                //    問題なければ rootOnly を外して全ロールに開放する。チャットを一番上に配置。
+                // ⚠️ コミュニケーション機能のうち「チャット」は全ロール（root/hq/owner/manager/staff）に開放済み。
+                //    見える範囲は lib/authz.js の権限（唯一の判断源・CHAT_PERMISSION_MATRIX.md）で決まる。
+                //    掲示板・勉強会・組織図は当面 rootOnly のまま。
                 { label: 'コミュニケーション', accent: { pill: 'bg-blue-50 text-blue-700', dot: 'bg-blue-500', chip: 'group-hover:bg-blue-50 group-hover:text-blue-600' }, items: [
-                    { id: 'chat', label: 'チャット', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, badge: chatUnread, rootOnly: true },
+                    { id: 'chat', label: 'チャット', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, badge: chatUnread },
                     { id: 'board', label: '重要掲示板', icon: <Megaphone size={18} />, mobileIcon: <Megaphone size={18} />, badge: boardUnread, rootOnly: true },
                     { id: 'events', label: '勉強会・イベント', icon: <Calendar size={18} />, mobileIcon: <Calendar size={18} />, badge: eventsUnread, rootOnly: true },
                     { id: 'org', label: '組織図', icon: <Users size={18} />, mobileIcon: <Users size={18} />, rootOnly: true },

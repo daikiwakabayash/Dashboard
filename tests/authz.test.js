@@ -292,9 +292,18 @@ describe('authz - Chat 操作', () => {
   it('上限以内の宛先なら許可', () => {
     expect(can(A.owner, 'chat.broadcast', { recipientCount: 10 }).allow).toBe(true);
   });
-  it('AI Agent はチャット送信できるが、ルームのアーカイブはできない（humanOnly）', () => {
-    expect(can(A.agent, 'chat.send', EBISU).allow).toBe(true);
+  it('AI Agent は自由なチャット送信ができない（宛先を選ばせない）', () => {
+    expect(can(A.agent, 'chat.send', EBISU).allow).toBe(false);
+    expect(can(A.agent, 'chat.dm', EBISU).allow).toBe(false);
+    expect(can(A.agent, 'chat.broadcast_all', {}).allow).toBe(false);
+  });
+  it('AI Agent が書き込めるのは「呼ばれた返信」と「パトロール投稿」だけ', () => {
+    expect(can(A.agent, 'chat.ai_reply', EBISU).allow).toBe(true);
+    expect(can(A.agent, 'chat.patrol_post', EBISU).allow).toBe(true);
+  });
+  it('AI Agent はルームのアーカイブも承認もできない', () => {
     expect(can(A.agent, 'chat.room_archive', EBISU).allow).toBe(false);
+    expect(can(A.agent, 'approval.approve', EBISU).allow).toBe(false);
   });
   it('AI Agent も人間の権限を超える宛先には送れない（全社一斉は root 相当でも humanOnly ではないが rank で制御）', () => {
     const lowAgent = { id: 'a1', role: 'staff', source: 'agent', verified: true, shops: ['恵比寿'] };

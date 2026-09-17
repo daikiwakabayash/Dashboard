@@ -1439,6 +1439,12 @@
         const soBearerUrl = (url) => {
           if (typeof url !== 'string') return false;
           if (url.indexOf('/api/settlement-store') === 0 || url.indexOf('/api/settlement-owners') === 0) return true;
+          // Command Center の認可（cc_authz）で「誰か」をサーバー側が確かめられるようにする。
+          // plan-store は Cache-Control: no-store なので、Authorization を付けても
+          // SalonOne のようなキャッシュ失効の問題は起きない。
+          // ⚠️ サーバー側は Bearer を最後に試す（lib/actor.js）。ポーリングのたびに
+          //    上流 /me を叩かないための設計で、検証結果も60秒キャッシュしている。
+          if (url.indexOf('/api/plan-store') === 0) return true;
           if (url.indexOf(SALONONE_API_URL) === 0) return url.indexOf('resource=me') !== -1;
           return false;
         };
@@ -2288,6 +2294,141 @@
             const [acqForcedSort, setAcqForcedSort] = useState({ key: 'booking', dir: 'desc' }); // 施策リンク別の並び替え（既定=予約降順）
             const [acqShopSearch, setAcqShopSearch] = useState('');  // 店舗別コホート/店舗×媒体の店舗名検索
             const [acqExcluded, setAcqExcluded] = useState({});      // マーケ集計から手動除外した予約 { customer_id: {by,name,shop,at} }（全社共有）
+
+            // ══════════════════════════════════════════════════════════════
+            // Command Center（Phase 0〜2）: フィーチャーフラグ／承認センター／AI Agent Activity
+            // ⚠️ フラグが取れない・ストア未設定・cc_all=false なら全てOFF（fail closed）。
+            //    その場合このブロックは何も描画しないので、既存画面は1pxも変わらない。
+            // ══════════════════════════════════════════════════════════════
+            const [ccFlags, setCcFlags] = useState(null);              // null=未取得（＝OFF扱い）
+            const [ccApprovals, setCcApprovals] = useState([]);
+            const [ccApprovalFilter, setCcApprovalFilter] = useState('pending');
+            const [ccRuns, setCcRuns] = useState([]);
+            const [ccRunSummary, setCcRunSummary] = useState(null);
+            const [ccRunAnomalies, setCcRunAnomalies] = useState([]);
+            const [ccRunFilter, setCcRunFilter] = useState('all');
+            const [ccBusy, setCcBusy] = useState('');
+            const [ccNotes, setCcNotes] = useState({});                // { approvalId: 入力中のメモ }
+            const [ccErr, setCcErr] = useState('');
+            // 機能が有効か。キルスイッチ(cc_all=false)と未取得は必ず false。
+            const ccOn = (key) => !!(ccFlags && ccFlags.cc_all !== false && ccFlags[key] === true);
+            // 操作者。⚠️ サーバー側の認可はまだ無い（cc_authz='off'）。UIレベルの記録用。
+            const ccActor = () => ({
+                id: String(authState.staffId || authState.owner || ''),
+                name: String(acctDisplayName || authState.staffName || authState.owner || ''),
+                role: authState.root ? (isHqRole(authState.role) ? 'hq' : 'root') : String(authState.role || 'owner'),
+                source: 'ui',
+            });
+            const ccPost = async (body) => {
+                // owner/token はサーバー側の本人確認用（lib/actor.js がハッシュ照合する）。
+                // SSOセッションでは Authorization: Bearer が fetch インターセプタで自動付与される。
+                // actor は「名乗り」であって信用されない。認可が有効なときはサーバーが確かめる。
+                const r = await fetch('/api/plan-store', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...body, actor: ccActor(), owner: authState.owner || undefined, token: authState.token || undefined }),
+                });
+                return await r.json().catch(() => ({ ok: false, error: 'bad_response' }));
+            };
+
+            // フラグ取得（ログイン後＋60秒ごと）。失敗したら OFF のまま＝安全側。
+            useEffect(() => {
+                if (!authState.authenticated) return;
+                let alive = true;
+                const load = async () => {
+                    try {
+                        const r = await fetch('/api/plan-store?type=ccflags', { cache: 'no-store' });
+                        const j = await r.json();
+                        if (alive) setCcFlags((j && j.flags) ? j.flags : null);
+                    } catch (_) { if (alive) setCcFlags(null); }
+                };
+                load();
+                const iv = setInterval(load, 60000);
+                return () => { alive = false; clearInterval(iv); };
+            }, [authState.authenticated]);
+
+            const ccLoadApprovals = async () => {
+                try {
+                    const r = await fetch('/api/plan-store?type=approval', { cache: 'no-store' });
+                    const j = await r.json();
+                    setCcApprovals(Array.isArray(j && j.items) ? j.items : []);
+                } catch (_) { setCcApprovals([]); }
+            };
+            const ccLoadRuns = async () => {
+                try {
+                    const r = await fetch('/api/plan-store?type=agentlog', { cache: 'no-store' });
+                    const j = await r.json();
+                    setCcRuns(Array.isArray(j && j.items) ? j.items : []);
+                    setCcRunSummary((j && j.summary) || null);
+                    setCcRunAnomalies(Array.isArray(j && j.anomalies) ? j.anomalies : []);
+                } catch (_) { setCcRuns([]); setCcRunSummary(null); setCcRunAnomalies([]); }
+            };
+            // 表示中のみポーリング（他タブでは負荷をかけない）
+            useEffect(() => {
+                if (!authState.authenticated) return;
+                if (currentPage === 'approval' && ccOn('cc_approval')) { ccLoadApprovals(); const iv = setInterval(ccLoadApprovals, 20000); return () => clearInterval(iv); }
+                if (currentPage === 'agentlog' && ccOn('cc_agentlog')) { ccLoadRuns(); const iv = setInterval(ccLoadRuns, 20000); return () => clearInterval(iv); }
+            }, [currentPage, authState.authenticated, ccFlags]);
+
+            // 判断（承認／却下／修正依頼）。seenHash と expectedUpdatedAt を送り、
+            // 「見ていた内容」と違う／他の人が先に判断していたらサーバーが 409 を返す。
+            const ccDecide = async (ap, decision) => {
+                if (ccBusy) return;
+                setCcBusy(ap.id); setCcErr('');
+                try {
+                    const j = await ccPost({ type: 'approval', action: 'decide', id: ap.id, decision, note: ccNotes[ap.id] || '', seenHash: ap.contentHash, expectedUpdatedAt: ap.updatedAt });
+                    if (!j.ok) setCcErr(ccErrText(j.error));
+                    else setCcNotes(n => { const x = { ...n }; delete x[ap.id]; return x; });
+                    await ccLoadApprovals();
+                } finally { setCcBusy(''); }
+            };
+            const ccErrText = (code) => ({
+                stale: '他の人が先に処理しました。最新の内容を再読み込みしました。',
+                content_changed: '提案の内容が変わっています。内容を確認してからもう一度承認してください。',
+                expired: 'この提案は期限切れです。',
+                not_authorized: 'この操作を行う権限がありません。',
+                self_approval_forbidden: '高リスクの提案は、提案者本人が承認できません。別の承認者に依頼してください。',
+                note_required: '修正依頼には理由の入力が必要です。',
+            })[code] || (code ? `エラー: ${code}` : 'エラーが発生しました');
+
+            // Preview 動作確認用のサンプル投入（root専用・本番データを作らないための明示ラベル付き）
+            const ccSeedSample = async () => {
+                if (ccBusy) return;
+                setCcBusy('seed'); setCcErr('');
+                try {
+                    const st = await ccPost({ type: 'agentlog', action: 'start', run: { agentName: 'Meta Ads Operator', action: 'analyze', reason: '［サンプル］日次巡回: 全店のCPAを点検', source: 'manual', shop: '恵比寿院' } });
+                    if (st.ok) await ccPost({ type: 'agentlog', action: 'finish', id: st.run.id, outcome: { status: 'completed', result: { checkedShops: 8, flagged: 3 }, usage: { tokensIn: 4200, tokensOut: 800, costJpy: 12.4, model: 'claude-sonnet-5' } } });
+                    const pr = await ccPost({ type: 'agentlog', action: 'start', run: { agentName: 'Meta Ads Operator', action: 'propose', reason: '［サンプル］恵比寿院のCPAが閾値を37.7%超過', source: 'rule', shop: '恵比寿院', approvalRequired: true } });
+                    const ap = await ccPost({ type: 'approval', action: 'create', approval: {
+                        kind: 'meta_budget_change',
+                        title: '［サンプル］恵比寿院 Meta日予算を ¥12,000 → ¥8,000 に減額',
+                        summary: '直近30日のCPAが¥6,885（閾値¥5,000）。来店率も全社平均を下回るため、改善までは投下を絞る提案です。',
+                        scope: { shop: '恵比寿院', campaignId: 'demo_campaign_001' },
+                        payload: { before: { dailyBudget: 12000 }, after: { dailyBudget: 8000 } },
+                        expectedEffect: { metric: 'CPA', delta: '-18%（推定）', confidence: 'medium' },
+                        risk: 'medium',
+                        proposedBy: { agent: 'Meta Ads Operator', runId: (pr.ok && pr.run.id) || '', actorId: 'agent:meta-ads-operator' },
+                    } });
+                    if (pr.ok) await ccPost({ type: 'agentlog', action: 'finish', id: pr.run.id, outcome: { status: 'completed', approvalId: (ap.ok && ap.approval.id) || '', approvalRequired: true, result: { proposed: 1 }, usage: { tokensIn: 3100, tokensOut: 1200, costJpy: 9.8, model: 'claude-sonnet-5' } } });
+                    await ccLoadApprovals(); await ccLoadRuns();
+                } finally { setCcBusy(''); }
+            };
+            const ccSetFlag = async (key, value) => {
+                setCcBusy(key);
+                try {
+                    const j = await ccPost({ type: 'ccflags', action: value === '__kill__' ? 'kill' : 'set', key, value });
+                    if (j && j.flags) setCcFlags(j.flags); else setCcErr(ccErrText(j && j.error));
+                } finally { setCcBusy(''); }
+            };
+            const ccFmtDt = (ms) => { if (!ms) return '—'; const d = new Date(Number(ms)); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+            const ccFmtDur = (r) => { if (!r || !r.completedAt || !r.startedAt) return '—'; const ms = Number(r.completedAt) - Number(r.startedAt); return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`; };
+            // フラグOFFの新タブに居座らせない（キルスイッチで即座に画面から消える）。
+            // ⚠️ この useEffect は ccFlags / ccOn の宣言より後に置くこと。
+            //    依存配列は描画時に評価されるため、宣言前に書くと TDZ で全画面が落ちる。
+            useEffect(() => {
+                if (!authState.authenticated) return;
+                if (currentPage === 'approval' && !ccOn('cc_approval')) setCurrentPage(authState.root ? 'chat' : 'salonone');
+                if (currentPage === 'agentlog' && !ccOn('cc_agentlog')) setCurrentPage(authState.root ? 'chat' : 'salonone');
+            }, [currentPage, ccFlags, authState.authenticated, authState.root]);
             const [acqShowExcluded, setAcqShowExcluded] = useState(false); // 新規顧客一覧: 除外済みも表示（戻す用）
             const acqLoadedKeyRef = useRef('');
             const [acqForced, setAcqForced] = useState([]);   // 獲得分析: 強制リンク別 実績（/marketing/by-forced-link・初回オファー/訴求）
@@ -12447,6 +12588,7 @@
                     {/* Sidebar */}
                     <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} handleLogout={handleLogout} cpaAlerts={cpaAlerts} alertOpen={alertOpen} setAlertOpen={setAlertOpen} alertRef={alertRef} authRoot={authState.root} authIsHq={authIsHq} authOwner={authState.owner} authRole={authRole} authStaffName={authState.staffName} authDisplayName={acctDisplayName} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} chatUnread={chatUnreadTotal} boardUnread={boardUnreadTotal} eventsUnread={evUnreadTotal} mobileNavOpen={mobileNavOpen} setMobileNavOpen={setMobileNavOpen}
                         soRegion={soRegion} homeRegion={homeRegion} hasOverseas={(soShopsRaw || []).some(s => soShopCountry(s) !== 'jp')}
+                        ccFlags={ccFlags} approvalPending={(ccApprovals || []).filter(a => a.status === 'pending' || a.status === 'changes_requested').length}
                         onNav={(item) => { const r = item.region || homeRegion; if (r !== soRegion) { setSoRegion(r); setSoShopSel([]); setSoStaffSel([]); } setCurrentPage(item.id); }} />
                     {/* ルーム削除の確認（スマホ/PC共通の確実なポップアップ） */}
                     {chatDeleteAsk && (
@@ -20858,6 +21000,245 @@
                         );
                     })()}
 
+                    {/* ══════════ 承認センター（Phase 2・フラグ cc_approval がONのときだけ描画） ══════════ */}
+                    {currentPage === 'approval' && ccOn('cc_approval') && (() => {
+                        const KINDS = {
+                            meta_budget_change: { label: 'Meta 予算変更', group: 'Meta広告' },
+                            meta_pause: { label: 'Meta 広告停止', group: 'Meta広告' },
+                            meta_resume: { label: 'Meta 広告再開', group: 'Meta広告' },
+                            creative_replace: { label: 'Creative 差し替え', group: 'Meta広告' },
+                            knowledge_publish: { label: 'Knowledge 正式版変更', group: 'ナレッジ' },
+                            sns_post: { label: 'SNS 投稿', group: 'コンテンツ' },
+                            lp_change: { label: 'LP 変更', group: 'コンテンツ' },
+                        };
+                        const STATUS = {
+                            pending: { label: '承認待ち', cls: 'bg-amber-50 text-amber-700 ring-amber-200' },
+                            changes_requested: { label: '修正依頼中', cls: 'bg-blue-50 text-blue-700 ring-blue-200' },
+                            approved: { label: '承認済み', cls: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
+                            rejected: { label: '却下', cls: 'bg-slate-100 text-slate-600 ring-slate-200' },
+                            expired: { label: '期限切れ', cls: 'bg-slate-100 text-slate-500 ring-slate-200' },
+                            executed: { label: '実行済み', cls: 'bg-emerald-100 text-emerald-800 ring-emerald-300' },
+                            failed: { label: '実行失敗', cls: 'bg-rose-50 text-rose-700 ring-rose-200' },
+                        };
+                        const RISK = { low: { label: '低', cls: 'bg-slate-100 text-slate-600' }, medium: { label: '中', cls: 'bg-amber-100 text-amber-800' }, high: { label: '高', cls: 'bg-rose-100 text-rose-800' } };
+                        const TABS = [['pending', '承認待ち'], ['approved', '承認済み'], ['rejected', '却下'], ['executed', '実行済み'], ['all', 'すべて']];
+                        const rows = ccApprovalFilter === 'all' ? ccApprovals : (ccApprovals || []).filter(a => a.status === ccApprovalFilter || (ccApprovalFilter === 'pending' && a.status === 'changes_requested'));
+                        const fmtVal = (v) => (typeof v === 'number' ? v.toLocaleString('ja-JP') : (v == null ? '—' : String(v)));
+                        return (
+                        <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
+                            <div className="w-full space-y-4">
+                                <div className="flex flex-wrap items-start gap-3">
+                                    <div className="flex-1 min-w-[260px]">
+                                        <h1 className="text-xl md:text-2xl font-black tracking-tight">承認センター</h1>
+                                        <p className="text-[12.5px] font-medium text-slate-500 mt-1">AIやルールが出した「操作の提案」を、人が承認・却下・修正依頼します。承認しただけでは実行されません（実行は将来の接続後）。</p>
+                                    </div>
+                                    <button onClick={ccLoadApprovals} className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-[12px] font-bold hover:bg-slate-50">再読み込み</button>
+                                    {authState.root && (
+                                        <button onClick={ccSeedSample} disabled={!!ccBusy} className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[12px] font-bold disabled:opacity-40">{ccBusy === 'seed' ? '作成中…' : 'サンプル提案を作成'}</button>
+                                    )}
+                                </div>
+
+                                <div className="rounded-xl bg-amber-50 ring-1 ring-amber-200 px-4 py-3 text-[12px] font-semibold text-amber-900 leading-relaxed">
+                                    この画面は <span className="font-black">Phase 2（土台）</span> です。承認の記録は残りますが、Meta広告やSNSへの<span className="font-black">実際の反映はまだ行いません</span>。
+                                    サーバー側の権限チェックも未導入（<span className="font-mono text-[11px]">cc_authz=off</span>）のため、社内限定でお試しください。
+                                </div>
+
+                                {ccErr && <div className="rounded-xl bg-rose-50 ring-1 ring-rose-200 px-4 py-3 text-[12.5px] font-bold text-rose-800">{ccErr}</div>}
+
+                                <div className="flex flex-wrap gap-1.5">
+                                    {TABS.map(([k, label]) => (
+                                        <button key={k} onClick={() => setCcApprovalFilter(k)} className={`px-3 py-1.5 rounded-lg text-[12px] font-bold transition ${ccApprovalFilter === k ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50'}`}>
+                                            {label}{k === 'pending' ? ` (${(ccApprovals || []).filter(a => a.status === 'pending' || a.status === 'changes_requested').length})` : ''}
+                                        </button>
+                                    ))}
+                                </div>
+
+                                {rows.length === 0 ? (
+                                    <div className="rounded-2xl bg-white ring-1 ring-slate-200 p-10 text-center">
+                                        <p className="text-[14px] font-bold text-slate-500">この条件の提案はありません</p>
+                                        <p className="text-[12px] font-medium text-slate-400 mt-1.5">AIが提案を出すとここに並びます。{authState.root ? '上の「サンプル提案を作成」で動作を確認できます。' : ''}</p>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {rows.map(ap => {
+                                            const st = STATUS[ap.status] || STATUS.pending;
+                                            const rk = RISK[ap.risk] || RISK.medium;
+                                            const kd = KINDS[ap.kind] || { label: ap.kind, group: '—' };
+                                            const open = ap.status === 'pending' || ap.status === 'changes_requested';
+                                            const before = (ap.payload && ap.payload.before) || {};
+                                            const after = (ap.payload && ap.payload.after) || {};
+                                            const keys = Array.from(new Set([...Object.keys(before), ...Object.keys(after)]));
+                                            return (
+                                            <div key={ap.id} className="rounded-2xl bg-white ring-1 ring-slate-200 p-4 md:p-5">
+                                                <div className="flex flex-wrap items-center gap-2 mb-2">
+                                                    <span className={`px-2 py-0.5 rounded-md text-[10.5px] font-black ring-1 ${st.cls}`}>{st.label}</span>
+                                                    <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[10.5px] font-bold">{kd.group}・{kd.label}</span>
+                                                    <span className={`px-2 py-0.5 rounded-md text-[10.5px] font-black ${rk.cls}`}>リスク {rk.label}</span>
+                                                    {(ap.scope && ap.scope.shop) && <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[10.5px] font-bold">{ap.scope.shop}</span>}
+                                                    <span className="ml-auto text-[10.5px] font-bold text-slate-400">期限 {ccFmtDt(ap.expiresAt)}</span>
+                                                </div>
+
+                                                <h3 className="text-[14.5px] font-black text-slate-900 leading-snug">{ap.title}</h3>
+                                                {ap.summary && <p className="text-[12.5px] font-medium text-slate-600 mt-1.5 leading-relaxed">{ap.summary}</p>}
+
+                                                {keys.length > 0 && (
+                                                    <div className="mt-3 rounded-xl bg-slate-50 ring-1 ring-slate-200 p-3">
+                                                        <div className="text-[10px] font-black text-slate-500 mb-1.5">変更内容</div>
+                                                        {keys.map(k => (
+                                                            <div key={k} className="flex items-center gap-2 text-[12px] font-bold py-0.5">
+                                                                <span className="text-slate-500 min-w-[110px]">{k}</span>
+                                                                <span className="text-slate-400 line-through">{fmtVal(before[k])}</span>
+                                                                <span className="text-slate-300">→</span>
+                                                                <span className="text-slate-900">{fmtVal(after[k])}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+
+                                                {ap.expectedEffect && (
+                                                    <div className="mt-2 text-[12px] font-semibold text-slate-600">
+                                                        期待効果: <span className="text-slate-900 font-black">{ap.expectedEffect.metric} {ap.expectedEffect.delta}</span>
+                                                        <span className="text-slate-400 font-medium ml-2">確度 {ap.expectedEffect.confidence || '—'}（AIの推定であり保証ではありません）</span>
+                                                    </div>
+                                                )}
+
+                                                <div className="mt-2 text-[11px] font-medium text-slate-400">
+                                                    提案: {(ap.proposedBy && ap.proposedBy.agent) || '—'}　作成 {ccFmtDt(ap.createdAt)}
+                                                    {ap.decidedBy && <span className="ml-2">／ 判断: {ap.decidedBy.name}（{ccFmtDt(ap.decidedAt)}）</span>}
+                                                </div>
+                                                {ap.decisionNote && <div className="mt-1.5 text-[12px] font-semibold text-slate-700 bg-slate-50 rounded-lg px-3 py-2">メモ: {ap.decisionNote}</div>}
+
+                                                {open && (
+                                                    <div className="mt-3 pt-3 border-t border-slate-100 space-y-2">
+                                                        <input type="text" value={ccNotes[ap.id] || ''} onChange={e => setCcNotes(n => ({ ...n, [ap.id]: e.target.value }))}
+                                                            placeholder="メモ（修正依頼のときは必須）" aria-label="判断メモ"
+                                                            className="w-full px-3 py-2 rounded-lg ring-1 ring-slate-200 text-[12.5px] font-medium focus:outline-none focus:ring-2 focus:ring-slate-900" />
+                                                        <div className="flex flex-wrap gap-2">
+                                                            <button onClick={() => ccDecide(ap, 'approve')} disabled={ccBusy === ap.id} className="px-4 py-2 rounded-lg bg-emerald-600 text-white text-[12.5px] font-black hover:bg-emerald-700 disabled:opacity-40">承認</button>
+                                                            <button onClick={() => ccDecide(ap, 'request_changes')} disabled={ccBusy === ap.id} className="px-4 py-2 rounded-lg bg-white text-slate-700 ring-1 ring-slate-300 text-[12.5px] font-black hover:bg-slate-50 disabled:opacity-40">修正依頼</button>
+                                                            <button onClick={() => ccDecide(ap, 'reject')} disabled={ccBusy === ap.id} className="px-4 py-2 rounded-lg bg-white text-rose-700 ring-1 ring-rose-200 text-[12.5px] font-black hover:bg-rose-50 disabled:opacity-40">却下</button>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>);
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        </div>);
+                    })()}
+
+                    {/* ══════════ AI Agent Activity（Phase 2・フラグ cc_agentlog がONのときだけ描画） ══════════ */}
+                    {currentPage === 'agentlog' && ccOn('cc_agentlog') && (() => {
+                        const ACT = {
+                            analyze: { label: '分析', cls: 'bg-slate-100 text-slate-700' },
+                            detect: { label: '異常検知', cls: 'bg-amber-100 text-amber-800' },
+                            propose: { label: '提案', cls: 'bg-blue-100 text-blue-800' },
+                            draft: { label: '下書き', cls: 'bg-blue-50 text-blue-700' },
+                            notify: { label: '通知', cls: 'bg-slate-100 text-slate-700' },
+                            execute: { label: '実行', cls: 'bg-rose-100 text-rose-800' },
+                            sync: { label: '同期', cls: 'bg-slate-100 text-slate-700' },
+                        };
+                        const RS = {
+                            queued: { label: '待機中', cls: 'bg-slate-100 text-slate-600' },
+                            running: { label: '実行中', cls: 'bg-blue-50 text-blue-700' },
+                            completed: { label: '完了', cls: 'bg-emerald-50 text-emerald-700' },
+                            failed: { label: '失敗', cls: 'bg-rose-50 text-rose-700' },
+                            cancelled: { label: '中止', cls: 'bg-slate-100 text-slate-500' },
+                        };
+                        const sm = ccRunSummary || {};
+                        const rows = ccRunFilter === 'all' ? ccRuns : (ccRuns || []).filter(r => r.status === ccRunFilter);
+                        const tiles = [
+                            ['実行数', sm.total || 0, ''], ['完了', sm.completed || 0, 'text-emerald-600'],
+                            ['失敗', sm.failed || 0, (sm.failed ? 'text-rose-600' : '')], ['実行中', sm.running || 0, 'text-blue-600'],
+                            ['提案', sm.proposals || 0, ''], ['承認待ち', sm.awaitingApproval || 0, (sm.awaitingApproval ? 'text-amber-600' : '')],
+                            ['AI費用', `¥${(sm.costJpy || 0).toLocaleString('ja-JP')}`, ''],
+                        ];
+                        return (
+                        <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
+                            <div className="w-full space-y-4">
+                                <div className="flex flex-wrap items-start gap-3">
+                                    <div className="flex-1 min-w-[260px]">
+                                        <h1 className="text-xl md:text-2xl font-black tracking-tight">AI Agent Activity</h1>
+                                        <p className="text-[12.5px] font-medium text-slate-500 mt-1">エージェントが「いつ・何を見て・何を提案し・何が起きたか」の記録です。暴走とコストを見張るための画面です。</p>
+                                    </div>
+                                    <button onClick={ccLoadRuns} className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-[12px] font-bold hover:bg-slate-50">再読み込み</button>
+                                </div>
+
+                                {ccRunAnomalies.length > 0 && (
+                                    <div className="rounded-xl bg-rose-50 ring-1 ring-rose-200 px-4 py-3 text-[12.5px] font-bold text-rose-800 space-y-1">
+                                        {ccRunAnomalies.map((a, i) => (
+                                            <div key={i}>{a.kind === 'fail_streak' ? `${a.agentName} が ${a.count} 回連続で失敗しています` : `AI費用が上限を超えています（¥${(a.costJpy || 0).toLocaleString('ja-JP')} / 上限 ¥${(a.limitJpy || 0).toLocaleString('ja-JP')}）`}</div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-2.5">
+                                    {tiles.map(([label, val, cls]) => (
+                                        <div key={label} className="rounded-xl bg-white ring-1 ring-slate-200 px-3.5 py-3">
+                                            <div className="text-[10.5px] font-black text-slate-500">{label}</div>
+                                            <div className={`text-[20px] font-black mt-1 tabular-nums ${cls || 'text-slate-900'}`}>{val}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                                <p className="text-[11px] font-medium text-slate-400 -mt-1.5">集計対象: 直近24時間</p>
+
+                                <div className="flex flex-wrap gap-1.5">
+                                    {[['all', 'すべて'], ['running', '実行中'], ['completed', '完了'], ['failed', '失敗']].map(([k, label]) => (
+                                        <button key={k} onClick={() => setCcRunFilter(k)} className={`px-3 py-1.5 rounded-lg text-[12px] font-bold transition ${ccRunFilter === k ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50'}`}>{label}</button>
+                                    ))}
+                                </div>
+
+                                {rows.length === 0 ? (
+                                    <div className="rounded-2xl bg-white ring-1 ring-slate-200 p-10 text-center">
+                                        <p className="text-[14px] font-bold text-slate-500">記録はまだありません</p>
+                                        <p className="text-[12px] font-medium text-slate-400 mt-1.5">エージェントが動くとここに並びます。「承認センター」の「サンプル提案を作成」で動作を確認できます。</p>
+                                    </div>
+                                ) : (
+                                    <div className="rounded-2xl bg-white ring-1 ring-slate-200 overflow-hidden">
+                                        <div className="overflow-x-auto">
+                                            <table className="w-full text-[12px] min-w-[1000px]">
+                                                <thead className="bg-slate-50">
+                                                    <tr className="text-left text-[10.5px] font-black text-slate-500">
+                                                        <th className="px-3 py-2.5">エージェント</th>
+                                                        <th className="px-3 py-2.5">アクション</th>
+                                                        <th className="px-3 py-2.5 min-w-[260px]">理由</th>
+                                                        <th className="px-3 py-2.5">きっかけ</th>
+                                                        <th className="px-3 py-2.5">状態</th>
+                                                        <th className="px-3 py-2.5">開始</th>
+                                                        <th className="px-3 py-2.5">所要</th>
+                                                        <th className="px-3 py-2.5">承認</th>
+                                                        <th className="px-3 py-2.5">結果</th>
+                                                        <th className="px-3 py-2.5">費用</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {rows.map(r => {
+                                                        const ac = ACT[r.action] || { label: r.action, cls: 'bg-slate-100 text-slate-700' };
+                                                        const rs = RS[r.status] || RS.queued;
+                                                        return (
+                                                        <tr key={r.id} className="border-t border-slate-100 align-top">
+                                                            <td className="px-3 py-2.5 font-bold text-slate-900 whitespace-nowrap">{r.agentName}{r.shop ? <div className="text-[10.5px] font-medium text-slate-400">{r.shop}</div> : null}</td>
+                                                            <td className="px-3 py-2.5"><span className={`px-2 py-0.5 rounded-md text-[10.5px] font-black ${ac.cls}`}>{ac.label}</span></td>
+                                                            <td className="px-3 py-2.5 font-medium text-slate-600 leading-relaxed">{r.reason || '—'}</td>
+                                                            <td className="px-3 py-2.5 font-semibold text-slate-500 whitespace-nowrap">{r.source}</td>
+                                                            <td className="px-3 py-2.5"><span className={`px-2 py-0.5 rounded-md text-[10.5px] font-black ${rs.cls}`}>{rs.label}</span></td>
+                                                            <td className="px-3 py-2.5 font-medium text-slate-500 whitespace-nowrap tabular-nums">{ccFmtDt(r.startedAt)}</td>
+                                                            <td className="px-3 py-2.5 font-medium text-slate-500 whitespace-nowrap tabular-nums">{ccFmtDur(r)}</td>
+                                                            <td className="px-3 py-2.5 whitespace-nowrap">{r.approvalRequired ? <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-800 text-[10.5px] font-black">要承認</span> : <span className="text-slate-300">—</span>}</td>
+                                                            <td className="px-3 py-2.5 font-medium text-slate-600 max-w-[220px] break-words">{r.error ? <span className="text-rose-700 font-bold">{r.error}</span> : (r.result ? JSON.stringify(r.result) : '—')}</td>
+                                                            <td className="px-3 py-2.5 font-medium text-slate-500 whitespace-nowrap tabular-nums">{r.usage ? `¥${(r.usage.costJpy || 0).toLocaleString('ja-JP')}` : '—'}</td>
+                                                        </tr>);
+                                                    })}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>);
+                    })()}
+
                     {currentPage === 'settings' && (() => {
                         const shopList = (soShops.length ? soShops : soDemoShops);
                         return (
@@ -20870,6 +21251,69 @@
                                         <h1 className="text-xl md:text-2xl font-black tracking-tight italic">オーナー設定</h1>
                                     </div>
                                 </header>
+
+                                {/* ══ Command Center フラグ（root専用・既定は全てOFF） ══
+                                     ⚠️ ここはオーナー設定ページ。承認センター内に置くと、フラグOFF時に
+                                        タブが出ず有効化できなくなる（鶏と卵）ため、常に見えるここに置く。 */}
+                                {authState.root && (
+                                <div className="rounded-2xl bg-white p-4 md:p-5 shadow-sm border border-slate-200">
+                                    <div className="flex flex-wrap items-center gap-2 mb-1">
+                                        <h2 className="text-[15px] font-black">Command Center フラグ</h2>
+                                        <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[10.5px] font-bold">新機能の公開スイッチ</span>
+                                        {ccFlags && ccFlags.env && ccFlags.env !== 'production' && (
+                                            <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 text-[10.5px] font-black">{ccFlags.env === 'preview' ? 'PREVIEW専用' : ccFlags.env}</span>
+                                        )}
+                                        {ccFlags && ccFlags.cc_all === false && <span className="px-2 py-0.5 rounded-md bg-rose-100 text-rose-800 text-[10.5px] font-black">停止中（キルスイッチ）</span>}
+                                    </div>
+                                    <p className="text-[12px] font-medium text-slate-500 leading-relaxed mb-3">
+                                        新しく追加した画面のON/OFFです。<span className="font-bold">OFFのあいだは画面に一切出ません</span>（既存機能には影響しません）。
+                                        設定はサーバーに保存され、<span className="font-bold">再デプロイなしで数秒で反映</span>されます。
+                                        {ccFlags && ccFlags.env && ccFlags.env !== 'production' && <span className="font-bold text-amber-700">　この環境の設定は本番とは別に保存され、本番には影響しません。</span>}
+                                    </p>
+
+                                    {!ccFlags && (
+                                        <div className="rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-[12px] font-bold text-slate-500 mb-3">
+                                            フラグを読み込めていません。この状態では全ての新機能がOFFです。
+                                        </div>
+                                    )}
+                                    {ccFlags && ccFlags.configured === false && (
+                                        <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2.5 text-[12px] font-bold text-amber-900 mb-3 leading-relaxed">
+                                            共有ストア（Vercel KV / Supabase / GAS）が未設定のため、<span className="font-black">フラグを保存できません</span>。
+                                            この環境では全ての新機能がOFFのままです。Vercel の Storage で KV を作成すると有効になります。
+                                        </div>
+                                    )}
+
+                                    <div className="space-y-1.5">
+                                        {[['cc_approval', '承認センター'], ['cc_agentlog', 'AI Agent Activity']].map(([k, label]) => (
+                                            <div key={k} className="flex items-center gap-3 py-1.5">
+                                                <span className="text-[13px] font-bold text-slate-800 flex-1">{label}</span>
+                                                <span className={`text-[11px] font-black ${ccOn(k) ? 'text-emerald-600' : 'text-slate-400'}`}>{ccOn(k) ? '公開中' : 'OFF'}</span>
+                                                <button onClick={() => ccSetFlag(k, !(ccFlags && ccFlags[k] === true))} disabled={ccBusy === k || !ccFlags || ccFlags.configured === false}
+                                                    className={`px-3 py-1.5 rounded-lg text-[12px] font-black disabled:opacity-40 ${(ccFlags && ccFlags[k] === true) ? 'bg-white text-slate-700 ring-1 ring-slate-300 hover:bg-slate-50' : 'bg-slate-900 text-white hover:bg-slate-800'}`}>
+                                                    {(ccFlags && ccFlags[k] === true) ? 'OFFにする' : 'ONにする'}
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+
+                                    <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-center gap-2">
+                                        <span className="text-[12px] font-bold text-slate-600 flex-1">緊急停止（新機能を全てまとめて止める）</span>
+                                        {ccFlags && ccFlags.cc_all === false ? (
+                                            <button onClick={() => ccSetFlag('cc_all', true)} disabled={!!ccBusy || !ccFlags || ccFlags.configured === false} className="px-3 py-1.5 rounded-lg bg-slate-900 text-white text-[12px] font-black disabled:opacity-40">停止を解除</button>
+                                        ) : (
+                                            <button onClick={() => ccSetFlag('cc_all', '__kill__')} disabled={!!ccBusy || !ccFlags || ccFlags.configured === false} className="px-3 py-1.5 rounded-lg bg-rose-600 text-white text-[12px] font-black hover:bg-rose-700 disabled:opacity-40">キルスイッチ</button>
+                                        )}
+                                    </div>
+
+                                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] font-medium text-slate-400">
+                                        <span>サーバー側の権限チェック: <span className="font-black text-slate-500">{(ccFlags && ccFlags.cc_authz) || 'off'}</span></span>
+                                        <span>保存先: <span className="font-black text-slate-500">{(ccFlags && ccFlags.store) || '未設定'}</span></span>
+                                        {ccFlags && ccFlags._updatedAt ? <span>最終変更 {ccFmtDt(ccFlags._updatedAt)}{ccFlags._updatedBy ? `／${ccFlags._updatedBy}` : ''}</span> : null}
+                                        <span>（変更は監査ログに残ります）</span>
+                                    </div>
+                                    {ccErr && <p className="mt-2 text-[12px] font-bold text-rose-700">{ccErr}</p>}
+                                </div>
+                                )}
 
                                 <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 text-xs font-bold text-emerald-800 leading-relaxed">
                                     アカウントの<span className="font-black">ID（氏名）</span>・<span className="font-black">ログインPASS</span>・<span className="font-black">アクセス店舗</span>を設定します。ここで作成したアカウントは<span className="font-black">ダッシュボード本体のログイン</span>に使え、ログイン後は<span className="font-black">許可した店舗のみ</span>表示されます（SalonOne売上・サブスク・返金明細書すべてに反映）。管理者は <span className="font-black">DASHBOARD_PASSWORD</span> で全店舗にログインできます。GASに保存・再デプロイ不要。
@@ -24880,7 +25324,9 @@
             );
         };
 
-        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authIsHq = false, authOwner = '', authRole = 'root', authStaffName = '', authDisplayName = '', collapsed = false, setCollapsed = () => {}, chatUnread = 0, boardUnread = 0, eventsUnread = 0, mobileNavOpen = false, setMobileNavOpen = () => {}, soRegion = 'jp', homeRegion = 'jp', hasOverseas = false, onNav = null }) => {
+        const Sidebar = ({ currentPage, setCurrentPage, handleLogout, cpaAlerts = [], alertOpen, setAlertOpen, alertRef, authRoot = true, authIsHq = false, authOwner = '', authRole = 'root', authStaffName = '', authDisplayName = '', collapsed = false, setCollapsed = () => {}, chatUnread = 0, boardUnread = 0, eventsUnread = 0, mobileNavOpen = false, setMobileNavOpen = () => {}, soRegion = 'jp', homeRegion = 'jp', hasOverseas = false, onNav = null, ccFlags = null, approvalPending = 0 }) => {
+            // Command Center の新項目はフラグONのときだけ出す（未取得・キルスイッチ時は非表示＝既存の見た目のまま）
+            const ccFlagOn = (k) => !!(ccFlags && ccFlags.cc_all !== false && ccFlags[k] === true);
             const goNav = (item) => { if (onNav) onNav(item); else setCurrentPage(item.id); };
             // ナビ項目のアクティブ判定（海外タブは国スコープも一致していること）
             const isActive = (item) => currentPage === item.id && ((item.region || homeRegion) === soRegion);
@@ -24923,9 +25369,11 @@
                 { label: '管理', accent: { pill: 'bg-slate-100 text-slate-600', dot: 'bg-slate-400', chip: 'group-hover:bg-slate-100 group-hover:text-slate-600' }, items: [
                     { id: 'settings', label: 'オーナー設定', icon: <Users size={18} />, mobileIcon: <Users size={18} />, rootOnly: true },
                     { id: 'faqadmin', label: 'FAQ管理（AI）', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, rootOnly: true },
+                    { id: 'approval', label: '承認センター', icon: <CheckCircle size={18} />, mobileIcon: <CheckCircle size={18} />, rootOnly: true, flag: 'cc_approval', badge: approvalPending },
+                    { id: 'agentlog', label: 'AI Agent Activity', icon: <Activity size={18} />, mobileIcon: <Activity size={18} />, rootOnly: true, flag: 'cc_agentlog' },
                 ] },
             ];
-            const canShow = (it) => (authRoot || !it.rootOnly) && !(it.hideForStaff && authRole === 'staff') && (!it.thanksOnly || authRole === 'staff' || authRole === 'owner' || authRoot);
+            const canShow = (it) => (authRoot || !it.rootOnly) && !(it.hideForStaff && authRole === 'staff') && (!it.thanksOnly || authRole === 'staff' || authRole === 'owner' || authRoot) && (!it.flag || ccFlagOn(it.flag));
             const visSections = navSections
                 .filter(s => !s.overseasOnly || hasOverseas)   // 海外セクションは海外店舗がある時だけ
                 .map(s => ({ ...s, items: s.items.filter(canShow) })).filter(s => s.items.length);

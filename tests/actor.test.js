@@ -187,3 +187,32 @@ describe('resolveActor - Bearer検証の失敗もキャッシュする', () => {
     expect(calls).toBe(2);
   });
 });
+
+describe('resolveActor - 秘密が未設定でも認証を無効にしない（fail closed）', () => {
+  it('🔴 DASHBOARD_PASSWORD 未設定なら、空文字ハッシュを送っても root にならない', async () => {
+    // 未設定時に rootToken() が '' を返す想定（api/plan-store.js 側の実装）
+    const d = { rootToken: () => '' };
+    const req = { headers: {}, query: {}, body: { owner: '__root__', token: '' } };
+    const a = await resolveActor(req, d);
+    expect(a.verified).toBe(false);
+    expect(a.role).not.toBe('root');
+  });
+  it('🔴 空トークンを送りつけても通らない', async () => {
+    const d = { rootToken: () => '' };
+    for (const token of ['', null, undefined, 'anything']) {
+      const a = await resolveActor({ headers: {}, query: {}, body: { owner: '__root__', token } }, d);
+      expect(a.verified, String(token)).toBe(false);
+    }
+  });
+  it('秘密が設定されていれば従来どおり root になる', async () => {
+    const d = { rootToken: () => 'real-token-hash' };
+    const a = await resolveActor({ headers: {}, query: {}, body: { owner: '__root__', token: 'real-token-hash' } }, d);
+    expect(a.verified).toBe(true);
+    expect(a.role).toBe('root');
+  });
+  it('秘密が設定されていても、違うトークンは拒否する', async () => {
+    const d = { rootToken: () => 'real-token-hash' };
+    const a = await resolveActor({ headers: {}, query: {}, body: { owner: '__root__', token: 'wrong' } }, d);
+    expect(a.verified).toBe(false);
+  });
+});

@@ -353,7 +353,8 @@ export default async function handler(req, res) {
       const resolved = await resolveActor(req, {
         env: process.env,
         verifySalonOneBearer,
-        rootToken: () => hashOwnerToken('__root__', process.env.DASHBOARD_PASSWORD || '', salt),
+        // 未設定なら空を返す → resolveActor は root 経路を閉じる（fail closed）
+        rootToken: () => (process.env.DASHBOARD_PASSWORD ? hashOwnerToken('__root__', process.env.DASHBOARD_PASSWORD, salt) : ''),
         verifyOwnerToken: (pw, owner, token) => verifyOwnerToken(pw, owner, token, salt),
         loadAccounts: ccLoadAccounts,
         skipCache: needsReverify(ccAction),   // 取り返しがつかない操作は毎回確かめる

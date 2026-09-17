@@ -2126,10 +2126,7 @@
                 if (authRole === 'staff' && currentPage === 'settlement') setCurrentPage('salonone');
                 // コミュニケーション4機能（チャット/お知らせ/勉強会/組織図）は当面 本部(hq)・管理者(root) のみ。
                 if (!authState.root && ['chat', 'board', 'events', 'org'].includes(currentPage)) setCurrentPage('salonone');
-                // Command Center の新タブはフラグOFFなら退避（キルスイッチで即座に画面から消える）
-                if (currentPage === 'approval' && !ccOn('cc_approval')) setCurrentPage(authState.root ? 'chat' : 'salonone');
-                if (currentPage === 'agentlog' && !ccOn('cc_agentlog')) setCurrentPage(authState.root ? 'chat' : 'salonone');
-            }, [authState.authenticated, authState.root, authRole, currentPage, ccFlags]);
+            }, [authState.authenticated, authState.root, authRole, currentPage]);
             const [rawData, setRawData] = useState(() => {
                 try {
                     const cached = localStorage.getItem(CACHE_KEY);
@@ -2412,6 +2409,14 @@
             };
             const ccFmtDt = (ms) => { if (!ms) return '—'; const d = new Date(Number(ms)); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
             const ccFmtDur = (r) => { if (!r || !r.completedAt || !r.startedAt) return '—'; const ms = Number(r.completedAt) - Number(r.startedAt); return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`; };
+            // フラグOFFの新タブに居座らせない（キルスイッチで即座に画面から消える）。
+            // ⚠️ この useEffect は ccFlags / ccOn の宣言より後に置くこと。
+            //    依存配列は描画時に評価されるため、宣言前に書くと TDZ で全画面が落ちる。
+            useEffect(() => {
+                if (!authState.authenticated) return;
+                if (currentPage === 'approval' && !ccOn('cc_approval')) setCurrentPage(authState.root ? 'chat' : 'salonone');
+                if (currentPage === 'agentlog' && !ccOn('cc_agentlog')) setCurrentPage(authState.root ? 'chat' : 'salonone');
+            }, [currentPage, ccFlags, authState.authenticated, authState.root]);
             const [acqShowExcluded, setAcqShowExcluded] = useState(false); // 新規顧客一覧: 除外済みも表示（戻す用）
             const acqLoadedKeyRef = useRef('');
             const [acqForced, setAcqForced] = useState([]);   // 獲得分析: 強制リンク別 実績（/marketing/by-forced-link・初回オファー/訴求）

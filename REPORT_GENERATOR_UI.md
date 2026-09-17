@@ -1,7 +1,11 @@
 # 資料生成 UI / データ契約（REPORT_GENERATOR_UI）
 
 作成日: 2026-09-17 / ブランチ: `feature/cc-foundation` / 状態: **設計**
-関連: `MARKETING_DASHBOARD_PLAN.md`／`KPI_UI_SPEC.md`／`INTEGRATION_PLAN.md` §F（Platform接続）
+関連: `MARKETING_DASHBOARD_PLAN.md`／`KPI_UI_SPEC.md`／`INTEGRATION_PLAN.md` §F（Platform接続）／`DASHBOARD_GROUP_ANALYTICS_PLAN.md`
+
+> ⚠️ **改訂（2026-09-17）**: Report Snapshot の `scope` に **`campaigns` / `creatives` を追加**する
+> （[DASHBOARD_GROUP_ANALYTICS_PLAN.md](DASHBOARD_GROUP_ANALYTICS_PLAN.md) §11）。
+> スライド構成にも **媒体比較・Creative比較** を含める。数値は Platform の確定 Metric を固定して使う。
 
 > 目的: 画面で見ている**そのままの条件**（期間・店舗・媒体）で、
 > 会議に出せるレポートを1クリックで作る。**数字は画面と1円もずれない。**

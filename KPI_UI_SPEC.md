@@ -1,7 +1,13 @@
 # KPI 定義・UI 仕様（KPI_UI_SPEC）
 
 作成日: 2026-09-17 / ブランチ: `feature/cc-foundation` / 状態: **設計**
-関連: `MARKETING_DASHBOARD_PLAN.md`（画面構成）／`REPORT_GENERATOR_UI.md`（資料生成）
+関連: `MARKETING_DASHBOARD_PLAN.md`（画面構成）／`REPORT_GENERATOR_UI.md`（資料生成）／`DASHBOARD_GROUP_ANALYTICS_PLAN.md`（Data Contract・Phase）
+
+> ⚠️ **改訂（2026-09-17）**: §8 の新規モジュール案（`lib/unitecon.js` 等で Dashboard が計算する）は
+> **[DASHBOARD_GROUP_ANALYTICS_PLAN.md](DASHBOARD_GROUP_ANALYTICS_PLAN.md) §1・§3 で上書き**された。計算は Platform 側。
+> 指標は **Retention / Churn / MRR / ARR を加えた20種**に拡張（同 §3）。
+> **本書のカード仕様（§1）・データ品質（§4）・差異警告（§5）・InfoTip（§6）はそのまま有効**で、
+> Platform が返す `source` / `updated_at` / `quality` / `reconciliation` をそのまま描く仕様として読むこと。
 
 > この文書の目的は「**この数字はどこから来て、どう計算され、どれくらい信用できるか**」を
 > 画面の上で必ず答えられるようにすること。

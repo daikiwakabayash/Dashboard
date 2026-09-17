@@ -3,6 +3,12 @@
 作成日: 2026-09-17 / ブランチ: `feature/cc-foundation` / 状態: **設計。実装は次フェーズ**
 関連: `KPI_UI_SPEC.md`（KPI定義とカード仕様）／`REPORT_GENERATOR_UI.md`（資料生成）／`INTEGRATION_PLAN.md`（全体方針）
 
+> ⚠️ **改訂（2026-09-17）**: 本書 §8 の「AIの役割分担」と §8-1 の `lib/unitecon.js`（Dashboard側で指標を計算する案）は、
+> **[DASHBOARD_GROUP_ANALYTICS_PLAN.md](DASHBOARD_GROUP_ANALYTICS_PLAN.md) §1 で上書き**された。
+> 指標の計算は naoru-ai-platform の Group Data Platform が担い、**Dashboard では新しい指標計算を書かない**。
+> Dashboard は `/api/cc?fn=metrics` の契約（同 §2）に対して1度だけ画面を書き、データ源をフラグで切り替える。
+> 本書の Source of Truth（§1）・KPI・グラフ・ドリルダウンの内容は引き続き有効。
+
 ---
 
 ## 1. Source of Truth（正式データソース）

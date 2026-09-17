@@ -224,3 +224,76 @@ describe('手当 - 既存の応答が変わっていない', () => {
     expect((await post({ action: 'nope' })).statusCode).toBe(400);
   });
 });
+
+// ── Supabase / GAS へフォールバックしたときの安全性 ──
+// 本番の保存経路は KV だが、KV が外れた場合に何が起きるかを確認しておく。
+describe('手当 - 非KV経路（Supabase/GAS フォールバック）', () => {
+  // KV を外して GAS 経路にする
+  const useGas = () => {
+    delete process.env.KV_REST_API_URL;
+    delete process.env.KV_REST_API_TOKEN;
+    process.env.SETTLEMENT_GAS_URL = 'https://gas.test/exec';
+  };
+  const gasStore = () => {
+    const mem = new Map();
+    globalThis.fetch = vi.fn(async (url, opts = {}) => {
+      const u = String(url);
+      const ok = (b) => ({ ok: true, status: 200, json: async () => b, headers: new Map() });
+      if (u.startsWith('https://gas.test/exec?type=kv&key=')) {
+        const key = decodeURIComponent(u.split('key=')[1]);
+        return ok({ value: mem.has(key) ? JSON.parse(mem.get(key)) : null });
+      }
+      if (u === 'https://gas.test/exec' && opts.method === 'POST') {
+        const b = JSON.parse(opts.body);
+        if (b.action === 'saveKv') { mem.set(b.key, JSON.stringify(b.value)); return ok({ ok: true }); }
+      }
+      return ok({});
+    });
+    return mem;
+  };
+  afterEach(() => { delete process.env.SETTLEMENT_GAS_URL; });
+
+  it('非KVでも提出は保存され、読み出せる', async () => {
+    useGas(); gasStore();
+    const r = await post({ action: 'submit', submission: sub('g1') });
+    expect(r.body.ok).toBe(true);
+    expect(r.body.atomic).toBe(false);          // 原子的でないことを応答で区別できる
+    expect((await get()).body.submissions.map(s => s.id)).toEqual(['g1']);
+  });
+
+  it('書き込みが反映されない場合は 503 を返す（黙って成功にしない）', async () => {
+    useGas();
+    // 書いても保存されないGAS（＝他の書き込みに踏まれ続ける状況）を模擬
+    globalThis.fetch = vi.fn(async (url, opts = {}) => {
+      const u = String(url);
+      const ok = (b) => ({ ok: true, status: 200, json: async () => b, headers: new Map() });
+      if (u.includes('type=kv')) return ok({ value: null });      // 常に空が返る
+      return ok({ ok: true });                                    // 書き込みは成功したふり
+    });
+    const r = await post({ action: 'submit', submission: sub('lost') });
+    expect(r.statusCode).toBe(503);
+    expect(r.body.error).toBe('not_durable');
+    expect(r.body.message).toContain('保存できませんでした');
+  });
+
+  it('やり直しの途中で既に入っていたら重複させない', async () => {
+    useGas();
+    const mem = gasStore();
+    const r1 = await post({ action: 'submit', submission: sub('dup1') });
+    expect(r1.body.ok).toBe(true);
+    const logAfterFirst = JSON.parse(mem.get('naoru:allowance:log:v1'));
+    expect(logAfterFirst).toHaveLength(1);
+    // 同じ内容をもう一度（二重送信）
+    const r2 = await post({ action: 'submit', submission: sub('dup1') });
+    expect(r2.body.duplicate).toBe(true);
+    expect(JSON.parse(mem.get('naoru:allowance:log:v1'))).toHaveLength(1);
+  });
+
+  it('非KVでも生産性は提出に触れない', async () => {
+    useGas(); const mem = gasStore();
+    await post({ action: 'submit', submission: sub('p1') });
+    const logBefore = mem.get('naoru:allowance:log:v1');
+    await post({ action: 'recordProductivity', staffId: 's1', month: '2026-08', gross: 500 });
+    expect(mem.get('naoru:allowance:log:v1')).toBe(logBefore);
+  });
+});

@@ -272,11 +272,27 @@ export default async function handler(req, res) {
       const action = body.action;
 
       // 追記専用。既存の要素を読んで書き直さないので、同時提出で互いを踏まない。
+      // 戻り値 { ok, atomic } … ok=false は「保存できなかった」＝呼び出し側がエラーを返す。
+      const hasEntry = (arr, e) => Array.isArray(arr) && arr.some(x => x && x.id === e.id && x.op === e.op && x.at === e.at);
       const appendLog = async (entry) => {
-        if (hasKV) { await kvAppendJson(ALLOWANCE_LOG_KEY, entry, ALLOWANCE_LOG_CAP); return; }
-        const fresh = await blobGet(ALLOWANCE_LOG_KEY, hasKV, hasSB, gas).catch(() => null);
-        const arr = Array.isArray(fresh) ? fresh : log;      // 直前に読み直して取りこぼしを減らす
-        await blobSet(ALLOWANCE_LOG_KEY, [...arr, entry].slice(-ALLOWANCE_LOG_CAP), hasKV, hasSB, gas);
+        if (hasKV) {                                          // KV: Lua で原子的に追記（本番はこちら）
+          await kvAppendJson(ALLOWANCE_LOG_KEY, entry, ALLOWANCE_LOG_CAP);
+          return { ok: true, atomic: true };
+        }
+        // ⚠️ Supabase / GAS は原子的な追記ができない。読んで書くだけだと同時提出で消える。
+        //    そこで「書く→読み直して入っているか確認する」を最大3回繰り返す。
+        //    それでも入らなければ **黙って成功にせず** 失敗を返す（領収書が消えるより、
+        //    利用者に「保存できませんでした」と出すほうが良い）。
+        for (let i = 0; i < 3; i++) {
+          const fresh = await blobGet(ALLOWANCE_LOG_KEY, hasKV, hasSB, gas).catch(() => null);
+          const arr = Array.isArray(fresh) ? fresh : [];
+          if (hasEntry(arr, entry)) return { ok: true, atomic: false };      // 既に入っていた
+          await blobSet(ALLOWANCE_LOG_KEY, [...arr, entry].slice(-ALLOWANCE_LOG_CAP), hasKV, hasSB, gas);
+          const after = await blobGet(ALLOWANCE_LOG_KEY, hasKV, hasSB, gas).catch(() => null);
+          if (hasEntry(after, entry)) return { ok: true, atomic: false };    // 書けたことを確認
+          await new Promise(r => setTimeout(r, 60 * (i + 1)));               // 少し待ってやり直す
+        }
+        return { ok: false, atomic: false };
       };
       // 旧blobへの写し。Rollback しても提出が残るように保つ。
       // ⚠️ 生産性(productivity)はここでは書かない。旧blobの値をそのまま保持する
@@ -293,14 +309,16 @@ export default async function handler(req, res) {
         }
         const entry = makeAllowanceEntry('submit', s);
         if (!entry) return res.status(400).json({ ok: false, error: 'invalid_submission' });
-        await appendLog(entry);                              // ← 正。これが通れば提出は失われない
+        const w = await appendLog(entry);                    // ← 正。これが通れば提出は失われない
+        if (!w.ok) return res.status(503).json({ ok: false, error: 'not_durable', message: '保存できませんでした。もう一度お試しください。' });
         await mirrorLegacy(mergeSubmissions(legacySubs, [...log, entry]));
-        return res.status(200).json({ ok: true, id: s.id });
+        return res.status(200).json({ ok: true, id: s.id, atomic: w.atomic });
       }
       if (action === 'delete' && body.id) {
         const entry = makeAllowanceEntry('delete', { id: body.id });
         if (!entry) return res.status(400).json({ ok: false, error: 'invalid_id' });
-        await appendLog(entry);
+        const w = await appendLog(entry);
+        if (!w.ok) return res.status(503).json({ ok: false, error: 'not_durable', message: '取り消しを保存できませんでした。もう一度お試しください。' });
         await mirrorLegacy(mergeSubmissions(legacySubs, [...log, entry]));
         return res.status(200).json({ ok: true });
       }

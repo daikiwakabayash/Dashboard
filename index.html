@@ -20163,43 +20163,6 @@
                         return (
                         <div className="p-3 md:p-4 lg:p-6 font-sans text-slate-900">
                             <div className="w-full space-y-4 md:space-y-6">
-                                {/* ══ Command Center フラグ（root専用・既定は全てOFF） ══ */}
-                                {authState.root && (
-                                <div className="rounded-2xl bg-white ring-1 ring-slate-200 p-4 md:p-5">
-                                    <div className="flex flex-wrap items-center gap-2 mb-1">
-                                        <h2 className="text-[15px] font-black">Command Center フラグ</h2>
-                                        <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[10.5px] font-bold">新機能の公開スイッチ</span>
-                                        {ccFlags && ccFlags.cc_all === false && <span className="px-2 py-0.5 rounded-md bg-rose-100 text-rose-800 text-[10.5px] font-black">停止中（キルスイッチ）</span>}
-                                    </div>
-                                    <p className="text-[12px] font-medium text-slate-500 leading-relaxed mb-3">
-                                        新しく追加した画面のON/OFFです。<span className="font-bold">OFFのあいだは画面に一切出ません</span>（既存機能には影響しません）。
-                                        設定はサーバーに保存され、<span className="font-bold">再デプロイなしで数秒で反映</span>されます。
-                                    </p>
-                                    {!ccFlags && <div className="rounded-lg bg-slate-50 ring-1 ring-slate-200 px-3 py-2 text-[12px] font-bold text-slate-500 mb-3">フラグを読み込めていません（共有ストア未設定の可能性）。この状態では全ての新機能がOFFです。</div>}
-                                    <div className="space-y-1.5">
-                                        {[['cc_approval', '承認センター'], ['cc_agentlog', 'AI Agent Activity']].map(([k, label]) => (
-                                            <div key={k} className="flex items-center gap-3 py-1.5">
-                                                <span className="text-[13px] font-bold text-slate-800 flex-1">{label}</span>
-                                                <span className={`text-[11px] font-black ${ccOn(k) ? 'text-emerald-600' : 'text-slate-400'}`}>{ccOn(k) ? '公開中' : 'OFF'}</span>
-                                                <button onClick={() => ccSetFlag(k, !(ccFlags && ccFlags[k] === true))} disabled={ccBusy === k || !ccFlags}
-                                                    className={`px-3 py-1.5 rounded-lg text-[12px] font-black disabled:opacity-40 ${(ccFlags && ccFlags[k] === true) ? 'bg-white text-slate-700 ring-1 ring-slate-300 hover:bg-slate-50' : 'bg-slate-900 text-white hover:bg-slate-800'}`}>
-                                                    {(ccFlags && ccFlags[k] === true) ? 'OFFにする' : 'ONにする'}
-                                                </button>
-                                            </div>
-                                        ))}
-                                    </div>
-                                    <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-center gap-2">
-                                        <span className="text-[12px] font-bold text-slate-600 flex-1">緊急停止（新機能を全てまとめて止める）</span>
-                                        {ccFlags && ccFlags.cc_all === false ? (
-                                            <button onClick={() => ccSetFlag('cc_all', true)} disabled={!!ccBusy} className="px-3 py-1.5 rounded-lg bg-slate-900 text-white text-[12px] font-black disabled:opacity-40">停止を解除</button>
-                                        ) : (
-                                            <button onClick={() => ccSetFlag('cc_all', '__kill__')} disabled={!!ccBusy || !ccFlags} className="px-3 py-1.5 rounded-lg bg-rose-600 text-white text-[12px] font-black hover:bg-rose-700 disabled:opacity-40">キルスイッチ</button>
-                                        )}
-                                    </div>
-                                    {ccFlags && ccFlags._updatedAt && <p className="mt-2 text-[10.5px] font-medium text-slate-400">最終変更 {ccFmtDt(ccFlags._updatedAt)}{ccFlags._updatedBy ? `／${ccFlags._updatedBy}` : ''}（変更は監査ログに残ります）</p>}
-                                </div>
-                                )}
-
                                 {/* ヘッダー + フィルタ */}
                                 <header className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 bg-white p-3 md:p-5 rounded-2xl md:rounded-3xl shadow-sm border border-slate-200">
                                     <div className="flex items-center gap-3">
@@ -21253,6 +21216,69 @@
                                         <h1 className="text-xl md:text-2xl font-black tracking-tight italic">オーナー設定</h1>
                                     </div>
                                 </header>
+
+                                {/* ══ Command Center フラグ（root専用・既定は全てOFF） ══
+                                     ⚠️ ここはオーナー設定ページ。承認センター内に置くと、フラグOFF時に
+                                        タブが出ず有効化できなくなる（鶏と卵）ため、常に見えるここに置く。 */}
+                                {authState.root && (
+                                <div className="rounded-2xl bg-white p-4 md:p-5 shadow-sm border border-slate-200">
+                                    <div className="flex flex-wrap items-center gap-2 mb-1">
+                                        <h2 className="text-[15px] font-black">Command Center フラグ</h2>
+                                        <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[10.5px] font-bold">新機能の公開スイッチ</span>
+                                        {ccFlags && ccFlags.env && ccFlags.env !== 'production' && (
+                                            <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 text-[10.5px] font-black">{ccFlags.env === 'preview' ? 'PREVIEW専用' : ccFlags.env}</span>
+                                        )}
+                                        {ccFlags && ccFlags.cc_all === false && <span className="px-2 py-0.5 rounded-md bg-rose-100 text-rose-800 text-[10.5px] font-black">停止中（キルスイッチ）</span>}
+                                    </div>
+                                    <p className="text-[12px] font-medium text-slate-500 leading-relaxed mb-3">
+                                        新しく追加した画面のON/OFFです。<span className="font-bold">OFFのあいだは画面に一切出ません</span>（既存機能には影響しません）。
+                                        設定はサーバーに保存され、<span className="font-bold">再デプロイなしで数秒で反映</span>されます。
+                                        {ccFlags && ccFlags.env && ccFlags.env !== 'production' && <span className="font-bold text-amber-700">　この環境の設定は本番とは別に保存され、本番には影響しません。</span>}
+                                    </p>
+
+                                    {!ccFlags && (
+                                        <div className="rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-[12px] font-bold text-slate-500 mb-3">
+                                            フラグを読み込めていません。この状態では全ての新機能がOFFです。
+                                        </div>
+                                    )}
+                                    {ccFlags && ccFlags.configured === false && (
+                                        <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2.5 text-[12px] font-bold text-amber-900 mb-3 leading-relaxed">
+                                            共有ストア（Vercel KV / Supabase / GAS）が未設定のため、<span className="font-black">フラグを保存できません</span>。
+                                            この環境では全ての新機能がOFFのままです。Vercel の Storage で KV を作成すると有効になります。
+                                        </div>
+                                    )}
+
+                                    <div className="space-y-1.5">
+                                        {[['cc_approval', '承認センター'], ['cc_agentlog', 'AI Agent Activity']].map(([k, label]) => (
+                                            <div key={k} className="flex items-center gap-3 py-1.5">
+                                                <span className="text-[13px] font-bold text-slate-800 flex-1">{label}</span>
+                                                <span className={`text-[11px] font-black ${ccOn(k) ? 'text-emerald-600' : 'text-slate-400'}`}>{ccOn(k) ? '公開中' : 'OFF'}</span>
+                                                <button onClick={() => ccSetFlag(k, !(ccFlags && ccFlags[k] === true))} disabled={ccBusy === k || !ccFlags || ccFlags.configured === false}
+                                                    className={`px-3 py-1.5 rounded-lg text-[12px] font-black disabled:opacity-40 ${(ccFlags && ccFlags[k] === true) ? 'bg-white text-slate-700 ring-1 ring-slate-300 hover:bg-slate-50' : 'bg-slate-900 text-white hover:bg-slate-800'}`}>
+                                                    {(ccFlags && ccFlags[k] === true) ? 'OFFにする' : 'ONにする'}
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+
+                                    <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-center gap-2">
+                                        <span className="text-[12px] font-bold text-slate-600 flex-1">緊急停止（新機能を全てまとめて止める）</span>
+                                        {ccFlags && ccFlags.cc_all === false ? (
+                                            <button onClick={() => ccSetFlag('cc_all', true)} disabled={!!ccBusy || !ccFlags || ccFlags.configured === false} className="px-3 py-1.5 rounded-lg bg-slate-900 text-white text-[12px] font-black disabled:opacity-40">停止を解除</button>
+                                        ) : (
+                                            <button onClick={() => ccSetFlag('cc_all', '__kill__')} disabled={!!ccBusy || !ccFlags || ccFlags.configured === false} className="px-3 py-1.5 rounded-lg bg-rose-600 text-white text-[12px] font-black hover:bg-rose-700 disabled:opacity-40">キルスイッチ</button>
+                                        )}
+                                    </div>
+
+                                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] font-medium text-slate-400">
+                                        <span>サーバー側の権限チェック: <span className="font-black text-slate-500">{(ccFlags && ccFlags.cc_authz) || 'off'}</span></span>
+                                        <span>保存先: <span className="font-black text-slate-500">{(ccFlags && ccFlags.store) || '未設定'}</span></span>
+                                        {ccFlags && ccFlags._updatedAt ? <span>最終変更 {ccFmtDt(ccFlags._updatedAt)}{ccFlags._updatedBy ? `／${ccFlags._updatedBy}` : ''}</span> : null}
+                                        <span>（変更は監査ログに残ります）</span>
+                                    </div>
+                                    {ccErr && <p className="mt-2 text-[12px] font-bold text-rose-700">{ccErr}</p>}
+                                </div>
+                                )}
 
                                 <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 text-xs font-bold text-emerald-800 leading-relaxed">
                                     アカウントの<span className="font-black">ID（氏名）</span>・<span className="font-black">ログインPASS</span>・<span className="font-black">アクセス店舗</span>を設定します。ここで作成したアカウントは<span className="font-black">ダッシュボード本体のログイン</span>に使え、ログイン後は<span className="font-black">許可した店舗のみ</span>表示されます（SalonOne売上・サブスク・返金明細書すべてに反映）。管理者は <span className="font-black">DASHBOARD_PASSWORD</span> で全店舗にログインできます。GASに保存・再デプロイ不要。

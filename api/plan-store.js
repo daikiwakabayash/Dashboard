@@ -267,13 +267,25 @@ export default async function handler(req, res) {
   // ⚠️ 新しいServerless Functionは増やさない（Hobby上限12・現在11使用済み）。
   //    そのため plan-store の ?type= 分岐として同居させる。
   // ══════════════════════════════════════════════════════════════════
+  // ── 環境スコープ（重要）────────────────────────────────────────
+  // Vercel の環境変数は既定で Production / Preview が同じ値を共有するため、
+  // Preview からフラグを ON にすると **本番のフラグまで ON になってしまう**。
+  // そこで Command Center のキーだけ環境ごとに分ける。VERCEL_ENV は Vercel が
+  // 自動で入れるシステム変数なので、環境変数の追加設定は要らない。
+  //   production → naoru:cc:flags:v1        （従来どおり）
+  //   preview    → naoru:cc:flags:v1:preview（本番とは別物）
+  // ⚠️ 既存の type=（chat/board/allowance 等）のキーは**一切変えない**。
+  //    既存データの参照先が変わると社内の運用が壊れるため、新規キーのみ対象。
+  const CC_ENV = String(process.env.VERCEL_ENV || process.env.CC_ENV || 'development');
+  const ccKey = (base) => (CC_ENV === 'production' ? base : `${base}:${CC_ENV}`);
+
   const ccType = (req.method === 'GET' ? req.query.type : (req.body || {}).type);
   const isCC = ['ccflags', 'approval', 'agentlog', 'audit'].includes(ccType);
   if (isCC) {
     const hasStore = !!(hasKV || hasSB || gas);
     // ストアが無い＝フラグを読めない＝fail closed（全新機能OFF）。既存機能には影響しない。
     if (!hasStore) {
-      if (ccType === 'ccflags') return res.status(200).json({ flags: { ...DEFAULT_FLAGS, cc_all: false }, configured: false });
+      if (ccType === 'ccflags') return res.status(200).json({ flags: { ...DEFAULT_FLAGS, cc_all: false, configured: false, env: CC_ENV, store: 'none' }, configured: false });
       return res.status(200).json({ items: [], configured: false });
     }
 
@@ -333,7 +345,7 @@ export default async function handler(req, res) {
       return { passwords, shopsMap, metaMap };
     };
     let ccActor = actorOf();          // 既定はクライアント申告（従来どおり）
-    const ccFlagsNow = normalizeFlags(await blobGet(FLAGS_KEY, hasKV, hasSB, gas).catch(() => null));
+    const ccFlagsNow = normalizeFlags(await blobGet(ccKey(FLAGS_KEY), hasKV, hasSB, gas).catch(() => null));
     const ccAuthzMode = ccFlagsNow.cc_authz || 'off';
     if (ccAuthzMode !== 'off') {
       const salt = process.env.AUTH_SALT || 'naoru-settlement-2026';
@@ -354,7 +366,7 @@ export default async function handler(req, res) {
       if (verdict.shouldLog) {
         try {
           const e = buildAuditEntry({ action: 'authz_deny', entity: 'authz', entityId: ccActionFor(ccType, body), actor: ccActor, source: ccActor.source, note: verdict.code, after: { mode: verdict.mode, shop: target.shop } });
-          if (e.ok) { if (hasKV) await kvAppendJson(AUDIT_KEY, e.entry, AUDIT_CAP); }
+          if (e.ok) { if (hasKV) await kvAppendJson(ccKey(AUDIT_KEY), e.entry, AUDIT_CAP); }
         } catch (_) { /* 記録失敗で本処理を止めない */ }
       }
       if (verdict.blocked) return res.status(403).json({ ok: false, error: 'forbidden', code: verdict.code, message: verdict.reason });
@@ -364,34 +376,36 @@ export default async function handler(req, res) {
     const audit = async (input) => {
       try {
         const built = buildAuditEntry({ ...input, actor: ccActor, source: (input && input.source) || ccActor.source });
-        if (built.ok) await appendRow(AUDIT_KEY, built.entry, AUDIT_CAP);
+        if (built.ok) await appendRow(ccKey(AUDIT_KEY), built.entry, AUDIT_CAP);
       } catch (_) { /* 監査の失敗で業務処理を落とさない */ }
     };
 
     try {
       // ── フィーチャーフラグ ──
       if (ccType === 'ccflags') {
-        const cur = normalizeFlags(await blobGet(FLAGS_KEY, hasKV, hasSB, gas));
-        if (req.method === 'GET') return res.status(200).json({ flags: cur, configured: true });
+        const cur = normalizeFlags(await blobGet(ccKey(FLAGS_KEY), hasKV, hasSB, gas));
+        const storeName = hasKV ? 'kv' : (hasSB ? 'supabase' : 'gas');
+        const decorate = (f) => ({ ...f, configured: true, env: CC_ENV, store: storeName, key: ccKey(FLAGS_KEY) });
+        if (req.method === 'GET') return res.status(200).json({ flags: decorate(cur), configured: true, env: CC_ENV });
         if (body.action === 'set') {
           const next = applyFlagChange(cur, String(body.key || ''), body.value, actorOf());
           if (!next) return res.status(400).json({ ok: false, error: 'invalid_flag' });
-          await blobSet(FLAGS_KEY, next, hasKV, hasSB, gas);
-          await audit({ action: 'flag_change', entity: 'ccflags', entityId: String(body.key || ''), before: { [body.key]: cur[body.key] }, after: { [body.key]: next[body.key] } });
-          return res.status(200).json({ ok: true, flags: next });
+          await blobSet(ccKey(FLAGS_KEY), next, hasKV, hasSB, gas);
+          await audit({ action: 'flag_change', entity: 'ccflags', entityId: String(body.key || ''), before: { [body.key]: cur[body.key] }, after: { [body.key]: next[body.key] }, note: `env=${CC_ENV}` });
+          return res.status(200).json({ ok: true, flags: decorate(next) });
         }
         if (body.action === 'kill') {                     // キルスイッチ
           const next = killAll(cur, actorOf());
-          await blobSet(FLAGS_KEY, next, hasKV, hasSB, gas);
-          await audit({ action: 'kill_switch', entity: 'ccflags', entityId: 'cc_all', before: { cc_all: cur.cc_all }, after: { cc_all: false }, note: String(body.note || '').slice(0, 400) });
-          return res.status(200).json({ ok: true, flags: next });
+          await blobSet(ccKey(FLAGS_KEY), next, hasKV, hasSB, gas);
+          await audit({ action: 'kill_switch', entity: 'ccflags', entityId: 'cc_all', before: { cc_all: cur.cc_all }, after: { cc_all: false }, note: `env=${CC_ENV} ${String(body.note || '').slice(0, 380)}` });
+          return res.status(200).json({ ok: true, flags: decorate(next) });
         }
         return res.status(400).json({ ok: false, error: 'invalid ccflags action' });
       }
 
       // ── 承認センター ──
       if (ccType === 'approval') {
-        const rows = await readRows(APPROVAL_KEY);
+        const rows = await readRows(ccKey(APPROVAL_KEY));
         if (req.method === 'GET') {
           const filter = { status: req.query.status || 'all', kind: req.query.kind || 'all', group: req.query.group || 'all', shop: req.query.shop || '' };
           return res.status(200).json({ items: listApprovals(rows, filter), pending: pendingCount(rows), configured: true });
@@ -399,7 +413,7 @@ export default async function handler(req, res) {
         if (body.action === 'create') {
           const built = buildApproval(body.approval || {});
           if (!built.ok) return res.status(400).json({ ok: false, error: built.error });
-          await appendRow(APPROVAL_KEY, built.approval, APPROVAL_CAP);
+          await appendRow(ccKey(APPROVAL_KEY), built.approval, APPROVAL_CAP);
           await audit({ action: 'create', entity: 'approval', entityId: built.approval.id, after: { kind: built.approval.kind, title: built.approval.title, risk: built.approval.risk }, source: 'agent' });
           return res.status(200).json({ ok: true, approval: built.approval });
         }
@@ -426,7 +440,7 @@ export default async function handler(req, res) {
         if (toSave) {
           const next = rows.slice();
           next[idx] = toSave;
-          await blobSet(APPROVAL_KEY, next, hasKV, hasSB, gas);
+          await blobSet(ccKey(APPROVAL_KEY), next, hasKV, hasSB, gas);
         }
         if (!out.ok) return res.status(409).json({ ok: false, error: out.error, approval: toSave || before });
         await audit({ action: body.action === 'decide' ? String(body.decision || 'decide') : String(body.action), entity: 'approval', entityId: id, before: { status: before.status }, after: { status: out.approval.status }, note: String(body.note || '').slice(0, 400) });
@@ -435,7 +449,7 @@ export default async function handler(req, res) {
 
       // ── AI Agent Activity ──
       if (ccType === 'agentlog') {
-        const rows = await readRows(AGENTLOG_KEY);
+        const rows = await readRows(ccKey(AGENTLOG_KEY));
         if (req.method === 'GET') {
           const since = Number(req.query.since) || 0;
           const filter = { agentName: req.query.agentName || 'all', status: req.query.status || 'all', action: req.query.action || 'all', source: req.query.source || 'all', shop: req.query.shop || '', since };
@@ -450,7 +464,7 @@ export default async function handler(req, res) {
         if (body.action === 'start') {
           const built = startRun(body.run || {});
           if (!built.ok) return res.status(400).json({ ok: false, error: built.error });
-          await appendRow(AGENTLOG_KEY, built.run, AGENTLOG_CAP);
+          await appendRow(ccKey(AGENTLOG_KEY), built.run, AGENTLOG_CAP);
           return res.status(200).json({ ok: true, run: built.run });
         }
         if (body.action === 'finish') {
@@ -461,7 +475,7 @@ export default async function handler(req, res) {
           if (!out.ok) return res.status(409).json({ ok: false, error: out.error });
           const next = rows.slice();
           next[idx] = out.run;
-          await blobSet(AGENTLOG_KEY, next, hasKV, hasSB, gas);
+          await blobSet(ccKey(AGENTLOG_KEY), next, hasKV, hasSB, gas);
           return res.status(200).json({ ok: true, run: out.run });
         }
         return res.status(400).json({ ok: false, error: 'invalid agentlog action' });
@@ -469,7 +483,7 @@ export default async function handler(req, res) {
 
       // ── 監査ログ ──
       if (ccType === 'audit') {
-        const rows = await readRows(AUDIT_KEY);
+        const rows = await readRows(ccKey(AUDIT_KEY));
         if (req.method === 'GET') {
           const filter = { entity: req.query.entity || 'all', entityId: req.query.entityId || '', actorId: req.query.actorId || '', action: req.query.action || 'all', since: Number(req.query.since) || 0 };
           return res.status(200).json({ items: listAuditEntries(rows, filter).slice(0, 500), configured: true });
@@ -477,7 +491,7 @@ export default async function handler(req, res) {
         if (body.action === 'add') {
           const built = buildAuditEntry({ ...(body.entry || {}), actor: actorOf() });
           if (!built.ok) return res.status(400).json({ ok: false, error: built.error });
-          await appendRow(AUDIT_KEY, built.entry, AUDIT_CAP);
+          await appendRow(ccKey(AUDIT_KEY), built.entry, AUDIT_CAP);
           return res.status(200).json({ ok: true, entry: built.entry });
         }
         return res.status(400).json({ ok: false, error: 'invalid audit action' });

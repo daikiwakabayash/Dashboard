@@ -32,6 +32,13 @@ describe('Command Center API - ストア未設定でも安全side（fail closed�
     expect(res.body.flags.cc_agentlog).toBe(false);
   });
 
+  it('保存できない状態を画面が判別できるよう configured / env / store を返す', async () => {
+    const res = await call({ method: 'GET', query: { type: 'ccflags' } });
+    expect(res.body.flags.configured).toBe(false);      // ボタンを無効化する根拠
+    expect(typeof res.body.flags.env).toBe('string');
+    expect(res.body.flags.store).toBe('none');
+  });
+
   it('承認・Agentログ・監査は空配列を返し、例外を投げない', async () => {
     for (const type of ['approval', 'agentlog', 'audit']) {
       const res = await call({ method: 'GET', query: { type } });
@@ -69,5 +76,24 @@ describe('Command Center API - 既存の type を壊していない（回帰）'
     const res = await call({ method: 'GET', query: { type: 'ccflags' } });
     expect(res.headers['Access-Control-Allow-Origin']).toBe('*');
     expect(res.headers['Cache-Control']).toBe('no-store');
+  });
+});
+
+
+// Preview から本番のフラグを書き換えてしまわないこと（環境スコープ）
+describe('Command Center API - 環境スコープ', () => {
+  it('VERCEL_ENV によって env が切り替わる', async () => {
+    const prev = process.env.VERCEL_ENV;
+    try {
+      process.env.VERCEL_ENV = 'preview';
+      const a = await call({ method: 'GET', query: { type: 'ccflags' } });
+      expect(a.body.flags.env).toBe('preview');
+
+      process.env.VERCEL_ENV = 'production';
+      const b = await call({ method: 'GET', query: { type: 'ccflags' } });
+      expect(b.body.flags.env).toBe('production');
+    } finally {
+      if (prev === undefined) delete process.env.VERCEL_ENV; else process.env.VERCEL_ENV = prev;
+    }
   });
 });

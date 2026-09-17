@@ -1,0 +1,219 @@
+{
+  "_readme": {
+    "purpose": "SalonOne 分析APIのレスポンス形状を、実データ無しで再現した検証用サンプル。SALONONE_API_CONTRACT.md の各節に対応する。",
+    "warning": "実在する顧客・スタッフ・店舗・金額ではない。APIキー・トークン・秘密・個人情報を含めてはならない（tests/fixtures.test.js が機械的に検査する）。",
+    "anonymization": "顧客IDは cust_0001 形式の連番、氏名は「サンプル太郎」等のダミー、店舗名は「サンプルA院」等。金額・件数は形状確認のための架空値。",
+    "generatedFor": "Marketing / KPI 画面を上流に接続せず組み立てるための仮データ",
+    "contractVersion": "2026-09-17"
+  },
+
+  "meta": {
+    "_endpoint": "GET /meta",
+    "data": { "brand_code": "sample-brand", "brand_name": "サンプルブランド", "timezone": "Asia/Tokyo", "currency": "JPY" }
+  },
+
+  "me": {
+    "_endpoint": "GET /me（SSO時のみ Bearer 必須）",
+    "data": {
+      "user_id": "1001",
+      "login_id": "sample.user",
+      "role": "brand_admin",
+      "accessible_shops": [
+        { "id": "11", "name": "サンプルA院" },
+        { "id": "12", "name": "サンプルB院" }
+      ]
+    }
+  },
+
+  "shops": {
+    "_endpoint": "GET /shops",
+    "data": [
+      { "id": "11", "name": "サンプルA院", "area_id": 900000101, "timezone": "Asia/Tokyo", "address": "東京都サンプル区1-1-1" },
+      { "id": "12", "name": "サンプルB院", "area_id": 900000102, "timezone": "Asia/Tokyo", "address": "千葉県サンプル市2-2-2" },
+      { "id": "13", "name": "サンプルC院", "area_id": 900000342, "timezone": "Australia/Sydney", "address": "Sample St, Sample NSW" },
+      { "id": "14", "name": "サンプルD院", "area_id": 900000341, "timezone": "Asia/Kuala_Lumpur", "address": "Jalan Sample, Sample" }
+    ],
+    "meta": { "has_more": false, "next_cursor": null }
+  },
+
+  "salesSummary": {
+    "_endpoint": "GET /sales/summary?from=2026-08-01&to=2026-08-31&shop_id=11",
+    "_note": "売上は digest_sales（会計済み・入金ベース）を採用する。gross_sales は予測を含むためフォールバックのみ。",
+    "data": {
+      "digest_sales": 8420000,
+      "gross_sales": 8610000,
+      "consumed_sales": 8180000,
+      "new_customer_sales": 2140000,
+      "repeat_customer_sales": 6280000,
+      "new_visit_count": 61,
+      "repeat_visit_count": 498,
+      "cancel_count": 23,
+      "no_show_count": 4,
+      "period_utilization_rate": 0.742,
+      "amounts_jpy": 8420000,
+      "by_day": [
+        {
+          "date": "2026-08-01",
+          "digest_sales": 284000,
+          "media_breakdown": [
+            { "name": "META", "count": 4 },
+            { "name": "Instagram", "count": 2 },
+            { "name": "HPB", "count": 3 },
+            { "name": "既存", "count": 18 }
+          ],
+          "payment_breakdown": [
+            { "name": "現金", "amount": 96000, "is_sales": true },
+            { "name": "クレジット", "amount": 142000, "is_sales": true },
+            { "name": "スクエア", "amount": 46000, "is_sales": true },
+            { "name": "回数券消化", "amount": 38000, "is_sales": false }
+          ]
+        },
+        {
+          "date": "2026-08-02",
+          "digest_sales": 312000,
+          "media_breakdown": [
+            { "name": "META", "count": 5 },
+            { "name": "Google", "count": 1 },
+            { "name": "既存", "count": 21 }
+          ],
+          "payment_breakdown": [
+            { "name": "現金", "amount": 104000, "is_sales": true },
+            { "name": "クレジット", "amount": 158000, "is_sales": true },
+            { "name": "スクエア", "amount": 50000, "is_sales": true }
+          ]
+        }
+      ],
+      "by_staff": [
+        { "staff_id": "201", "name": "サンプル太郎", "gross": 3120000, "treatments": 186 },
+        { "staff_id": "202", "name": "サンプル花子", "gross": 2840000, "treatments": 171 },
+        { "staff_id": "203", "name": "サンプル次郎", "gross": 1980000, "treatments": 132 },
+        { "staff_id": null, "name": "ヘルプ", "gross": 480000, "treatments": 28 }
+      ]
+    }
+  },
+
+  "salesSummaryByShop": {
+    "_endpoint": "GET /sales/summary?from=2026-08-01&to=2026-08-31&group_by=shop",
+    "_note": "全店を1リクエストで取得する形（レート制限回避）。合計は amounts_jpy を使う（トップレベル金額は店舗通貨のまま）。",
+    "data": [
+      { "shop_id": "11", "shop_name": "サンプルA院", "digest_sales": 8420000, "gross_sales": 8610000, "new_visit_count": 61, "amounts_jpy": 8420000 },
+      { "shop_id": "12", "shop_name": "サンプルB院", "digest_sales": 9180000, "gross_sales": 9340000, "new_visit_count": 74, "amounts_jpy": 9180000 },
+      { "shop_id": "13", "shop_name": "サンプルC院", "digest_sales": 42000, "gross_sales": 42000, "new_visit_count": 9, "amounts_jpy": 4120000 },
+      { "shop_id": "14", "shop_name": "サンプルD院", "digest_sales": 38000, "gross_sales": 38000, "new_visit_count": 7, "amounts_jpy": 1280000 }
+    ]
+  },
+
+  "marketingByChannel": {
+    "_endpoint": "GET /marketing/by-channel?from=2026-08-01&to=2026-08-31&shop_id=11",
+    "_note": "ad_spend が全広告費の正式値。join_count は遡及して増えるため月次推移には join_in_period_count を使う。join_rate は分母が来店数なので100%超がありうる。",
+    "data": [
+      {
+        "visit_source_id": "301", "name": "META", "platform_type": "sns",
+        "booking_count": 58, "visit_count": 39, "remaining_count": 8, "cancel_count": 11,
+        "join_count": 24, "join_in_period_count": 22, "join_rate": 0.615,
+        "sales": 1180000, "ad_spend": 420000, "cpa": 10769, "roas": 2.81,
+        "impressions": 214000, "clicks": 3120
+      },
+      {
+        "visit_source_id": "302", "name": "Instagram", "platform_type": "sns",
+        "booking_count": 22, "visit_count": 16, "remaining_count": 3, "cancel_count": 3,
+        "join_count": 10, "join_in_period_count": 10, "join_rate": 0.625,
+        "sales": 480000, "ad_spend": 160000, "cpa": 10000, "roas": 3.0,
+        "impressions": 88000, "clicks": 1240
+      },
+      {
+        "visit_source_id": "303", "name": "Google", "platform_type": "search",
+        "booking_count": 19, "visit_count": 15, "remaining_count": 2, "cancel_count": 2,
+        "join_count": 9, "join_in_period_count": 9, "join_rate": 0.6,
+        "sales": 420000, "ad_spend": 96000, "cpa": 6400, "roas": 4.38,
+        "impressions": 61000, "clicks": 980
+      },
+      {
+        "visit_source_id": "304", "name": "HPB", "platform_type": "portal",
+        "booking_count": 14, "visit_count": 9, "remaining_count": 2, "cancel_count": 3,
+        "join_count": 4, "join_in_period_count": 4, "join_rate": 0.444,
+        "sales": 180000, "ad_spend": 130000, "cpa": 14444, "roas": 1.38,
+        "impressions": 0, "clicks": 0
+      },
+      {
+        "visit_source_id": "305", "name": "チラシ", "platform_type": "offline",
+        "booking_count": 6, "visit_count": 5, "remaining_count": 0, "cancel_count": 1,
+        "join_count": 3, "join_in_period_count": 3, "join_rate": 0.6,
+        "sales": 140000, "ad_spend": 60000, "cpa": 12000, "roas": 2.33,
+        "impressions": 0, "clicks": 0
+      },
+      {
+        "visit_source_id": "306", "name": "既存", "platform_type": null,
+        "booking_count": 412, "visit_count": 398, "remaining_count": 6, "cancel_count": 8,
+        "join_count": 0, "join_in_period_count": 0, "join_rate": 0,
+        "sales": 6280000, "ad_spend": 0, "cpa": 0, "roas": 0,
+        "impressions": 0, "clicks": 0,
+        "_note": "「新規でない媒体」。既存 / 未設定 / 会員 / N分 メニューはマーケ集計から除外する"
+      }
+    ]
+  },
+
+  "marketingByStaff": {
+    "_endpoint": "GET /marketing/by-staff?from=2026-08-01&to=2026-08-31&shop_id=11",
+    "data": [
+      { "staff_id": null, "staff_name": "合計", "is_total": true, "new_booking_count": 119, "new_visit_count": 84, "remaining_count": 15, "cancel_count": 20, "purchase_count": 50, "purchase_amount": 2140000, "purchase_unit_price": 42800, "new_customer_sales_total": 2140000 },
+      { "staff_id": "201", "staff_name": "サンプル太郎", "is_total": false, "new_booking_count": 48, "new_visit_count": 36, "remaining_count": 6, "cancel_count": 6, "purchase_count": 23, "purchase_amount": 984000, "purchase_unit_price": 42782, "new_customer_sales_total": 984000 },
+      { "staff_id": "202", "staff_name": "サンプル花子", "is_total": false, "new_booking_count": 41, "new_visit_count": 29, "remaining_count": 5, "cancel_count": 7, "purchase_count": 17, "purchase_amount": 728000, "purchase_unit_price": 42823, "new_customer_sales_total": 728000 }
+    ]
+  },
+
+  "marketingNewCustomers": {
+    "_endpoint": "GET /marketing/new-customers?from=2026-08-01&to=2026-08-31&shop_id=11&limit=200",
+    "_note": "1人1行。received_at（受付日時）が期間内なら対象＝受付日コホート。来店・入会が翌月でも含む。",
+    "data": [
+      { "customer_id": "cust_0001", "customer_name": "サンプル顧客01", "shop_id": "11", "received_at": "2026-08-03T01:12:00Z", "reserved_at": "2026-08-05T02:00:00Z", "first_appointment_status": "completed", "visited_completed": true, "joined": true,  "ltv": 58400, "visit_source_name": "META" },
+      { "customer_id": "cust_0002", "customer_name": "サンプル顧客02", "shop_id": "11", "received_at": "2026-08-04T05:40:00Z", "reserved_at": "2026-08-06T04:30:00Z", "first_appointment_status": "completed", "visited_completed": true, "joined": false, "ltv": 8800,  "visit_source_name": "META" },
+      { "customer_id": "cust_0003", "customer_name": "サンプル顧客03", "shop_id": "11", "received_at": "2026-08-07T08:05:00Z", "reserved_at": "2026-08-09T03:00:00Z", "first_appointment_status": "cancelled", "visited_completed": false, "joined": false, "ltv": 0,     "visit_source_name": "Instagram", "_note": "実キャンセル" },
+      { "customer_id": "cust_0004", "customer_name": "サンプル顧客04", "shop_id": "11", "received_at": "2026-08-28T11:20:00Z", "reserved_at": "2026-09-02T05:00:00Z", "first_appointment_status": "reserved",  "visited_completed": false, "joined": false, "ltv": 0,     "visit_source_name": "Google", "_note": "未来店。予約済みで来店日が未到来＝キャンセルに数えない" },
+      { "customer_id": "cust_0005", "customer_name": "サンプル顧客05", "shop_id": "12", "received_at": "2026-08-11T02:00:00Z", "reserved_at": "2026-08-12T06:00:00Z", "first_appointment_status": "completed", "visited_completed": true, "joined": true,  "ltv": 91200, "visit_source_name": "HPB" },
+      { "customer_id": "cust_0006", "customer_name": "サンプル顧客06", "shop_id": "12", "received_at": "2026-08-19T07:45:00Z", "reserved_at": "2026-08-21T01:30:00Z", "first_appointment_status": "visited",   "visited_completed": true, "joined": false, "ltv": 12400, "visit_source_name": "チラシ" }
+    ],
+    "meta": { "has_more": true, "next_cursor": "SAMPLE_CURSOR_PAGE_2" }
+  },
+
+  "appointments": {
+    "_endpoint": "GET /appointments?limit=200&cursor=…",
+    "_note": "dismissed_at（予約取り消し＝テスト/無効予約）は cancelled_at（予約キャンセル）と別物。dismissed は新規顧客コホートから完全除外する。",
+    "data": [
+      { "id": "ap_0001", "customer_id": "cust_0001", "shop_id": "11", "forced_link_id": "fl_101", "created_at": "2026-08-03T01:12:00Z", "updated_at": "2026-08-05T02:40:00Z", "cancelled_at": null, "dismissed_at": null },
+      { "id": "ap_0002", "customer_id": "cust_0002", "shop_id": "11", "forced_link_id": "fl_101", "created_at": "2026-08-04T05:40:00Z", "updated_at": "2026-08-06T05:10:00Z", "cancelled_at": null, "dismissed_at": null },
+      { "id": "ap_0003", "customer_id": "cust_0003", "shop_id": "11", "forced_link_id": "fl_102", "created_at": "2026-08-07T08:05:00Z", "updated_at": "2026-08-08T00:10:00Z", "cancelled_at": "2026-08-08T00:10:00Z", "dismissed_at": null },
+      { "id": "ap_0004", "customer_id": "cust_0099", "shop_id": "11", "forced_link_id": null,     "created_at": "2026-08-10T03:00:00Z", "updated_at": "2026-08-10T03:05:00Z", "cancelled_at": null, "dismissed_at": "2026-08-10T03:05:00Z", "_note": "スタッフのテスト予約。集計から完全除外" }
+    ],
+    "meta": { "has_more": true, "next_cursor": "{\"u\":\"2026-08-10T03:05:00Z\",\"i\":4}" }
+  },
+
+  "visitSources": {
+    "_endpoint": "GET /visit-sources",
+    "_note": "channel_group への正規化（Meta / Google / HotPepper / Flyer / その他）の入力。表記ゆれの例を含む。",
+    "data": [
+      { "id": "301", "name": "META", "platform_type": "sns" },
+      { "id": "302", "name": "Instagram", "platform_type": "sns" },
+      { "id": "307", "name": "Facebook", "platform_type": "sns" },
+      { "id": "303", "name": "Google", "platform_type": "search" },
+      { "id": "308", "name": "ホットペッパービューティー", "platform_type": "portal" },
+      { "id": "304", "name": "HPB", "platform_type": "portal" },
+      { "id": "305", "name": "チラシ", "platform_type": "offline" },
+      { "id": "309", "name": "ポスティング", "platform_type": "offline" },
+      { "id": "310", "name": "紹介", "platform_type": "referral" },
+      { "id": "306", "name": "既存", "platform_type": null }
+    ]
+  },
+
+  "errors": {
+    "_note": "api/salonone.js が整形して返すエラー形。実際のメッセージは状況で変わる。",
+    "invalidRequest": { "error": { "code": "invalid_request", "message": "Missing required parameter(s): from, to", "fields": ["from", "to"] } },
+    "notFound":       { "error": { "code": "not_found", "message": "Unknown resource: sales/unknown", "fields": ["resource"] } },
+    "methodNotAllowed": { "error": { "code": "method_not_allowed", "message": "GET only for data resources" } },
+    "upstreamError":  { "error": { "code": "upstream_error", "message": "upstream timeout" } },
+    "userAuthRequired": { "error": { "code": "user_auth_required", "message": "user authentication required" } },
+    "invalidToken":   { "error": { "code": "invalid_token", "message": "access token expired" } },
+    "shopForbidden":  { "error": { "code": "shop_forbidden", "message": "no access to this shop" } },
+    "rateLimited":    { "_http": 429, "_headers": { "retry-after": "14", "x-ratelimit-limit": "60", "x-ratelimit-remaining": "0" }, "error": { "code": "rate_limited", "message": "too many requests" } }
+  }
+}

@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>チャット同期 差分プレビュー（dry-run）</title>
+<style>
+  :root {
+    --bg:#F8F9FB; --card:#fff; --line:#EAECF0; --ink:#111827; --sub:#667085; --mute:#98A2B3;
+    --brand:#E5670A; --brand-bg:#FFF4EC; --ok:#0E9F6E; --ok-bg:#ECFDF5;
+    --warn:#B45309; --warn-bg:#FFFBEB; --dan:#B42318; --dan-bg:#FEF3F2; --info:#175CD3; --info-bg:#EFF6FF;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif; font-size:14px; line-height:1.6; }
+  .wrap { max-width:1040px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:20px; margin:0 0 4px; font-weight:800; }
+  .lead { color:var(--sub); font-size:13px; margin:0 0 20px; }
+  .banner { background:var(--brand-bg); border:1px solid #FDDCC0; color:#93370D;
+    border-radius:12px; padding:10px 14px; font-size:12.5px; font-weight:700; margin-bottom:20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:16px; }
+  .card h2 { font-size:14px; margin:0 0 10px; font-weight:800; }
+  .scenarios { display:flex; flex-wrap:wrap; gap:8px; }
+  button.sc { border:1px solid var(--line); background:#fff; color:var(--ink); border-radius:999px;
+    padding:7px 13px; font-size:12.5px; font-weight:700; cursor:pointer; }
+  button.sc:hover { background:#F2F4F7; }
+  button.sc[aria-pressed="true"] { background:var(--brand); border-color:var(--brand); color:#fff; }
+  .sub { color:var(--sub); font-size:12.5px; margin:8px 0 0; }
+  .stats { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0 0; }
+  .stat { border:1px solid var(--line); border-radius:10px; padding:7px 11px; font-size:12px; background:#FCFCFD; }
+  .stat b { font-size:15px; margin-left:6px; }
+  .sec { margin-top:14px; }
+  .sec h3 { font-size:12.5px; margin:0 0 6px; font-weight:800; letter-spacing:.02em; }
+  ul.rows { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px; }
+  li.row { border:1px solid var(--line); border-radius:10px; padding:9px 12px; font-size:12.5px; background:#FCFCFD; }
+  li.row .who { font-weight:700; }
+  li.row .why { color:var(--sub); }
+  .t { display:inline-block; border-radius:6px; padding:1px 7px; font-size:11px; font-weight:800; margin-right:8px; }
+  .t.add { background:var(--ok-bg); color:var(--ok); }
+  .t.del { background:var(--dan-bg); color:var(--dan); }
+  .t.bind{ background:var(--info-bg); color:var(--info); }
+  .t.rev { background:var(--warn-bg); color:var(--warn); }
+  .t.arc { background:#F2F4F7; color:var(--sub); }
+  .empty { color:var(--mute); font-size:12.5px; }
+  textarea { width:100%; min-height:150px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:12px; border:1px solid var(--line); border-radius:10px; padding:10px; resize:vertical; }
+  .btn { border:1px solid var(--line); background:#fff; border-radius:9px; padding:7px 13px;
+    font-size:12.5px; font-weight:700; cursor:pointer; }
+  .btn.primary { background:var(--brand); border-color:var(--brand); color:#fff; }
+  .err { color:var(--dan); font-size:12.5px; font-weight:700; }
+  details summary { cursor:pointer; font-size:12.5px; font-weight:700; color:var(--sub); }
+  pre { background:#0B1220; color:#D1E0FF; padding:12px; border-radius:10px; overflow:auto; font-size:11.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>チャット同期 差分プレビュー</h1>
+  <p class="lead">「同期を実行したら何が変わるか」だけを表示します（本部 / root 向け）。</p>
+  <div class="banner">
+    🔒 dry-run のみ — このページは本番の Room・メンバー・招待を<b>一切変更しません</b>。
+    サーバーへの書き込み・一括招待は行わず、合成データ（または貼り付けたJSON）を計算するだけです。
+  </div>
+
+  <div class="card">
+    <h2>シナリオ</h2>
+    <div class="scenarios" id="scenarios"></div>
+    <p class="sub" id="scTitle"></p>
+  </div>
+
+  <div class="card" id="result"></div>
+
+  <div class="card">
+    <h2>自分のデータで試す（任意）</h2>
+    <p class="sub" style="margin-top:0">
+      <code>{ rooms, shops, staffs, accounts, hqMembers, events, source, previous }</code> の形の JSON を貼り付けて「この入力で計算」。
+      個人情報を貼らずに済むよう、ID だけの合成データで十分に検証できます。
+    </p>
+    <textarea id="json" spellcheck="false"></textarea>
+    <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+      <button class="btn primary" id="runJson">この入力で計算</button>
+      <button class="btn" id="loadScenario">選択中のシナリオを読み込む</button>
+      <span class="err" id="jsonErr"></span>
+    </div>
+  </div>
+
+  <details class="card">
+    <summary>この画面が使っているロジック</summary>
+    <p class="sub"><code>lib/chat-rooms.js</code> の <code>planChatSync()</code>（純粋関数・テスト済み: <code>tests/chat-rooms.test.js</code>）。
+    同じ計算は CLI でも確認できます: <code>node scripts/chat-sync-demo.mjs</code></p>
+    <pre id="raw"></pre>
+  </details>
+</div>
+
+<script type="module">
+import { planChatSync, summarizePlan, isNoop } from './lib/chat-rooms.js';
+import { SCENARIOS } from './scripts/chat-sync-demo.mjs';
+
+const $ = (id) => document.getElementById(id);
+let current = 'base';
+
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const list = (items, render) => items.length
+  ? `<ul class="rows">${items.map(render).join('')}</ul>`
+  : '<p class="empty">なし</p>';
+
+function section(title, items, render) {
+  if (!items.length) return '';
+  return `<div class="sec"><h3>${esc(title)}</h3>${list(items, render)}</div>`;
+}
+
+function render(input) {
+  const plan = planChatSync(input);
+  const s = summarizePlan(plan);
+  const problems = plan.problems.length
+    ? `<div class="sec"><h3>入力の問題</h3>${list(plan.problems, p =>
+        `<li class="row"><span class="t ${p.level === 'abort' ? 'del' : 'rev'}">${p.level === 'abort' ? '中止' : '保留'}</span>
+         <span class="who">${esc(p.code)}</span> <span class="why">${esc(p.message)}</span></li>`)}</div>`
+    : '';
+
+  if (plan.aborted) {
+    $('result').innerHTML = `<h2>差分</h2>${problems}
+      <p class="err" style="margin-top:12px">⛔ 同期を中止しました。Room・メンバーは一切変更しません。</p>`;
+    $('raw').textContent = JSON.stringify(plan, null, 2);
+    return;
+  }
+
+  $('result').innerHTML = `
+    <h2>差分</h2>
+    <div class="stats">
+      <span class="stat">作成予定 Room<b>${s.createRooms}</b></span>
+      <span class="stat">ID 紐付け<b>${s.bindIds}</b></span>
+      <span class="stat">表示名の更新<b>${s.renames}</b></span>
+      <span class="stat">アーカイブ候補<b>${s.archives}</b></span>
+      <span class="stat">追加予定メンバー<b>${s.addPeople}</b></span>
+      <span class="stat">除外予定メンバー<b>${s.removePeople}</b></span>
+      <span class="stat">要確認<b>${s.reviews}</b></span>
+    </div>
+    ${isNoop(plan) ? '<p class="sub">✅ 変更はありません（同じ同期を繰り返しても増えません）</p>' : ''}
+    ${problems}
+    ${section('作成予定 Room', plan.create, c => `<li class="row"><span class="t add">作成</span>
+      <span class="who">${esc(c.roomId)}</span> <span class="why">kind=${esc(c.kind)} / 名前=${esc(c.name)}${c.storeId ? ` / storeId=${esc(c.storeId)}` : ''}${c.eventId ? ` / eventId=${esc(c.eventId)}` : ''} — ${esc(c.reason)}</span></li>`)}
+    ${section('ID 紐付け予定（既存 Room の ID は変えません）', plan.bind, b => `<li class="row"><span class="t bind">紐付け</span>
+      <span class="who">${esc(b.roomId)}</span> <span class="why">→ ${b.storeId ? `storeId=${esc(b.storeId)}（${esc(b.shopName || '')}）` : `eventId=${esc(b.eventId)}`} / 根拠=${esc(b.matchedBy)}</span></li>`)}
+    ${section('表示名の更新（Room は維持）', plan.rename, r => `<li class="row"><span class="t bind">改名</span>
+      <span class="who">${esc(r.roomId)}</span> <span class="why">「${esc(r.from)}」→「${esc(r.to)}」</span></li>`)}
+    ${section('アーカイブ候補（削除はしません）', plan.archive, a => `<li class="row"><span class="t arc">保管</span>
+      <span class="who">${esc(a.roomId)}</span> <span class="why">${esc(a.reason)}</span></li>`)}
+    ${section('追加予定メンバー', plan.memberAdd, m => `<li class="row"><span class="t add">追加</span>
+      <span class="who">${esc(m.roomId)}</span> <span class="why">${esc(m.staffIds.join('、'))}（${esc(m.reason)}）</span></li>`)}
+    ${section('除外予定メンバー', plan.memberRemove, m => `<li class="row"><span class="t del">除外</span>
+      <span class="who">${esc(m.roomId)}</span> <span class="why">${esc(m.staffIds.join('、'))}（${esc(m.reason)}）</span></li>`)}
+    ${section('判断できない項目（自動では触りません）', plan.review, r => `<li class="row"><span class="t rev">要確認</span>
+      <span class="who">${esc(r.subject)}</span> <span class="why">${esc(r.reason)}${r.staffIds ? ` → ${esc(r.staffIds.join('、'))}` : ''}${r.candidates && r.candidates.length ? `（候補: ${r.candidates.map(c => `${esc(c.name)}#${esc(c.id)}`).join(' / ')}）` : ''}</span></li>`)}
+    ${section('アクセス権限について（メンバー表示の更新とは別処理）', plan.accessNotes, n => `<li class="row"><span class="t rev">権限</span>
+      <span class="who">${esc(n.staffIds.join('、'))}</span> <span class="why">${esc(n.note)}</span></li>`)}
+  `;
+  $('raw').textContent = JSON.stringify(plan, null, 2);
+}
+
+function selectScenario(key) {
+  current = key;
+  [...document.querySelectorAll('button.sc')].forEach(b => b.setAttribute('aria-pressed', String(b.dataset.key === key)));
+  $('scTitle').textContent = SCENARIOS[key].title;
+  $('jsonErr').textContent = '';
+  render(SCENARIOS[key].input);
+}
+
+$('scenarios').innerHTML = Object.entries(SCENARIOS)
+  .map(([k, v]) => `<button class="sc" data-key="${k}" aria-pressed="false">${esc(k)}</button>`).join('');
+$('scenarios').addEventListener('click', e => {
+  const b = e.target.closest('button.sc'); if (b) selectScenario(b.dataset.key);
+});
+$('loadScenario').addEventListener('click', () => {
+  $('json').value = JSON.stringify(SCENARIOS[current].input, null, 2); $('jsonErr').textContent = '';
+});
+$('runJson').addEventListener('click', () => {
+  try { const input = JSON.parse($('json').value || '{}'); $('jsonErr').textContent = ''; render(input); }
+  catch (err) { $('jsonErr').textContent = 'JSON を読めませんでした: ' + err.message; }
+});
+
+selectScenario('base');
+</script>
+</body>
+</html>

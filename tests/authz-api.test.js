@@ -59,6 +59,13 @@ function mockRes() {
   return r;
 }
 const call = async (req) => { const res = mockRes(); await handler({ headers: {}, query: {}, body: {}, ...req }, res); return res; };
+// 本人確認済み root として POST する（Command Center の書き込みは本人確認が必須）
+const asRoot = (body) => {
+  process.env.DASHBOARD_PASSWORD = 'pw-for-test';
+  process.env.AUTH_SALT = 'salt-for-test';
+  const token = hashOwnerToken('__root__', 'pw-for-test', 'salt-for-test');
+  return call({ method: 'POST', body: { owner: '__root__', token, ...body } });
+};
 const FLAGS = 'naoru:cc:flags:v1:preview';            // 環境スコープ済みのキー
 const AUDIT = 'naoru:cc:audit:v1:preview';
 const setMode = (mode) => store.set(FLAGS, JSON.stringify({ cc_all: true, cc_approval: true, cc_agentlog: true, cc_authz: mode }));
@@ -66,9 +73,9 @@ const auditRows = () => { try { return JSON.parse(store.get(AUDIT) || '[]'); } c
 const denies = () => auditRows().filter(e => e.action === 'authz_deny');
 
 describe('cc_authz - off（既定）: 何も変わらない', () => {
-  it('認可ヘッダを付けず、拒否も記録もしない', async () => {
+  it('本人確認済みなら認可ヘッダを付けず、拒否も記録もしない', async () => {
     setMode('off');
-    const res = await call({ method: 'POST', body: { type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' } } });
+    const res = await asRoot({ type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' } });
     expect(res.statusCode).toBe(200);
     expect(res.headers['X-CC-Authz']).toBeUndefined();   // ← ヘッダ自体が付かない
     expect(denies()).toHaveLength(0);
@@ -128,31 +135,39 @@ describe('常時強制ゲート - 制御面の変更', () => {
     expect(rows.length).toBeGreaterThan(0);
     expect(rows[rows.length - 1].after.code).toBe('unverified_admin');
   });
-  it('承認の閲覧や提案の作成は止めない（制御面ではない）', async () => {
+  it('閲覧(GET)は止めない。書き込みは本人確認が要る', async () => {
     setMode('off');
     expect((await call({ method: 'GET', query: { type: 'approval' } })).statusCode).toBe(200);
-    const res = await call({ method: 'POST', body: { type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' } } });
-    expect(res.statusCode).toBe(200);
+    // 名乗りだけの提案作成は拒否（新APIなので互換のために開ける理由がない）
+    const bad = await call({ method: 'POST', body: { type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' } } });
+    expect(bad.statusCode).toBe(403);
+    expect(bad.body.code).toBe('unverified');
+    // 本人確認済みなら通る
+    expect((await asRoot({ type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' } })).statusCode).toBe(200);
   });
 });
 
 describe('cc_authz - log: 計測するがブロックしない', () => {
-  it('本人確認できない書き込みでも成功する（既存を壊さない）', async () => {
+  it('本人確認済みの書き込みは log でも止まらない', async () => {
     setMode('log');
-    const res = await call({ method: 'POST', body: { type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: '検証' } } });
+    const res = await asRoot({ type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: '検証' } });
     expect(res.statusCode).toBe(200);           // ← ブロックしない
     expect(res.body.ok).toBe(true);
   });
-
-  it('拒否されるべき操作が監査ログに残る', async () => {
+  it('🔴 本人確認できない書き込みは log でも通さない（Command Center は新APIのため）', async () => {
     setMode('log');
-    // 制御面ではない操作（提案の作成）で観測の動きを見る。
-    // フラグ変更は常時強制ゲートの対象なので、ここでは使わない。
+    const res = await call({ method: 'POST', body: { type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' } } });
+    expect(res.statusCode).toBe(403);
+    expect(res.body.code).toBe('unverified');
+  });
+
+  it('拒否された書き込みは監査ログに残る', async () => {
+    setMode('log');
     await call({ method: 'POST', body: { type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' }, actor: { role: 'staff' } } });
     const d = denies();
     expect(d.length).toBeGreaterThan(0);
     expect(d[0].entity).toBe('authz');
-    expect(d[0].note).toBe('unauthenticated');   // 理由
+    expect(d[d.length - 1].after.code).toBe('unverified');
   });
 
   it('X-CC-Authz ヘッダで結果が分かる', async () => {
@@ -187,7 +202,7 @@ describe('cc_authz - log: 計測するがブロックしない', () => {
 describe('cc_authz - warn: 警告するがブロックしない', () => {
   it('成功しつつ警告ヘッダが返る', async () => {
     setMode('warn');
-    const res = await call({ method: 'POST', body: { type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' } } });
+    const res = await asRoot({ type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' } });
     expect(res.statusCode).toBe(200);            // ← まだブロックしない
     expect(res.headers['X-CC-Authz']).toMatch(/^warn:/);
   });
@@ -196,14 +211,12 @@ describe('cc_authz - warn: 警告するがブロックしない', () => {
 describe('cc_authz - enforce: ここで初めて拒否する', () => {
   it('本人確認できない書き込みは 403', async () => {
     setMode('enforce');
-    // 制御面（フラグ変更）は常時強制ゲートが先に効くため code は unverified_admin。
     const flag = await call({ method: 'POST', body: { type: 'ccflags', action: 'set', key: 'cc_approval', value: true } });
     expect(flag.statusCode).toBe(403);
-    expect(flag.body.code).toBe('unverified_admin');
-    // 制御面でない操作は cc_authz=enforce が拒否する。
+    expect(flag.body.code).toBe('unverified_admin');   // 制御面は管理者が要る
     const res = await call({ method: 'POST', body: { type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' } } });
     expect(res.statusCode).toBe(403);
-    expect(res.body.code).toBe('unauthenticated');
+    expect(res.body.code).toBe('unverified');          // 書き込みは本人確認が要る
   });
 
   it('確認できた root は通る', async () => {
@@ -243,11 +256,10 @@ describe('cc_authz - enforce: ここで初めて拒否する', () => {
     } finally { delete process.env.CC_AGENT_TOKEN; }
   });
 
-  it('戻せる: enforce → off で即座に元どおり（観測対象の操作）', async () => {
+  it('戻せる: enforce → off で本人確認済みの操作は元どおり通る', async () => {
     setMode('enforce');
-    expect((await call({ method: 'POST', body: { type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' } } })).statusCode).toBe(403);
     setMode('off');
-    expect((await call({ method: 'POST', body: { type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' } } })).statusCode).toBe(200);
+    expect((await asRoot({ type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' } })).statusCode).toBe(200);
   });
   it('🔴 制御面（フラグ変更）は off に戻しても素通しにならない', async () => {
     setMode('off');
@@ -288,7 +300,7 @@ describe('cc_authz - log: ALLOW も DENY も記録する', () => {
 
   it('記録は「誰が・どのrole・どのtenant・どの店舗・何を・ALLOW/DENY」を含む', async () => {
     setMode('log');
-    await call({ method: 'POST', body: { type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' }, actor: { id: 'u1', name: 'テスト太郎', role: 'staff', shops: ['恵比寿'] } } });
+    await asRoot({ type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' }, shop: '恵比寿' });
     const rows = [...allows(), ...denies()];
     expect(rows.length).toBeGreaterThan(0);
     const rec = rows[rows.length - 1].after;
@@ -298,9 +310,9 @@ describe('cc_authz - log: ALLOW も DENY も記録する', () => {
     expect(['ALLOW', 'DENY']).toContain(rec.decision);
   });
 
-  it('log モードでは decision が DENY でもリクエストは成功する（制御面を除く）', async () => {
+  it('log モードでは判定結果がヘッダに出る', async () => {
     setMode('log');
-    const res = await call({ method: 'POST', body: { type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' }, actor: { role: 'staff', id: 'u2' } } });
+    const res = await asRoot({ type: 'approval', action: 'create', approval: { kind: 'meta_pause', title: 'x' } });
     expect(res.statusCode).toBe(200);
     expect(String(res.headers['X-CC-Authz'])).toMatch(/^log:/);
   });

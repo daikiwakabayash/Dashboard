@@ -385,22 +385,30 @@ export default async function handler(req, res) {
     const CONTROL_ACTIONS = new Set(['flag.change', 'killswitch.engage', 'killswitch.release',
                                      'approval.approve', 'approval.reject', 'approval.execute']);
     const ccActionNow = ccActionFor(ccType, body);
-    if (req.method === 'POST' && CONTROL_ACTIONS.has(ccActionNow)) {
+    // Command Center の書き込みは**すべて**本人確認を要求する。
+    // これらは今回追加する新しいAPIで、旧クライアントは存在しない＝互換のために
+    // 開けておく理由がない。開けたままだと、誰でも承認提案や監査ログを書き込める。
+    // ・書き込み全般 … 本人確認済みであること（AIエージェントのトークンも可）
+    // ・制御面(CONTROL_ACTIONS) … さらに管理者(root/本部)であること
+    if (req.method === 'POST') {
       const verified = await ccVerify(ccActionNow);
-      // ⚠️ 申告値(body.actor)は使わない。名乗るだけで通ってはいけない操作。
-      const okRole = !!verified && verified.verified === true && ['root', 'admin'].includes(verified.role);
+      // ⚠️ 申告値(body.actor)は使わない。名乗るだけで通ってはいけない。
+      const isVerified = !!verified && verified.verified === true;
+      const isAdmin = isVerified && ['root', 'admin'].includes(verified.role);
+      const needsAdmin = CONTROL_ACTIONS.has(ccActionNow);
+      const okRole = needsAdmin ? isAdmin : isVerified;
       if (!okRole) {
         try {
           const e = buildAuditEntry({
             action: 'authz_deny', entity: 'authz', entityId: ccActionNow,
             actor: verified || ccActor, source: (verified || ccActor).source,
-            note: 'control_action_requires_verified_admin',
-            after: { action: ccActionNow, decision: 'DENY', code: 'unverified_admin', mode: 'always' },
+            note: needsAdmin ? 'control_action_requires_verified_admin' : 'cc_write_requires_verified_actor',
+            after: { action: ccActionNow, decision: 'DENY', code: needsAdmin ? 'unverified_admin' : 'unverified', mode: 'always' },
           });
           if (e.ok && hasKV) await kvAppendJson(ccKey(AUDIT_KEY), e.entry, AUDIT_CAP);
         } catch (_) { /* 記録失敗で拒否は覆さない */ }
-        return res.status(403).json({ ok: false, error: 'forbidden', code: 'unverified_admin',
-          message: 'この操作には本人確認済みの管理者権限が必要です' });
+        return res.status(403).json({ ok: false, error: 'forbidden', code: needsAdmin ? 'unverified_admin' : 'unverified',
+          message: needsAdmin ? 'この操作には本人確認済みの管理者権限が必要です' : 'この操作には本人確認が必要です' });
       }
       ccActor = verified;
     }

@@ -1439,6 +1439,12 @@
         const soBearerUrl = (url) => {
           if (typeof url !== 'string') return false;
           if (url.indexOf('/api/settlement-store') === 0 || url.indexOf('/api/settlement-owners') === 0) return true;
+          // Command Center の認可（cc_authz）で「誰か」をサーバー側が確かめられるようにする。
+          // plan-store は Cache-Control: no-store なので、Authorization を付けても
+          // SalonOne のようなキャッシュ失効の問題は起きない。
+          // ⚠️ サーバー側は Bearer を最後に試す（lib/actor.js）。ポーリングのたびに
+          //    上流 /me を叩かないための設計で、検証結果も60秒キャッシュしている。
+          if (url.indexOf('/api/plan-store') === 0) return true;
           if (url.indexOf(SALONONE_API_URL) === 0) return url.indexOf('resource=me') !== -1;
           return false;
         };
@@ -2314,7 +2320,13 @@
                 source: 'ui',
             });
             const ccPost = async (body) => {
-                const r = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, actor: ccActor() }) });
+                // owner/token はサーバー側の本人確認用（lib/actor.js がハッシュ照合する）。
+                // SSOセッションでは Authorization: Bearer が fetch インターセプタで自動付与される。
+                // actor は「名乗り」であって信用されない。認可が有効なときはサーバーが確かめる。
+                const r = await fetch('/api/plan-store', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...body, actor: ccActor(), owner: authState.owner || undefined, token: authState.token || undefined }),
+                });
                 return await r.json().catch(() => ({ ok: false, error: 'bad_response' }));
             };
 

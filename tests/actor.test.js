@@ -1,5 +1,9 @@
-import { describe, it, expect } from 'vitest';
-import { resolveActor, safeEqual, bearerOf } from '../lib/actor.js';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { resolveActor, safeEqual, bearerOf, _clearBearerCache } from '../lib/actor.js';
+
+// Bearer 検証の結果はトークン単位でキャッシュされる（本番では同じトークン＝同じ人なので正しい）。
+// テスト間で持ち越さないよう毎回クリアする。
+beforeEach(() => _clearBearerCache());
 
 const req = (over = {}) => ({ headers: {}, body: {}, ...over });
 
@@ -108,5 +112,45 @@ describe('actor - cron とオーナートークン', () => {
     });
     expect(a.role).toBe('admin');
     expect(a.shops).toBeNull();
+  });
+});
+
+
+describe('actor - ポーリングで上流を叩きすぎない', () => {
+  it('同じBearerの連続リクエストで /me は1回しか呼ばれない', async () => {
+    const spy = vi.fn(async () => ({ root: true, role: 'brand_admin', shopNames: [], userId: '7', loginId: 'u' }));
+    const req = { headers: { authorization: 'Bearer same-token' }, body: {} };
+    for (let i = 0; i < 10; i++) await resolveActor(req, { env: {}, verifySalonOneBearer: spy });
+    expect(spy).toHaveBeenCalledTimes(1);          // ← SalonOne のレート制限(60/分)を守るため
+  });
+
+  it('別のBearerなら別途検証する', async () => {
+    const spy = vi.fn(async () => ({ root: true, role: 'brand_admin', shopNames: [], userId: '7', loginId: 'u' }));
+    await resolveActor({ headers: { authorization: 'Bearer aaa' }, body: {} }, { env: {}, verifySalonOneBearer: spy });
+    await resolveActor({ headers: { authorization: 'Bearer bbb' }, body: {} }, { env: {}, verifySalonOneBearer: spy });
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it('ローカルで判定できる場合は /me を呼ばない（rootトークン）', async () => {
+    const spy = vi.fn(async () => ({ root: true, role: 'brand_admin', shopNames: [] }));
+    const a = await resolveActor(
+      { headers: { authorization: 'Bearer x' }, body: { owner: '__root__', token: 'rt' } },
+      { env: {}, rootToken: () => 'rt', verifySalonOneBearer: spy });
+    expect(a.role).toBe('root');
+    expect(spy).not.toHaveBeenCalled();            // ← ネットワークを使わない
+  });
+
+  it('cron も /me を呼ばない', async () => {
+    const spy = vi.fn(async () => ({ root: true, role: 'brand_admin' }));
+    const a = await resolveActor({ headers: { authorization: 'Bearer cs' }, body: {} }, { env: { CRON_SECRET: 'cs' }, verifySalonOneBearer: spy });
+    expect(a.source).toBe('cron');
+    expect(spy).not.toHaveBeenCalled();            // cronの秘密で /me を叩かない
+  });
+
+  it('エージェントトークンも /me を呼ばない', async () => {
+    const spy = vi.fn(async () => ({ root: true, role: 'brand_admin' }));
+    const a = await resolveActor({ headers: { 'x-cc-agent-token': 'ag', authorization: 'Bearer x' }, body: {} }, { env: { CC_AGENT_TOKEN: 'ag' }, verifySalonOneBearer: spy });
+    expect(a.source).toBe('agent');
+    expect(spy).not.toHaveBeenCalled();
   });
 });

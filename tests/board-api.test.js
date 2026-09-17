@@ -33,6 +33,13 @@ function installFetchMock() {
           store.set(key, JSON.stringify(m));
           return ok({ result: 1 });
         }
+        if (script.includes('curv~=tonumber')) {      // compare-and-set
+          let curv = 0;
+          try { const d = JSON.parse(store.get(key) || 'null'); if (d && d._v) curv = Number(d._v) || 0; } catch {}
+          if (curv !== Number(args[0])) return ok({ result: -1 });
+          store.set(key, args[1]);
+          return ok({ result: 1 });
+        }
         if (script.includes('arr[#arr+1]')) {         // 配列への追記
           let arr = [];
           try { arr = JSON.parse(store.get(key) || '[]') || []; } catch { arr = []; }
@@ -298,5 +305,98 @@ describe('掲示板 - 既存の操作が壊れていない', () => {
 
   it('不正なアクションは 400', async () => {
     expect((await post({ action: 'drop_everything' })).statusCode).toBe(400);
+  });
+});
+
+
+// ── 「読んでから書くまでの窓」の再現 ──
+// expectedVersion は「読んだ時点の版」しか見ないため、2つのリクエストが
+// ほぼ同時に読んだ場合はどちらも検査を通過してしまう。その窓を CAS が塞ぐ。
+describe('掲示板 - 同時投稿の競合窓（compare-and-set）', () => {
+  it('読んだ直後に他の人が書き込んでも、投稿が消えずに両方残る', async () => {
+    await post(mkPost('base', '既存'));
+
+    // ハンドラが CAS を実行する直前に、別の投稿を割り込ませる（＝競合を人工的に作る）
+    const orig = globalThis.fetch;
+    let injected = false;
+    globalThis.fetch = vi.fn(async (url, opts) => {
+      if (String(url) === KV && !injected) {
+        const cmd = JSON.parse(opts.body);
+        if (cmd[0] === 'EVAL' && String(cmd[1]).includes('curv~=tonumber')) {
+          injected = true;
+          // 割り込み: 別の人の投稿を先に確定させ、版を進める
+          const cur = JSON.parse(store.get('naoru:board:v1'));
+          store.set('naoru:board:v1', JSON.stringify({
+            posts: [{ id: 'rival', clientId: 'rv', text: '割り込んだ投稿' }, ...cur.posts],
+            reads: cur.reads || {}, _v: (cur._v || 0) + 1,
+          }));
+        }
+      }
+      return orig(url, opts);
+    });
+
+    const r = await post(mkPost('mine', '私の投稿'));
+    globalThis.fetch = orig;
+
+    expect(r.statusCode).toBe(200);
+    const after = await get();
+    const texts = after.body.posts.map(p => p.text);
+    expect(texts).toContain('割り込んだ投稿');   // 先に入った方
+    expect(texts).toContain('私の投稿');         // ← CASが無ければここで消えていた
+    expect(texts).toContain('既存');
+  });
+
+  it('版が合わなければ書き込まない（CASが効いている）', async () => {
+    await post(mkPost('a', 'x'));
+    const before = rawBoard();
+    // 期待版をわざとずらして CAS を直接叩く
+    const res = await call({ method: 'POST', body: { type: 'board', action: 'pin', id: 'nope', expectedVersion: 999 } });
+    expect(res.statusCode).toBe(409);
+    expect(rawBoard()).toEqual(before);
+  });
+
+  it('3回やり直しても取れなければ 409 を返す（黙って失敗しない）', async () => {
+    await post(mkPost('base', 'x'));
+    const orig = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url, opts) => {
+      if (String(url) === KV) {
+        const cmd = JSON.parse(opts.body);
+        if (cmd[0] === 'EVAL' && String(cmd[1]).includes('curv~=tonumber')) {
+          return { ok: true, status: 200, json: async () => ({ result: -1 }), headers: new Map() };  // 常に競合
+        }
+      }
+      return orig(url, opts);
+    });
+    const r = await post(mkPost('mine', 'y'));
+    globalThis.fetch = orig;
+    expect(r.statusCode).toBe(409);
+    expect(r.body.error).toBe('conflict');
+    expect((await get()).body.posts.map(p => p.text)).not.toContain('y');
+  });
+
+  it('やり直しの最中でも clientId が効いて二重に入らない', async () => {
+    await post(mkPost('base', 'x'));
+    const orig = globalThis.fetch;
+    let fails = 0;
+    globalThis.fetch = vi.fn(async (url, opts) => {
+      if (String(url) === KV) {
+        const cmd = JSON.parse(opts.body);
+        if (cmd[0] === 'EVAL' && String(cmd[1]).includes('curv~=tonumber') && fails < 1) {
+          fails++;
+          // 1回目は「自分の投稿が既に入った状態」にしてから競合を返す（再送の途中で成功していた場合）
+          const cur = JSON.parse(store.get('naoru:board:v1'));
+          store.set('naoru:board:v1', JSON.stringify({
+            posts: [{ id: 'srv', clientId: 'mine', text: 'z' }, ...cur.posts], reads: cur.reads || {}, _v: (cur._v || 0) + 1,
+          }));
+          return { ok: true, status: 200, json: async () => ({ result: -1 }), headers: new Map() };
+        }
+      }
+      return orig(url, opts);
+    });
+    const r = await post(mkPost('mine', 'z'));
+    globalThis.fetch = orig;
+    expect(r.body.ok).toBe(true);
+    expect(r.body.duplicate).toBe(true);                        // 既に入っていたと気づく
+    expect((await get()).body.posts.filter(p => p.text === 'z')).toHaveLength(1);   // 1件だけ
   });
 });

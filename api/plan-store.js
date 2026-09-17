@@ -141,6 +141,16 @@ async function kvEval(script, keys, args) {
 }
 // JSON配列キーに1要素をアトミックに追記し、末尾cap件へトリム（read-modify-writeの競合＝同時送信で消えるのを防ぐ）。
 const KV_APPEND_LUA = "local raw=redis.call('GET',KEYS[1]) local arr if raw then arr=cjson.decode(raw) else arr={} end arr[#arr+1]=cjson.decode(ARGV[1]) local cap=tonumber(ARGV[2]) if #arr>cap then local res={} local s=#arr-cap+1 for i=s,#arr do res[#res+1]=arr[i] end arr=res end redis.call('SET',KEYS[1],cjson.encode(arr)) return #arr";
+// 版(_v)を照合してから書き込む compare-and-set。
+// 読んでから書くまでの間に他のリクエストが書いていたら -1 を返して書かない。
+// これが無いと、同時投稿が数百ミリ秒の窓で互いを踏む（expectedVersion だけでは
+// 「読んだ時点の版」しか見ないため、この窓は閉じられない）。
+const KV_CAS_LUA = "local raw=redis.call('GET',KEYS[1]) local curv=0 if raw then local ok,d=pcall(cjson.decode,raw) if ok and type(d)=='table' and d._v then curv=tonumber(d._v) or 0 end end if curv~=tonumber(ARGV[1]) then return -1 end redis.call('SET',KEYS[1],ARGV[2]) return 1";
+async function kvCasSet(key, expectedV, value) {
+  const r = await kvEval(KV_CAS_LUA, [key], [String(expectedV), JSON.stringify(value)]);
+  return Number(r) === 1;
+}
+
 // 既読マップの1キーだけを「大きい方を採用」で原子的に更新する。
 // 既読は別キーなので、仮にこれが失敗して read-modify-write に落ちても投稿は壊れない。
 const KV_BUMP_READ_LUA = "local raw=redis.call('GET',KEYS[1]) local m={} if raw then local ok,d=pcall(cjson.decode,raw) if ok and type(d)=='table' then m=d end end local k=ARGV[1] local t=tonumber(ARGV[2]) local cur=tonumber(m[k]) or 0 if t>cur then m[k]=t end redis.call('SET',KEYS[1],cjson.encode(m)) return 1";
@@ -1009,9 +1019,35 @@ export default async function handler(req, res) {
       const posts = Array.isArray(cur.posts) ? cur.posts : [];
       const legacyReads = (cur.reads && typeof cur.reads === 'object') ? cur.reads : {};
       const version = versionOf(cur);
-      // 投稿側を書き換えるときだけ呼ぶ。reads には触れず、版を1つ進める。
+      // 投稿側の書き換えはここだけを通す。reads には触れず、版を1つ進める。
+      // KV では compare-and-set で書く。読んでから書くまでの間に他の人が書いていたら
+      // **最新を読み直して同じ操作をやり直す**（最大3回）。これで同時投稿が消えない。
+      // ⚠️ Supabase/GAS では CAS が使えないため従来どおりの書き込みになる（§既知の制約）。
+      const mutatePosts = async (applyFn) => {
+        if (!hasKV) {                                        // 非KV: 従来どおり（本番では到達しない）
+          await blobSet(BOARD_KEY, { posts: applyFn(posts), reads: legacyReads, _v: version + 1 }, hasKV, hasSB, gas);
+          return { ok: true, atomic: false };
+        }
+        let base = { posts, legacyReads, version };
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const next = applyFn(base.posts);
+          if (next === null) return { ok: false, reason: 'not_found' };   // 対象が消えていた
+          const done = await kvCasSet(BOARD_KEY, base.version, { posts: next, reads: base.legacyReads, _v: base.version + 1 });
+          if (done) return { ok: true, atomic: true, posts: next };
+          const fresh = (await blobGet(BOARD_KEY, hasKV, hasSB, gas)) || {};   // 誰かが先に書いた→読み直す
+          base = {
+            posts: Array.isArray(fresh.posts) ? fresh.posts : [],
+            legacyReads: (fresh.reads && typeof fresh.reads === 'object') ? fresh.reads : {},
+            version: versionOf(fresh),
+          };
+        }
+        return { ok: false, reason: 'conflict' };
+      };
+      // 既存の呼び出し形（配列をそのまま渡す）を保つための薄い包み。
       const savePosts = async (nextPosts) => {
-        await blobSet(BOARD_KEY, { posts: nextPosts, reads: legacyReads, _v: version + 1 }, hasKV, hasSB, gas);
+        const r = await mutatePosts(() => nextPosts);
+        if (!r.ok) throw new Error('board_write_conflict');
+        return r;
       };
       // 投稿者・コメント者・リアクションした人の既読も進める（別キーなので投稿を巻き込まない）。
       const bumpActor = async (staffId) => {
@@ -1058,12 +1094,19 @@ export default async function handler(req, res) {
           pinned: false,
           createdAt: new Date().toISOString(),
         };
-        const r = upsertPost(posts, rec, BOARD_POST_CAP);
-        if (!r.added) {                                       // 再送＝既にある。通知も送り直さない
+        if (!upsertPost(posts, rec, BOARD_POST_CAP).added) {  // 再送＝既にある。通知も送り直さない
           await bumpActor(rec.authorId);
-          return res.status(200).json({ ok: true, post: r.existing, duplicate: true });
+          return res.status(200).json({ ok: true, post: upsertPost(posts, rec, BOARD_POST_CAP).existing, duplicate: true });
         }
-        await savePosts(r.posts);
+        // 再試行のたびに最新の posts へ当て直す。clientId があるので二重に入らない。
+        let dup = false;
+        const w = await mutatePosts((cur) => {
+          const u = upsertPost(cur, rec, BOARD_POST_CAP);
+          if (!u.added) { dup = true; return cur; }
+          return u.posts;
+        });
+        if (!w.ok) return res.status(409).json({ ok: false, error: 'conflict', message: '他の投稿と重なりました。もう一度お試しください。' });
+        if (dup) { await bumpActor(rec.authorId); return res.status(200).json({ ok: true, post: rec, duplicate: true }); }
         await bumpActor(rec.authorId);
         sendPush(hasKV, hasSB, gas, { kind: 'board', title: 'NAORU', body: `${rec.important ? '❗' : '📣'} 重要掲示板／${title || rec.authorName || 'お知らせ'}：${text}`.slice(0, 150) || '新しい掲示があります', url: '/?tab=board' });
         return res.status(200).json({ ok: true, post: rec });
@@ -1109,16 +1152,27 @@ export default async function handler(req, res) {
           mentions: (Array.isArray(c.mentions) ? c.mentions : []).filter(x => x && x.id && x.name).map(x => ({ id: String(x.id).slice(0, 64), name: String(x.name).slice(0, 80) })).slice(0, 30),
           createdAt: new Date().toISOString(),
         };
-        const r = upsertComment(posts, String(body.id), rec, 500);
-        if (!r.target) return res.status(404).json({ ok: false, error: 'not_found' });
-        if (!r.added) {                                        // 再送＝既にある
+        const probe = upsertComment(posts, String(body.id), rec, 500);
+        if (!probe.target) return res.status(404).json({ ok: false, error: 'not_found' });
+        if (!probe.added) {                                    // 再送＝既にある
           await bumpActor(rec.fromStaffId);
-          return res.status(200).json({ ok: true, comment: r.existing, duplicate: true });
+          return res.status(200).json({ ok: true, comment: probe.existing, duplicate: true });
         }
-        await savePosts(r.posts);
+        let cmDup = false, target = probe.target;
+        const w = await mutatePosts((cur) => {
+          const u = upsertComment(cur, String(body.id), rec, 500);
+          if (!u.target) return null;                          // 投稿が消えていた
+          if (!u.added) { cmDup = true; return cur; }
+          target = u.target;
+          return u.posts;
+        });
+        if (!w.ok) {
+          if (w.reason === 'not_found') return res.status(404).json({ ok: false, error: 'not_found' });
+          return res.status(409).json({ ok: false, error: 'conflict', message: '他の書き込みと重なりました。もう一度お試しください。' });
+        }
+        if (cmDup) { await bumpActor(rec.fromStaffId); return res.status(200).json({ ok: true, comment: rec, duplicate: true }); }
         await bumpActor(rec.fromStaffId);
         // 通知: 投稿者＋メンション＋（返信なら親コメント投稿者）へ
-        const target = r.target;
         const set = new Set();
         if (target.authorId && String(target.authorId) !== rec.fromStaffId) set.add(String(target.authorId));
         rec.mentions.forEach(m => { if (m.id && m.id !== rec.fromStaffId && m.id !== '__all__') set.add(String(m.id)); });

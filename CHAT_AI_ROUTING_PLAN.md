@@ -1,200 +1,180 @@
-# CHAT_AI_ROUTING_PLAN — 社内チャットのAI宛先解決 設計
+# CHAT_AI_ROUTING_PLAN
 
-**ブランチ**: `feature/chat-ai-routing` / **状態**: 設計＋ロジック＋テストのみ（画面は未着手）
-**本番影響**: なし（`index.html` は1行も変更していない）
-
----
-
-## 0. 一言でいうと
-
-「東京の店舗全部に、恵比寿西口は除いて送っておいて」と**話し言葉で頼めるチャット**を作る。
-ただし **AIに送信させない**。AIがやるのは「宛先の下書き」まで。誰に届くかを決めるのは
-機械的なルール（`lib/chat-recipients.js`）で、最後に**人が確認して押す**。
+NAORU Dashboard の社内チャットを「AI対応・自然言語宛先指定・自動グループ生成」へ拡張する全体計画。
+**このブランチ（`feature/chat-ai-routing`）は main / Production に自動マージしない。**
 
 ---
 
-## 1. なぜこの形にするか
+## 0. 目的（最終ゴール）
 
-チャットの誤送信は**取り消せない**。他店の給与の話が別の店舗に流れた、退職予定者に
-全社向けの告知が届いた、といった事故は謝って済む範囲を超える。
+100〜200店舗規模になっても、本部 / オーナー / 院長（マネージャー）/ スタッフが LINE 等の外部ツールを使わず、
+Dashboard 内の Chat を社内コミュニケーションの中心として使える状態にする。
 
-一方で、店舗数が100〜200になると「誰に送るか」を手で選ぶのは現実的でない。
-だから**解釈はAIに任せ、決定は機械に任せ、実行は人に任せる**という3分割にする。
+さらに **SalonOne（店舗 / スタッフ / イベント情報）→ Chat** を自動連携し、
+店舗やイベントの発生に応じて必要な Chat Room を自動生成・更新する。
 
-| 役割 | 担当 | 根拠 |
-|---|---|---|
-| 話し言葉を読み取る | AI | 揺れのある日本語を扱えるのはAIだけ |
-| 誰に届くかを決める | `lib/chat-recipients.js`（純粋関数） | 毎回同じ答えになる。テストできる。監査で再現できる |
-| 送る | 人（ボタン） | 取り消せない操作の責任は人が持つ |
+将来的に SalonOne AI として他社提供（White Label）できるよう、**すべて `tenant_id` 前提**で設計する。
 
 ---
 
-## 2. 全体の流れ
+## 1. 現状（Before）
+
+| 項目 | 現状 |
+|------|------|
+| 利用可能ロール | `chat` タブは `rootOnly: true`（root / hq のみ） |
+| Room 種別 | `announce` / `store` / `group` / `dm` |
+| store room の ID | `store_<店舗名>`（**店舗名が主キー**＝改名でルームが分裂する） |
+| メンバー | `store` は members 空のまま「店舗名の部分一致」で可視判定 |
+| 認可 | **UI レベルのみ**。`/api/plan-store?type=chat` はサーバー認証なし（`root:true` はクライアント申告） |
+| AI | `@AI` or 「AIに質問」ボタン →`chatAiReply`。出典表示・Feedback なし |
+| 宛先 | 手動でルーム選択のみ。複数宛先・自然言語指定なし |
+| 監査 | なし |
+| テナント | 単一（キーは `naoru:` 固定プレフィクス） |
+
+## 2. 目標（After）
+
+| 項目 | 目標 |
+|------|------|
+| 利用可能ロール | root / hq / owner / manager / staff |
+| Room の主キー | `store_id` / `event_id`（**名称変更でルームを維持**） |
+| メンバー | SalonOne 由来の `staff_id` を実体として同期（異動・退職・配属変更に追従） |
+| 認可 | `lib/chat-authz.js` を唯一の判断源とし、**フロント表示とサーバー側 API の両方で同じ関数**を通す |
+| AI | `@AI` メンション・AI Question Mode・出典 / 更新日時 / Confidence・本部エスカレ・👍👎修正 Feedback |
+| 宛先 | 自然言語 → Intent Parse → Resolve → **Preview → 人間承認 → 送信** |
+| 監査 | 全送信に `CHAT_AUDIT_MODEL.md` の 20 フィールドを記録 |
+| テナント | 全キー・全レコードに `tenant_id`。クロステナント参照は構造的に不可能 |
+
+---
+
+## 3. 設計原則（Non-negotiable）
+
+1. **AI は直接送信しない。** Resolver の出力は必ず Preview を経由し、人間が `[送信]` を押して初めて送信される。
+2. **AI Agent は人間の権限を超える Recipient を作れない。** Resolver は actor の authz スコープで必ず後段フィルタされる。
+3. **AI Agent 自身は承認者になれない。** `approved_by` に AI の actor_id は入らない。
+4. **staff_id / store_id が正。** 表示名（氏名・店舗名）は解決の入力にしか使わない。同姓同名は必ず人間に確認する。
+5. **サーバー側が最終防衛線。** フロントのフィルタは UX であり、セキュリティ境界ではない。
+6. **既存データを壊さない。** 既存の `naoru:chat:*` blob をそのまま読め、旧クライアントも動く（後方互換）。
+7. **NAORU 固有名を core logic にハードコードしない。** 店舗名・法人名・ロール名の日本語ラベルは表示層 or 設定に置く。
+8. **index.html の編集は最小限。** ロジックは `lib/*.js` に出し、`index.html` は薄い呼び出しに留める（Meta 開発とのコンフリクト最小化）。
+
+---
+
+## 4. モジュール構成（新規追加）
 
 ```
-  ① スタッフが話し言葉で頼む
-     「東京の店舗全部に、恵比寿西口は除いて“明日は10時開店”って送って」
-            ↓
-  ② AI が**構造**へ変換（送信はしない）
-     { scope:'area', areas:['東京'], exclude:{shops:['恵比寿西口']}, raw:'…' }
-            ↓
-  ③ resolveRecipients() が確定させる（lib/chat-recipients.js）
-     ・名前 → store_id / staff_id に変換
-     ・曖昧（同名2人、部分一致2件）→ **止める**
-     ・依頼者の権限を超える宛先 → 落として報告
-            ↓
-  ④ 送信前プレビューを人に見せる
-     「店舗2件（恵比寿、渋谷）/ 除外 恵比寿西口 / 28名に届きます」
-            ↓
-  ⑤ 人が押す → 送信 → 監査記録（lib/chat-audit.js）
+lib/
+  chat-authz.js        # 権限の唯一の判断源（純粋関数・tenant対応）        … Phase 1
+  chat-identity.js     # リクエスト → 検証済み actor（SSO Bearer / owner token）… Phase 1
+  chat-rooms.js        # store/event Room のライフサイクル・membership 同期   … Phase 2
+  chat-recipients.js   # Recipient 集合の解決・展開・重複排除・除外          … Phase 3
+  chat-resolver.js     # 自然言語 → Intent → Recipient（決定的部分）         … Phase 5
+  chat-audit.js        # 監査レコードの生成・検証                            … Phase 3
+  chat-schedule.js     # 予約 / 定期送信                                     … Phase 6
+  chat-smartgroup.js   # 条件グループ（Dynamic Group）の評価                 … Phase 6
 ```
 
-**③で止まったものは、④へ進まない。** ここが安全性の要。
+いずれも **純粋関数＋テスト必須**（`tests/*.test.js`）。I/O（KV 読み書き・fetch）は `api/plan-store.js` 側に残す。
 
 ---
 
-## 3. AIが返すのは「文」ではなく「構造」
+## 5. データモデル方針
 
-AIに `送信して` と言わせない。AIの出力は下の形に限定する（`normalizeSpec` で正規化）。
+### 5.1 テナント
+- `tenant_id` は `resolveTenantId(req)` で決定（既定 `process.env.TENANT_ID || 'default'`）。
+- ストレージキー: 既存 `naoru:chat:v1` は `default` テナントの互換キーとして残し、
+  新テナントは `t:<tenant_id>:chat:v1` を使う（`chatKey(tenantId, suffix)` に集約）。
+- **すべてのレコードに `tenantId` を持たせ、読み出し時にも必ずフィルタ**（キー分離＋レコード検査の二重化）。
 
-```js
+### 5.2 Room
+```jsonc
 {
-  scope:   'store' | 'staff' | 'role' | 'area' | 'all' | 'mixed',
-  shops:   ['恵比寿', '渋谷'],        // 名前は検索語。真実は store_id
-  staff:   ['田中 太郎'],
-  roles:   ['owner'],
-  areas:   ['東京'],
-  exclude: { shops: ['恵比寿西口'], staff: [] },
-  raw:     '元の依頼文（監査用）'
+  "id": "store_s_10293",          // 主キー。store は storeRoomIdFromStoreId(store_id)
+  "tenantId": "default",
+  "kind": "announce|store|group|dm|event",
+  "name": "NAORU渋谷院",          // 表示名。変更されても id は不変
+  "storeId": "10293",             // kind=store のとき必須
+  "eventId": "ev_xxx",            // kind=event のとき必須
+  "shop": "NAORU渋谷院",          // 後方互換（旧クライアントが使う）
+  "members": ["staff_1", "staff_2"],
+  "managers": ["staff_1"],        // 管理者（グループ設定変更・メンバー変更可）
+  "purpose": "新店舗立ち上げ",     // 目的（自由グループ）
+  "source": "salonone|manual|event",
+  "status": "active|archived|closed",
+  "createdBy": "staff_1",
+  "createdAt": "2026-09-17T00:00:00.000Z"
 }
 ```
+既存の `store_<店舗名>` ルームは **削除せず**、`storeId` を後付けして同一ルームを引き継ぐ（`CHAT_ROOM_LIFECYCLE.md` 参照）。
 
-**この設計の効果**: AIが「田中さんに送りました」と幻覚を述べても、実際に送信するのは
-`resolveRecipients` が確定させた `staffIds` だけ。AIの言葉と実際の宛先がずれない。
-
----
-
-## 4. 曖昧さの扱い（絶対に推測しない）
-
-`resolveNames()` は検索語を3つに分ける。
-
-| 候補数 | 分類 | 動き |
-|---|---|---|
-| ちょうど1件 | `resolved` | 確定 |
-| 2件以上 | `ambiguous` | **止める**。候補を出して人に選ばせる |
-| 0件 | `unresolved` | **止める**。近い名前に寄せない |
-
-### 4-1. 一部だけ送る、をしない
-
-「田中さん と 佐藤一郎さん に送って」で田中さんが2人いた場合、
-**佐藤さんにも送らない**。片方だけ届くと、依頼者も受け手も「届いていない」ことに
-気づけない。全体を止めて人に返す。
-
-### 4-2. 除外語が曖昧なときも止める
-
-「恵比寿は除いて」で恵比寿・恵比寿西口の2件が該当した場合、除外できないまま送ると
-**送ってはいけない先に届く**。除外の曖昧さは宛先の曖昧さより危険なので、同じく止める。
-
-### 4-3. 完全一致は部分一致に勝つ
-
-「恵比寿」という店舗が実在するなら、それは恵比寿西口に吸われない（`matchCandidates`）。
-実在する名前をそのまま言ったのに確認を求められる、を避ける。
+### 5.3 Message
+既存フィールドに以下を追加（すべて optional・旧クライアントは無視できる）:
+`tenantId` / `ai` (`{ used, agent, sources[], confidence, answeredAt }`) / `audit` (`{ auditId, resolverVersion }`) / `deliveryId`。
 
 ---
 
-## 5. AIは人間の権限を超えられない
+## 6. Phase 計画
 
-`resolveRecipients(spec, { actor, onBehalfOf })` の `onBehalfOf` が**権限の基準**。
+| Phase | 内容 | 主な成果物 | 状態 |
+|-------|------|-----------|------|
+| **1** | Staff / Owner Chat Permission（5ロール + server-side authz） | `lib/chat-authz.js` / `lib/chat-identity.js` / plan-store 適用 | 実装 |
+| **2** | SalonOne Store Room 自動生成 / Event Room 自動生成 | `lib/chat-rooms.js` / store_id 移行 / membership 同期 | 予定 |
+| **3** | Multiple Recipient / DM / Recipient Preview + Audit | `lib/chat-recipients.js` / `lib/chat-audit.js` / Preview UI | 予定 |
+| **4** | @AI Mention + AI Question UX（出典 / Confidence / Feedback） | `api/chat.js` 拡張 / `?type=aifeedback` | 予定 |
+| **5** | Natural Language Recipient Resolver | `lib/chat-resolver.js` / Intent Parse / 同姓同名確認 | 予定 |
+| **6** | Scheduled / Unread Resend / Smart Group / 音声入力 | `lib/chat-schedule.js` / `lib/chat-smartgroup.js` | 予定 |
+
+各 Phase は **1 Phase = 1 feature branch = 1 PR = 1 Vercel Preview**。
+PR の向き先は `feature/chat-ai-routing`（統合ブランチ）。**main には自動 merge しない。**
 
 ```
-actor      = 実際に実行した主体（AIなら source:'agent'）
-onBehalfOf = 依頼した人間。権限判定はこちらを使う
+main
+ └── feature/chat-ai-routing            （設計ドキュメント・統合ブランチ）
+      ├── feature/chat-ai-routing-phase1  → PR → feature/chat-ai-routing
+      ├── feature/chat-ai-routing-phase2  → PR → feature/chat-ai-routing
+      └── …
 ```
 
-- スタッフが頼めば、AIが代行しても**自店にしか送れない**
-- 本部が頼めば、AI代行でも全社一斉が通る
-- 監査には**両方**残る（`actorId` = AI、`onBehalfOfId` = 依頼者）
+---
 
-権限外の宛先は**黙って落とさない**。`outOfScope` に載せ、状態を `needs_confirmation` にして
-「渋谷には送れません。恵比寿だけに送りますか？」と人に聞く。全部が権限外なら `denied`。
+## 7. コンフリクト最小化方針（Meta / Marketing 開発との並行）
+
+`index.html` は 25,000 行超の単一ファイルで、他 feature と同時編集すると衝突する。したがって:
+
+1. **新規ロジックは必ず `lib/` の新規ファイル**に置く（新規ファイル同士は衝突しない）。
+2. `index.html` の編集は **Chat 関連の局所ブロックのみ**（`navSections` の chat 行、`chatMe`、`chatRoomVisible` 等）。
+   Meta / Marketing 側が触るのは `mktg` / `acq*` / `soFl*` 系であり、行が離れているため衝突確率は低い。
+3. `CLAUDE.md` への追記は**ファイル末尾に新セクションとして追加**（中間挿入しない）。
+4. 1 Phase あたりの `index.html` 差分は **200 行以内** を目安とし、超える場合は `lib/` への抽出を先に行う。
+5. Phase 着手前に `git fetch origin main && git merge origin/main` を統合ブランチで実行し、差分を小さく保つ。
 
 ---
 
-## 6. 状態（`status`）の意味
+## 8. 既存機能への影響（互換性の約束）
 
-| status | 意味 | 画面の動き |
-|---|---|---|
-| `resolved` | 送ってよい | 送信ボタンを出す（`requiresBulkConfirm` なら二段確認） |
-| `needs_confirmation` | 宛先が確定していない／権限外が混ざっている | 候補・落とした先を見せ、送信ボタンは出さない |
-| `denied` | 権限が足りない | 理由を出す。送信ボタンを出さない |
-| `empty` | 宛先0件 | 「該当なし」。送信ボタンを出さない |
-
-**送信ボタンを出してよいのは `resolved` のときだけ。**
+- 既存の Room / Message / 既読 / リアクション / 画像 / 動画 / ノートのデータ形式は**変更しない**（追加のみ）。
+- 旧クライアント（キャッシュに残った古い `index.html`）でも読み書きが壊れないこと。
+- `CHAT_AUTHZ_ENFORCE` 環境変数で `shadow`（判定はするが拒否しない・ログのみ）/ `strict`（拒否する）を切替。
+  **既定は `shadow`**。Preview で十分検証してから `strict` に切り替える。
 
 ---
 
-## 7. 一括送信の二段確認
+## 9. リスクと対策
 
-`requiresBulkConfirm` が立つ条件:
-
-- 宛先が **20名以上**（`BULK_CONFIRM_THRESHOLD`）
-- または **全社一斉**（`chat.broadcast_all`）
-
-このときは「◯◯名に送ります」と**人数を明示**して、もう一度押させる。
-数を見せるのが目的で、「全店」という言葉だけでは規模が伝わらないため。
-
----
-
-## 8. authz との接続
-
-このモジュールは `lib/authz.js` に**依存しない**（`ctx.can` で注入する）。
-
-理由: 認可（`feature/cc-foundation`）とチャット（このブランチ）は別PRで進んでおり、
-**どちらが先に main へ入っても動く必要がある**。
-
-```js
-// 両方入ったあとの接続（1行）
-import { can } from './authz.js';
-resolveRecipients(spec, { dir, actor, onBehalfOf, can });
-```
-
-注入が無い間は `fallbackCan`（役割の高さ＋店舗スコープのみを見る保守的な既定）が働く。
-`fallbackCan` は authz より**厳しめ**に倒してある。見落として広く送るより、狭く止める。
+| リスク | 対策 |
+|--------|------|
+| plan-store にサーバー認証が無い（現状） | Phase 1 で `chat-identity.js` を導入。SSO Bearer / owner token を検証。未検証セッションは `unverified` として扱い、`strict` では書き込みを制限 |
+| 店舗名主キーからの移行でルームが二重化 | `chat-rooms.js` の移行関数で「同一店舗の旧ID→新ID」をマージし、メッセージは旧キーを読み続ける（Phase 2） |
+| 大量送信の事故 | Recipient Preview 必須 + 件数警告 + Kill Switch + レート上限（`CHAT_RECIPIENT_RESOLVER.md` §7） |
+| AI の誤宛先 | AI は候補提示のみ。曖昧・0 件・権限外は必ず停止（`CHAT_RECIPIENT_RESOLVER.md` §6） |
+| AI の誤情報 | 出典・更新日時・Confidence を必ず表示。低 Confidence は `NEEDS_HQ` で人間へエスカレ |
+| KV blob の肥大 / 競合 | ルーム別キー方式を維持。監査ログは別キー（`naoru:chat:audit:<YYYY-MM>`）へ月別分割 |
 
 ---
 
-## 9. やらないこと（この設計の範囲外）
+## 10. 関連ドキュメント
 
-| やらないこと | 理由 |
-|---|---|
-| AIによる自動送信（人の確認なし） | 取り消せない操作をAIに委ねない |
-| 自由文をそのまま宛先として解釈 | 幻覚が誤送信になる |
-| 曖昧なときに「たぶんこっち」で送る | 事故の典型 |
-| 送信内容のAI生成（文面作成） | 別の話。必要なら既存の `agent:'faq'` を使う |
-| サーバー側での厳密なデータ分離 | `plan-store` は認証を持たない（既存の信頼モデル） |
-
----
-
-## 10. 実装の順番（提案）
-
-| 段階 | 内容 | 画面 | 本番影響 |
-|---|---|---|---|
-| R0（完了） | 宛先解決・ライフサイクル・監査のロジック＋テスト | なし | なし |
-| R1 | 送信前プレビューUI（既存の送信ボタンの前に1枚挟む） | チャット | フラグOFFで無効 |
-| R2 | `@AI` からの宛先解決（構造化出力） | チャット | フラグOFFで無効 |
-| R3 | 店舗ルームの自動生成・在籍同期 | なし（裏側） | 要確認 |
-| R4 | 予約送信・未読者再送 | チャット | フラグOFFで無効 |
-| R5 | 監査画面 | 新タブ（root） | なし |
-
-**R1 以降はすべて `cc_chat_routing` フラグの下に置く**（既定OFF・キルスイッチ対象）。
-
----
-
-## 11. 参照
-
-- `CHAT_PERMISSION_MATRIX.md` — 誰が誰に送れるか
-- `CHAT_ROOM_LIFECYCLE.md` — ルームの生成・在籍・アーカイブ
-- `CHAT_RECIPIENT_RESOLVER.md` — 解決アルゴリズムの詳細
-- `CHAT_AI_UX_SPEC.md` — 画面と文言
-- `CHAT_AUDIT_MODEL.md` — 監査記録
-- `AUTHORIZATION_PLAN.md` — 認可の全体設計（`feature/cc-foundation`）
+- `CHAT_PERMISSION_MATRIX.md` — ロール × 操作の権限表
+- `CHAT_ROOM_LIFECYCLE.md` — Room の生成 / 更新 / Archive / Close
+- `CHAT_RECIPIENT_RESOLVER.md` — 自然言語宛先解決の仕様
+- `CHAT_AI_UX_SPEC.md` — @AI / AI Question Mode / 透明性 / Feedback の UX 仕様
+- `CHAT_AUDIT_MODEL.md` — 監査レコードのスキーマと保存

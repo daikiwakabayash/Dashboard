@@ -1,109 +1,129 @@
-# CHAT_PERMISSION_MATRIX — チャットの権限表
+# CHAT_PERMISSION_MATRIX
 
-**対象**: 社内チャットの送信・ルーム操作 / **判定**: `lib/authz.js`（`feature/cc-foundation`）
-**接続**: `lib/chat-recipients.js` が `ctx.can` で注入を受ける
-
----
-
-## 1. 役割
-
-| 役割 | rank | 範囲 | 想定 |
-|---|---|---|---|
-| `root` | 100 | 全店 | 共有PASS（`DASHBOARD_PASSWORD`）でログインした管理者 |
-| `admin`（本部 / `hq` / `headquarters`） | 90 | 全店 | 個人名の本部アカウント |
-| `owner` | 60 | 管轄店舗 | FCオーナー・複数店管轄 |
-| `manager` | 40 | 所属店舗 | 店長 |
-| `staff` | 20 | 所属店舗 | セラピスト |
-| `guest` | 0 | なし | 未認証 |
-
-**AI Agent は役割ではなく `source:'agent'`。** `role` では制限を回避できない。
+社内チャットの権限モデル。**この表が `lib/chat-authz.js` の唯一の仕様**であり、
+フロント（表示の出し分け）とサーバー（`api/plan-store.js?type=chat`）は同じ関数を通す。
 
 ---
 
-## 2. 操作の権限表
+## 1. ロール定義
 
-| 操作 | 必要な役割 | 店舗スコープ | AI可 | 人のみ | 再検証 |
-|---|---|---|---|---|---|
-| `chat.send` 送信 | staff | ✅ | ✅ | | |
-| `chat.dm` 個別 | staff | ✅ | ✅ | | |
-| `chat.group_create` グループ作成 | staff | ✅ | ✅ | | |
-| `chat.member_add` メンバー追加 | manager | ✅ | ✅ | | |
-| `chat.member_remove` メンバー削除 | manager | ✅ | ✅ | | |
-| `chat.broadcast` 複数店舗一斉 | owner | — | ✅ | | |
-| `chat.broadcast_all` 全社一斉 | admin（本部） | — | ❌ | | ✅ |
-| `chat.schedule` 予約送信 | manager | ✅ | ✅ | | |
-| `chat.resend_unread` 未読者再送 | manager | ✅ | ✅ | | |
-| `chat.room_archive` ルームを畳む | owner | ✅ | | ✅ | |
+| role | 日本語 | 由来 | スコープ |
+|------|--------|------|----------|
+| `root` | 管理者 | `DASHBOARD_PASSWORD` 共有ログイン / SalonOne `brand_admin` | テナント内すべて |
+| `hq` | 本部 | オーナー設定で発行（個人名 + PASS） | テナント内すべて（= root 相当、表示名は本人名） |
+| `owner` | オーナー | オーナー設定 / SalonOne `shop_admin` | 自分が管理する法人・店舗・その所属スタッフ |
+| `manager` | 院長 / マネージャー | オーナー設定（新規） / SalonOne `shop_admin` で単店 | 自店舗 + 管理対象店舗 |
+| `staff` | スタッフ | オーナー設定 / SalonOne `shop_staff` | 自店舗 + 参加 Group + 許可された DM |
 
-- **店舗スコープ ✅** = 対象店舗が自分の管轄外なら拒否
-- **人のみ** = `source:'agent'` は拒否（`humanOnly`）
-- **再検証** = Bearer の60秒キャッシュを使わず毎回 `/me` を引き直す（`REVERIFY_ACTIONS`）
+- `manager` は**新規ロール**。既存アカウントは `owner` / `staff` のままで動作する（後方互換）。
+- `hq` は既に `root` トークンへ昇格される実装があるため、authz 上は `root` と同じ capability を持ち、`role` は `hq` を保持する。
+- **AI Agent** は擬似 actor `{ role: 'agent', actingFor: <人間の actor> }`。capability は常に `actingFor` の**部分集合**。
 
-### なぜ全社一斉だけ AI 不可なのか
+## 2. Capability 一覧
 
-一斉送信の中で、**取り消しが最も効かない**のが全社一斉。100〜200店舗の全員に届いたあと、
-誤りに気づいても訂正のほうが届かない。ここだけは人が押す。
+| capability | 意味 |
+|------------|------|
+| `chat.view` | チャットタブを開ける |
+| `room.view` | 個別 Room を閲覧できる |
+| `room.post` | 個別 Room に投稿できる |
+| `room.create.group` | 自由 Group を作成できる |
+| `room.create.dm` | DM を開始できる |
+| `room.members.manage` | Room のメンバーを変更できる |
+| `room.admin` | Room 名 / アイコン / ピン / 削除 |
+| `broadcast.store` | 複数店舗 Room への一斉送信 |
+| `broadcast.all` | 全社アナウンスへの送信 |
+| `recipient.resolve` | 自然言語 Recipient Resolver を使える |
+| `schedule.manage` | 予約 / 定期送信の作成・取消 |
+| `audit.read` | 監査ログを閲覧できる |
+| `ai.feedback` | AI 回答に 👍 / 👎 / 修正 を付けられる |
+| `ai.escalate.receive` | AI のエスカレ先になる |
 
-### なぜグループ作成が staff から可能か
+## 3. ロール × Capability
 
-現行の運用（部活・勉強会）を壊さないため。作成は増えるだけで既存の連絡経路を壊さない。
-**メンバーの追加削除は manager 以上**にしてある（人の出し入れは影響が大きい）。
+| capability | root | hq | owner | manager | staff | agent |
+|------------|:----:|:--:|:-----:|:-------:|:-----:|:-----:|
+| `chat.view` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `room.view` | 全 Room（DM 除く） | 全 Room（DM 除く） | 管轄内 | 管轄内 | 自店舗 + 参加 | actingFor と同一 |
+| `room.post` | ✅ | ✅ | 管轄内 | 管轄内 | 閲覧可能な Room | ❌（送信は人間が実行） |
+| `room.create.group` | ✅ | ✅ | ✅ | ✅ | ✅（メンバーは権限範囲内） | ❌ |
+| `room.create.dm` | ✅ | ✅ | ✅ | ✅ | ✅（相手は権限範囲内） | ❌ |
+| `room.members.manage` | ✅ | ✅ | 管轄内 | 管轄内 | 自分が作成した Group のみ | ❌ |
+| `room.admin` | ✅ | ✅ | 管轄内 | 管轄内 | 自分が作成した Group のみ | ❌ |
+| `broadcast.store` | ✅ | ✅ | 管轄店舗のみ | 管轄店舗のみ | ❌ | ❌ |
+| `broadcast.all` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `recipient.resolve` | ✅ | ✅ | ✅ | ✅ | ✅（自分の範囲のみ） | — |
+| `schedule.manage` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
+| `audit.read` | ✅ | ✅ | 自分の送信のみ | 自分の送信のみ | 自分の送信のみ | ❌ |
+| `ai.feedback` | ✅ | ✅ | ✅ | ✅ | 👍👎のみ（修正は不可） | ❌ |
+| `ai.escalate.receive` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
----
+> **DM は例外**: root / hq であっても、**自分がメンバーでない DM は閲覧できない**（プライバシー）。
+> これは既存実装（`roomVisibleTo`）の挙動であり、変更しない。
 
-## 3. 宛先数の上限
+## 4. Room 種別 × 可視・投稿ルール
 
-| 役割 | `chat.broadcast` の宛先上限 |
-|---|---|
-| staff / manager | そもそも送れない |
-| owner | **200件**（`maxRecipients`） |
-| admin / root | 上限なし |
+| kind | 可視 | 投稿 |
+|------|------|------|
+| `announce`（全社アナウンス） | 全員 | `broadcast.all` を持つ者のみ（root / hq） |
+| `store`（店舗） | root / hq、その店舗が `scopeStoreIds` に含まれる者、明示メンバー | 可視者すべて |
+| `event`（イベント） | 参加者（members）+ root / hq | members |
+| `group`（自由グループ） | members のみ | members |
+| `dm` | members（2名）のみ。**root でも非メンバーは不可** | members |
 
-現場の誤操作の歯止めが目的。本部は業務上200件を超える必要があるため除外している。
-上限を超えると `too_many_recipients` で拒否され、`needs_confirmation` にはならない
-（「200件までなら送れます」と部分送信させない）。
+## 5. スコープの表現
 
----
+```js
+actor = {
+  tenantId: 'default',
+  actorId: 'staff_123',        // staff_id（正）／root 共有ログインは '__root__'
+  role: 'root'|'hq'|'owner'|'manager'|'staff'|'agent',
+  storeIds: ['10293','10294'], // 権限のある store_id（正）
+  shopNames: ['NAORU渋谷院'],   // 後方互換（store_id 未確定時のみ使う部分一致キー）
+  verified: true,              // サーバーで検証済みの identity か
+  actingFor: null,             // agent のときのみ
+}
+```
 
-## 4. AI代行のときの判定
+- **`storeIds` が正**。`shopNames` は SalonOne の store_id が未同期な移行期間のフォールバックであり、
+  Phase 2 完了後は `storeIds` のみで判定する。
+- `root` / `hq` は `storeIds` を無視して全店許可（`isTenantAdmin(actor) === true`）。
+
+## 6. サーバー側 enforcement
+
+`api/plan-store.js` の `?type=chat` は、すべての **write action** で以下を実行する:
 
 ```
-resolveRecipients(spec, { actor: AI, onBehalfOf: 依頼者 })
+1. resolveActorFromRequest(req)    → 検証済み actor（lib/chat-identity.js）
+2. authorizeChatAction(actor, action, ctx) → { allow, reason }
+3. allow=false かつ ENFORCE=strict → 403 { error: 'forbidden', reason }
+   allow=false かつ ENFORCE=shadow → 実行はするが audit に violation を記録
 ```
 
-権限は **`onBehalfOf`（依頼した人間）** で判定する。
+### identity の検証優先順位
+1. `Authorization: Bearer <SalonOne access_token>` → `verifySalonOneBearer()`（`lib/salonone-auth.js`）→ `verified: true`
+2. `X-Chat-Auth: <settlement-auth token>` → オーナー / 本部トークン検証 → `verified: true`
+3. いずれも無い → body の申告値を使い `verified: false`
+   - `shadow`: 従来どおり動作（互換）
+   - `strict`: `room.view` 以外の書き込みを拒否
 
-| 依頼者 | AIができること |
-|---|---|
-| staff | 自店へ送る。他店・全社は不可 |
-| owner | 管轄店舗への一斉まで |
-| admin | 全社一斉も通る（ただし `chat.broadcast_all` は `agentAllowed:false` なので**AIは実行できない**。宛先の下書きまで） |
+### Kill Switch
+`CHAT_KILL_SWITCH=1`（環境変数）または共有ストアの `naoru:chat:killswitch` が真のとき、
+**すべての送信系 action を 503 で停止**する（閲覧は可能）。Resolver / 予約送信も停止対象。
 
-`onBehalfOf` が無いAI単独実行（定期パトロール等）は、AI自身に与えた役割で判定される。
-この場合も `humanOnly` / `agentAllowed:false` の操作は通らない。
+## 7. マルチテナント
 
----
+- actor の `tenantId` と対象レコードの `tenantId` が**一致しないものは存在しないものとして扱う**（404 ではなく不可視）。
+- ストレージキーもテナントで分離（`t:<tenant_id>:chat:*`）。既定テナント `default` のみ旧キー `naoru:chat:*` を使用。
+- クロステナントの `staff_id` 衝突を避けるため、内部 ID は `<tenant_id>:<staff_id>` で比較する関数を用意する
+  （`sameActor(a, b)`）。表示・保存は従来どおり `staff_id` 単体。
 
-## 5. ルームの見え方（既存 `lib/chat.js` の `roomVisibleTo`）
+## 8. テスト要件
 
-| ルーム種別 | 見える人 |
-|---|---|
-| `announce` 全社アナウンス | 全員 |
-| `store` 店舗ルーム | その店舗の所属/アクセス者 ＋ root |
-| `group` グループ | メンバーとして明示された人のみ |
-| `dm` 個別 | 当事者2名のみ（**root でも非メンバーのDMは見えない**） |
-
-DMだけは root も覗けない。ここを開けると、社内チャット自体が使われなくなる。
-
----
-
-## 6. まだ塞げていないこと（正直に）
-
-| 項目 | 状況 | 影響 |
-|---|---|---|
-| `plan-store` にサーバー認証がない | 既存の信頼モデル（thanksgift / chat と同じ） | APIを直接叩けば権限表を迂回できる。**UIレベルの制御** |
-| `manager` 役割のアカウントが未作成 | 「オーナー設定」に選択肢がない | 店長は当面 `owner` か `staff` |
-| Bearer 60秒キャッシュ | 高リスク操作のみ再検証済み | 通常のチャット送信は失効の反映が最大60秒遅れる |
-
-**厳密なサーバー側分離が必要になった時点で、`plan-store` にプロキシ認証を追加する**
-（`AUTHORIZATION_PLAN.md` §6-4）。それまでは社内利用前提。
+`tests/chat-authz.test.js` で最低限カバーすること:
+- 5 ロール × 主要 capability の allow/deny
+- DM は root でも非メンバー不可
+- staff が管轄外店舗の Room を見られない / 投稿できない
+- agent は actingFor の部分集合しか持てない（超えようとしたら deny）
+- 未検証 identity は strict で書き込み不可
+- テナント違いは不可視
+- Kill Switch で送信系が全停止

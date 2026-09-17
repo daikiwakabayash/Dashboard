@@ -3788,7 +3788,8 @@
             const [chatRenameVal, setChatRenameVal] = useState(null); // 名前編集中の値（nullで非編集）
 
             // ── 掲示板（全社発信） ────────────────────────────────────────
-            const [boardData, setBoardData] = useState({ posts: [], reads: {}, configured: true, loaded: false });
+            const [boardData, setBoardData] = useState({ posts: [], reads: {}, version: 0, configured: true, loaded: false });
+            const boardVersionRef = useRef(0);   // 最後に読み込んだ版（古いデータでの上書きを検出するため送る）
             const [boardText, setBoardText] = useState('');
             const [boardImgs, setBoardImgs] = useState([]);      // [{id,dataUrl}]
             const [boardFiles, setBoardFiles] = useState([]);    // [{id,name,type,size}]
@@ -3840,9 +3841,30 @@
                 return () => { try { navigator.serviceWorker.removeEventListener('message', onMsg); } catch {} };
             }, []);
             const boardLoad = async () => {
-                try { const r = await fetch('/api/plan-store?type=board'); const j = await r.json().catch(() => ({})); setBoardData({ posts: Array.isArray(j.posts) ? j.posts : [], reads: (j.reads && typeof j.reads === 'object') ? j.reads : {}, configured: j.configured !== false, loaded: true }); }
-                catch { setBoardData(d => ({ ...d, loaded: true })); }
+                try {
+                    const r = await fetch('/api/plan-store?type=board');
+                    const j = await r.json().catch(() => ({}));
+                    boardVersionRef.current = Number(j.version) || 0;
+                    setBoardData({ posts: Array.isArray(j.posts) ? j.posts : [], reads: (j.reads && typeof j.reads === 'object') ? j.reads : {}, version: boardVersionRef.current, configured: j.configured !== false, loaded: true });
+                } catch { setBoardData(d => ({ ...d, loaded: true })); }
             };
+            // 掲示板の更新系はこれを通す。
+            //  ・見ていた版(expectedVersion)を送り、他の人が先に更新していたらサーバーが 409 を返す
+            //  ・409 のときは最新を読み直して**1回だけ**やり直す（利用者の操作は変わらない）
+            //  ・clientId を付けるので、再送されても二重に登録されない
+            const boardMutate = async (payload, { retry = true } = {}) => {
+                const send = () => fetch('/api/plan-store', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ type: 'board', expectedVersion: boardVersionRef.current, ...payload }),
+                });
+                let r = await send();
+                if (r.status === 409 && retry) {
+                    await boardLoad();                      // 最新の版を取り直してから
+                    r = await send();                       // 同じ clientId で再送＝重複しない
+                }
+                return await r.json().catch(() => ({ ok: false }));
+            };
+            const boardClientId = () => `bc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
             // 既読は「開いただけ」では進めない＝未読バッジが読むまで残る。明示的に既読化する。
             const boardSetSeen = async (ts) => {
                 setBoardData(d => ({ ...d, reads: { ...(d.reads || {}), [chatMyId]: ts } })); // 楽観更新（バッジ即消し）
@@ -3871,7 +3893,8 @@
                 if (!t && !ti && boardImgs.length === 0 && boardFiles.length === 0 && !boardVideo.trim() && !boardLink.trim()) return;
                 setBoardPosting(true);
                 try {
-                    await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'post', post: { authorId: chatMyId, authorName: chatMyName, authorShop: chatMyShop, authorRoot: chatIsRoot, title: ti, important: boardImportant, text: t, link: boardLink.trim(), imgIds: boardImgs.map(i => i.id), files: boardFiles, videoUrl: boardVideo.trim() } }) });
+                    // clientId は1回の送信で固定。再送・409リトライでも同じ値を使うため二重投稿にならない。
+                    await boardMutate({ action: 'post', post: { clientId: boardClientId(), authorId: chatMyId, authorName: chatMyName, authorShop: chatMyShop, authorRoot: chatIsRoot, title: ti, important: boardImportant, text: t, link: boardLink.trim(), imgIds: boardImgs.map(i => i.id), files: boardFiles, videoUrl: boardVideo.trim() } });
                     setBoardText(''); setBoardTitle(''); setBoardLink(''); setBoardImportant(false); setBoardImgs([]); setBoardFiles([]); setBoardVideo('');
                     setBoardComposerOpen(false);
                     await boardLoad();
@@ -3887,13 +3910,13 @@
             };
             const boardDelete = async (id) => {
                 if (!window.confirm('この掲示を削除しますか？')) return;
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'delete', id, staffId: chatMyId, root: chatIsRoot }) }); await boardLoad(); } catch {}
+                try { await boardMutate({ action: 'delete', id, staffId: chatMyId, root: chatIsRoot }); await boardLoad(); } catch {}
             };
-            const boardPin = async (id, pinned) => { try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'pin', id, pinned }) }); await boardLoad(); } catch {} };
+            const boardPin = async (id, pinned) => { try { await boardMutate({ action: 'pin', id, pinned }); await boardLoad(); } catch {} };
             const boardReact = async (id, emoji) => {
                 // 楽観更新（即トグル）→ サーバー反映
                 setBoardData(d => ({ ...d, posts: (d.posts || []).map(p => { if (!p || p.id !== id) return p; return { ...p, reactions: reactToggleOne(p.reactions, emoji, chatMyId) }; }), reads: { ...(d.reads || {}), [chatMyId]: Math.max((d.reads || {})[chatMyId] || 0, Date.now()) } }));
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'react', id, emoji, staffId: chatMyId }) }); await boardLoad(); } catch {}
+                try { await boardMutate({ action: 'react', id, emoji, staffId: chatMyId }); await boardLoad(); } catch {}
             };
             // ── お知らせハブ: コメント（返信・メンション対応） ──
             const [boardReplyTo, setBoardReplyTo] = useState({});   // {postId:{id,name}} 返信先コメント
@@ -3903,12 +3926,12 @@
                 const t = String(text || '').trim(); if (!t) return;
                 const rec = { id: 'tmp_' + Date.now().toString(36), parentId: parentId || '', fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, mentions: mentions || [], createdAt: new Date().toISOString(), _pending: true };
                 setBoardData(d => ({ ...d, posts: (d.posts || []).map(p => p.id === post.id ? { ...p, comments: [...(p.comments || []), rec] } : p) }));
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'comment', id: post.id, comment: { parentId: parentId || '', fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, mentions: mentions || [] } }) }); } catch {}
+                try { await boardMutate({ action: 'comment', id: post.id, comment: { clientId: boardClientId(), parentId: parentId || '', fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text: t, mentions: mentions || [] } }); } catch {}
                 await boardLoad();
             };
             const boardDeleteComment = async (postId, commentId) => {
                 setBoardData(d => ({ ...d, posts: (d.posts || []).map(p => p.id === postId ? { ...p, comments: (p.comments || []).filter(c => c.id !== commentId) } : p) }));
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'board', action: 'deleteComment', id: postId, commentId, staffId: chatMyId, root: chatIsRoot }) }); await boardLoad(); } catch {}
+                try { await boardMutate({ action: 'deleteComment', id: postId, commentId, staffId: chatMyId, root: chatIsRoot }); await boardLoad(); } catch {}
             };
             // 更新フィード: 投稿＋コメントを時系列で集約（右上ベルで確認）
             const boardActivity = useMemo(() => {

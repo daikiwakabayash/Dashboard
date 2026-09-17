@@ -25,6 +25,11 @@ import { FLAGS_KEY, DEFAULT_FLAGS, normalizeFlags, applyFlagChange, killAll } fr
 import { AUDIT_KEY, AUDIT_CAP, buildEntry as buildAuditEntry, listEntries as listAuditEntries } from '../lib/audit.js';
 import { APPROVAL_KEY, APPROVAL_CAP, buildApproval, decide as decideApproval, repropose as reproposeApproval, recordExecution, listApprovals, pendingCount } from '../lib/approvals.js';
 import { AGENTLOG_KEY, AGENTLOG_CAP, startRun, finishRun, listRuns, summarize as summarizeRuns, anomalies as runAnomalies } from '../lib/agentlog.js';
+import { check as authzCheck } from '../lib/authz.js';
+import { resolveActor } from '../lib/actor.js';
+import { verifySalonOneBearer } from '../lib/salonone-auth.js';
+import { hashOwnerToken, verifyOwnerToken, parseOwnerPasswords, parseOwnerShops } from '../lib/settlement.js';
+import { kvConfigured, kvBlobGet, ACCT_PASS_KEY } from '../lib/kvblob.js';
 
 // Vercel KV / Upstash Redis / Vercel Redis いずれの環境変数名でも動くよう両対応（REST APIは共通）
 const KV_URL = () => process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_REST_API_URL || '';
@@ -294,10 +299,71 @@ export default async function handler(req, res) {
       const cur = (await blobGet(key, hasKV, hasSB, gas)) || [];
       return Array.isArray(cur) ? cur : [];
     };
+    // ── 認可（段階導入）─────────────────────────────────────────
+    // cc_authz='off' のあいだは resolveActor も authzCheck も呼ばない（＝追加コスト0・従来と同一動作）。
+    // 'log'/'warn' は判定して記録するだけでブロックしない。'enforce' で初めて 403 を返す。
+    const ccActionFor = (type, b) => {
+      const act = String((b && b.action) || '');
+      if (type === 'ccflags') {
+        if (act === 'kill') return 'killswitch.engage';
+        if (act === 'set' && b.key === 'cc_all' && b.value === true) return 'killswitch.release';
+        if (act === 'set') return 'flag.change';
+        return 'flag.read';
+      }
+      if (type === 'approval') {
+        if (act === 'create') return 'approval.create';
+        if (act === 'decide') return `approval.${String(b.decision || 'approve')}`;
+        if (act === 'repropose') return 'approval.create';
+        if (act === 'record') return 'approval.execute';
+        return 'approval.read';
+      }
+      if (type === 'agentlog') return (act === 'start' || act === 'finish') ? 'agentlog.write' : 'agentlog.read';
+      if (type === 'audit') return act === 'add' ? 'audit.write' : 'audit.read';
+      return 'flag.read';
+    };
+    // 環境変数＋KV からアカウントを組み立てる（GAS は遅いのでここでは読まない。AUTHORIZATION_PLAN.md §6-2 の既知の穴）
+    const ccLoadAccounts = async () => {
+      const passwords = parseOwnerPasswords(process.env.SETTLEMENT_OWNER_PASSWORDS);
+      const shopsMap = parseOwnerShops(process.env.SETTLEMENT_OWNER_SHOPS);
+      if (kvConfigured()) {
+        const kvPass = await kvBlobGet(ACCT_PASS_KEY).catch(() => null);
+        if (kvPass && typeof kvPass === 'object') for (const [o, pw] of Object.entries(kvPass)) if (pw) passwords[o] = String(pw);
+      }
+      const metaMap = (await blobGet(ACCTMETA_KEY, hasKV, hasSB, gas).catch(() => null)) || {};
+      return { passwords, shopsMap, metaMap };
+    };
+    let ccActor = actorOf();          // 既定はクライアント申告（従来どおり）
+    const ccFlagsNow = normalizeFlags(await blobGet(FLAGS_KEY, hasKV, hasSB, gas).catch(() => null));
+    const ccAuthzMode = ccFlagsNow.cc_authz || 'off';
+    if (ccAuthzMode !== 'off') {
+      const salt = process.env.AUTH_SALT || 'naoru-settlement-2026';
+      const resolved = await resolveActor(req, {
+        env: process.env,
+        verifySalonOneBearer,
+        rootToken: () => hashOwnerToken('__root__', process.env.DASHBOARD_PASSWORD || '', salt),
+        verifyOwnerToken: (pw, owner, token) => verifyOwnerToken(pw, owner, token, salt),
+        loadAccounts: ccLoadAccounts,
+      }).catch(() => null);
+      if (resolved) ccActor = { ...resolved };
+      const target = {
+        shop: String(body.shop || (body.approval && body.approval.scope && body.approval.scope.shop) || req.query.shop || ''),
+        risk: body.risk || '', approvalStatus: body.approvalStatus || '',
+      };
+      const verdict = authzCheck(ccActor, ccActionFor(ccType, body), target, ccAuthzMode);
+      res.setHeader('X-CC-Authz', `${verdict.mode}:${verdict.allowed ? 'allow' : (verdict.code || 'deny')}`);
+      if (verdict.shouldLog) {
+        try {
+          const e = buildAuditEntry({ action: 'authz_deny', entity: 'authz', entityId: ccActionFor(ccType, body), actor: ccActor, source: ccActor.source, note: verdict.code, after: { mode: verdict.mode, shop: target.shop } });
+          if (e.ok) { if (hasKV) await kvAppendJson(AUDIT_KEY, e.entry, AUDIT_CAP); }
+        } catch (_) { /* 記録失敗で本処理を止めない */ }
+      }
+      if (verdict.blocked) return res.status(403).json({ ok: false, error: 'forbidden', code: verdict.code, message: verdict.reason });
+    }
+
     // 監査ログは本処理を止めない（失敗しても握りつぶす）。
     const audit = async (input) => {
       try {
-        const built = buildAuditEntry({ ...input, actor: actorOf() });
+        const built = buildAuditEntry({ ...input, actor: ccActor, source: (input && input.source) || ccActor.source });
         if (built.ok) await appendRow(AUDIT_KEY, built.entry, AUDIT_CAP);
       } catch (_) { /* 監査の失敗で業務処理を落とさない */ }
     };

@@ -154,3 +154,36 @@ describe('actor - ポーリングで上流を叩きすぎない', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 });
+
+describe('resolveActor - Bearer検証の失敗もキャッシュする', () => {
+  it('無効トークンの連打で上流を何度も叩かない（60回/分の保護）', async () => {
+    let calls = 0;
+    const d = { verifySalonOneBearer: async () => { calls++; return null; } };
+    const req = { headers: { authorization: 'Bearer bad-token' }, body: {}, query: {} };
+    for (let i = 0; i < 5; i++) await resolveActor(req, d);
+    expect(calls).toBe(1);
+  });
+  it('失敗キャッシュに当たっても verified:false の主体を返す（誤って許可しない）', async () => {
+    const d = { verifySalonOneBearer: async () => null };
+    const req = { headers: { authorization: 'Bearer bad-token2' }, body: { actor: { role: 'root' } }, query: {} };
+    await resolveActor(req, d);
+    const a = await resolveActor(req, d);
+    expect(a.verified).toBe(false);
+  });
+  it('高リスク操作（skipCache）は失敗キャッシュも使わず毎回確かめる', async () => {
+    let calls = 0;
+    const d = { verifySalonOneBearer: async () => { calls++; return null; }, skipCache: true };
+    const req = { headers: { authorization: 'Bearer bad-token3' }, body: {}, query: {} };
+    await resolveActor(req, d);
+    await resolveActor(req, d);
+    expect(calls).toBe(2);
+  });
+  it('60秒経てば再検証する（失効の反映が最大60秒遅れる仕様の確認）', async () => {
+    let calls = 0;
+    const d = { verifySalonOneBearer: async () => { calls++; return null; } };
+    const req = { headers: { authorization: 'Bearer bad-token4' }, body: {}, query: {} };
+    await resolveActor(req, { ...d, now: 1_000_000 });
+    await resolveActor(req, { ...d, now: 1_000_000 + 61_000 });
+    expect(calls).toBe(2);
+  });
+});

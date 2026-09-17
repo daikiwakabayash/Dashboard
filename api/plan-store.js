@@ -25,7 +25,7 @@ import { FLAGS_KEY, DEFAULT_FLAGS, normalizeFlags, applyFlagChange, killAll } fr
 import { AUDIT_KEY, AUDIT_CAP, buildEntry as buildAuditEntry, listEntries as listAuditEntries } from '../lib/audit.js';
 import { APPROVAL_KEY, APPROVAL_CAP, buildApproval, decide as decideApproval, repropose as reproposeApproval, recordExecution, listApprovals, pendingCount } from '../lib/approvals.js';
 import { AGENTLOG_KEY, AGENTLOG_CAP, startRun, finishRun, listRuns, summarize as summarizeRuns, anomalies as runAnomalies } from '../lib/agentlog.js';
-import { check as authzCheck } from '../lib/authz.js';
+import { check as authzCheck, can as authzCan, enforce as authzEnforce, decisionRecord, needsReverify, DEFAULT_TENANT } from '../lib/authz.js';
 import { resolveActor } from '../lib/actor.js';
 import { verifySalonOneBearer } from '../lib/salonone-auth.js';
 import { hashOwnerToken, verifyOwnerToken, parseOwnerPasswords, parseOwnerShops } from '../lib/settlement.js';
@@ -348,6 +348,7 @@ export default async function handler(req, res) {
     const ccFlagsNow = normalizeFlags(await blobGet(ccKey(FLAGS_KEY), hasKV, hasSB, gas).catch(() => null));
     const ccAuthzMode = ccFlagsNow.cc_authz || 'off';
     if (ccAuthzMode !== 'off') {
+      const ccAction = ccActionFor(ccType, body);
       const salt = process.env.AUTH_SALT || 'naoru-settlement-2026';
       const resolved = await resolveActor(req, {
         env: process.env,
@@ -355,18 +356,32 @@ export default async function handler(req, res) {
         rootToken: () => hashOwnerToken('__root__', process.env.DASHBOARD_PASSWORD || '', salt),
         verifyOwnerToken: (pw, owner, token) => verifyOwnerToken(pw, owner, token, salt),
         loadAccounts: ccLoadAccounts,
+        skipCache: needsReverify(ccAction),   // 取り返しがつかない操作は毎回確かめる
       }).catch(() => null);
       if (resolved) ccActor = { ...resolved };
       const target = {
         shop: String(body.shop || (body.approval && body.approval.scope && body.approval.scope.shop) || req.query.shop || ''),
+        tenantId: String(body.tenantId || req.query.tenantId || '') || undefined,
         risk: body.risk || '', approvalStatus: body.approvalStatus || '',
+        recipientCount: Number(body.recipientCount) || 0,
       };
-      const verdict = authzCheck(ccActor, ccActionFor(ccType, body), target, ccAuthzMode);
+      const decision = authzCan(ccActor, ccAction, target);
+      const verdict = authzEnforce(ccAuthzMode, decision);
       res.setHeader('X-CC-Authz', `${verdict.mode}:${verdict.allowed ? 'allow' : (verdict.code || 'deny')}`);
-      if (verdict.shouldLog) {
+      // log / warn / enforce では **ALLOW も DENY も** 記録する。
+      // 「本来どちらになるはずか」を貯めるのが目的で、拒否だけ見ていると
+      // 正しく通っていた量が分からず、enforce に上げてよいか判断できない。
+      if (ccAuthzMode !== 'off') {
         try {
-          const e = buildAuditEntry({ action: 'authz_deny', entity: 'authz', entityId: ccActionFor(ccType, body), actor: ccActor, source: ccActor.source, note: verdict.code, after: { mode: verdict.mode, shop: target.shop } });
-          if (e.ok) { if (hasKV) await kvAppendJson(ccKey(AUDIT_KEY), e.entry, AUDIT_CAP); }
+          const rec = decisionRecord(ccActor, ccAction, target, decision, ccAuthzMode);
+          const e = buildAuditEntry({
+            action: decision.allow ? 'authz_allow' : 'authz_deny',
+            entity: 'authz', entityId: ccAction,
+            actor: ccActor, source: ccActor.source,
+            note: rec.code || rec.decision,
+            after: rec,
+          });
+          if (e.ok && hasKV) await kvAppendJson(ccKey(AUDIT_KEY), e.entry, AUDIT_CAP);
         } catch (_) { /* 記録失敗で本処理を止めない */ }
       }
       if (verdict.blocked) return res.status(403).json({ ok: false, error: 'forbidden', code: verdict.code, message: verdict.reason });

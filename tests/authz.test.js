@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { can, check, enforce, normalizeActor, inScope, isAgent, roleRank, ACTIONS, ROLES } from '../lib/authz.js';
+import { can, check, enforce, normalizeActor, inScope, isAgent, roleRank, needsReverify, decisionRecord, ACTIONS, ROLES, DEFAULT_TENANT, REVERIFY_ACTIONS } from '../lib/authz.js';
 
 // ── 検証用の主体（fixture）。verified=true はトークン検証を通った状態 ──
 const A = {
@@ -210,5 +210,155 @@ describe('authz - 表の網羅性', () => {
     expect(r('owner')).toBeGreaterThan(r('manager'));
     expect(r('manager')).toBeGreaterThan(r('staff'));
     expect(r('staff')).toBeGreaterThan(r('guest'));
+  });
+});
+
+// ────────────────────────────────────────────────────────────────
+// cc_authz=log 拡張（本部エイリアス / tenant / Chat操作 / 再検証）
+// ────────────────────────────────────────────────────────────────
+describe('authz - 役割エイリアス（headquarters / 本部）', () => {
+  it('headquarters は admin（本部）として扱う', () => {
+    expect(normalizeActor({ role: 'headquarters' }).role).toBe('admin');
+  });
+  it('日本語の「本部」も admin として扱う', () => {
+    expect(normalizeActor({ role: '本部' }).role).toBe('admin');
+  });
+  it('既存の hq / brand_admin / shop_admin / shop_staff も従来どおり', () => {
+    expect(normalizeActor({ role: 'hq' }).role).toBe('admin');
+    expect(normalizeActor({ role: 'brand_admin' }).role).toBe('root');
+    expect(normalizeActor({ role: 'shop_admin' }).role).toBe('owner');
+    expect(normalizeActor({ role: 'shop_staff' }).role).toBe('staff');
+  });
+  it('headquarters は admin と同じ権限を持つ', () => {
+    const hq = { id: 'u_hq2', role: 'headquarters', source: 'ui', verified: true, shops: null };
+    expect(can(hq, 'flag.change', {}).allow).toBe(can(A.admin, 'flag.change', {}).allow);
+  });
+});
+
+describe('authz - tenant 分離', () => {
+  it('tenantId 未指定は既定テナント（naoru）', () => {
+    expect(normalizeActor({ role: 'root' }).tenantId).toBe(DEFAULT_TENANT);
+  });
+  it('tenantId は大小文字を無視して正規化される', () => {
+    expect(normalizeActor({ role: 'root', tenantId: 'ClientX' }).tenantId).toBe('clientx');
+    expect(normalizeActor({ role: 'root', tenantId: '  ClientX  ' }).tenantId).toBe('clientx');
+  });
+  it('大小文字違いは同一テナントとして通す（分断を防ぐ）', () => {
+    const a = { id: 'u', role: 'root', source: 'ui', verified: true, shops: null, tenantId: 'clientx' };
+    expect(can(a, 'flag.change', { tenantId: 'ClientX' }).allow).toBe(true);
+  });
+  it('別テナントへの操作は root でも拒否（cross_tenant）', () => {
+    const d = can(A.root, 'flag.change', { tenantId: 'other' });
+    expect(d.allow).toBe(false);
+    expect(d.code).toBe('cross_tenant');
+  });
+  it('同じテナントなら通常どおり判定', () => {
+    expect(can(A.root, 'flag.change', { tenantId: DEFAULT_TENANT }).allow).toBe(true);
+  });
+  it('対象に tenantId が無ければテナント判定はしない（既存呼び出しを壊さない）', () => {
+    expect(can(A.root, 'flag.change', {}).allow).toBe(true);
+  });
+});
+
+describe('authz - Chat 操作', () => {
+  it('staff も通常のチャット送信・DM・グループ作成はできる', () => {
+    for (const a of ['chat.send', 'chat.dm', 'chat.group_create']) {
+      expect(can(A.staff, a, EBISU).allow, a).toBe(true);
+    }
+  });
+  it('staff はメンバー追加・削除はできない（店長以上）', () => {
+    expect(can(A.staff, 'chat.member_add', EBISU).allow).toBe(false);
+    expect(can(A.manager, 'chat.member_add', EBISU).allow).toBe(true);
+  });
+  it('複数店舗への一斉送信は owner 以上', () => {
+    expect(can(A.staff, 'chat.broadcast', {}).allow).toBe(false);
+    expect(can(A.manager, 'chat.broadcast', {}).allow).toBe(false);
+    expect(can(A.owner, 'chat.broadcast', {}).allow).toBe(true);
+  });
+  it('全社一斉送信は本部（admin）以上のみ', () => {
+    expect(can(A.staff, 'chat.broadcast_all', {}).allow).toBe(false);
+    expect(can(A.owner, 'chat.broadcast_all', {}).allow).toBe(false);
+    expect(can(A.admin, 'chat.broadcast_all', {}).allow).toBe(true);   // 本部＝全社発信は業務上必要
+    expect(can(A.root, 'chat.broadcast_all', {}).allow).toBe(true);
+  });
+  it('宛先が多すぎる一斉送信は拒否（too_many_recipients）', () => {
+    const d = can(A.owner, 'chat.broadcast', { recipientCount: 10000 });
+    expect(d.allow).toBe(false);
+    expect(d.code).toBe('too_many_recipients');
+  });
+  it('本部・管理者は宛先数の上限を超えられる（誤爆の歯止めは現場向け）', () => {
+    expect(can(A.admin, 'chat.broadcast', { recipientCount: 10000 }).allow).toBe(true);
+  });
+  it('上限以内の宛先なら許可', () => {
+    expect(can(A.owner, 'chat.broadcast', { recipientCount: 10 }).allow).toBe(true);
+  });
+  it('AI Agent はチャット送信できるが、ルームのアーカイブはできない（humanOnly）', () => {
+    expect(can(A.agent, 'chat.send', EBISU).allow).toBe(true);
+    expect(can(A.agent, 'chat.room_archive', EBISU).allow).toBe(false);
+  });
+  it('AI Agent も人間の権限を超える宛先には送れない（全社一斉は root 相当でも humanOnly ではないが rank で制御）', () => {
+    const lowAgent = { id: 'a1', role: 'staff', source: 'agent', verified: true, shops: ['恵比寿'] };
+    expect(can(lowAgent, 'chat.broadcast', {}).allow).toBe(false);
+  });
+  it('店舗スコープ外のチャット送信は拒否', () => {
+    expect(can(A.staff, 'chat.send', { shop: '渋谷' }).allow).toBe(false);
+  });
+});
+
+describe('authz - 高リスク操作の再検証', () => {
+  it('承認・実行・フラグ変更・キルスイッチは再検証が必要', () => {
+    for (const a of ['approval.approve', 'approval.execute', 'flag.change', 'killswitch.release']) {
+      expect(needsReverify(a), a).toBe(true);
+    }
+  });
+  it('広告・SNS・LP・Knowledge の変更も再検証が必要', () => {
+    for (const a of ['meta.budget_change', 'meta.pause', 'meta.resume', 'meta.creative_replace', 'sns.post', 'lp.change', 'knowledge.publish']) {
+      expect(needsReverify(a), a).toBe(true);
+    }
+  });
+  it('全社一斉送信は再検証が必要（取り消せないため）', () => {
+    expect(needsReverify('chat.broadcast_all')).toBe(true);
+  });
+  it('閲覧や通常のチャット送信は再検証不要（60秒キャッシュのままでよい）', () => {
+    expect(needsReverify('approval.view')).toBe(false);
+    expect(needsReverify('chat.send')).toBe(false);
+  });
+  it('未知の操作名は再検証不要（既定で false）', () => {
+    expect(needsReverify('nope')).toBe(false);
+    expect(needsReverify(null)).toBe(false);
+  });
+});
+
+describe('authz - decisionRecord（誰が・どのrole・どのtenant・どの店舗・何を・ALLOW/DENY）', () => {
+  it('ユーザーの要求した項目をすべて含む', () => {
+    const rec = decisionRecord(A.owner, 'chat.broadcast', { shop: '恵比寿' }, can(A.owner, 'chat.broadcast', { shop: '恵比寿' }), 'log');
+    expect(rec.actorId).toBe('u_owner');
+    expect(rec.actorName).toBe('オーナーA');
+    expect(rec.role).toBe('owner');
+    expect(rec.source).toBe('ui');
+    expect(rec.tenantId).toBe(DEFAULT_TENANT);
+    expect(rec.shop).toBe('恵比寿');
+    expect(rec.action).toBe('chat.broadcast');
+    expect(rec.decision).toBe('ALLOW');
+    expect(rec.mode).toBe('log');
+  });
+  it('拒否されるべき操作は DENY と理由コードを記録する', () => {
+    const rec = decisionRecord(A.staff, 'flag.change', {}, can(A.staff, 'flag.change', {}), 'log');
+    expect(rec.decision).toBe('DENY');
+    expect(rec.code).toBeTruthy();
+    expect(rec.reason).toBeTruthy();
+  });
+  it('AI Agent の操作も source=agent として記録される', () => {
+    const rec = decisionRecord(A.agent, 'approval.approve', {}, can(A.agent, 'approval.approve', {}), 'log');
+    expect(rec.source).toBe('agent');
+    expect(rec.decision).toBe('DENY');
+  });
+  it('未検証（verified=false）も記録に残る', () => {
+    const rec = decisionRecord(A.guest, 'approval.view', {}, can(A.guest, 'approval.view', {}), 'log');
+    expect(rec.verified).toBe(false);
+  });
+  it('記録に秘密情報（トークン等）を含めない', () => {
+    const rec = decisionRecord({ ...A.root, token: 'secret-token' }, 'flag.change', {}, can(A.root, 'flag.change', {}), 'log');
+    expect(JSON.stringify(rec)).not.toContain('secret-token');
   });
 });

@@ -20,6 +20,7 @@ import { analyzeStore, couponReminderItems, buildStoreMessage } from '../lib/pat
 import { buildSearchRequest, parsePlacesResponse, reviewRequestUrl, buildLegacyReviewsRequest, parseLegacyReviews } from '../lib/places.js';
 import { recordSnapshot, computeDeltas, meoFlags, meoScore, alertWeight, jstYmd, reviewsInMonth } from '../lib/meo.js';
 import { mergeAppointments, mergeDismissed, flatten as soflFlatten } from '../lib/soflmap.js';
+import { BOARD_READS_KEY, normalizeReads, mergeReads, bumpRead, versionOf, isStale, upsertPost, upsertComment } from '../lib/board-store.js';
 
 // Vercel KV / Upstash Redis / Vercel Redis いずれの環境変数名でも動くよう両対応（REST APIは共通）
 const KV_URL = () => process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_REST_API_URL || '';
@@ -41,7 +42,7 @@ const CHAT_MSG_PREFIX = 'naoru:chat:m:';      // メッセージはルーム別�
 //   GETは権威ある rooms 一覧から per-room キーをMGETでまとめて引く方式に変更した。
 const CHAT_IMG_PREFIX = 'naoru:chat:img:';    // 画像は1枚1キーで別保存（blob肥大化を避ける）
 const CHAT_MSG_CAP = 400;                     // 1ルームあたり保持する最大メッセージ数（古いものから破棄）
-const BOARD_KEY = 'naoru:board:v1';           // { posts:[...], reads:{staffId:ms} } 掲示板（全社発信）
+const BOARD_KEY = 'naoru:board:v1';           // { posts:[...], reads:{…旧}, _v } 掲示板（全社発信）。既読は BOARD_READS_KEY へ分離済み（旧readsは移行用に残す）
 const BOARD_FILE_PREFIX = 'naoru:board:file:';// 添付ファイルは1件1キーで別保存
 const BOARD_POST_CAP = 500;                   // 保持する最大投稿数
 const PUSH_KEY = 'naoru:push:v1';             // { subs:[{endpoint,keys,staffId,name,createdAt}] } Webプッシュ購読
@@ -140,6 +141,12 @@ async function kvEval(script, keys, args) {
 }
 // JSON配列キーに1要素をアトミックに追記し、末尾cap件へトリム（read-modify-writeの競合＝同時送信で消えるのを防ぐ）。
 const KV_APPEND_LUA = "local raw=redis.call('GET',KEYS[1]) local arr if raw then arr=cjson.decode(raw) else arr={} end arr[#arr+1]=cjson.decode(ARGV[1]) local cap=tonumber(ARGV[2]) if #arr>cap then local res={} local s=#arr-cap+1 for i=s,#arr do res[#res+1]=arr[i] end arr=res end redis.call('SET',KEYS[1],cjson.encode(arr)) return #arr";
+// 既読マップの1キーだけを「大きい方を採用」で原子的に更新する。
+// 既読は別キーなので、仮にこれが失敗して read-modify-write に落ちても投稿は壊れない。
+const KV_BUMP_READ_LUA = "local raw=redis.call('GET',KEYS[1]) local m={} if raw then local ok,d=pcall(cjson.decode,raw) if ok and type(d)=='table' then m=d end end local k=ARGV[1] local t=tonumber(ARGV[2]) local cur=tonumber(m[k]) or 0 if t>cur then m[k]=t end redis.call('SET',KEYS[1],cjson.encode(m)) return 1";
+async function kvBumpRead(key, staffId, ts) {
+  return await kvEval(KV_BUMP_READ_LUA, [key], [String(staffId), String(ts)]);
+}
 async function kvAppendJson(key, item, cap) {
   return await kvEval(KV_APPEND_LUA, [key], [JSON.stringify(item), String(cap)]);
 }
@@ -966,7 +973,7 @@ export default async function handler(req, res) {
   // ── 掲示板（全社発信）ストア: ?type=board ──
   const isBoard = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'board';
   if (isBoard) {
-    if (!hasKV && !hasSB && !gas) return res.status(200).json({ posts: [], reads: {}, configured: false });
+    if (!hasKV && !hasSB && !gas) return res.status(200).json({ posts: [], reads: {}, version: 0, configured: false });
     try {
       // 添付ファイル取得: GET ?type=board&file=<id> → { name, dataUrl }
       if (req.method === 'GET' && req.query.file) {
@@ -974,13 +981,60 @@ export default async function handler(req, res) {
         if (!f) return res.status(404).json({ ok: false, error: 'not_found' });
         return res.status(200).json({ ok: true, ...f });
       }
-      const cur = (await blobGet(BOARD_KEY, hasKV, hasSB, gas)) || {};
-      const posts = Array.isArray(cur.posts) ? cur.posts : [];
-      const reads = (cur.reads && typeof cur.reads === 'object') ? cur.reads : {};
-      if (req.method === 'GET') return res.status(200).json({ posts, reads, configured: true });
 
       const body = req.body || {};
       const action = body.action;
+
+      // ══ 既読の更新は投稿に一切触れない（これが今回の修正の核心）══
+      // 従来は read アクションが { posts, reads } を丸ごと書き戻していたため、
+      // 「誰かが掲示板を開く」たびに、その直前に投稿された記事を踏み潰す可能性があった。
+      if (req.method === 'POST' && action === 'read' && body.staffId) {
+        const staffId = String(body.staffId).slice(0, 64);
+        const ts = Number(body.ts) || Date.now();
+        try {
+          if (hasKV) await kvBumpRead(BOARD_READS_KEY, staffId, ts);           // 原子的
+          else {
+            const cur = await blobGet(BOARD_READS_KEY, hasKV, hasSB, gas);      // 小さな別キーのRMW
+            await blobSet(BOARD_READS_KEY, bumpRead(cur, staffId, ts), hasKV, hasSB, gas);
+          }
+        } catch (_) {
+          const cur = await blobGet(BOARD_READS_KEY, hasKV, hasSB, gas).catch(() => null);
+          await blobSet(BOARD_READS_KEY, bumpRead(cur, staffId, ts), hasKV, hasSB, gas).catch(() => {});
+        }
+        return res.status(200).json({ ok: true });
+      }
+
+      // 投稿側。旧 blob の reads は**移行のためそのまま保持**する（旧コードへ戻しても既読が消えない）。
+      const cur = (await blobGet(BOARD_KEY, hasKV, hasSB, gas)) || {};
+      const posts = Array.isArray(cur.posts) ? cur.posts : [];
+      const legacyReads = (cur.reads && typeof cur.reads === 'object') ? cur.reads : {};
+      const version = versionOf(cur);
+      // 投稿側を書き換えるときだけ呼ぶ。reads には触れず、版を1つ進める。
+      const savePosts = async (nextPosts) => {
+        await blobSet(BOARD_KEY, { posts: nextPosts, reads: legacyReads, _v: version + 1 }, hasKV, hasSB, gas);
+      };
+      // 投稿者・コメント者・リアクションした人の既読も進める（別キーなので投稿を巻き込まない）。
+      const bumpActor = async (staffId) => {
+        if (!staffId) return;
+        try {
+          if (hasKV) await kvBumpRead(BOARD_READS_KEY, String(staffId), Date.now());
+          else {
+            const r = await blobGet(BOARD_READS_KEY, hasKV, hasSB, gas);
+            await blobSet(BOARD_READS_KEY, bumpRead(r, staffId, Date.now()), hasKV, hasSB, gas);
+          }
+        } catch (_) { /* 既読の失敗で投稿処理を止めない */ }
+      };
+
+      if (req.method === 'GET') {
+        // 移行期間: 旧 blob 内の既読と新キーの既読を両方読む
+        const split = await blobGet(BOARD_READS_KEY, hasKV, hasSB, gas).catch(() => null);
+        return res.status(200).json({ posts, reads: mergeReads(legacyReads, split), version, configured: true });
+      }
+
+      // 古い版で上書きしようとしていないか（expectedVersion 未指定なら検査しない＝旧クライアントも動く）
+      if (isStale(body.expectedVersion, version)) {
+        return res.status(409).json({ ok: false, error: 'stale', version, posts });
+      }
 
       if (action === 'post' && body.post) {
         const p = body.post;
@@ -988,6 +1042,7 @@ export default async function handler(req, res) {
         const title = String(p.title || '').slice(0, 200);
         const rec = {
           id: genId('post'),
+          clientId: String(p.clientId || '').slice(0, 64),   // 二重送信・再送の重複を防ぐ
           authorId: String(p.authorId || ''),
           authorName: String(p.authorName || '').slice(0, 80),
           authorShop: String(p.authorShop || '').slice(0, 80),
@@ -1003,9 +1058,13 @@ export default async function handler(req, res) {
           pinned: false,
           createdAt: new Date().toISOString(),
         };
-        const nextPosts = [rec, ...posts].slice(0, BOARD_POST_CAP);
-        await blobSet(BOARD_KEY, { posts: nextPosts, reads: { ...reads, [rec.authorId]: Date.now() } }, hasKV, hasSB, gas);
-        // 全員へプッシュ（購読者全員）
+        const r = upsertPost(posts, rec, BOARD_POST_CAP);
+        if (!r.added) {                                       // 再送＝既にある。通知も送り直さない
+          await bumpActor(rec.authorId);
+          return res.status(200).json({ ok: true, post: r.existing, duplicate: true });
+        }
+        await savePosts(r.posts);
+        await bumpActor(rec.authorId);
         sendPush(hasKV, hasSB, gas, { kind: 'board', title: 'NAORU', body: `${rec.important ? '❗' : '📣'} 重要掲示板／${title || rec.authorName || 'お知らせ'}：${text}`.slice(0, 150) || '新しい掲示があります', url: '/?tab=board' });
         return res.status(200).json({ ok: true, post: rec });
       }
@@ -1026,15 +1085,12 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, id });
       }
       if (action === 'pin' && body.id) {
-        const nextPosts = posts.map(p => p && p.id === String(body.id) ? { ...p, pinned: !!body.pinned } : p);
-        await blobSet(BOARD_KEY, { posts: nextPosts, reads }, hasKV, hasSB, gas);
+        await savePosts(posts.map(p => p && p.id === String(body.id) ? { ...p, pinned: !!body.pinned } : p));
         return res.status(200).json({ ok: true });
       }
       if (action === 'react' && body.id && body.emoji && body.staffId) {
-        const nextPosts = posts.map(p => p && p.id === String(body.id) ? { ...p, reactions: toggleReaction(p.reactions, String(body.emoji), String(body.staffId)) } : p);
-        // リアクション＝閲覧とみなし、その人の既読も進める
-        const nextReads = { ...reads, [String(body.staffId)]: Math.max(Number(reads[String(body.staffId)]) || 0, Date.now()) };
-        await blobSet(BOARD_KEY, { posts: nextPosts, reads: nextReads }, hasKV, hasSB, gas);
+        await savePosts(posts.map(p => p && p.id === String(body.id) ? { ...p, reactions: toggleReaction(p.reactions, String(body.emoji), String(body.staffId)) } : p));
+        await bumpActor(String(body.staffId));   // リアクション＝閲覧とみなす（別キーへ）
         return res.status(200).json({ ok: true });
       }
       // コメント投稿（返信＝parentId・メンション対応）
@@ -1044,6 +1100,7 @@ export default async function handler(req, res) {
         if (!text) return res.status(400).json({ ok: false, error: 'empty' });
         const rec = {
           id: genId('cm'),
+          clientId: String(c.clientId || '').slice(0, 64),
           parentId: c.parentId ? String(c.parentId) : '',
           fromStaffId: String(c.fromStaffId || ''),
           fromName: String(c.fromName || '').slice(0, 80),
@@ -1052,12 +1109,16 @@ export default async function handler(req, res) {
           mentions: (Array.isArray(c.mentions) ? c.mentions : []).filter(x => x && x.id && x.name).map(x => ({ id: String(x.id).slice(0, 64), name: String(x.name).slice(0, 80) })).slice(0, 30),
           createdAt: new Date().toISOString(),
         };
-        let target = null;
-        const nextPosts = posts.map(p => { if (p && p.id === String(body.id)) { target = p; const comments = [...(Array.isArray(p.comments) ? p.comments : []), rec].slice(-500); return { ...p, comments }; } return p; });
-        if (!target) return res.status(404).json({ ok: false, error: 'not_found' });
-        const nextReads = { ...reads, [rec.fromStaffId]: Math.max(Number(reads[rec.fromStaffId]) || 0, Date.now()) };
-        await blobSet(BOARD_KEY, { posts: nextPosts, reads: nextReads }, hasKV, hasSB, gas);
+        const r = upsertComment(posts, String(body.id), rec, 500);
+        if (!r.target) return res.status(404).json({ ok: false, error: 'not_found' });
+        if (!r.added) {                                        // 再送＝既にある
+          await bumpActor(rec.fromStaffId);
+          return res.status(200).json({ ok: true, comment: r.existing, duplicate: true });
+        }
+        await savePosts(r.posts);
+        await bumpActor(rec.fromStaffId);
         // 通知: 投稿者＋メンション＋（返信なら親コメント投稿者）へ
+        const target = r.target;
         const set = new Set();
         if (target.authorId && String(target.authorId) !== rec.fromStaffId) set.add(String(target.authorId));
         rec.mentions.forEach(m => { if (m.id && m.id !== rec.fromStaffId && m.id !== '__all__') set.add(String(m.id)); });
@@ -1068,20 +1129,14 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, comment: rec });
       }
       if (action === 'deleteComment' && body.id && body.commentId) {
-        const nextPosts = posts.map(p => { if (p && p.id === String(body.id)) { const comments = (Array.isArray(p.comments) ? p.comments : []).filter(c => !(c.id === String(body.commentId) && (body.root || String(c.fromStaffId) === String(body.staffId)))); return { ...p, comments }; } return p; });
-        await blobSet(BOARD_KEY, { posts: nextPosts, reads }, hasKV, hasSB, gas);
+        await savePosts(posts.map(p => { if (p && p.id === String(body.id)) { const comments = (Array.isArray(p.comments) ? p.comments : []).filter(c => !(c.id === String(body.commentId) && (body.root || String(c.fromStaffId) === String(body.staffId)))); return { ...p, comments }; } return p; }));
         return res.status(200).json({ ok: true });
       }
       if (action === 'delete' && body.id) {
-        const nextPosts = posts.filter(p => {
+        await savePosts(posts.filter(p => {
           if (!p || p.id !== String(body.id)) return true;
           return !(body.root || String(p.authorId) === String(body.staffId)); // 本人/rootのみ削除
-        });
-        await blobSet(BOARD_KEY, { posts: nextPosts, reads }, hasKV, hasSB, gas);
-        return res.status(200).json({ ok: true });
-      }
-      if (action === 'read' && body.staffId) {
-        await blobSet(BOARD_KEY, { posts, reads: { ...reads, [String(body.staffId)]: Number(body.ts) || Date.now() } }, hasKV, hasSB, gas);
+        }));
         return res.status(200).json({ ok: true });
       }
       return res.status(400).json({ ok: false, error: 'invalid board action' });

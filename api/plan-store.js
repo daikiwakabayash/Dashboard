@@ -15,6 +15,8 @@
 
 import { getVotingState, validateVote, upsertVote, removeVote, isPeriodPublished, autoPublishLabel, listPeriods } from '../lib/thanksgift.js';
 import { ensureBaseRooms, extractLinks, toggleReaction, genId } from '../lib/chat.js';
+import { authorizeChatAction, canViewRoom, enforcementMode, isTenantAdmin } from '../lib/chat-authz.js';
+import { resolveActorFromRequest, withAltIds } from '../lib/chat-identity.js';
 import { videoEmbed } from '../lib/board.js';
 import { analyzeStore, couponReminderItems, buildStoreMessage } from '../lib/patrol.js';
 import { buildSearchRequest, parsePlacesResponse, reviewRequestUrl, buildLegacyReviewsRequest, parseLegacyReviews } from '../lib/places.js';
@@ -1246,6 +1248,24 @@ export default async function handler(req, res) {
         }
         return res.status(200).json({ ok: true, dataUrl });
       }
+      // ── 認可（CHAT_PERMISSION_MATRIX.md §6 / lib/chat-authz.js）────────────────
+      // actor = 検証済み identity（SalonOne SSO の Bearer / settlement-auth の rootトークン）。
+      // どちらも無ければ body の申告値を verified:false で使う（＝従来どおりの互換動作）。
+      //   CHAT_AUTHZ_ENFORCE=strict … 権限違反を 403 で拒否する
+      //   CHAT_AUTHZ_ENFORCE=shadow … 判定だけして通し、違反をログに残す（既定・既存クライアントを壊さない）
+      //   CHAT_AUTHZ_ENFORCE=off    … 判定しない
+      const authzMode = enforcementMode(process.env);
+      let actor = await resolveActorFromRequest(req);
+      // 本部(hq)アカウントのチャットIDは「オーナー設定」で紐付けた staffId のことがある。
+      // クライアント申告ではなくサーバー側の accountmeta から別IDとして補う（DM の可視判定に効く）。
+      if (actor.verified && actor.role === 'hq' && actor.actorId) {
+        try {
+          const meta = (await blobGet(ACCTMETA_KEY, hasKV, hasSB, gas)) || {};
+          const m = meta && meta[actor.actorId];
+          if (m && m.staffId) actor = withAltIds(actor, [String(m.staffId)]);
+        } catch {}
+      }
+      const actorIsAdmin = isTenantAdmin(actor);
       const cur = (await blobGet(CHAT_KEY, hasKV, hasSB, gas)) || {};
       const rooms = Array.isArray(cur.rooms) ? cur.rooms : [];
       // メッセージはルーム別キー(naoru:chat:m:<roomId>)に保存。
@@ -1278,18 +1298,50 @@ export default async function handler(req, res) {
       const save = (patch) => blobSet(CHAT_KEY, { rooms, dir, notes, ...patch }, hasKV, hasSB, gas);
 
       if (req.method === 'GET') {
+        // 見える Room だけを返す（＝メッセージ本文もサーバー側で出さない）。
+        // ⚠️ strict のときだけ適用する。shadow（既定）では従来どおり全件返し、フロント側でフィルタする。
+        //    identity の取り違え（SSOのstaff_id/user_id、本部アカウントの紐付け漏れ）で
+        //    既存ユーザーの自分のルームが消えるのを避けるため、段階的に有効化する。
+        const scoped = (authzMode === 'strict') ? rooms.filter(r => canViewRoom(actor, r)) : rooms;
         // rooms 一覧の per-room キーをMGETでまとめて取得。空のルームは旧集約で補完。
-        const keys = rooms.map(r => CHAT_MSG_PREFIX + String(r.id));
+        const keys = scoped.map(r => CHAT_MSG_PREFIX + String(r.id));
         const arrs = await blobMGet(keys, hasKV, hasSB, gas);
         const messages = {};
         const missing = [];
-        rooms.forEach((r, i) => { const a = arrs[i]; if (Array.isArray(a) && a.length) messages[String(r.id)] = a; else missing.push(String(r.id)); });
+        scoped.forEach((r, i) => { const a = arrs[i]; if (Array.isArray(a) && a.length) messages[String(r.id)] = a; else missing.push(String(r.id)); });
         if (missing.length) { const agg = await loadAgg(); for (const rid of missing) { const m = agg[rid]; if (Array.isArray(m) && m.length) messages[rid] = m; } }
-        return res.status(200).json({ rooms, messages, reads, dir, notes, configured: true });
+        return res.status(200).json({
+          rooms: scoped, messages, reads, dir, notes, configured: true,
+          authz: { mode: authzMode, role: actor.role, verified: actor.verified, filtered: scoped.length !== rooms.length },
+        });
       }
 
       const body = req.body || {};
       const action = body.action;
+
+      // ── action 単位の認可判定 ───────────────────────────────────────────
+      // 対象ルームは既存の rooms から引く（createRoom は body.room を検査対象にする）。
+      const authzRoom = action === 'createRoom'
+        ? { ...(body.room || {}), tenantId: actor.tenantId }
+        : (rooms.find(r => r && String(r.id) === String(body.roomId || '')) || null);
+      const authzCtx = { env: process.env, knownStaff: dir.staff };
+      if (authzRoom) authzCtx.room = authzRoom;
+      const verdict = authorizeChatAction(actor, String(action || ''), authzCtx);
+      if (!verdict.allow) {
+        if (authzMode === 'strict') return res.status(403).json({ ok: false, error: 'forbidden', reason: verdict.reason });
+        if (authzMode === 'shadow') {
+          // shadow は拒否せず記録のみ（Preview で十分検証してから strict に切り替える）
+          console.warn('[chat-authz] shadow-violation ' + JSON.stringify({
+            action: String(action || ''), reason: verdict.reason, role: actor.role,
+            actorId: actor.actorId, verified: actor.verified, roomId: String(body.roomId || ''),
+          }));
+        }
+      }
+      // 特権操作（他人の投稿削除・メンバー変更・ルーム削除など）は、strict では
+      // クライアント申告の body.root ではなく検証済み actor のみを信用する。
+      const rootOk = authzMode === 'strict'
+        ? (actor.verified && actorIsAdmin)
+        : (!!body.root || (actor.verified && actorIsAdmin));
 
       // 全社アナウンス＋店舗ルーム＋スタッフディレクトリを用意（広い権限のセッションが呼ぶ）
       if (action === 'ensureRooms') {
@@ -1332,7 +1384,7 @@ export default async function handler(req, res) {
         const room = rooms.find(r => r && r.id === rid);
         if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
         const isMember = (room.members || []).map(String).includes(String(body.staffId));
-        if (!(body.root || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        if (!(rootOk || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
         const oldM = (room.members || []).map(String);
         const members = [...new Set(body.members.map(String))].slice(0, 500);
         const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, members } : r);
@@ -1388,7 +1440,7 @@ export default async function handler(req, res) {
         const room = rooms.find(r => r && r.id === rid);
         if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
         const isMember = (room.members || []).map(String).includes(String(body.staffId));
-        if (!(body.root || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        if (!(rootOk || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
         const patch = {};
         if (typeof body.name === 'string') patch.name = body.name.slice(0, 60);
         // アイコン: 絵文字(icon) と 画像(iconImg=画像ID) は排他。片方を設定するともう片方はクリア。
@@ -1511,7 +1563,7 @@ export default async function handler(req, res) {
         const rid = String(body.roomId);
         const arr = (await getRoomMsgs(rid)).filter(msg => {
           if (!msg || msg.id !== String(body.msgId)) return true;
-          return !(body.root || String(msg.fromStaffId) === String(body.staffId)); // 本人/rootのみ削除可
+          return !(rootOk || String(msg.fromStaffId) === String(body.staffId)); // 本人/rootのみ削除可
         });
         await saveRoomMsgs(rid, arr);
         return res.status(200).json({ ok: true });
@@ -1522,7 +1574,7 @@ export default async function handler(req, res) {
         const rid = String(body.roomId);
         const target = rooms.find(r => r && r.id === rid);
         if (!target || target.kind === 'announce' || target.kind === 'store') return res.status(400).json({ ok: false, error: 'not_deletable' });
-        if (!(body.root || String(target.createdBy) === String(body.staffId))) return res.status(403).json({ ok: false, error: 'forbidden' });
+        if (!(rootOk || String(target.createdBy) === String(body.staffId))) return res.status(403).json({ ok: false, error: 'forbidden' });
         const nextRooms = rooms.filter(r => r && r.id !== rid);
         await save({ rooms: nextRooms }); await saveRoomMsgs(rid, []);   // ルーム削除＝そのルームのメッセージも空に（索引からも除去）
         return res.status(200).json({ ok: true });
@@ -1568,7 +1620,7 @@ export default async function handler(req, res) {
         const idx = cur.findIndex(x => x && x.id === String(body.noteId));
         if (idx < 0) return res.status(404).json({ ok: false, error: 'not_found' });
         const target = cur[idx];
-        if (!(body.root || String(target.fromStaffId) === String(body.staffId))) return res.status(403).json({ ok: false, error: 'forbidden' });
+        if (!(rootOk || String(target.fromStaffId) === String(body.staffId))) return res.status(403).json({ ok: false, error: 'forbidden' });
         const n = body.note;
         const text = String(n.text || '').slice(0, 4000);
         const imgIds = (Array.isArray(n.imgIds) ? n.imgIds : []).map(String).slice(0, 6);
@@ -1588,13 +1640,13 @@ export default async function handler(req, res) {
       }
       if (action === 'noteDelete' && body.roomId && body.noteId) {
         const rid = String(body.roomId);
-        const arr = (Array.isArray(notes[rid]) ? notes[rid] : []).filter(x => !(x.id === String(body.noteId) && (body.root || String(x.fromStaffId) === String(body.staffId))));
+        const arr = (Array.isArray(notes[rid]) ? notes[rid] : []).filter(x => !(x.id === String(body.noteId) && (rootOk || String(x.fromStaffId) === String(body.staffId))));
         await save({ notes: { ...notes, [rid]: arr } });
         return res.status(200).json({ ok: true });
       }
       // 管理: あるユーザーID(fromId)のチャット所属・発言・既読を別ID(toId)へ付け替える（root専用）。
       // 重複アカウント削除時に、旧IDで参加/受信していたルームを現アカウントに引き継ぐための復旧用。
-      if (action === 'remapUser' && body.root && body.fromId && body.toId) {
+      if (action === 'remapUser' && rootOk && body.fromId && body.toId) {
         const from = String(body.fromId), to = String(body.toId);
         let changed = 0;
         const nextRooms = rooms.map(r => {
@@ -1623,7 +1675,7 @@ export default async function handler(req, res) {
 
       // 管理: 旧集約メッセージをルーム別キーへ移行（root専用）。索引は廃止したので作らない。
       // per-roomキーが未作成のルームだけ、旧集約(CHAT_MSGS_KEY)/旧CHAT_KEY.messages から書き出す。
-      if (action === 'migrateMsgs' && body.root) {
+      if (action === 'migrateMsgs' && rootOk) {
         const agg = await loadAgg();
         let migrated = 0;
         for (const [rid, arr] of Object.entries(agg)) {

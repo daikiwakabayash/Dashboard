@@ -20,6 +20,7 @@ import { analyzeStore, couponReminderItems, buildStoreMessage } from '../lib/pat
 import { buildSearchRequest, parsePlacesResponse, reviewRequestUrl, buildLegacyReviewsRequest, parseLegacyReviews } from '../lib/places.js';
 import { recordSnapshot, computeDeltas, meoFlags, meoScore, alertWeight, jstYmd, reviewsInMonth } from '../lib/meo.js';
 import { mergeAppointments, mergeDismissed, flatten as soflFlatten } from '../lib/soflmap.js';
+import { ALLOWANCE_LOG_KEY, ALLOWANCE_PROD_KEY, ALLOWANCE_LOG_CAP, makeEntry as makeAllowanceEntry, mergeSubmissions, isDuplicateSubmit, mergeProductivity, bumpProductivity } from '../lib/allowance-store.js';
 import { BOARD_READS_KEY, normalizeReads, mergeReads, bumpRead, versionOf, isStale, upsertPost, upsertComment } from '../lib/board-store.js';
 
 // Vercel KV / Upstash Redis / Vercel Redis いずれの環境変数名でも動くよう両対応（REST APIは共通）
@@ -30,7 +31,7 @@ const SB_KEY = () => process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABA
 const GAS_URL = () => process.env.PLAN_GAS_URL || process.env.SETTLEMENT_GAS_URL || '';
 const GOALS_KEY = 'naoru:plan:goals';
 const ACTIONS_KEY = 'naoru:plan:actions';
-const ALLOWANCE_KEY = 'naoru:allowance:v1'; // { submissions:[...], productivity:{staffId:{'YYYY-MM':gross}} }
+const ALLOWANCE_KEY = 'naoru:allowance:v1'; // { submissions:[...], productivity:{…} } 旧形式。提出は追記ログ(ALLOWANCE_LOG_KEY)・生産性は別キー(ALLOWANCE_PROD_KEY)へ移行済み。ここはRollback用の写しとして維持
 const ACCTMETA_KEY = 'naoru:accountmeta:v1'; // { owner: { role, staffId, staffName } }
 const ZKTHERAPIST_KEY = 'naoru:zktherapist:v1'; // { 'shopName|YYYY-MM': count } 全体管理シートのセラピスト数 手動上書き
 const THANKSGIFT_KEY = 'naoru:thanksgift:v1'; // { votes:[{id,period,fromStaffId,fromStaffName,fromShop,toStaffId,toStaffName,toShop,comment,createdAt}] } サンクスギフト投票
@@ -269,30 +270,79 @@ export default async function handler(req, res) {
   if (isAllowance) {
     if (!hasKV && !hasSB && !gas) return res.status(200).json({ submissions: [], productivity: {}, configured: false });
     try {
-      const cur = (await blobGet(ALLOWANCE_KEY, hasKV, hasSB, gas)) || {};
-      const submissions = Array.isArray(cur.submissions) ? cur.submissions : [];
-      const productivity = (cur.productivity && typeof cur.productivity === 'object') ? cur.productivity : {};
+      // 旧blob（Rollback用の写し）／提出の追記ログ／生産性の別キー の3つを読む。
+      const [curRaw, logRaw, prodRaw] = await Promise.all([
+        blobGet(ALLOWANCE_KEY, hasKV, hasSB, gas).catch(() => null),
+        blobGet(ALLOWANCE_LOG_KEY, hasKV, hasSB, gas).catch(() => null),
+        blobGet(ALLOWANCE_PROD_KEY, hasKV, hasSB, gas).catch(() => null),
+      ]);
+      const cur = curRaw || {};
+      const legacySubs = Array.isArray(cur.submissions) ? cur.submissions : [];
+      const log = Array.isArray(logRaw) ? logRaw : [];
+      const submissions = mergeSubmissions(legacySubs, log);
+      const productivity = mergeProductivity(cur.productivity, prodRaw);
+
       if (req.method === 'GET') {
         return res.status(200).json({ submissions, productivity, configured: true });
       }
       const body = req.body || {};
       const action = body.action;
+
+      // 追記専用。既存の要素を読んで書き直さないので、同時提出で互いを踏まない。
+      // 戻り値 { ok, atomic } … ok=false は「保存できなかった」＝呼び出し側がエラーを返す。
+      const hasEntry = (arr, e) => Array.isArray(arr) && arr.some(x => x && x.id === e.id && x.op === e.op && x.at === e.at);
+      const appendLog = async (entry) => {
+        if (hasKV) {                                          // KV: Lua で原子的に追記（本番はこちら）
+          await kvAppendJson(ALLOWANCE_LOG_KEY, entry, ALLOWANCE_LOG_CAP);
+          return { ok: true, atomic: true };
+        }
+        // ⚠️ Supabase / GAS は原子的な追記ができない。読んで書くだけだと同時提出で消える。
+        //    そこで「書く→読み直して入っているか確認する」を最大3回繰り返す。
+        //    それでも入らなければ **黙って成功にせず** 失敗を返す（領収書が消えるより、
+        //    利用者に「保存できませんでした」と出すほうが良い）。
+        for (let i = 0; i < 3; i++) {
+          const fresh = await blobGet(ALLOWANCE_LOG_KEY, hasKV, hasSB, gas).catch(() => null);
+          const arr = Array.isArray(fresh) ? fresh : [];
+          if (hasEntry(arr, entry)) return { ok: true, atomic: false };      // 既に入っていた
+          await blobSet(ALLOWANCE_LOG_KEY, [...arr, entry].slice(-ALLOWANCE_LOG_CAP), hasKV, hasSB, gas);
+          const after = await blobGet(ALLOWANCE_LOG_KEY, hasKV, hasSB, gas).catch(() => null);
+          if (hasEntry(after, entry)) return { ok: true, atomic: false };    // 書けたことを確認
+          await new Promise(r => setTimeout(r, 60 * (i + 1)));               // 少し待ってやり直す
+        }
+        return { ok: false, atomic: false };
+      };
+      // 旧blobへの写し。Rollback しても提出が残るように保つ。
+      // ⚠️ 生産性(productivity)はここでは書かない。旧blobの値をそのまま保持する
+      //    （返金明細書の表示のたびに走る recordProductivity が提出を巻き込んでいたのが元の不具合）。
+      const mirrorLegacy = async (nextSubs) => {
+        try { await blobSet(ALLOWANCE_KEY, { submissions: nextSubs, productivity: cur.productivity || {} }, hasKV, hasSB, gas); }
+        catch (_) { /* 写しの失敗はログが正なので致命的ではない */ }
+      };
+
       if (action === 'submit' && body.submission && body.submission.id) {
         const s = body.submission;
-        const next = submissions.filter(x => x && x.id !== s.id);
-        next.push(s);
-        await blobSet(ALLOWANCE_KEY, { submissions: next, productivity }, hasKV, hasSB, gas);
-        return res.status(200).json({ ok: true, id: s.id });
+        if (isDuplicateSubmit(log, s)) {                    // 同じ内容の再送＝何もしない
+          return res.status(200).json({ ok: true, id: s.id, duplicate: true });
+        }
+        const entry = makeAllowanceEntry('submit', s);
+        if (!entry) return res.status(400).json({ ok: false, error: 'invalid_submission' });
+        const w = await appendLog(entry);                    // ← 正。これが通れば提出は失われない
+        if (!w.ok) return res.status(503).json({ ok: false, error: 'not_durable', message: '保存できませんでした。もう一度お試しください。' });
+        await mirrorLegacy(mergeSubmissions(legacySubs, [...log, entry]));
+        return res.status(200).json({ ok: true, id: s.id, atomic: w.atomic });
       }
       if (action === 'delete' && body.id) {
-        const next = submissions.filter(x => x && x.id !== body.id);
-        await blobSet(ALLOWANCE_KEY, { submissions: next, productivity }, hasKV, hasSB, gas);
+        const entry = makeAllowanceEntry('delete', { id: body.id });
+        if (!entry) return res.status(400).json({ ok: false, error: 'invalid_id' });
+        const w = await appendLog(entry);
+        if (!w.ok) return res.status(503).json({ ok: false, error: 'not_durable', message: '取り消しを保存できませんでした。もう一度お試しください。' });
+        await mirrorLegacy(mergeSubmissions(legacySubs, [...log, entry]));
         return res.status(200).json({ ok: true });
       }
       if (action === 'recordProductivity' && body.staffId && body.month) {
-        const p = { ...productivity };
-        p[String(body.staffId)] = { ...(p[String(body.staffId)] || {}), [String(body.month)]: Number(body.gross) || 0 };
-        await blobSet(ALLOWANCE_KEY, { submissions, productivity: p }, hasKV, hasSB, gas);
+        // 生産性は別キーへ。**提出データには一切触れない**。
+        const next = bumpProductivity(prodRaw, body.staffId, body.month, body.gross);
+        await blobSet(ALLOWANCE_PROD_KEY, next, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true });
       }
       return res.status(400).json({ ok: false, error: 'invalid allowance action' });

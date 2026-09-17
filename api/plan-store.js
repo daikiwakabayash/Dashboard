@@ -20,6 +20,16 @@ import { analyzeStore, couponReminderItems, buildStoreMessage } from '../lib/pat
 import { buildSearchRequest, parsePlacesResponse, reviewRequestUrl, buildLegacyReviewsRequest, parseLegacyReviews } from '../lib/places.js';
 import { recordSnapshot, computeDeltas, meoFlags, meoScore, alertWeight, jstYmd, reviewsInMonth } from '../lib/meo.js';
 import { mergeAppointments, mergeDismissed, flatten as soflFlatten } from '../lib/soflmap.js';
+// ── Command Center（Phase 0〜2）。既存の type= には一切触れない追加のみ ──
+import { FLAGS_KEY, DEFAULT_FLAGS, normalizeFlags, applyFlagChange, killAll } from '../lib/ccflags.js';
+import { AUDIT_KEY, AUDIT_CAP, buildEntry as buildAuditEntry, listEntries as listAuditEntries } from '../lib/audit.js';
+import { APPROVAL_KEY, APPROVAL_CAP, buildApproval, decide as decideApproval, repropose as reproposeApproval, recordExecution, listApprovals, pendingCount } from '../lib/approvals.js';
+import { AGENTLOG_KEY, AGENTLOG_CAP, startRun, finishRun, listRuns, summarize as summarizeRuns, anomalies as runAnomalies } from '../lib/agentlog.js';
+import { check as authzCheck, can as authzCan, enforce as authzEnforce, decisionRecord, needsReverify, DEFAULT_TENANT } from '../lib/authz.js';
+import { resolveActor } from '../lib/actor.js';
+import { verifySalonOneBearer } from '../lib/salonone-auth.js';
+import { hashOwnerToken, verifyOwnerToken, parseOwnerPasswords, parseOwnerShops } from '../lib/settlement.js';
+import { kvConfigured, kvBlobGet, ACCT_PASS_KEY } from '../lib/kvblob.js';
 
 // Vercel KV / Upstash Redis / Vercel Redis いずれの環境変数名でも動くよう両対応（REST APIは共通）
 const KV_URL = () => process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_REST_API_URL || '';
@@ -242,6 +252,265 @@ export default async function handler(req, res) {
         onUploadCompleted: async () => {},   // 完了URLはクライアントの upload() 戻り値から取得するため何もしない
       });
       return res.status(200).json(jsonResponse);
+    } catch (err) {
+      return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // Command Center（Phase 0〜2）: ?type=ccflags / approval / agentlog / audit
+  // ──────────────────────────────────────────────────────────────────
+  // ⚠️ 信頼モデルは既存の chat / thanksgift と同じ＝**サーバー認証なし**。
+  //    actor はクライアント申告であり、ここでの role 判定はUIレベルの制御にすぎない。
+  //    サーバー側の強制は cc_authz='enforce' を導入する段階（Phase 3）で行う。
+  //    それまでの間、この4種は「既定OFFのフラグの内側」でのみ画面に出る。
+  // ⚠️ 新しいServerless Functionは増やさない（Hobby上限12・現在11使用済み）。
+  //    そのため plan-store の ?type= 分岐として同居させる。
+  // ══════════════════════════════════════════════════════════════════
+  // ── 環境スコープ（重要）────────────────────────────────────────
+  // Vercel の環境変数は既定で Production / Preview が同じ値を共有するため、
+  // Preview からフラグを ON にすると **本番のフラグまで ON になってしまう**。
+  // そこで Command Center のキーだけ環境ごとに分ける。VERCEL_ENV は Vercel が
+  // 自動で入れるシステム変数なので、環境変数の追加設定は要らない。
+  //   production → naoru:cc:flags:v1        （従来どおり）
+  //   preview    → naoru:cc:flags:v1:preview（本番とは別物）
+  // ⚠️ 既存の type=（chat/board/allowance 等）のキーは**一切変えない**。
+  //    既存データの参照先が変わると社内の運用が壊れるため、新規キーのみ対象。
+  const CC_ENV = String(process.env.VERCEL_ENV || process.env.CC_ENV || 'development');
+  const ccKey = (base) => (CC_ENV === 'production' ? base : `${base}:${CC_ENV}`);
+
+  const ccType = (req.method === 'GET' ? req.query.type : (req.body || {}).type);
+  const isCC = ['ccflags', 'approval', 'agentlog', 'audit'].includes(ccType);
+  if (isCC) {
+    const hasStore = !!(hasKV || hasSB || gas);
+    // ストアが無い＝フラグを読めない＝fail closed（全新機能OFF）。既存機能には影響しない。
+    if (!hasStore) {
+      if (ccType === 'ccflags') return res.status(200).json({ flags: { ...DEFAULT_FLAGS, cc_all: false, configured: false, env: CC_ENV, store: 'none' }, configured: false });
+      return res.status(200).json({ items: [], configured: false });
+    }
+
+    const body = req.body || {};
+    const actorOf = () => {
+      const a = (body.actor && typeof body.actor === 'object') ? body.actor : {};
+      return {
+        id: String(a.id || '').slice(0, 60),
+        name: String(a.name || '').slice(0, 80),
+        role: String(a.role || '').slice(0, 20),
+        source: String(a.source || 'ui').slice(0, 20),
+      };
+    };
+    // 配列キーへの追記。KVならLuaで原子的（同時書き込みで消えない）、それ以外は read-modify-write。
+    const appendRow = async (key, row, cap) => {
+      if (hasKV) { await kvAppendJson(key, row, cap); return; }
+      const cur = (await blobGet(key, hasKV, hasSB, gas)) || [];
+      const arr = Array.isArray(cur) ? cur : [];
+      arr.push(row);
+      await blobSet(key, arr.slice(-cap), hasKV, hasSB, gas);
+    };
+    const readRows = async (key) => {
+      const cur = (await blobGet(key, hasKV, hasSB, gas)) || [];
+      return Array.isArray(cur) ? cur : [];
+    };
+    // ── 認可（段階導入）─────────────────────────────────────────
+    // cc_authz='off' のあいだは resolveActor も authzCheck も呼ばない（＝追加コスト0・従来と同一動作）。
+    // 'log'/'warn' は判定して記録するだけでブロックしない。'enforce' で初めて 403 を返す。
+    const ccActionFor = (type, b) => {
+      const act = String((b && b.action) || '');
+      if (type === 'ccflags') {
+        if (act === 'kill') return 'killswitch.engage';
+        if (act === 'set' && b.key === 'cc_all' && b.value === true) return 'killswitch.release';
+        if (act === 'set') return 'flag.change';
+        return 'flag.read';
+      }
+      if (type === 'approval') {
+        if (act === 'create') return 'approval.create';
+        if (act === 'decide') return `approval.${String(b.decision || 'approve')}`;
+        if (act === 'repropose') return 'approval.create';
+        if (act === 'record') return 'approval.execute';
+        return 'approval.read';
+      }
+      if (type === 'agentlog') return (act === 'start' || act === 'finish') ? 'agentlog.write' : 'agentlog.read';
+      if (type === 'audit') return act === 'add' ? 'audit.write' : 'audit.read';
+      return 'flag.read';
+    };
+    // 環境変数＋KV からアカウントを組み立てる（GAS は遅いのでここでは読まない。AUTHORIZATION_PLAN.md §6-2 の既知の穴）
+    const ccLoadAccounts = async () => {
+      const passwords = parseOwnerPasswords(process.env.SETTLEMENT_OWNER_PASSWORDS);
+      const shopsMap = parseOwnerShops(process.env.SETTLEMENT_OWNER_SHOPS);
+      if (kvConfigured()) {
+        const kvPass = await kvBlobGet(ACCT_PASS_KEY).catch(() => null);
+        if (kvPass && typeof kvPass === 'object') for (const [o, pw] of Object.entries(kvPass)) if (pw) passwords[o] = String(pw);
+      }
+      const metaMap = (await blobGet(ACCTMETA_KEY, hasKV, hasSB, gas).catch(() => null)) || {};
+      return { passwords, shopsMap, metaMap };
+    };
+    let ccActor = actorOf();          // 既定はクライアント申告（従来どおり）
+    const ccFlagsNow = normalizeFlags(await blobGet(ccKey(FLAGS_KEY), hasKV, hasSB, gas).catch(() => null));
+    const ccAuthzMode = ccFlagsNow.cc_authz || 'off';
+    if (ccAuthzMode !== 'off') {
+      const ccAction = ccActionFor(ccType, body);
+      const salt = process.env.AUTH_SALT || 'naoru-settlement-2026';
+      const resolved = await resolveActor(req, {
+        env: process.env,
+        verifySalonOneBearer,
+        rootToken: () => hashOwnerToken('__root__', process.env.DASHBOARD_PASSWORD || '', salt),
+        verifyOwnerToken: (pw, owner, token) => verifyOwnerToken(pw, owner, token, salt),
+        loadAccounts: ccLoadAccounts,
+        skipCache: needsReverify(ccAction),   // 取り返しがつかない操作は毎回確かめる
+      }).catch(() => null);
+      if (resolved) ccActor = { ...resolved };
+      const target = {
+        shop: String(body.shop || (body.approval && body.approval.scope && body.approval.scope.shop) || req.query.shop || ''),
+        tenantId: String(body.tenantId || req.query.tenantId || '') || undefined,
+        risk: body.risk || '', approvalStatus: body.approvalStatus || '',
+        recipientCount: Number(body.recipientCount) || 0,
+      };
+      const decision = authzCan(ccActor, ccAction, target);
+      const verdict = authzEnforce(ccAuthzMode, decision);
+      res.setHeader('X-CC-Authz', `${verdict.mode}:${verdict.allowed ? 'allow' : (verdict.code || 'deny')}`);
+      // log / warn / enforce では **ALLOW も DENY も** 記録する。
+      // 「本来どちらになるはずか」を貯めるのが目的で、拒否だけ見ていると
+      // 正しく通っていた量が分からず、enforce に上げてよいか判断できない。
+      if (ccAuthzMode !== 'off') {
+        try {
+          const rec = decisionRecord(ccActor, ccAction, target, decision, ccAuthzMode);
+          const e = buildAuditEntry({
+            action: decision.allow ? 'authz_allow' : 'authz_deny',
+            entity: 'authz', entityId: ccAction,
+            actor: ccActor, source: ccActor.source,
+            note: rec.code || rec.decision,
+            after: rec,
+          });
+          if (e.ok && hasKV) await kvAppendJson(ccKey(AUDIT_KEY), e.entry, AUDIT_CAP);
+        } catch (_) { /* 記録失敗で本処理を止めない */ }
+      }
+      if (verdict.blocked) return res.status(403).json({ ok: false, error: 'forbidden', code: verdict.code, message: verdict.reason });
+    }
+
+    // 監査ログは本処理を止めない（失敗しても握りつぶす）。
+    const audit = async (input) => {
+      try {
+        const built = buildAuditEntry({ ...input, actor: ccActor, source: (input && input.source) || ccActor.source });
+        if (built.ok) await appendRow(ccKey(AUDIT_KEY), built.entry, AUDIT_CAP);
+      } catch (_) { /* 監査の失敗で業務処理を落とさない */ }
+    };
+
+    try {
+      // ── フィーチャーフラグ ──
+      if (ccType === 'ccflags') {
+        const cur = normalizeFlags(await blobGet(ccKey(FLAGS_KEY), hasKV, hasSB, gas));
+        const storeName = hasKV ? 'kv' : (hasSB ? 'supabase' : 'gas');
+        const decorate = (f) => ({ ...f, configured: true, env: CC_ENV, store: storeName, key: ccKey(FLAGS_KEY) });
+        if (req.method === 'GET') return res.status(200).json({ flags: decorate(cur), configured: true, env: CC_ENV });
+        if (body.action === 'set') {
+          const next = applyFlagChange(cur, String(body.key || ''), body.value, actorOf());
+          if (!next) return res.status(400).json({ ok: false, error: 'invalid_flag' });
+          await blobSet(ccKey(FLAGS_KEY), next, hasKV, hasSB, gas);
+          await audit({ action: 'flag_change', entity: 'ccflags', entityId: String(body.key || ''), before: { [body.key]: cur[body.key] }, after: { [body.key]: next[body.key] }, note: `env=${CC_ENV}` });
+          return res.status(200).json({ ok: true, flags: decorate(next) });
+        }
+        if (body.action === 'kill') {                     // キルスイッチ
+          const next = killAll(cur, actorOf());
+          await blobSet(ccKey(FLAGS_KEY), next, hasKV, hasSB, gas);
+          await audit({ action: 'kill_switch', entity: 'ccflags', entityId: 'cc_all', before: { cc_all: cur.cc_all }, after: { cc_all: false }, note: `env=${CC_ENV} ${String(body.note || '').slice(0, 380)}` });
+          return res.status(200).json({ ok: true, flags: decorate(next) });
+        }
+        return res.status(400).json({ ok: false, error: 'invalid ccflags action' });
+      }
+
+      // ── 承認センター ──
+      if (ccType === 'approval') {
+        const rows = await readRows(ccKey(APPROVAL_KEY));
+        if (req.method === 'GET') {
+          const filter = { status: req.query.status || 'all', kind: req.query.kind || 'all', group: req.query.group || 'all', shop: req.query.shop || '' };
+          return res.status(200).json({ items: listApprovals(rows, filter), pending: pendingCount(rows), configured: true });
+        }
+        if (body.action === 'create') {
+          const built = buildApproval(body.approval || {});
+          if (!built.ok) return res.status(400).json({ ok: false, error: built.error });
+          await appendRow(ccKey(APPROVAL_KEY), built.approval, APPROVAL_CAP);
+          await audit({ action: 'create', entity: 'approval', entityId: built.approval.id, after: { kind: built.approval.kind, title: built.approval.title, risk: built.approval.risk }, source: 'agent' });
+          return res.status(200).json({ ok: true, approval: built.approval });
+        }
+        // 以降は既存行の更新。楽観ロック: クライアントが見ていた updatedAt と一致しなければ 409。
+        const id = String(body.id || '');
+        const idx = rows.findIndex(r => r && r.id === id);
+        if (idx < 0) return res.status(404).json({ ok: false, error: 'not_found' });
+        const before = rows[idx];
+        if (body.expectedUpdatedAt != null && Number(body.expectedUpdatedAt) !== Number(before.updatedAt)) {
+          return res.status(409).json({ ok: false, error: 'stale', current: before });
+        }
+        let out = null;
+        if (body.action === 'decide') {
+          out = decideApproval(before, String(body.decision || ''), actorOf(), { note: body.note, seenHash: body.seenHash });
+        } else if (body.action === 'repropose') {
+          out = reproposeApproval(before, body.patch || {}, actorOf());
+        } else if (body.action === 'record') {
+          out = recordExecution(before, body.result || {});
+        } else {
+          return res.status(400).json({ ok: false, error: 'invalid approval action' });
+        }
+        // decide() は期限切れ時に「期限切れへ倒した行」を返すので、それは保存する。
+        const toSave = out.ok ? out.approval : (out.approval || null);
+        if (toSave) {
+          const next = rows.slice();
+          next[idx] = toSave;
+          await blobSet(ccKey(APPROVAL_KEY), next, hasKV, hasSB, gas);
+        }
+        if (!out.ok) return res.status(409).json({ ok: false, error: out.error, approval: toSave || before });
+        await audit({ action: body.action === 'decide' ? String(body.decision || 'decide') : String(body.action), entity: 'approval', entityId: id, before: { status: before.status }, after: { status: out.approval.status }, note: String(body.note || '').slice(0, 400) });
+        return res.status(200).json({ ok: true, approval: out.approval });
+      }
+
+      // ── AI Agent Activity ──
+      if (ccType === 'agentlog') {
+        const rows = await readRows(ccKey(AGENTLOG_KEY));
+        if (req.method === 'GET') {
+          const since = Number(req.query.since) || 0;
+          const filter = { agentName: req.query.agentName || 'all', status: req.query.status || 'all', action: req.query.action || 'all', source: req.query.source || 'all', shop: req.query.shop || '', since };
+          const dayAgo = Date.now() - 24 * 3600 * 1000;
+          return res.status(200).json({
+            items: listRuns(rows, filter),
+            summary: summarizeRuns(rows, since || dayAgo),
+            anomalies: runAnomalies(rows, { failStreak: 3, dailyCostLimitJpy: Number(req.query.costLimit) || 0 }),
+            configured: true,
+          });
+        }
+        if (body.action === 'start') {
+          const built = startRun(body.run || {});
+          if (!built.ok) return res.status(400).json({ ok: false, error: built.error });
+          await appendRow(ccKey(AGENTLOG_KEY), built.run, AGENTLOG_CAP);
+          return res.status(200).json({ ok: true, run: built.run });
+        }
+        if (body.action === 'finish') {
+          const id = String(body.id || '');
+          const idx = rows.findIndex(r => r && r.id === id);
+          if (idx < 0) return res.status(404).json({ ok: false, error: 'not_found' });
+          const out = finishRun(rows[idx], body.outcome || {});
+          if (!out.ok) return res.status(409).json({ ok: false, error: out.error });
+          const next = rows.slice();
+          next[idx] = out.run;
+          await blobSet(ccKey(AGENTLOG_KEY), next, hasKV, hasSB, gas);
+          return res.status(200).json({ ok: true, run: out.run });
+        }
+        return res.status(400).json({ ok: false, error: 'invalid agentlog action' });
+      }
+
+      // ── 監査ログ ──
+      if (ccType === 'audit') {
+        const rows = await readRows(ccKey(AUDIT_KEY));
+        if (req.method === 'GET') {
+          const filter = { entity: req.query.entity || 'all', entityId: req.query.entityId || '', actorId: req.query.actorId || '', action: req.query.action || 'all', since: Number(req.query.since) || 0 };
+          return res.status(200).json({ items: listAuditEntries(rows, filter).slice(0, 500), configured: true });
+        }
+        if (body.action === 'add') {
+          const built = buildAuditEntry({ ...(body.entry || {}), actor: actorOf() });
+          if (!built.ok) return res.status(400).json({ ok: false, error: built.error });
+          await appendRow(ccKey(AUDIT_KEY), built.entry, AUDIT_CAP);
+          return res.status(200).json({ ok: true, entry: built.entry });
+        }
+        return res.status(400).json({ ok: false, error: 'invalid audit action' });
+      }
     } catch (err) {
       return res.status(200).json({ ok: false, configured: true, error: String((err && err.message) || err) });
     }

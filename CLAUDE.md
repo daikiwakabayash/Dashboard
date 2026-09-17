@@ -241,3 +241,17 @@ Googleマップの口コミ数・評価を全店で追跡し、集客増につ�
 - 新しいビジネスロジックは `lib/` に分離してテストを書く
 - **絶対にAPIキーやトークンをコードにハードコードしない**（`.env` + Vercel環境変数を使う）
 - GAS URLはフロントに直接書かず、`/api/gas-proxy` 経由にする
+
+## チャット権限（chat-authz・Phase 1）
+社内チャットを root/hq/owner/manager/staff の5ロールに開放し、権限判定を1箇所に集約した。
+設計は `CHAT_AI_ROUTING_PLAN.md` ほか5点のドキュメント（`CHAT_PERMISSION_MATRIX.md` が権限表の正）。
+- **`lib/chat-authz.js`（純粋関数・テスト済み）** が権限の唯一の判断源。フロント（`index.html`）とサーバー（`api/plan-store.js ?type=chat`）が同じルールを使う。
+  - ロール: `root`/`hq`（テナント全体）・`owner`/`manager`（管轄店舗）・`staff`（自店＋参加ルーム）・`agent`（AI・人間の権限の部分集合／**送信も承認もできない**）
+  - Room: `announce`（全員閲覧・**投稿は root/hq のみ**）／`store`（storeId スコープ・店舗名は移行期のフォールバック）／`group`・`event`（メンバー）／`dm`（**root/hq でも非メンバーは不可**）
+  - `status: archived|closed` のルームは閲覧のみ（投稿不可）。`tenantId` 不一致は「存在しない」扱い（ホワイトラベル前提）
+  - `filterRecipients()` は Phase 3/5（複数宛先・自然言語Resolver）の最終防衛線。AI が解決した宛先も必ずここを通す
+- **`lib/chat-identity.js`** がサーバー側で actor を決める。優先順位 ①SalonOne SSO の `Authorization: Bearer`（`/me` で検証）②`X-Chat-Token`（settlement-auth の rootトークン＝root/hq）③どちらも無ければ body の申告値（`verified:false`）。
+  本部(hq)は「オーナー設定」で紐付けた `staffId` を accountmeta から読み、別ID（`altIds`）として補う（SSO も `staff_id`/`user_id` の両方を保持）。
+- **環境変数 `CHAT_AUTHZ_ENFORCE`**: `shadow`（既定・判定して通し違反をログ）/ `strict`（403 で拒否＋GETを可視ルームのみに絞る）/ `off`。
+  `CHAT_KILL_SWITCH=1` で送信系のみ全停止（閲覧は可）。**本番へ出す前に Preview で `strict` を検証すること。**
+- 既存データ互換: Room/メッセージのスキーマは変更なし（`storeId`/`status`/`managers`/`tenantId` は後付けの任意フィールド）。旧クライアントもそのまま動く。

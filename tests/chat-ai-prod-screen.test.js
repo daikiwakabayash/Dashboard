@@ -79,6 +79,24 @@ describe('本番画面: request_id の扱い', () => {
     expect(ask).toContain('retry && aiTrial.lastRequestId ? aiTrial.lastRequestId : aiMakeRequestId()');
     expect(html).toContain('const aiTrialRetry = () => aiTrialAsk({ retry: true });');
   });
+
+  // ⚠️ 未修正（①へ報告）: `aiTrialRetry` は**定義だけ**で、画面のどのボタンにも繋がっていない。
+  //    失敗の下に出るのは「※ そのまま再試行できます」という文言だけで、押せるのは
+  //    「AIに質問する」＝`aiTrialAsk()`（retry なし）。
+  //    → 画面から同じ送信をやり直すと**新しい request_id** になり、
+  //      「同じ送信の再試行だけ同じID」という合意が画面では成立しない。
+  //      応答だけが失われた場合（サーバーは生成済み）に押すと、回答がもう1件増える。
+  //    再現: scripts/chat-ai-screen-check.mjs
+  //      「失敗後に出るボタン: （再試行ボタンなし）」
+  //      「やり直しの request_id: req_…_0wqeev , req_…_4z5vr3 → ❌ 別IDになる」
+  //    直し方: 失敗表示の隣に `<button onClick={aiTrialRetry}>再試行</button>` を出すだけです。
+  it.fails('【未修正】再試行は画面から呼べる（aiTrialRetry がボタンに繋がっている）', () => {
+    expect(html).toContain('onClick={aiTrialRetry}');
+  });
+
+  it('【現状の記録】aiTrialRetry は定義だけで、画面から到達できない', () => {
+    expect((html.match(/aiTrialRetry/g) || []).length).toBe(1);   // 定義の1回きり
+  });
 });
 
 describe('本番画面: ルーム・資料の選び方', () => {

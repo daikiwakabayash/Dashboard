@@ -44,12 +44,29 @@ export function start(port = 8961) {
               choices: { rooms: rooms.map(r => ({ id: r.id, name: r.name, kind: 'group' })), docs } });
           }
           if (action === 'ask') {
-            // 「失敗テスト」を含む質問はわざと失敗させる（再試行の経路を見るため）
-            if (String(body.question || '').includes('失敗テスト') && !state.failedOnce) {
+            const q = String(body.question || '');
+            const rid = String(body.request_id || '');
+            // 権限エラー（再試行してはいけない失敗）
+            if (q.includes('権限テスト')) {
+              return json(res, { ok: false, error: { code: 'forbidden_room', message: 'このルームは検証対象ではありません', retryable: false } });
+            }
+            // 1回目だけ失敗する（再試行の経路を見るため）。回答は作らない。
+            if (q.includes('失敗テスト') && !state.failedOnce) {
               state.failedOnce = true;
               return json(res, { ok: false, error: { code: 'upstream_failed', message: '回答の取得に失敗しました', retryable: true } });
             }
-            const rid = String(body.request_id || '');
+            // 「応答消失テスト」: サーバーは回答を保存したのに、応答だけが届かない状況。
+            // 同じ request_id で再試行されれば replay を返す＝回答は増えない。
+            if (q.includes('応答消失テスト') && !state.lostOnce) {
+              state.lostOnce = true;
+              const aid = `a_stub_${++state.seq}`;
+              state.byReq[rid] = aid;
+              state.answers[aid] = { body: `［サンプル回答］${q}`, mode: 'sample',
+                sources: { verification: 'none', verified: [], candidates: [] },
+                questionMessageId: `m_stub_${state.seq}`, corrections: [], hq_review: null };
+              state.order.push(aid);
+              return json(res, { ok: false, error: { code: 'upstream_failed', message: '応答が届きませんでした', retryable: true } });
+            }
             if (state.byReq[rid]) return json(res, { ok: true, replay: true, answer_message_id: state.byReq[rid], room_id: body.room_id });
             const aid = `a_stub_${++state.seq}`;
             state.byReq[rid] = aid;
@@ -79,4 +96,5 @@ export function start(port = 8961) {
   });
   return new Promise(r => server.listen(port, '127.0.0.1', () => r(server)));
 }
-export const reset = () => { state.answers = {}; state.order = []; state.seq = 0; state.byReq = {}; state.failedOnce = false; calls.length = 0; };
+export const reset = () => { state.answers = {}; state.order = []; state.seq = 0; state.byReq = {};
+  state.failedOnce = false; state.lostOnce = false; calls.length = 0; };

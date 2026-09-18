@@ -84,49 +84,80 @@ if (!onScreen) {
   await browser.close(); server.close(); process.exit(1);
 }
 
-// ── 観測1: ルーム選択肢は名前か、内部IDか ────────────────────────────
+// ── 必須確認 7項目 ────────────────────────────────────────────────────
+const R = [];            // [{ n, label, ok, note }]
+const rec = (n, label, ok, note) => { R.push({ n, label, ok, note }); console.log(`${ok ? '✅' : '❌'} ${n}. ${label}${note ? ` — ${note}` : ''}`); };
+const asks = () => calls.filter(c => c.body && c.body.type === 'chatai' && c.body.action === 'ask');
+const cards = () => page.locator('article').count();
+const askBtn = () => page.locator('button', { hasText: 'AIに質問する' }).first();
+const retryBtn = () => page.locator('button', { hasText: /再試行|もう一度|やり直/ }).first();
+const send = async (q) => { await page.fill('textarea', q); await askBtn().click(); await page.waitForTimeout(1200); };
+
+// 選択（観測A: ルーム名・資料タイトル）
 const opts = await page.$$eval('select option', els => els.map(e => ({ value: e.value, label: e.textContent.trim() })));
 const roomOpts = opts.filter(o => o.value);
 console.log('ルーム選択肢:', JSON.stringify(roomOpts));
-console.log('→ 名前で選べるか:', roomOpts.length && roomOpts.every(o => o.label !== o.value) ? '✅ 名前' : '❌ 内部IDのまま');
-
-const faqLine = await page.locator('text=許可FAQ').first().textContent().catch(() => '');
-console.log('許可資料の表示:', (faqLine || '').trim());
-console.log('→ タイトルで表示か:', /家族施術制度|シフト提出ルール/.test(faqLine || '') ? '✅ タイトル' : '❌ IDの羅列');
-
-// ── 観測2: 同じ質問を2回「新しく送信」したときの request_id ──────────
+const faqLine = ((await page.locator('text=許可FAQ').first().textContent().catch(() => '')) || '').trim();
+console.log('許可資料:', faqLine);
+rec('A', 'ルームを名前で選べる', roomOpts.length > 0 && roomOpts.every(o => o.label !== o.value));
+rec('B', '資料をタイトルで表示', /家族施術制度|シフト提出ルール/.test(faqLine));
 await page.selectOption('select', roomOpts[0].value);
 await page.waitForTimeout(400);
-const ask = async (q) => {
-  await page.fill('textarea', q);
-  await page.locator('button', { hasText: 'AIに質問する' }).first().click();
-  await page.waitForTimeout(1200);
-};
-await ask('家族施術のルールは？');
-await ask('家族施術のルールは？');       // 人が意図的にもう一度送る（新しい送信）
 
-const asks = calls.filter(c => c.body && c.body.type === 'chatai' && c.body.action === 'ask');
-console.log('送信された ask:', asks.length, '件');
-console.log('request_id:', asks.map(a => a.body.request_id).join(' , '));
-const ids = new Set(asks.map(a => a.body.request_id));
-console.log('→ 新しい送信ごとに新しいID:', asks.length >= 2 && ids.size === asks.length ? '✅' : '❌ 同じIDが再利用されている（新しい回答を作れない）');
+// 5. 新規送信では新しいIDになる（同じ本文でも別の依頼）
+let n0 = asks().length;
+await send('家族施術のルールは？');
+await send('家族施術のルールは？');
+const two = asks().slice(n0);
+rec(5, '新規送信では新しいIDになる',
+  two.length === 2 && two[0].body.request_id !== two[1].body.request_id,
+  two.map(a => a.body.request_id).join(' , '));
+rec('C', '同じ質問でも2件目の回答が作られる', (await cards()) >= 2, `回答カード ${await cards()} 件`);
 
-// ── 観測3: 失敗 → 再試行のときに同じ request_id を使うか ──────────────
-await ask('失敗テストの質問');                      // 1回目は必ず失敗する
-const btns = await page.$$eval('button', els => els.map(e => (e.textContent || '').trim()).filter(Boolean));
-const retryBtn = btns.filter(t => /再試行|もう一度|リトライ/.test(t));
-console.log('失敗後に出るボタン:', retryBtn.length ? retryBtn.join(' / ') : '（再試行ボタンなし）');
-const before = calls.filter(c => c.body && c.body.action === 'ask').length;
-if (retryBtn.length) await page.locator('button', { hasText: retryBtn[0] }).first().click();
-else await page.locator('button', { hasText: 'AIに質問する' }).first().click();   // 画面にある操作でやり直す
-await page.waitForTimeout(1200);
-const retried = calls.filter(c => c.body && c.body.action === 'ask').slice(before - 1);
-console.log('失敗した送信 → やり直しの request_id:', retried.map(a => a.body.request_id).join(' , '));
-console.log('→ 同じ送信の再試行で同じID:', retried.length >= 2 && retried[0].body.request_id === retried[1].body.request_id ? '✅' : '❌ 別IDになる（同じ送信のやり直しが新規送信になる）');
+// 1〜3. 失敗 → 再試行（表示・ID・質問/Room の維持）
+n0 = asks().length;
+await send('失敗テストの質問');
+const hasRetry = (await retryBtn().count()) > 0;
+rec(1, '失敗後に「同じ送信を再試行」が表示される', hasRetry,
+  hasRetry ? (await retryBtn().textContent()).trim() : '再試行ボタンなし');
+if (hasRetry) await retryBtn().click(); else await askBtn().click();   // 画面にある操作でやり直す
+await page.waitForTimeout(1400);
+const pair = asks().slice(n0);
+const same = pair.length >= 2 && pair[0].body.request_id === pair[1].body.request_id;
+rec(2, 'クリックしても request_id が変わらない', same, pair.map(a => a.body.request_id).join(' , '));
+rec(3, '元の質問と Room が維持される',
+  pair.length >= 2 && pair[0].body.question === pair[1].body.question && pair[0].body.room_id === pair[1].body.room_id,
+  pair.length >= 2 ? `${pair[1].body.question} / ${pair[1].body.room_id}` : '—');
 
-// 画面に回答カードが何枚できたか
-const cards = await page.locator('article').count();
-console.log('回答カード数:', cards, asks.length >= 2 && cards >= 2 ? '✅ 2件目も作られた' : '❌ 2件目が作られない');
+// 4. サーバー保存後の応答消失でも回答が増えない
+const before4 = await cards();
+n0 = asks().length;
+await send('応答消失テストの質問');            // サーバーは保存済み・応答だけ届かない
+if ((await retryBtn().count()) > 0) await retryBtn().click(); else await askBtn().click();
+await page.waitForTimeout(1400);
+const after4 = await cards();
+rec(4, 'サーバー保存後の応答消失でも回答が増えない', after4 - before4 === 1,
+  `回答カード ${before4} → ${after4}（+${after4 - before4}）`);
+
+// 6. 権限エラー等を再試行し続けない
+n0 = asks().length;
+await send('権限テストの質問');
+const retryShown = (await retryBtn().count()) > 0;
+await page.waitForTimeout(2500);               // 自動で再送していないか見る
+const autoRetries = asks().length - n0 - 1;
+rec(6, '権限エラー等を再試行し続けない', autoRetries === 0 && !retryShown,
+  `自動再送 ${autoRetries} 回 / 再試行ボタン ${retryShown ? '出ている（再試行できない失敗なので出さない）' : '出ていない'}`);
+
+// 7. 二重クリックで送信が増えない
+n0 = asks().length;
+await page.fill('textarea', '二重クリックの確認');
+await Promise.all([askBtn().click(), askBtn().click().catch(() => {})]);
+await page.waitForTimeout(1500);
+rec(7, '二重クリックで送信が増えない', asks().length - n0 === 1, `送信 ${asks().length - n0} 回`);
+
+console.log('\n──── 判定 ────');
+console.log(R.map(r => `${r.ok ? '合格' : '不合格'} ${r.n}. ${r.label}`).join('\n'));
+console.log(`合格 ${R.filter(r => r.ok).length} / ${R.length}`);
 
 await page.screenshot({ path: `${OUT}/prod-screen.png`, fullPage: true });
 console.log(errors.length ? 'ERRORS:\n' + errors.slice(0, 5).join('\n') : 'NO PAGE ERRORS ✅');

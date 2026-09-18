@@ -1,5 +1,8 @@
 # NAORU Dashboard
 
+> **開発の引き継ぎ・体制・再開地点は [`HANDOVER.md`](./HANDOVER.md) を先に読んでください。**
+> このファイルは仕様の正本、`HANDOVER.md` は「いまどこまで進んでいて、次に何をするか」の正本です。
+
 ## プロジェクト概要
 NAORU整骨院グループの経営ダッシュボード。GAS(Google Apps Script)・Square API・Claude AIを統合した分析ツール。
 

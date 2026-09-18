@@ -86,10 +86,15 @@ describe('chat-ai-ux: エスカレーション（断定させない）', () => {
 });
 
 describe('chat-ai-ux: AI 回答メッセージの組み立て', () => {
+  // サーバーが検証した出典（verification:'server_verified'）を渡した場合
   const base = {
     raw: '家族施術は…です。', question: '家族施術のルール', shop: 'A院',
-    sources: [{ kind: 'faq', id: 'f1', title: '福利厚生規程', updatedAt: '2026-09-12T00:00:00Z' }],
-    confidence: 0.9, answeredAt: '2026-09-18T01:00:00.000Z', runId: 'run_1',
+    sourceInfo: {
+      verification: 'server_verified',
+      verified: [{ kind: 'faq', docId: 'f1', title: '福利厚生規程', version: '1.2', updatedAt: '2026-09-12T00:00:00Z', locator: '§3' }],
+      candidates: [],
+    },
+    confidence: 0.9, answeredAt: '2026-09-18T01:00:00.000Z', runId: 'run_1', mode: 'live',
   };
   it('既存の投稿者ID・表示名を変えない', () => {
     const m = buildAiAnswerMessage(base);
@@ -98,15 +103,30 @@ describe('chat-ai-ux: AI 回答メッセージの組み立て', () => {
     expect(AI_STAFF_ID).toBe('__ai__');
     expect(CHAT_AI_UX_VERSION).toBe('chat-ai-ux-1');
   });
-  it('ai メタ（出典・確信度・エスカレ）を付ける（既存フィールドは壊さない）', () => {
+  it('検証済みの出典なら ai メタに出典を入れ、エスカレしない', () => {
     const m = buildAiAnswerMessage(base);
-    expect(m.ai).toMatchObject({ used: true, agent: 'faq', confidence: 0.9, level: 'high', escalated: false, runId: 'run_1' });
-    expect(m.ai.sources[0].title).toBe('福利厚生規程');
+    expect(m.ai).toMatchObject({ used: true, agent: 'faq', confidence: 0.9, level: 'high', escalated: false, runId: 'run_1', sourceVerification: 'server_verified', mode: 'live' });
+    expect(m.ai.sources[0]).toMatchObject({ id: 'f1', title: '福利厚生規程', version: '1.2', locator: '§3' });
+    expect(m.ai.candidates).toEqual([]);
     expect(m.text).toBe('家族施術は…です。');
     expect(m.mentions).toEqual([]);
   });
+  it('未検証の「渡しただけの資料」は出典にせず、断定もしない', () => {
+    // 旧形式（sources 配列だけ）で呼ばれた場合も候補扱いにする（勝手に検証済みにしない）
+    const m = buildAiAnswerMessage({ ...base, sourceInfo: undefined, sources: [{ id: 'f1', title: '福利厚生規程' }] });
+    expect(m.ai.sourceVerification).toBe('unverified');
+    expect(m.ai.sources).toEqual([]);                 // 出典としては出さない
+    expect(m.ai.candidates[0].title).toBe('福利厚生規程');
+    expect(m.ai.escalated).toBe(true);                // 検証済み出典が無いので断定しない
+    expect(m.ai.escalateReasons).toContain('no_source');
+  });
+  it('サーバーが server_verified と言っても verified が空なら昇格させない', () => {
+    const m = buildAiAnswerMessage({ ...base, sourceInfo: { verification: 'server_verified', verified: [], candidates: [{ docId: 'x', title: 'X' }] } });
+    expect(m.ai.sourceVerification).toBe('unverified');
+    expect(m.ai.escalated).toBe(true);
+  });
   it('エスカレ時は本文に案内を足し、本部をメンションする', () => {
-    const m = buildAiAnswerMessage({ ...base, sources: [], hqMentions: [{ id: 'hq1', name: '本部 太郎' }] });
+    const m = buildAiAnswerMessage({ ...base, sourceInfo: { verification: 'none', verified: [], candidates: [] }, hqMentions: [{ id: 'hq1', name: '本部 太郎' }] });
     expect(m.ai.escalated).toBe(true);
     expect(m.ai.escalateReasons).toContain('no_source');
     expect(m.text).toMatch(/本部の確認が必要です/);
@@ -134,11 +154,14 @@ describe('chat-ai-ux: AI Agent Activity（共通 lib/agentlog.js に接続）', 
   });
   it('buildAgentRunOutcome が共通の finishRun にそのまま通る', () => {
     const run = startRun(buildAgentRunInput({ question: 'q', roomId: 'r' }), 1700000000000).run;
-    const msg = buildAiAnswerMessage({ raw: 'ok', question: 'q', sources: [{ id: 'f1' }], confidence: 0.9 });
+    const msg = buildAiAnswerMessage({ raw: 'ok', question: 'q', confidence: 0.9,
+      sourceInfo: { verification: 'server_verified', verified: [{ docId: 'f1', title: 'F' }], candidates: [{ docId: 'f2', title: 'G' }] } });
     const done = finishRun(run, buildAgentRunOutcome(msg), 1700000001000);
     expect(done.ok).toBe(true);
     expect(done.run.status).toBe('completed');
-    expect(done.run.result.sourceCount).toBe(1);
+    expect(done.run.result.sourceCount).toBe(1);          // 検証済みのみ
+    expect(done.run.result.candidateCount).toBe(1);
+    expect(done.run.result.sourceVerification).toBe('server_verified');
   });
   it('失敗時は failed として記録できる', () => {
     const run = startRun(buildAgentRunInput({ question: 'q' }), 1700000000000).run;

@@ -19,6 +19,17 @@
 ②が push 済みのブランチに、共有ファイルの変更は1件もありません。
 PR #385 は #379 より前の main から分岐していますが、共有ファイルに触れていないため競合しません。
 
+### ②から①への引き渡し（重複取り込みを避けるため）
+
+| PR | 内容 | head | 基準 commit | 備考 |
+|---|---|---|---|---|
+| #385 | Room 情報 / 所属同期の差分関数・dry-run | **`4b5bc15`**（A〜E の追加確認を反映済み） | `main` = `581a660` | 共有ファイル無変更。取り込みはこの head で |
+| #386 | `lib/chat-ai-ux.js`（@AI の純粋ロジック） | `097aa8f` | `main` = `45ad3e3` | **#389 に含まれます。単独で取り込む必要はありません** |
+| #389 | @AI 試用版（#386 を含む） | `b44d63a` | `main` = `45ad3e3` | #386 を内包。#386 と両方取り込むと重複します |
+| （本ブランチ） | 実接続の契約・出典表示の是正 | — | `main` = `45ad3e3` | #389 の続き |
+
+①が別の基準 commit を指定する場合は、そちらへ追従して作り直します。
+
 ### ①の Command Center Foundation（#379）との整合
 `lib/authz.js` に `chat.send` / `chat.dm` / `chat.group_create` / `chat.member_add` / `chat.member_remove` /
 `chat.broadcast` / `chat.broadcast_all` / `chat.schedule` / `chat.resend_unread` / `chat.room_archive` が
@@ -39,7 +50,7 @@ PR #385 は #379 より前の main から分岐していますが、共有ファ
 | S-2 | `index.html` | AI 回答メッセージの描画部分のみ（`ChatMessageList` の AI 分岐） | 出典・更新日時・確信度・「本部に確認する」の表示 | 同上 |
 | S-3 | `index.html` | 本部向けタブに「同期差分プレビュー」を組み込む場合のみ | `chat-sync-preview.html` の取り込み（単体 HTML のままにするなら不要） | ①の判断待ち |
 | S-4 | `api/plan-store.js` | `?type=aifeedback` の追加のみ（既存 type には触れない） | 👍👎 / 修正の保存。保存先キーは `naoru:chat:aifeedback:v1` | ①の認可（`ai.feedback` / `ai.feedback.fix`）に乗せる |
-| S-5 | `scripts/precompile.mjs` | コピー対象に1行追加 | `chat-sync-preview.html` を Preview で開けるようにする（任意） | ①に依頼済み（PR #385） |
+| ~~S-5~~ | ~~`scripts/precompile.mjs`~~ | ~~コピー対象に1行追加~~ | **取り下げ**（①の指示）。precompile への追加はせず、①が認証付きの試用場所を用意します | — |
 
 - `lib/authz.js` / `lib/actor.js` / `lib/chat-policy.js` … **②からは変更しません。** 必要な入出力は「引継ぎ事項」として文書で依頼します。
 - `lib/chat.js`（既存の Room ロジック）も②からは変更しません。追加ロジックは新規ファイルに置きます。
@@ -50,6 +61,7 @@ PR #385 は #379 より前の main から分岐していますが、共有ファ
 | B-2（再掲・最重要） | Room レコードに任意フィールド `autoMembers: string[]` を許可 | 「手動で入れた人を自動で消さない」保証がこれ無しでは担保できない |
 | B-6 | AI 回答メッセージに任意フィールド `ai: {...}`（出典・確信度・エスカレ）を許可 | 透明性表示。旧クライアントは無視できる追加のみ |
 | B-7 | `ai.feedback` / `ai.feedback.fix` の capability 判定結果を、フロントから参照できる形で公開 | ②は権限判定を再実装せず、①の結果をそのまま使う |
+| B-8 | `CHAT_AI_API_CONTRACT.md` の入出力でのラップ | ②は `createLiveAdapter()` を実装済み。エンドポイントを差し替えるだけで実接続へ移れる |
 
 ---
 

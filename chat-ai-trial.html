@@ -86,7 +86,7 @@
       <b id="roomName">店舗グループ</b>
       <span class="muted" id="roomMeta"></span>
       <span style="flex:1"></span>
-      <span class="muted">あなた:</span>
+      <span class="muted" id="roleLabel">デモ表示の切替（合成データ専用）:</span>
       <button class="pill" id="roleStaff" aria-pressed="true">佐藤（スタッフ）</button>
       <button class="pill" id="roleHq" aria-pressed="false">本部 太郎（本部）</button>
     </div>
@@ -131,8 +131,7 @@ import {
   createSession, toggleMode, setMode, setDraft, submit, applyAnswer, failAnswer, retry,
   requestHqReview, applyCorrection, setFeedback, feedbackCount, questionStatus,
 } from './lib/chat-ai-session.js';
-import { buildContext, createMockAdapter, adapterBadge } from './lib/chat-ai-adapter.js';
-import { formatSources } from './lib/chat-ai-ux.js';
+import { buildContext, createMockAdapter, adapterBadge, resolveSources } from './lib/chat-ai-adapter.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
@@ -179,6 +178,8 @@ $('notes').innerHTML = `
     <li>AI へ渡すのは「今回の質問」「このルームの履歴」「このルームに共有された資料」だけです（他店舗・人事情報・個人相談は渡しません）。</li>
     <li>通知・監査は共通基盤に接続予定です。<b>未接続のため「通知済み」とは表示しません</b>。</li>
     <li>音声入力は外部アプリの文字起こしを貼り付けて使います（この画面では音声認識を持ちません）。</li>
+    <li><b>ロール切替は合成データのデモ表示専用</b>です。実際の権限はサーバーが確定し、画面の操作では変わりません。</li>
+    <li>出典は「<b>検証済みの出典</b>（サーバーが資料ID・版・該当箇所を確認）」と「<b>参照候補として渡した資料（未検証）</b>」を区別して表示します。</li>
   </ul>`;
 
 function switchRole(next) {
@@ -188,8 +189,16 @@ function switchRole(next) {
   $('roleHq').setAttribute('aria-pressed', String(viewer.role === 'hq'));
   render();
 }
-$('roleStaff').onclick = () => switchRole(PEOPLE.staff);
-$('roleHq').onclick = () => switchRole(PEOPLE.hq);
+// ⚠️ ロール切替は **合成データのデモ表示専用**。
+//    実接続（live / legacy）では本物の role・権限はサーバーが確定するため、ここでは切り替えられない。
+const DEMO_ROLE_SWITCH = adapter.name === 'mock';
+if (!DEMO_ROLE_SWITCH) {
+  $('roleStaff').disabled = true; $('roleHq').disabled = true;
+  $('roleLabel').textContent = '表示ロール（サーバーが確定・画面からは変更できません）:';
+} else {
+  $('roleStaff').onclick = () => switchRole(PEOPLE.staff);
+  $('roleHq').onclick = () => switchRole(PEOPLE.hq);
+}
 
 // ── コンポーザー ─────────────────────────────────────────────────────────
 function renderComposer() {
@@ -258,16 +267,27 @@ async function doSend() {
 async function askAi(req, keepDraft) {
   render();
   const context = buildContext({ roomId: ROOM.id, shopId: ROOM.shopId, docs: DOCS, history: state.messages });
-  const res = await adapter.ask({ question: req.question, roomId: req.roomId, context });
+  const res = await adapter.ask({
+    question: req.question, roomId: req.roomId, context,
+    requestId: req.questionId, clientId: 'trial', questionMessageId: req.questionId,
+  });
   if (!res || !res.ok) {
-    state = failAnswer(state, { questionId: req.questionId, error: (res && res.error) || '回答の取得に失敗しました', keepDraft }).state;
+    const err = (res && res.error) || {};
+    state = failAnswer(state, {
+      questionId: req.questionId,
+      error: `${err.message || '回答の取得に失敗しました'}${err.retryable === false ? '（再試行はできません）' : ''}`,
+      retryable: err.retryable !== false, keepDraft,
+    }).state;
     $('input').value = state.draft || keepDraft || '';
     render(); return;
   }
+  // 出典は「検証済み」と「渡しただけの候補」を分けて扱う
+  const sourceInfo = resolveSources(res, context);
   state = applyAnswer(state, {
-    questionId: req.questionId, raw: res.message, sources: res.sources,
-    confidence: res.sources && res.sources.length ? 0.86 : 0.2,
-    sample: res.sample, shop: ROOM.name,
+    questionId: req.questionId, raw: res.body, sourceInfo,
+    confidence: sourceInfo.verified.length ? 0.86 : 0.2,
+    mode: res.mode, sample: res.mode !== 'live', shop: ROOM.name,
+    answerMessageId: res.answerMessageId, questionMessageId: res.questionMessageId,
     hqMentions: [{ id: PEOPLE.hq.id, name: PEOPLE.hq.name }],
   }).state;
   render();
@@ -280,18 +300,24 @@ function answerCard(a) {
   const st = questionStatus(state, a.replyToId);
   const fb = feedbackCount(state, a.id);
   const fixes = state.corrections[a.id] || [];
-  const srcs = (ai.sources || []);
+  const verified = ai.sources || [];
+  const cands = ai.candidates || [];
+  const ver = ai.sourceVerification || 'none';
   return `
   <div class="ai-card" data-answer="${esc(a.id)}">
     <div class="lbl">🤖 AIによる回答
       ${a.sample ? '<span class="chip">サンプル回答（mock）</span>' : ''}
-      ${srcs.length ? `<span class="chip" style="background:#fff">出典 ${srcs.length}件に基づく回答</span>` : ''}
+      ${ver === 'server_verified' ? '<span class="chip" style="background:#fff">検証済みの出典あり</span>' : ''}
     </div>
     <div class="q">この質問への回答: 「${esc(q.text || '')}」（${esc(q.fromName || '')} ${esc(hhmm(q.createdAt || a.createdAt))}）</div>
     <div class="ans">${esc(a.text)}</div>
-    ${srcs.length ? `<div class="src">📚 使用した出典
-        <ul>${srcs.map(s => `<li>${esc(s.title)}${s.version ? ` <span class="muted">v${esc(s.version)}</span>` : ''}
-          <span class="muted">${s.updatedAt ? `（${esc(String(s.updatedAt).slice(0,10).replace(/-/g,'/'))} 更新）` : '（更新日不明）'}</span></li>`).join('')}</ul>
+    ${ver === 'server_verified' ? `<div class="src">📚 検証済みの出典（サーバーが資料ID・版・該当箇所を確認）
+        <ul>${verified.map(s => `<li>${esc(s.title)}${s.version ? ` <span class="muted">v${esc(s.version)}</span>` : ''}
+          <span class="muted">${s.updatedAt ? `（${esc(String(s.updatedAt).slice(0,10).replace(/-/g,'/'))} 更新）` : '（更新日不明）'}</span>${s.locator ? ` <span class="muted">${esc(s.locator)}</span>` : ''}</li>`).join('')}</ul>
+      </div>`
+      : ver === 'unverified' ? `<div class="nosrc" style="background:var(--warn-bg);border-color:#FDE68A;color:#92400E">
+        ⚠️ 参照候補として渡した資料（未検証）— サーバーで出典の検証がされていないため、正式な社内規程としての回答ではありません
+        <ul style="margin:4px 0 0;padding-left:18px;font-weight:500">${cands.map(s => `<li>${esc(s.title)}${s.version ? ` v${esc(s.version)}` : ''}</li>`).join('')}</ul>
       </div>`
       : `<div class="nosrc">⚠️ 根拠不足・本部確認が必要です（社内規程に基づく回答ではありません）</div>`}
     <div class="acts">
@@ -324,7 +350,7 @@ function render() {
         <div class="bubble">${esc(m.text)}</div>
         ${st.pending ? '<div class="muted" style="margin-top:4px">🤖 回答を作成中…</div>' : ''}
         ${st.error ? `<div class="err">⚠️ ${esc(st.error)}
-            <button class="btn" data-retry="${esc(m.id)}" style="margin-left:8px">再試行</button>
+            ${st.retryable ? `<button class="btn" data-retry="${esc(m.id)}" style="margin-left:8px">再試行</button>` : ''}
             <button class="btn" data-hq="${esc(m.id)}" ${st.hq ? 'disabled' : ''}>🙋 本部に確認</button></div>` : ''}
       </div></div>`;
   }).join('');

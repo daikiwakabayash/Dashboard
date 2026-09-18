@@ -14,7 +14,9 @@
 | ブランチ | 基準 commit | 共有ファイルの変更 |
 |---|---|---|
 | `feature/chat-room-sync-dryrun`（PR #385） | `main` = `581a660`（#379 マージ前） | **なし**（新規5ファイルのみ） |
-| `feature/chat-ai-mention-logic`（本ブランチ） | `main` = `45ad3e3`（#379 Command Center Foundation マージ後） | **なし**（新規3ファイルのみ） |
+| `feature/chat-ai-mention-logic` | `main` = `45ad3e3` | **なし**（#389 に内包） |
+| `feature/chat-ai-trial` | `main` = `45ad3e3` | **なし**（#391 に内包） |
+| `feature/chat-ai-contract`（現在） | **`main` = `f19742e`**（#394）へ rebase 済み | **なし**（新規ファイルのみ） |
 
 ②が push 済みのブランチに、共有ファイルの変更は1件もありません。
 PR #385 は #379 より前の main から分岐していますが、共有ファイルに触れていないため競合しません。
@@ -26,9 +28,25 @@ PR #385 は #379 より前の main から分岐していますが、共有ファ
 | #385 | Room 情報 / 所属同期の差分関数・dry-run | **`4b5bc15`**（A〜E の追加確認を反映済み） | `main` = `581a660` | 共有ファイル無変更。取り込みはこの head で |
 | #386 | `lib/chat-ai-ux.js`（@AI の純粋ロジック） | `097aa8f` | `main` = `45ad3e3` | **#389 に含まれます。単独で取り込む必要はありません** |
 | #389 | @AI 試用版（#386 を含む） | `b44d63a` | `main` = `45ad3e3` | #386 を内包。#386 と両方取り込むと重複します |
-| （本ブランチ） | 実接続の契約・出典表示の是正 | — | `main` = `45ad3e3` | #389 の続き |
+| （本ブランチ） | 実接続の契約・出典表示の是正 | — | `main` = `f19742e` | #389 の続き |
 
 ①が別の基準 commit を指定する場合は、そちらへ追従して作り直します。
+
+### #391 の取り込み後、main に未反映の差分（②→①・**#391 の再取り込みはしないでください**）
+
+①は #391 を旧 head `7a02420` でマージしました。その後に②が足した分だけが未反映です。
+`git diff f19742e...feature/chat-ai-contract` の対象は下記10ファイルで、**共有ファイルは含みません**。
+
+| ファイル | 未反映の内容 | main の現状 |
+|---|---|---|
+| `lib/chat-ai-adapter.js` | `ccAuthHeaders`（Authorization / X-CC-Owner / X-CC-Token）、`normalizeError`（①の `{ok:false,error,code}` と契約形の両対応）、`errorMessageFor`、`buildTrialTargets` / `pickedTarget` | `createLiveAdapter`・`resolveSources` は `7a02420` 版が入っている。認証ヘッダと誤り処理が無い |
+| `lib/chat-ai-session.js` | `newRequestId` と依頼IDの発行・再試行での維持 | 無し |
+| `chat-ai-trial.html` | 「出典を確認済み（実在・版・参照箇所）」の表記、「本部による確認・訂正（出典の確認とは別です）」の見出し、送信先（ルーム名・参加者・資料タイトル）の選択 | `7a02420` 版（旧表記・ID手入力前提） |
+| `tests/chat-server-integration.test.js` | ①の実ハンドラに対する結合テスト（35件）＋既知の不具合3件の記録 | ファイルごと未反映 |
+| `tests/chat-ai-adapter.test.js` / `tests/chat-ai-session.test.js` / `tests/chat-ai-contract.test.js` | 上記に対応するテスト | 一部のみ |
+| `CHAT_AI_API_CONTRACT.md` / `CHAT_AI_TRIAL.md` / `CHAT_SHARED_FILE_PLAN.md` | 実サーバー仕様に合わせた更新・検証レベル表・本書 | 旧版 |
+
+取り込みは**このブランチの head だけ**で足ります（#391 を再度取り込むと `7a02420` 版に戻ります）。
 
 ### ①の Command Center Foundation（#379）との整合
 `lib/authz.js` に `chat.send` / `chat.dm` / `chat.group_create` / `chat.member_add` / `chat.member_remove` /

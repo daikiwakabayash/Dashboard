@@ -2,7 +2,7 @@
 
 チャット担当（②）の @AI 試用版。**質問 → @AIモードで送信 → 同じルームにAI回答 → 出典確認 → 本部に確認 → 本部が訂正**までを画面で通しで試せます。
 
-- 基準 commit: `main` = `45ad3e3`（#379 Command Center Foundation マージ後）
+- **基準 commit: `main` = `1e51b66`**（#392「@AI 実接続」まで反映。ブランチは rebase 済み）
 - **共有ファイルは無変更**（`index.html` / `api/plan-store.js` / `lib/authz.js` / `lib/actor.js` / `lib/chat.js` / `scripts/precompile.mjs`）
 - 追加は新規ファイルのみ: `chat-ai-trial.html` / `lib/chat-ai-session.js` / `lib/chat-ai-adapter.js` / テスト2本 / 本書
 
@@ -57,14 +57,111 @@ npx serve .     # もしくは python3 -m http.server 8931
 
 ⚠️ **フロントの絞り込みは UX であり、セキュリティ境界ではありません。** 参照権限・回答先 room_id・投稿権限の最終判定はサーバー側（①の authz）で行う前提です。
 
+## 3.5 検証のレベル（混同しないこと）
+
+| レベル | 何を動かすか | 状態 |
+|---|---|---|
+| A. 単体・契約準拠 | ②のロジックと、契約どおりに振る舞う参照実装 | ✅ 実施済み |
+| **B-1. ローカル結合（擬似KV）** | **①の実ハンドラ `api/plan-store.js` ＋ Upstash REST 互換の擬似KV** | ✅ 実施済み（下表） |
+| **B-2. ローカル結合（擬似KV＋擬似上流）** | 上記に加え、`/api/chat` を**遅延を差し込めるスタブ**にして「生成中」の窓を作る | ✅ 実施済み（下表） |
+| C-1. 実Redis（Upstash/Vercel KV） | ①の実KVに対する同じ結合テスト | ⏳ **未実施**（`KV_REST_API_URL`/`TOKEN` が②の環境に無い） |
+| C-2. デプロイ済みAPI | Preview / 本番にデプロイされた API | ⏳ **未実施**（URL・認証情報が①の管理。`cc_ai_trial` も OFF のまま） |
+| C-3. 実AI呼び出し（Anthropic） | `ANTHROPIC_API_KEY` を使った本物の生成 | ⏳ **未実施**（キーが②の環境に無い。B-2 の上流は**スタブであって実AIではありません**） |
+
+⚠️ B と C を混ぜて「動いた」と言わないこと。②が確認できたのは **B まで**です。
+
+### B-1. ローカル結合テスト（`tests/chat-server-integration.test.js`・35件 green）
+
+保存層だけ Upstash REST 互換の擬似KVをローカルに立て、**認証・認可・保存・AI経路は①の実コード**を通します（本番へは書き込みません）。
+
+**入口の認可**
+| 確認 | 結果 |
+|---|---|
+| 未認証 / `body.root` の申告のみ / オーナー（未公開ロール） | 403 `chat_admin_only` ✅ |
+| root トークン（`X-CC-Owner`/`X-CC-Token`） | 200 ✅ |
+| **本部アカウント**（オーナートークン＋`accountmeta` の `role:'hq'` → `admin`） | 200 ✅ |
+| **SalonOne SSO**（`brand_admin`） | 200 ✅ ／ `shop_staff` は 403 ✅ |
+
+**@AI 実接続（`?type=chatai`）**
+| 確認 | 結果 |
+|---|---|
+| フラグ `cc_ai_trial` OFF | `rollout_disabled` ✅（既定は閉じている） |
+| 検証用Room以外 | `forbidden_room` ✅ |
+| 質問 → 同じRoomに回答 → 再読み込みで残る | ✅ |
+| 同じ `request_id` の再送（応答消失後の再送を含む） | `replay` で同じ `answer_message_id`・回答は増えない ✅ |
+| **同じ `request_id` の同時送信** | ❌ **回答が複数作られる（既知の不具合・①へ報告）** |
+| 別本文で同じ `request_id` を使い回す | `request_conflict`（`retryable:false`）✅ |
+| 新しい送信に新しい `request_id` | 別の回答が作られる ✅ |
+| AI の投稿を質問に指定 | `ai_message_source` ✅（無限返信の防止） |
+| 本部確認 | 根拠不足なら ask 時点で自動作成。連打しても1件のまま ✅ 通知は `notified:false` / `channel:'not_connected'` ✅ |
+| 本部の訂正 | 元回答は書き換わらない ✅ |
+| **権限剥奪後の再取得** | 検証用Roomの許可を外すと `forbidden_room`、未認証は 403 ✅ |
+| ②の `createLiveAdapter` ↔ ①の実ハンドラ | ask → hqReview → correct → getConfig が往復 ✅ |
+
+### B-2. 回答生成中（pending の窓）の同時操作
+
+`/api/chat` を遅延スタブに差し替え、生成に時間がかかる間に別の操作を重ねた結果です（**実AIは呼んでいません**）。
+
+| 確認 | 結果 |
+|---|---|
+| 生成中に同じ `request_id` を再送 | `status:'pending'` が返り、回答は1件のまま ✅ |
+| 生成完了後の再送 | `replay`・増えない ✅ |
+| 生成中の通常投稿 | 質問・通常投稿・回答がすべて残る ✅ |
+| 同じ本文を別々に新規送信（別 `request_id`） | 別の回答が2件・`replay` にならない ✅ |
+| OFF にした後の新しい送信 | `rollout_disabled` ✅ |
+| **生成中に入れた本部の訂正** | ❌ **回答保存時の上書きで消える（既知の不具合①-a）** |
+| **別々の送信を同時に出す** | ❌ **片方の回答がルームから消える（既知の不具合①-b）** |
+| **生成中にフラグを OFF** | ❌ **その回答が投稿されてしまう（既知の不具合①-c）** |
+
+#### ①へ報告した不具合（`it.fails` で記録・直ると失敗して気づけます）
+
+| # | 症状 | 原因 | 対策案 |
+|---|---|---|---|
+| 既出 | 同じ `request_id` の**同時**送信で回答が複数できる | `loadAi → saveAi` の read-modify-write | pending を CAS / SETNX で1つだけ立てる |
+| ①-a | 生成中の訂正が消える | ask が生成**前**に読んだ `st` を生成**後**に保存し、その間の `corrections` を上書き | 保存直前に読み直してマージ／訂正は追記専用キーへ |
+| ①-b | 別々の送信を同時に出すと片方の回答が消える | ルームのメッセージ配列・chatai ストアがどちらも「読む→足す→書く」 | CAS もしくは Lua の追記で保存 |
+| ①-c | 生成中にフラグ OFF にしても投稿される | 配信直前の再確認に**フラグの読み直しが無い**（Room と `trialRooms` のみ） | 保存直前に `normalizeFlags` を読み直し、OFF なら `rollout_disabled` |
+
 ## 4. テスト
 
+ブラウザ側の単体テストと、サーバー結合テストは**分けて**数えています。
+
+**ブラウザ側（②のロジック・I/Oなし）**
 ```
-npx vitest run tests/chat-ai-session.test.js   → 20 passed
-npx vitest run tests/chat-ai-adapter.test.js   → 11 passed
-npx vitest run tests/chat-ai-ux.test.js        → 29 passed
-npm test                                        → 全体グリーン
+npx vitest run tests/chat-ai-session.test.js   → 27 passed（うち依頼IDの発行 7件）
+npx vitest run tests/chat-ai-adapter.test.js   → 26 passed（うち送信先の選択肢 4件）
+npx vitest run tests/chat-ai-ux.test.js        → 31 passed
+npx vitest run tests/chat-ai-contract.test.js  → 19 passed（契約どおりの参照実装に対する準拠）
 chat-ai-trial.html（headless Chromium で全手順を操作）→ PAGEERROR なし
+```
+
+**サーバー結合（①の実ハンドラ＋擬似KV／一部は擬似上流）**
+```
+npx vitest run tests/chat-server-integration.test.js → 35 passed
+  （うち it.fails ＝ ①の既知の不具合の記録が 4件。直ると失敗して気づけます）
+```
+
+**本番画面（`index.html`「@AI 検証」）の画面レベル検証**
+```
+tests/chat-ai-prod-screen.test.js                → 10 passed（index.html のコードを読んで確認）
+node scripts/chat-ai-screen-check.mjs            → 本物の index.html を headless Chromium で操作し、
+                                                    画面が送る request_id をネットワーク越しに観測
+```
+`scripts/chat-ai-screen-check.mjs` ＋ `scripts/chat-ai-screen-stub.mjs` は、**ローカルのスタブAPIに対して本物の画面を動かす**検証用です（本番には一切つながりません）。playwright はリポジトリの依存に入れていないので `npm test` には影響しません。
+
+現在の結果（main `1cbc314`）:
+
+| 観測 | 結果 |
+|---|---|
+| 「@AI 検証」画面が root＋`cc_ai_trial` ON で開く | ✅ |
+| 検証ルームを**名前**で選べる | ❌ 内部IDがそのまま選択肢（`g_trial`） |
+| 許可資料を**タイトル**で表示 | ❌ IDの羅列（`faq_family, faq_shift`） |
+| 同じ質問を**別々に新規送信**したとき新しい `request_id` | ❌ 同じIDを再送（`req_i_d9504b00` が2回） |
+| その結果、2件目の回答 | ❌ 作られない（回答カードは1枚のまま） |
+
+**リポジトリ全体**
+```
+npm test → 48 files / 1116 passed（このブランチ）
 ```
 
 ## 5. ①へ渡す接続事項（②では実装しません）

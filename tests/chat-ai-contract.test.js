@@ -188,7 +188,10 @@ describe('契約: 出典の扱い', () => {
     const info = resolveSources(r, ctx());
     expect(info.verification).toBe('server_verified');
     expect(info.verified[0]).toMatchObject({ docId: 'faq_family', version: '1.2', locator: '§3' });
-    expect(info.label).toBe('検証済みの出典');
+    expect(info.label).toBe('出典を確認済み（実在・版・参照箇所）');
+    // 「確認済み」は出典の実在・版・参照箇所の確認であって、回答の正解保証ではない
+    expect(info.note).toMatch(/正しさを保証するものではありません/);
+    expect(info.label).not.toMatch(/正解|承認/);
   });
   it('未検証で返ってきたら「参照候補として渡した資料」として表示する', async () => {
     const srv = createRefServer({ unverified: true });

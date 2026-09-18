@@ -35,6 +35,7 @@ import { recordSnapshot, computeDeltas, meoFlags, meoScore, alertWeight, jstYmd,
 import { mergeAppointments, mergeDismissed, flatten as soflFlatten } from '../lib/soflmap.js';
 import { ALLOWANCE_LOG_KEY, ALLOWANCE_PROD_KEY, ALLOWANCE_LOG_CAP, makeEntry as makeAllowanceEntry, mergeSubmissions, isDuplicateSubmit, mergeProductivity, bumpProductivity } from '../lib/allowance-store.js';
 import { BOARD_READS_KEY, normalizeReads, mergeReads, bumpRead, versionOf, isStale, upsertPost, upsertComment } from '../lib/board-store.js';
+import { normalizeIntro, canEditProfile } from '../lib/profile-fields.js';
 import { prKey as boardPrKey, normalizePr, markRead as boardMarkRead, markAck as boardMarkAck,
          postStatus as boardPostStatus, canSeeDetail as boardCanSeeDetail, outOfAudience as boardOutOfAudience } from '../lib/board-status.js';
 // ── Command Center（Phase 0〜2）。既存の type= には一切触れない追加のみ ──
@@ -2401,7 +2402,9 @@ export default async function handler(req, res) {
       // 保存（本人 or root）。pid＝本人の識別子（staffId or owner:<name>）。
       if (action === 'save' && body.pid && body.profile) {
         const pid = String(body.pid);
-        if (!(body.root || String(body.staffId) === pid)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        // ⚠️ クライアントの申告（body.root / body.staffId）を根拠にしない。
+        //    サーバーが確かめた本人（chatActor）で判定する。本人か本部の管理者だけ。
+        if (!canEditProfile(chatActor, pid)) return res.status(403).json({ ok: false, error: 'forbidden', code: 'profile_not_owner' });
         const p = body.profile;
         const clean = {
           pid,
@@ -2423,6 +2426,9 @@ export default async function handler(req, res) {
           shops: (Array.isArray(p.shops) ? p.shops : []).map(x => String(x).slice(0, 80)).slice(0, 50),
           // 生年月日（任意）。YYYY-MM-DD または MM-DD のみ許可。誕生日の当日表示に使用。
           birthday: (() => { const b = String(p.birthday || '').trim(); return /^(\d{4}-)?\d{2}-\d{2}$/.test(b) ? b : ''; })(),
+          // 自己紹介（任意）。ひとこと／得意なこと／学びたいこと／趣味。
+          // ⚠️ 氏名・所属・役割・社員IDはここに入らない（normalizeIntro が落とす）。
+          ...normalizeIntro(p),
           updatedAt: new Date().toISOString(),
         };
         const next = { ...profiles, [pid]: clean };
@@ -2433,7 +2439,7 @@ export default async function handler(req, res) {
       // 削除（本人 or root）
       if (action === 'delete' && body.pid) {
         const pid = String(body.pid);
-        if (!(body.root || String(body.staffId) === pid)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        if (!canEditProfile(chatActor, pid)) return res.status(403).json({ ok: false, error: 'forbidden', code: 'profile_not_owner' });
         const next = { ...profiles }; delete next[pid];
         await blobSet(PROFILE_KEY, { profiles: next, hidden }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true });

@@ -2447,13 +2447,19 @@ export default async function handler(req, res) {
 
       // 組織図から非表示/再表示（root専用）。SalonOne由来の人はこのリストで隠す。
       if (action === 'hide' && body.id) {
-        if (!body.root) return res.status(403).json({ ok: false, error: 'forbidden' });
+        // ⚠️ クライアントの申告ではなく、サーバーが確かめた役割で判定する（組織図からの非表示は本部だけ）
+        if (!(chatActor && chatActor.verified === true && ['root', 'admin'].includes(String(chatActor.role)))) {
+          return res.status(403).json({ ok: false, error: 'forbidden', code: 'hq_only' });
+        }
         const nextHidden = [...new Set([...hidden, String(body.id)])].slice(0, 5000);
         await blobSet(PROFILE_KEY, { profiles, hidden: nextHidden }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true, hidden: nextHidden });
       }
       if (action === 'unhide' && body.id) {
-        if (!body.root) return res.status(403).json({ ok: false, error: 'forbidden' });
+        // ⚠️ クライアントの申告ではなく、サーバーが確かめた役割で判定する（組織図からの非表示は本部だけ）
+        if (!(chatActor && chatActor.verified === true && ['root', 'admin'].includes(String(chatActor.role)))) {
+          return res.status(403).json({ ok: false, error: 'forbidden', code: 'hq_only' });
+        }
         const nextHidden = hidden.filter(x => x !== String(body.id));
         await blobSet(PROFILE_KEY, { profiles, hidden: nextHidden }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true, hidden: nextHidden });

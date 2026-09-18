@@ -843,6 +843,31 @@
         const ORG_KW_KEYS = Object.keys(ORG_KW).sort((a, b) => b.length - a.length);
         const orgGeoRank = (name) => { const s = String(name || '').replace(/NAORU/gi, '').replace(/院/g, '').trim(); for (const k of ORG_KW_KEYS) { if (s.includes(k)) return ORG_KW[k]; } return 950; };
         const orgRegionOf = (r) => r === 1 ? '北海道' : (r >= 2 && r <= 7) ? '東北' : (r >= 8 && r <= 14) ? '関東' : (r >= 15 && r <= 23) ? '中部' : (r >= 24 && r <= 30) ? '近畿' : (r >= 31 && r <= 35) ? '中国' : (r >= 36 && r <= 39) ? '四国' : (r >= 40 && r <= 46) ? '九州' : r === 47 ? '沖縄' : r >= 1000 ? '海外' : 'その他';
+        // ── 組織図: 自己紹介の入力候補（lib/profile-fields.js と同じ）────────
+        const PROF_TAGS = {
+            goodAt: ['骨盤矯正','猫背・姿勢','産後ケア','肩こり','腰痛','スポーツ障害','自律神経','問診・カウンセリング','新人教育','予約管理','SNS発信','店販提案'],
+            learning: ['解剖学','栄養','トレーニング指導','マーケティング','店舗運営','数字の読み方','接客英語','動画編集','AI活用'],
+            hobbies: ['筋トレ','サウナ','キャンプ','登山','釣り','ゴルフ','サッカー','野球','ランニング','料理','カフェ巡り','旅行','映画','読書','音楽','ゲーム','ペット','カメラ'],
+        };
+        const PROF_TAG_LABEL = { goodAt: '得意なこと・相談できること', learning: '学びたいこと', hobbies: '趣味・好きなこと' };
+        const profNormTags = (v) => {
+            const out = [], seen = new Set();
+            for (const raw of (Array.isArray(v) ? v : [])) {
+                const t = String(raw == null ? '' : raw).replace(/[　\s]+/g, ' ').trim().slice(0, 24);
+                if (!t || seen.has(t.toLowerCase())) continue;
+                seen.add(t.toLowerCase()); out.push(t);
+                if (out.length >= 8) break;
+            }
+            return out;
+        };
+        // 検索用（名前・店舗に加えて得意分野・趣味でも当たるように）
+        const profSearchNorm = (x) => String(x == null ? '' : x).normalize('NFKC').toLowerCase()
+            .replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60)).replace(/[\s　]/g, '');
+        const profIntroHay = (prof) => {
+            const p = prof || {};
+            return profSearchNorm([p.oneLine, ...(p.goodAt || []), ...(p.learning || []), ...(p.hobbies || [])].filter(Boolean).join(' '));
+        };
+
         // ── ニュース記事のイベントリンク（lib/news-event.js の画面側ミラー）────
         // ⚠️ 押した本人だけが参加する。自分のイベントリンクだけを受け付け、外部URLは読みに行かない。
         const evLinkFor = (rowId) => {
@@ -4891,11 +4916,11 @@
             // 組織図から非表示/再表示（root専用）。楽観更新→サーバー反映。
             const orgHide = async (id) => {
                 setProfileData(d => ({ ...d, hidden: [...new Set([...(d.hidden || []), String(id)])] }));
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'hide', id: String(id), root: !!authState.root }) }); await profileLoad(); } catch {}
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() }, body: JSON.stringify({ type: 'profile', action: 'hide', id: String(id) }) }); await profileLoad(); } catch {}
             };
             const orgUnhide = async (id) => {
                 setProfileData(d => ({ ...d, hidden: (d.hidden || []).filter(x => x !== String(id)) }));
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'unhide', id: String(id), root: !!authState.root }) }); await profileLoad(); } catch {}
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() }, body: JSON.stringify({ type: 'profile', action: 'unhide', id: String(id) }) }); await profileLoad(); } catch {}
             };
             const profileUploadImage = (file) => chatUploadImageTo('profile', file);
             // ── プロフィール写真トリミング（正方形・ドラッグで移動＋ピンチ/スライダーで拡大／iOSのCropと同じ操作感） ──
@@ -4976,7 +5001,8 @@
             };
             const profileSave = async (pid, profile) => {
                 setProfileSaving(true);
-                try { const r = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'save', pid, profile, staffId: myPid, root: !!authState.root }) }); const j = await r.json().catch(() => ({})); await profileLoad(); return j; }
+                // ⚠️ 認証ヘッダを必ず付ける。サーバーは body.root ではなく**確かめた本人**で権限を判定する。
+                try { const r = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() }, body: JSON.stringify({ type: 'profile', action: 'save', pid, profile, staffId: myPid }) }); const j = await r.json().catch(() => ({})); await profileLoad(); return j; }
                 catch { return { ok: false }; } finally { setProfileSaving(false); }
             };
             const [orgProgress, setOrgProgress] = useState({ month: '', done: 0, total: 0, loading: false });
@@ -14714,7 +14740,17 @@
                                 return [...out.values()].filter(o => !hidden.has(o.pid)); // root非表示を除外
                             };
                             const q = orgSearch.trim();
-                            const qHit = (s) => !!q && (String(dispName(s.id, s.name)).includes(q) || String(s.name || '').includes(q)); // 検索一致
+                            // 検索一致: 氏名に加えて、自己紹介（ひとこと・得意なこと・学びたいこと・趣味）でも当てる。
+                            // 全角半角・カナひらがな・大小文字の違いを吸収する。
+                            const qn = profSearchNorm(q);
+                            const qHit = (s) => {
+                                if (!q) return false;
+                                const nm = String(dispName(s.id, s.name) || '');
+                                if (nm.includes(q) || String(s.name || '').includes(q)) return true;
+                                if (!qn) return false;
+                                if (profSearchNorm(nm).includes(qn)) return true;
+                                return profIntroHay(profiles[String(s.id)]).includes(qn);
+                            };
                             // 既定＝在籍ロスター（読み込み不要・即表示）。楽トレ/ヘルプ/受付/役職は除外。＋プロフィール上書き。root非表示も除外。
                             // ⚠️ 検索中は施術者/予約可の絞り込みを緩め、名前一致するスタッフ（オーナー/受付/役職含む）も表示する。
                             // 検索語が「店舗名」に一致した店舗は、その店舗の在籍スタッフを“全員”表示する
@@ -14723,7 +14759,8 @@
                             const rosterStaff = (id, name) => {
                                 const showAll = !q || shopNameHit(name); // 検索なし or 店舗名一致 → 在籍全員（絞り込みを緩めない）
                                 const base = (soStaffs || []).filter(s => String(s.shop_id) === String(id) && !s.deleted && !reassigned.has(String(s.id)) && !hidden.has(String(s.id)) && (showAll ? (!isNonTherapistName(s.name) && s.acceptsRes !== false) : qHit(s))).map(s => ({ id: String(s.id), name: dispName(s.id, s.name) }));
-                                const added = (profStaffByShop[name] || []).filter(x => !hidden.has(String(x.id)) && (showAll || String(x.name || dispName(x.id) || '').includes(q))).map(x => ({ id: x.id, name: x.name || dispName(x.id) || (((soStaffs || []).find(s => String(s.id) === x.id) || {}).name) || 'スタッフ' }));
+                                // ⚠️ 氏名だけでなく得意分野・趣味でも当てる（qHit を使う）
+                                const added = (profStaffByShop[name] || []).filter(x => !hidden.has(String(x.id)) && (showAll || qHit({ id: x.id, name: x.name || dispName(x.id) || '' }))).map(x => ({ id: x.id, name: x.name || dispName(x.id) || (((soStaffs || []).find(s => String(s.id) === x.id) || {}).name) || 'スタッフ' }));
                                 const seen = new Set(); const out = [];
                                 for (const s of [...base, ...added]) { if (seen.has(s.id)) continue; seen.add(s.id); out.push(s); }
                                 return out;
@@ -14731,7 +14768,7 @@
                             // 売上モード時：その月に売上>0のスタッフ。未取得はnull（集計中）。root非表示も除外。店舗名一致時は施術者を全員表示。
                             const salesStaff = (id, name) => { const s = orgSales[`${id}__${orgMonth}`]; if (!s) return null; const showAll = !q || shopNameHit(name); return s.filter(x => x.gross > 0 && !hidden.has(String(x.id)) && (showAll ? !isNonTherapistName(x.name) : qHit(x))).sort((a, b) => b.gross - a.gross).map(x => ({ id: String(x.id), name: dispName(x.id, x.name) })); };
                             const staffFor = (id, name) => orgSalesMode ? salesStaff(id, name) : rosterStaff(id, name); // null=集計中(売上モードのみ)
-                            const nameMatch = (sh) => { if (String(sh.name).includes(q)) return true; if (ownersForShop(sh.name).some(o => String(o.name).includes(q))) return true; const ss = staffFor(sh.id, sh.name) || []; return ss.some(s => String(s.name).includes(q)); };
+                            const nameMatch = (sh) => { if (String(sh.name).includes(q)) return true; if (ownersForShop(sh.name).some(o => String(o.name).includes(q))) return true; const ss = staffFor(sh.id, sh.name) || []; return ss.some(s => qHit(s)); };   // 氏名だけでなく得意分野・趣味でも当てる
                             const shops = q ? allShops.filter(nameMatch) : allShops;
                             const regionGroups = (() => {
                                 const b = new Map();
@@ -14755,18 +14792,22 @@
                                     sns: { instagram: '', x: '', youtube: '', tiktok: '', ...(p.sns || {}) },
                                     shops: Array.isArray(p.shops) ? [...p.shops] : [],
                                     birthday: p.birthday || '',
+                                    oneLine: p.oneLine || '',
+                                    goodAt: Array.isArray(p.goodAt) ? [...p.goodAt] : [],
+                                    learning: Array.isArray(p.learning) ? [...p.learning] : [],
+                                    hobbies: Array.isArray(p.hobbies) ? [...p.hobbies] : [],
                                 });
                             };
                             // root: 新規に人を追加（SalonOneに居ない人・手動追加）。manual:のpidでプロフィール作成。
                             const openAddPerson = (shopName, kind) => {
                                 setProfileView(null);
-                                setProfileEdit({ pid: `manual:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`, kind: kind || 'therapist', nameKanji: '', nameKana: '', bio: '', mainImg: '', subImgs: [], sns: { instagram: '', x: '', youtube: '', tiktok: '' }, shops: shopName ? [shopName] : [], birthday: '' });
+                                setProfileEdit({ pid: `manual:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`, kind: kind || 'therapist', nameKanji: '', nameKana: '', bio: '', mainImg: '', subImgs: [], sns: { instagram: '', x: '', youtube: '', tiktok: '' }, shops: shopName ? [shopName] : [], birthday: '', oneLine: '', goodAt: [], learning: [], hobbies: [] });
                             };
                             // root: 組織図から人を削除。プロフィールがあれば削除、SalonOne由来/設定オーナーは非表示リストで隠す。
                             const orgRemove = async (pid, name) => {
                                 if (!window.confirm(`「${name}」を組織図から削除しますか？`)) return;
                                 setProfileView(null);
-                                if (profiles[pid]) { try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'delete', pid, staffId: myPid, root: true }) }); } catch {} }
+                                if (profiles[pid]) { try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() }, body: JSON.stringify({ type: 'profile', action: 'delete', pid, staffId: myPid }) }); } catch {} }
                                 if (/^\d+$/.test(String(pid)) || String(pid).startsWith('owner:')) await orgHide(pid);
                                 else await profileLoad();
                             };
@@ -14801,6 +14842,19 @@
                                         <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${prof.kind === 'hq' ? 'text-indigo-700 bg-indigo-50' : prof.kind === 'owner' ? 'text-brand-700 bg-brand-50' : 'text-teal-700 bg-teal-50'}`}>{prof.kind === 'hq' ? '本部' : prof.kind === 'owner' ? 'オーナー' : 'セラピスト'}</span>
                                     </div>
                                     {prof.nameKana && <div className="text-[12px] text-[#98A2B3] mt-0.5">{prof.nameKana}</div>}
+                                    {prof.oneLine && <div data-prof-oneline-view className={`${big ? 'text-[14px]' : 'text-[13px]'} font-bold text-[#344054] mt-2`}>「{prof.oneLine}」</div>}
+                                    {['goodAt', 'learning', 'hobbies'].map(key => {
+                                        const list = Array.isArray(prof[key]) ? prof[key] : [];
+                                        if (!list.length) return null;
+                                        return (
+                                            <div key={key} data-prof-tags={key} className="mt-2">
+                                                <div className="text-[10px] font-black text-[#98A2B3]">{PROF_TAG_LABEL[key]}</div>
+                                                <div className="flex flex-wrap gap-1 mt-1">{list.map(t => (
+                                                    <span key={t} className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold ${key === 'goodAt' ? 'bg-teal-50 text-teal-700' : key === 'learning' ? 'bg-indigo-50 text-indigo-700' : 'bg-amber-50 text-amber-700'}`}>{t}</span>
+                                                ))}</div>
+                                            </div>
+                                        );
+                                    })}
                                     {prof.bio && <p className={`${big ? 'text-[14px]' : 'text-[12px]'} text-[#475467] leading-relaxed mt-2.5 whitespace-pre-wrap break-words ${big ? '' : 'max-h-32 overflow-y-auto'}`}>{prof.bio}</p>}
                                     {snsList.length > 0 && <div className="flex flex-wrap gap-1.5 mt-3">{snsList.map(([k, v]) => { const m = snsMeta[k] || { label: k, color: 'text-brand-600' }; return <a key={k} href={/^https?:\/\//.test(v) ? v : `https://${v}`} target="_blank" rel="noopener noreferrer" className={`inline-flex items-center gap-1 text-[12px] font-semibold ${m.color} bg-[#F8F9FB] border border-[#EAECF0] rounded-full px-2.5 py-1 hover:bg-white transition`}>{m.label}<ExternalLink size={11} /></a>; })}</div>}
                                 </>) : (
@@ -14870,7 +14924,7 @@
 
                                         {!loading && (
                                             <div className="flex flex-wrap items-center gap-2.5 mb-5">
-                                                <div className="relative flex-1 min-w-[200px] max-w-sm"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]" /><input value={orgSearch} onChange={e => setOrgSearch(e.target.value)} placeholder="店舗・スタッフ・オーナーを検索" className="w-full h-9 pl-9 pr-3 rounded-lg bg-white border border-[#EAECF0] text-[13px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" /></div>
+                                                <div className="relative flex-1 min-w-[200px] max-w-sm"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]" /><input value={orgSearch} onChange={e => setOrgSearch(e.target.value)} placeholder="名前・店舗・得意分野・趣味で検索" className="w-full h-9 pl-9 pr-3 rounded-lg bg-white border border-[#EAECF0] text-[13px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" /></div>
                                                 <label className="inline-flex items-center gap-2 h-9 px-3 rounded-lg bg-white border border-[#EAECF0] text-[13px] font-medium text-[#667085] cursor-pointer select-none">
                                                     <input type="checkbox" checked={orgSalesMode} onChange={e => setOrgSalesMode(e.target.checked)} className="w-4 h-4 accent-[#F37021]" />当月売上で絞る
                                                 </label>
@@ -15022,6 +15076,34 @@
                                                             <div className="text-[12px] font-bold text-[#344054] mb-1.5">生年月日 <span className="text-[#98A2B3] font-normal">任意・誕生日の当日だけ組織図で名前が変わります🎂</span></div>
                                                             <input type="date" value={d.birthday || ''} onChange={e => setD({ birthday: e.target.value })} className={inputCls} />
                                                         </div>
+                                                        {/* ひとこと（1行） */}
+                                                        <div>
+                                                            <div className="text-[12px] font-bold text-[#344054] mb-1.5">ひとこと<span className="ml-1 text-[10px] font-bold text-[#98A2B3]">任意</span></div>
+                                                            <input data-prof-oneline value={d.oneLine || ''} onChange={e => setD({ oneLine: e.target.value.slice(0, 60) })} maxLength={60}
+                                                                placeholder="例）産後ケアが得意です。お気軽にどうぞ！"
+                                                                className="w-full h-10 px-3.5 rounded-lg border border-[#EAECF0] bg-white text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
+                                                        </div>
+                                                        {/* 得意なこと／学びたいこと／趣味（タグ。候補を押すだけでも入る） */}
+                                                        {['goodAt', 'learning', 'hobbies'].map(key => {
+                                                            const cur = Array.isArray(d[key]) ? d[key] : [];
+                                                            const add = (t) => setD({ [key]: profNormTags([...cur, t]) });
+                                                            return (
+                                                                <div key={key} data-prof-tagfield={key}>
+                                                                    <div className="text-[12px] font-bold text-[#344054] mb-1.5">{PROF_TAG_LABEL[key]}<span className="ml-1 text-[10px] font-bold text-[#98A2B3]">任意・最大8つ</span></div>
+                                                                    {cur.length > 0 && <div className="flex flex-wrap gap-1.5 mb-1.5">{cur.map(t => (
+                                                                        <button key={t} onClick={() => setD({ [key]: cur.filter(x => x !== t) })} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-brand-50 border border-brand-200 text-[12px] font-bold text-brand-700 hover:bg-brand-100">{t}<X size={12} /></button>
+                                                                    ))}</div>}
+                                                                    <input data-prof-taginput={key} placeholder="入力して Enter で追加"
+                                                                        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); const v = e.currentTarget.value.trim(); if (v) { add(v); e.currentTarget.value = ''; } } }}
+                                                                        className="w-full h-9 px-3 rounded-lg border border-[#EAECF0] bg-white text-[13px] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400" />
+                                                                    <div className="flex flex-wrap gap-1 mt-1.5">
+                                                                        {PROF_TAGS[key].filter(t => !cur.includes(t)).slice(0, 10).map(t => (
+                                                                            <button key={t} onClick={() => add(t)} className="px-2 py-0.5 rounded-full border border-[#EAECF0] text-[11px] font-bold text-[#667085] hover:bg-[#F8F9FB]">＋{t}</button>
+                                                                        ))}
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })}
                                                         {/* 自己紹介 */}
                                                         <div>
                                                             <div className="text-[12px] font-bold text-[#344054] mb-1.5">自己紹介</div>
@@ -15057,7 +15139,7 @@
                                                         </div>
                                                     </div>
                                                     <div className="px-5 py-3.5 border-t border-[#EAECF0] flex items-center gap-2 shrink-0">
-                                                        {profiles[d.pid] && <button onClick={async () => { if (window.confirm('このプロフィールを削除しますか？')) { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'delete', pid: d.pid, staffId: myPid, root: isRoot }) }).catch(() => {}); await profileLoad(); setProfileEdit(null); } }} className="h-10 px-3 rounded-lg text-[13px] font-semibold text-rose-600 hover:bg-rose-50 transition">削除</button>}
+                                                        {profiles[d.pid] && <button onClick={async () => { if (window.confirm('このプロフィールを削除しますか？')) { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() }, body: JSON.stringify({ type: 'profile', action: 'delete', pid: d.pid, staffId: myPid }) }).catch(() => {}); await profileLoad(); setProfileEdit(null); } }} className="h-10 px-3 rounded-lg text-[13px] font-semibold text-rose-600 hover:bg-rose-50 transition">削除</button>}
                                                         <button onClick={() => setProfileEdit(null)} className="ml-auto h-10 px-4 rounded-lg text-[13px] font-semibold text-[#667085] hover:bg-[#F2F4F7] transition">キャンセル</button>
                                                         <button onClick={doSave} disabled={profileSaving} className="h-10 px-5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-semibold disabled:opacity-60 transition">{profileSaving ? '保存中…' : '保存する'}</button>
                                                     </div>

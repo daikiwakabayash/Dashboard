@@ -128,6 +128,12 @@ check('ピックアップが1件だけ大きく出る', (await page.locator('[da
 check('ピックアップは featured の記事', (await page.locator('[data-news-hero="p1"]').count()) === 1);
 check('写真が無いピックアップは文字の表紙になる', (await page.locator('[data-news-hero] .nowl-graphic').count()) === 1);
 check('EDITOR\'S PICK の印が出る', t.includes("EDITOR'S PICK"));
+check('ピックアップの肩書きが試作どおり', t.includes('NOWL / KNOWLEDGE JOURNAL'), (t.match(/NOWL \/ [A-Z ]+/) || [''])[0]);
+check('ピックアップの短い言葉が出る', t.includes('学びは、つながるほど強くなる。'));
+const h1px = await page.locator('.nowl-h1').first().evaluate(el => Math.round(parseFloat(getComputedStyle(el).fontSize)));
+check('PCの大見出しが十分大きい（試作に寄せる）', h1px >= 38, `${h1px}px`);
+const coverPx = await page.locator('[data-news-hero] .nowl-graphic strong').first().evaluate(el => Math.round(parseFloat(getComputedStyle(el).fontSize)));
+check('ピックアップの英字が十分大きい', coverPx >= 40, `${coverPx}px`);
 check('PICKUP / UPDATES の見出しが出る', t.includes('PICKUP') && t.includes('UPDATES'));
 
 // ── カード ──────────────────────────────────────────────
@@ -145,11 +151,36 @@ await page.waitForTimeout(600);
 const cols = await page.locator('.nowl-postgrid').first().evaluate(el => getComputedStyle(el).gridTemplateColumns.split(' ').length);
 check('PCでは3列に並ぶ', cols === 3, `${cols} 列`);
 await page.setViewportSize({ width: 390, height: 844 });
-await page.waitForTimeout(600);
+await page.waitForTimeout(700);
 const cols1 = await page.locator('.nowl-postgrid').first().evaluate(el => getComputedStyle(el).gridTemplateColumns.split(' ').length);
 const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
 check('スマホでは1列に並ぶ', cols1 === 1, `${cols1} 列`);
 check('スマホで横スクロールが出ない', !overflow);
+// スマホ: 見出しが小さくなりすぎない／押せる大きさ／はみ出さない
+const h1m = await page.locator('.nowl-h1').first().evaluate(el => Math.round(parseFloat(getComputedStyle(el).fontSize)));
+check('スマホの大見出しも読みやすい大きさ', h1m >= 24 && h1m <= 34, `${h1m}px`);
+const small = await page.evaluate(() => {
+  const bad = [];
+  for (const el of document.querySelectorAll('button, a[href], input, select')) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) continue;             // 非表示は見ない
+    // 入力欄は、囲っている label 全体が押せる範囲になる（枠の高さで見る）
+    const box = el.tagName === 'INPUT' && el.closest('label') ? el.closest('label').getBoundingClientRect() : r;
+    if (box.height < 32) bad.push((el.innerText || el.getAttribute('aria-label') || el.tagName).trim().slice(0, 18));
+  }
+  return [...new Set(bad)];
+});
+check('スマホで押しにくい小さなボタンが無い（高さ32px以上）', small.length === 0, small.slice(0, 4).join(' / '));
+const wide = await page.evaluate(() => {
+  const w = document.documentElement.clientWidth, bad = [];
+  for (const el of document.querySelectorAll('main *, [data-nowl] *')) {
+    const r = el.getBoundingClientRect();
+    if (r.width > w + 2 && r.height > 0) bad.push((el.className || el.tagName).toString().slice(0, 30));
+  }
+  return [...new Set(bad)].slice(0, 5);
+});
+check('スマホで画面幅からはみ出す要素が無い', wide.length === 0, wide.join(' / '));
+await page.screenshot({ path: path.join(process.env.OUT_DIR || '/tmp', 'news-v3-mobile.png'), fullPage: true });
 await page.setViewportSize({ width: 1440, height: 900 });
 await page.waitForTimeout(600);
 

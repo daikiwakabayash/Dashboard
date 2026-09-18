@@ -157,3 +157,32 @@ describe('index.html - ニュースの名称', () => {
     expect(html).toContain("type: 'board'");
   });
 });
+
+// ── マーケティング: 新規顧客一覧（オーナー指摘の3点）──────────────────
+describe('index.html - 新規顧客一覧', () => {
+  it('「新しい順／古い順」ボタンを外した（見出しクリックで並べ替える）', () => {
+    expect(html).not.toContain('古い順(9/1〜)');
+    expect(html).toContain('クリックで受付日時の新しい順/古い順を切替');
+  });
+  it('🔴 並べ替えは lib/acq-list.js と同じ手順を使う（画面で別計算しない）', () => {
+    expect(html).toContain('const acqSortRows =');
+    expect(html).toContain("acqSortRows(rows.map(o => o.c), sortKey, sortDir");
+  });
+  it('🔴 時間帯が無い日時を日本時間として読む（9時間ずれない）', () => {
+    const fn = html.slice(html.indexOf('const acqParseAt'), html.indexOf('const acqIdOf'));
+    expect(fn).toContain('Number(m[4] || 0) - 9');
+  });
+  it('🔴 同じページを読み続けない（カーソルが進まなければ止める）', () => {
+    expect(html).toContain('const acqNextCursor =');
+    expect(html).toContain('cursor = acqNextCursor(cursor, j.meta);');
+  });
+  it('🔴 同じ人を二重に入れない', () => {
+    expect(html).toContain('all = acqDedupe(all);');
+    expect(html).toContain('if (seen.has(id)) return false;');
+  });
+  it('施策リンクは追いつくまで取りに行く（1回で終わらせない）', () => {
+    const fn = html.slice(html.indexOf('const acqFetchSoflMap'), html.indexOf('const soShiftMonth'));
+    expect(fn).toContain('const behind = !(j && j.caughtUp);');
+    expect(fn).toContain('const iters = force ? 6 : 3;');
+  });
+});

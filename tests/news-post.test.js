@@ -183,6 +183,21 @@ describe('一覧カードの表紙', () => {
     expect(coverStyle({ category: 'event' })).toMatchObject({ imgId: '', line1: 'LEARN', line2: 'TOGETHER.', tone: 'red' });
     expect(coverStyle({ category: 'study' })).toMatchObject({ kicker: 'NOWL / STORIES', tone: 'dark' });
   });
+  it('ピックアップ（大きい1件）は肩書きと短い言葉を持ち、濃い色になる', () => {
+    const h = coverStyle({ category: 'study' }, { hero: true });
+    expect(h.journal).toBe('NOWL / KNOWLEDGE JOURNAL');
+    expect(h.caption).toBe('学びは、つながるほど強くなる。');
+    expect(coverStyle({ category: 'notice' }, { hero: true }).tone).toBe('dark');
+  });
+  it('🔴 短い言葉はカテゴリーごとに固定（記事の中身を要約しない）', () => {
+    const a = coverStyle({ category: 'case', title: '症例A', text: '長い本文' }, { hero: true });
+    const b = coverStyle({ category: 'case', title: '症例B', text: 'まったく違う本文' }, { hero: true });
+    expect(a.caption).toBe(b.caption);
+    expect(a.caption).not.toContain('症例A');
+  });
+  it('写真がある記事では文字の表紙を作らない（ピックアップでも）', () => {
+    expect(coverStyle({ imgIds: ['i1'], category: 'study' }, { hero: true })).toMatchObject({ imgId: 'i1', caption: '', journal: '' });
+  });
   it('カテゴリー未設定の古い記事にも表紙が出る', () => {
     const c = coverStyle({});
     expect(c.line1).toBe('TEAM');

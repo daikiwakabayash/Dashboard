@@ -292,9 +292,13 @@ describe('authz - Chat 操作', () => {
   it('上限以内の宛先なら許可', () => {
     expect(can(A.owner, 'chat.broadcast', { recipientCount: 10 }).allow).toBe(true);
   });
-  it('AI Agent はチャット送信できるが、ルームのアーカイブはできない（humanOnly）', () => {
-    expect(can(A.agent, 'chat.send', EBISU).allow).toBe(true);
+  it('🔴 AI Agent に一般のチャット送信を与えない', () => {
+    expect(can(A.agent, 'chat.send', EBISU).allow).toBe(false);
     expect(can(A.agent, 'chat.room_archive', EBISU).allow).toBe(false);
+  });
+  it('AI が書けるのは「呼ばれた返信」と「パトロール投稿」だけ', () => {
+    expect(can(A.agent, 'chat.ai_reply', EBISU).allow).toBe(true);
+    expect(can(A.agent, 'chat.patrol_post', EBISU).allow).toBe(true);
   });
   it('AI Agent も人間の権限を超える宛先には送れない（全社一斉は root 相当でも humanOnly ではないが rank で制御）', () => {
     const lowAgent = { id: 'a1', role: 'staff', source: 'agent', verified: true, shops: ['恵比寿'] };

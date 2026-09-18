@@ -818,6 +818,47 @@
             if (!src) return <div {...rest} />;      // 読み込み前は同じ箱を出す（レイアウトが動かない）
             return <img src={src} alt={alt} {...rest} />;
         };
+        // ── クリエイティブ: 素材・制作物の中身を出す ───────────────────────
+        // ⚠️ 中身は**①の認証付き配信口からしか出ない**（保存先URLは画面に来ない）。
+        //    <img src>/<video src> はヘッダを付けられないので、fetch して object URL にする。
+        //    ログイン情報は App 側の ccAuthHeaders を使う（起動時にここへ渡す）。
+        const cvMediaAuth = { headers: () => ({}) };
+        const cvMediaCache = {};
+        const cvMediaPending = {};
+        const cvMediaFetch = (src) => {
+            const k = String(src || '');
+            if (!k) return Promise.resolve('');
+            if (cvMediaCache[k]) return Promise.resolve(cvMediaCache[k]);
+            if (cvMediaPending[k]) return cvMediaPending[k];
+            const p = (async () => {
+                try {
+                    const r = await fetch(k, { cache: 'no-store', headers: { ...cvMediaAuth.headers() } });
+                    if (!r.ok) return '';
+                    cvMediaCache[k] = URL.createObjectURL(await r.blob());
+                    return cvMediaCache[k];
+                } catch (_) { return ''; } finally { delete cvMediaPending[k]; }
+            })();
+            cvMediaPending[k] = p;
+            return p;
+        };
+        // 実ファイルを **その場で表示・再生**する（カードだけで終わらせない）。
+        const CvMedia = ({ f, tall }) => {
+            const key = String((f && f.src) || '');
+            const [src, setSrc] = React.useState(() => cvMediaCache[key] || '');
+            React.useEffect(() => {
+                let alive = true;
+                if (!key) { setSrc(''); return; }
+                if (cvMediaCache[key]) { setSrc(cvMediaCache[key]); return; }
+                cvMediaFetch(key).then(u => { if (alive) setSrc(u); });
+                return () => { alive = false; };
+            }, [key]);
+            const box = `w-full ${tall ? 'h-56' : 'h-36'} rounded-lg`;
+            if (!src) return <div data-cv-media="loading" className={`${box} bg-ink-50 border border-ink-100 flex items-center justify-center text-[11px] text-ink-400`}>読み込み中…</div>;
+            return f.kind === 'video'
+                ? <video data-cv-media="video" src={src} controls preload="metadata" className={`${box} object-contain bg-ink-900`} />
+                : <img data-cv-media="image" src={src} alt={f.name || ''} className={`${box} object-contain bg-ink-50`} />;
+        };
+
         // サムネは固定サイズの箱で表示（読み込み前後で高さが変わらない＝チャットのスクロールがガタつかない）。
         // 全体はタップでライトボックス表示（トリミング無し）。
         const ChatImage = ({ imgId, onClick }) => {
@@ -2775,6 +2816,8 @@
             // ⚠️ Meta のトークンはブラウザに存在しない。サーバー(?type=meta)が③のAPIを呼び、
             //    結果だけを受け取る。ここから広告を変更する経路は無い（GETのみ）。
             const [metaState, setMetaState] = useState({ loading: false, loaded: false, sample: false, connection: null, data: null, error: '' });
+            // 認証付き配信口（クリエイティブの画像・動画）にも同じログイン情報を使う
+            cvMediaAuth.headers = () => ccAuthHeaders();
             const ccAuthHeaders = () => {
                 // 認証はヘッダで送る（URLにトークンを載せない）。
                 // ⚠️ HTTPヘッダは ISO-8859-1 しか運べない。アカウント名は日本語のことがあるため
@@ -2805,6 +2848,11 @@
             // ── @AI 実接続の検証（本部/root限定・検証用Roomのみ）────────────────
             // 契約: CHAT_AI_API_CONTRACT.md。役割・tenant・Room・資料の範囲はサーバーが決める。
             // エンドポイントは POST /api/plan-store（type は**本文**）。
+            const [cv, setCv] = useState({
+                assets: [], creatives: [], channels: [], generator: null,
+                busy: false, error: '', notice: '', comparing: null, files: null,
+                newAsset: { title: '', channel: 'meta', companyId: '', shopId: '', rightsNote: '' }, uploading: [],
+            });
             const [aiTrial, setAiTrial] = useState({
                 loading: false, cfg: null, roomId: '', q: '', answers: {}, order: [],
                 error: '', busy: false, correcting: '', correctText: '',
@@ -2882,6 +2930,119 @@
             // サーバーに回答が保存済みで応答だけ失われた場合は replay として
             // 同じ answer_message_id が返るので、回答が増えない。
             const aiTrialRetry = () => aiTrialAsk({ retry: true });
+            // ── Creative Library: 暗号化の写し（lib/creative-crypto.js と同じ形式）────
+            // ⚠️ 保存先(Vercel Blob)は公開URLしか出せないので、**暗号文だけを置く**。
+            //    鍵はこの場で作り、暗号化してから保存先へ送り、鍵は①のサーバーへ渡す。
+            //    サーバーは鍵を親鍵で包んで保存する（平文の鍵はどこにも残らない）。
+            const CVC_CHUNK = 1024 * 1024, CVC_IV = 12, CVC_TAG = 16;
+            const cvcB64 = (b) => { let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s); };
+            const cvcAad = (fileId, i) => new TextEncoder().encode(`A256GCM-CHUNK1M|${fileId}|${i}`);
+            const cvcNewKey = () => { const b = new Uint8Array(32); crypto.getRandomValues(b); return b; };
+            const cvcSha256 = async (b) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', b))].map(x => x.toString(16).padStart(2, '0')).join('');
+            const cvcEncrypt = async (raw, fileId, plain) => {
+                const key = await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt']);
+                const n = plain.length === 0 ? 1 : Math.ceil(plain.length / CVC_CHUNK);
+                const out = new Uint8Array(plain.length + n * (CVC_IV + CVC_TAG));
+                let o = 0;
+                for (let i = 0; i < n; i++) {
+                    const part = plain.subarray(i * CVC_CHUNK, Math.min(plain.length, (i + 1) * CVC_CHUNK));
+                    const iv = new Uint8Array(CVC_IV); crypto.getRandomValues(iv);
+                    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: cvcAad(fileId, i) }, key, part));
+                    out.set(iv, o); o += CVC_IV; out.set(ct, o); o += ct.length;
+                }
+                return out;
+            };
+
+
+            // ── Creative Library（本部/root限定・cc_creative_library）──────────
+            // 生成そのものは③。ここは「依頼する・見る・比べる・直してもらう・承認する」だけ。
+            const cvPost = async (payload) => {
+                const r = await fetch('/api/plan-store', { method: 'POST', cache: 'no-store',
+                    headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() },
+                    body: JSON.stringify({ type: 'creative', ...payload }) });
+                if (r.status === 403) return { ok: false, error: { code: 'forbidden', message: 'この機能は利用できません' } };
+                return await r.json().catch(() => ({ ok: false, error: { code: 'internal', message: '応答を読めませんでした' } }));
+            };
+            const cvLoad = async () => {
+                const j = await cvPost({ action: 'list' });
+                if (!j.ok) { setCv(p => ({ ...p, error: (j.error && j.error.message) || '' })); return; }
+                setCv(p => ({ ...p, assets: j.assets || [], creatives: j.creatives || [],
+                    channels: j.channels || [], generator: j.generator || null, error: '' }));
+            };
+            // 素材の実ファイル。**暗号化してから**保存先(Vercel Blob)へ送る。
+            // ⚠️ 平文を保存先へ置かない。保存先URLは画面では使わず、サーバーへ渡すだけ。
+            const cvUpload = async (fileList) => {
+                if (typeof window.__blobUpload !== 'function') {
+                    setCv(p => ({ ...p, error: 'ファイル保存の準備ができていません（管理者へ: Vercel Blob の有効化が必要です）' }));
+                    return [];
+                }
+                const out = [];
+                for (const f of Array.from(fileList || []).slice(0, 10)) {
+                    const safe = String(f.name || 'file').replace(/[^\w.\-]/g, '_').slice(0, 80);
+                    try {
+                        const plain = new Uint8Array(await f.arrayBuffer());
+                        const fileId = `f_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+                        const dataKey = cvcNewKey();
+                        const sha256 = await cvcSha256(plain);
+                        const sealed = await cvcEncrypt(dataKey, fileId, plain);
+                        // 拡張子も内容も伏せた名前で置く（保存先には暗号文しか無い）
+                        const res = await window.__blobUpload(`creative/${fileId}.enc`, new Blob([sealed]), { access: 'public',
+                            handleUploadUrl: '/api/plan-store?type=blobupload', contentType: 'application/octet-stream' });
+                        out.push({ fileId, storageUrl: res.url, contentType: f.type || '', bytes: plain.length,
+                                   plainBytes: plain.length, sha256, name: safe, dataKey: cvcB64(dataKey) });
+                    } catch (_) { setCv(p => ({ ...p, error: `${safe} を保存できませんでした` })); }
+                }
+                return out;
+            };
+            // 完成ファイルの取得。**認証付きで取ってから**保存する（保存先URLは使わない）。
+            const cvDownload = async (f) => {
+                const u = await cvMediaFetch(f && f.src);
+                if (!u) { setCv(p => ({ ...p, error: 'ファイルを取得できませんでした' })); return; }
+                const a = document.createElement('a');
+                a.href = u; a.download = f.name || `${f.fileId}.${f.kind === 'video' ? 'mp4' : 'png'}`;
+                document.body.appendChild(a); a.click(); a.remove();
+            };
+            const cvBusy = (fn) => async (...args) => {
+                if (cv.busy) return;
+                setCv(p => ({ ...p, busy: true, error: '' }));
+                try { await fn(...args); } finally { setCv(p => ({ ...p, busy: false })); }
+            };
+            const cvAct = cvBusy(async (payload, okMsg) => {
+                const j = await cvPost(payload);
+                if (!j.ok) { setCv(p => ({ ...p, error: `${j.error.message}（${j.error.code}）` })); return; }
+                await cvLoad();
+                if (okMsg) setCv(p => ({ ...p, notice: okMsg }));
+            });
+            // ③への生成依頼は**受付だけ**。あとは進み具合を聞きに行く（画面を閉じても③に結果は残る）。
+            const cvPollRef = useRef({});
+            const cvPoll = async (creativeId, delay) => {
+                const j = await cvPost({ action: 'job_status', creative_id: creativeId });
+                if (!j.ok) { setCv(p => ({ ...p, error: `${j.error.message}（${j.error.code}）` })); delete cvPollRef.current[creativeId]; await cvLoad(); return; }
+                if (j.status === 'done') { delete cvPollRef.current[creativeId]; await cvLoad(); return; }
+                // ⚠️ 無制限に叩かない。③が指定した間隔から、最大10秒まで延ばす。
+                const next = Math.min(10000, Math.max(1000, Number(j.poll_after_ms) || delay * 1.5));
+                cvPollRef.current[creativeId] = setTimeout(() => cvPoll(creativeId, next), next);
+            };
+            useEffect(() => () => { for (const t of Object.values(cvPollRef.current)) clearTimeout(t); }, []);
+            const cvGenerate = cvBusy(async (creativeId) => {
+                const j = await cvPost({ action: 'generate', creative_id: creativeId });
+                if (!j.ok) { setCv(p => ({ ...p, error: `${j.error.message}（${j.error.code}）` })); return; }
+                await cvLoad();
+                if (j.status === 'failed') { setCv(p => ({ ...p, error: j.reason || '生成を依頼できませんでした' })); return; }
+                setCv(p => ({ ...p, notice: j.revision ? '修正を依頼しました（前の版と依頼の原文も一緒に送っています）' : '生成を依頼しました' }));
+                cvPoll(creativeId, Number(j.poll_after_ms) || 1000);
+            });
+            const cvCompare = cvBusy(async (assetId) => {
+                const j = await cvPost({ action: 'compare', asset_id: assetId });
+                if (!j.ok) { setCv(p => ({ ...p, error: j.error.message })); return; }
+                setCv(p => ({ ...p, comparing: { asset: j.asset, creatives: j.creatives } }));
+            });
+            const cvDeliver = cvBusy(async (creativeId) => {
+                const j = await cvPost({ action: 'deliverables', creative_id: creativeId });
+                if (!j.ok) { setCv(p => ({ ...p, error: j.error.message })); return; }
+                setCv(p => ({ ...p, files: j }));
+            });
+
             const aiTrialReview = async (aid) => {
                 const a = aiTrial.answers[aid]; if (!a) return;
                 const j = await aiPost({ action: 'hq_review', answer_message_id: aid, question_message_id: a.questionMessageId, room_id: aiTrial.roomId });
@@ -2903,6 +3064,7 @@
                 if (currentPage === 'agentlog' && ccOn('cc_agentlog')) { ccLoadRuns(); const iv = setInterval(ccLoadRuns, 20000); return () => clearInterval(iv); }
                 if (currentPage === 'metaov' && ccOn('cc_meta_overview')) { metaLoad(); }
                 if (currentPage === 'aitrial' && ccOn('cc_ai_trial')) { aiTrialLoadCfg(); }
+                if (currentPage === 'creative' && ccOn('cc_creative_library')) { cvLoad(); }
             }, [currentPage, authState.authenticated, ccFlags]);
 
             // 判断（承認／却下／修正依頼）。seenHash と expectedUpdatedAt を送り、
@@ -22348,6 +22510,224 @@
                     })()}
 
                     {/* ══════════ AI Agent Activity（Phase 2・フラグ cc_agentlog がONのときだけ描画） ══════════ */}
+                    {currentPage === 'creative' && ccOn('cc_creative_library') && (() => {
+                        const c = cv;
+                        const byAsset = (id) => c.creatives.filter(x => x.assetId === id);
+                        const MODE = {
+                            live: { cls: 'bg-emerald-50 text-emerald-800 border-emerald-200', label: '実生成' },
+                            sample: { cls: 'bg-amber-50 text-amber-900 border-amber-300', label: 'サンプル（実データではありません）' },
+                            not_connected: { cls: 'bg-slate-100 text-slate-700 border-slate-300', label: '未接続' },
+                        };
+                        const ST = {
+                            draft: 'bg-slate-100 text-slate-700', generating: 'bg-blue-50 text-blue-700',
+                            failed: 'bg-red-50 text-red-700', review: 'bg-amber-50 text-amber-900', approved: 'bg-emerald-50 text-emerald-800',
+                        };
+                        const STL = { draft: '下書き', generating: '生成中', failed: '失敗', review: '確認待ち', approved: '承認済み' };
+                        const Media = CvMedia;   // 実ファイルの表示・再生（トップレベルで定義）
+                        const ModeTag = ({ m }) => {
+                            const x = MODE[m] || MODE.not_connected;
+                            return <span className={`px-2 py-0.5 rounded-md text-[11px] font-bold border ${x.cls}`}>{x.label}</span>;
+                        };
+                        return (
+                            <div className="p-4 md:p-6 space-y-4 max-w-[1100px]">
+                                <header className="flex flex-wrap items-center gap-3">
+                                    <h1 className="text-[20px] font-black text-ink-900">クリエイティブ</h1>
+                                    <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-slate-100 text-slate-700">本部・管理者のみ</span>
+                                    {c.generator && (c.generator.connected
+                                        ? <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-50 text-emerald-800">生成API 接続済み</span>
+                                        : <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-slate-100 text-slate-700">生成API 未接続</span>)}
+                                    <button onClick={cvLoad} className="ml-auto px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200 hover:bg-ink-50">再読み込み</button>
+                                </header>
+
+                                {c.generator && !c.generator.connected && (
+                                    <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-[12px] text-amber-900">
+                                        <b>③の生成APIが未接続です。</b>{c.generator.reason}
+                                        <div className="mt-1 text-amber-800">未接続のあいだは生成を依頼しても<b>サンプルを作りません</b>。素材の登録と、手元のファイルを案にすることはできます。</div>
+                                    </div>
+                                )}
+                                {c.error && <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-[12px] text-red-800">{c.error}</div>}
+                                {c.notice && <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-[12px] text-emerald-800">{c.notice}</div>}
+
+                                {/* 素材登録 */}
+                                <section className="p-4 rounded-2xl bg-white border border-ink-100 space-y-3">
+                                    <h2 className="text-[13px] font-black text-ink-700">素材を登録する</h2>
+                                    <div className="grid grid-cols-1 md:grid-cols-4 gap-2 text-[12px]">
+                                        <input value={c.newAsset.title} placeholder="素材の名前（例: 春キャンペーン）"
+                                            onChange={e => setCv(p => ({ ...p, newAsset: { ...p.newAsset, title: e.target.value } }))}
+                                            className="md:col-span-2 px-3 py-2 rounded-lg border border-ink-200" />
+                                        <input value={c.newAsset.companyId} placeholder="企業（任意）"
+                                            onChange={e => setCv(p => ({ ...p, newAsset: { ...p.newAsset, companyId: e.target.value } }))}
+                                            className="px-3 py-2 rounded-lg border border-ink-200" />
+                                        <input value={c.newAsset.shopId} placeholder="店舗（任意）"
+                                            onChange={e => setCv(p => ({ ...p, newAsset: { ...p.newAsset, shopId: e.target.value } }))}
+                                            className="px-3 py-2 rounded-lg border border-ink-200" />
+                                        <select value={c.newAsset.channel}
+                                            onChange={e => setCv(p => ({ ...p, newAsset: { ...p.newAsset, channel: e.target.value } }))}
+                                            className="px-3 py-2 rounded-lg border border-ink-200 font-bold">
+                                            {(c.channels.length ? c.channels : ['meta']).map(ch => <option key={ch} value={ch}>{ch}</option>)}
+                                        </select>
+                                        <input type="file" multiple accept="image/*,video/*" id="cv-files"
+                                            className="md:col-span-3 px-3 py-2 rounded-lg border border-ink-200 bg-white" />
+                                    </div>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <button disabled={c.busy || !c.newAsset.title.trim()} className="px-4 py-2 rounded-xl text-[13px] font-bold bg-ink-900 text-white disabled:opacity-40"
+                                            onClick={cvBusy(async () => {
+                                                const el = document.getElementById('cv-files');
+                                                const files = await cvUpload(el && el.files);
+                                                if (!files.length) { setCv(p => ({ ...p, error: '画像か動画を1つ以上選んでください' })); return; }
+                                                const j = await cvPost({ action: 'asset_create', asset: { ...c.newAsset, files } });
+                                                if (!j.ok) { setCv(p => ({ ...p, error: `${j.error.message}（${j.error.code}）` })); return; }
+                                                if (el) el.value = '';
+                                                setCv(p => ({ ...p, newAsset: { ...p.newAsset, title: '' }, notice: '素材を登録しました' }));
+                                                await cvLoad();
+                                            })}>
+                                            {c.busy ? '処理中…' : '素材を登録'}
+                                        </button>
+                                        <span className="text-[11px] text-ink-400">※ 権利は「未確認」で登録されます。承認の前に確認が必要です。</span>
+                                    </div>
+                                </section>
+
+                                {/* 素材ごとの案 */}
+                                {c.assets.length === 0 && <div className="text-[13px] text-ink-400">まだ素材がありません。</div>}
+                                {c.assets.map(a => (
+                                    <section key={a.id} className="p-4 rounded-2xl bg-white border border-ink-100 space-y-3">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <h3 className="text-[14px] font-black text-ink-900">{a.title}</h3>
+                                            <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-slate-100 text-slate-700">{a.channel}</span>
+                                            {a.companyId && <span className="text-[11px] text-ink-400">企業 {a.companyId}</span>}
+                                            {a.shopId && <span className="text-[11px] text-ink-400">店舗 {a.shopId}</span>}
+                                            <span className={`px-2 py-0.5 rounded-md text-[11px] font-bold ${a.rights.status === 'confirmed' ? 'bg-emerald-50 text-emerald-800' : 'bg-amber-50 text-amber-900'}`}>
+                                                権利 {a.rights.status === 'confirmed' ? `確認済み（${a.rights.confirmedName || a.rights.confirmedBy}）` : a.rights.status === 'restricted' ? '利用制限あり' : '未確認'}
+                                            </span>
+                                            <span className="text-[11px] text-ink-400">素材ID {a.id}</span>
+                                            <div className="ml-auto flex gap-2">
+                                                {a.rights.status !== 'confirmed' && (
+                                                    <button disabled={c.busy} className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200 hover:bg-ink-50 disabled:opacity-40"
+                                                        onClick={() => cvAct({ action: 'asset_rights', asset_id: a.id, status: 'confirmed' }, '権利を確認済みにしました')}>権利を確認済みにする</button>
+                                                )}
+                                                <button disabled={c.busy} data-cv-add-draft={a.id} className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200 hover:bg-ink-50 disabled:opacity-40"
+                                                    onClick={() => cvAct({ action: 'creative_create', asset_id: a.id }, '案を作りました（下書き）')}>案を追加</button>
+                                                {/* ③が未接続でも、手元の素材をそのまま案にして確認・承認まで進められる */}
+                                                <button disabled={c.busy || !a.files.length} data-cv-use-asset={a.id} className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200 hover:bg-ink-50 disabled:opacity-40"
+                                                    onClick={() => cvAct({ action: 'creative_create', asset_id: a.id,
+                                                        creative: { origin: 'uploaded', use_asset_files: true } }, 'この素材を案にしました（確認待ち）')}>この素材を案にする</button>
+                                                <button disabled={c.busy || byAsset(a.id).length < 2} className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200 hover:bg-ink-50 disabled:opacity-40"
+                                                    onClick={() => cvCompare(a.id)}>複数案を比較</button>
+                                            </div>
+                                        </div>
+                                        <div className="flex gap-2 overflow-x-auto">
+                                            {a.files.map(f => <div key={f.fileId} className="w-40 shrink-0"><Media f={f} /></div>)}
+                                        </div>
+
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                            {byAsset(a.id).map(cr => (
+                                                <div key={cr.id} className="p-3 rounded-xl border border-ink-200 space-y-2">
+                                                    <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                                                        <span className={`px-2 py-0.5 rounded-md font-bold ${ST[cr.status]}`}>{STL[cr.status]}</span>
+                                                        <ModeTag m={cr.dataMode} />
+                                                        <span className="text-ink-400">v{cr.version}</span>
+                                                        <span className="text-ink-400">{cr.origin === 'uploaded' ? '手元の素材' : '③生成'}</span>
+                                                        <span className="text-ink-400">ID {cr.id}</span>
+                                                    </div>
+                                                    {cr.headline && <div className="text-[13px] font-bold text-ink-900">{cr.headline}</div>}
+                                                    {cr.appeal && <div className="text-[12px] text-ink-500">訴求: {cr.appeal}</div>}
+                                                    {cr.body && <div className="text-[12px] text-ink-700 whitespace-pre-wrap">{cr.body}</div>}
+                                                    {cr.failureReason && <div className="text-[12px] text-red-700">{cr.failureReason}</div>}
+                                                    <div className="grid grid-cols-2 gap-2">
+                                                        {cr.files.map(f => <Media key={f.fileId} f={f} />)}
+                                                    </div>
+                                                    {cr.measurement && cr.measurement.linkId && (
+                                                        <div className="text-[11px] text-ink-400">計測リンク: {cr.measurement.linkId}（{cr.measurement.confidence}）</div>
+                                                    )}
+                                                    {cr.revisions && cr.revisions.length > 0 && (
+                                                        <details className="text-[11px] text-ink-500">
+                                                            <summary className="cursor-pointer font-bold">修正履歴 {cr.revisions.length}件</summary>
+                                                            <ul className="mt-1 space-y-1">
+                                                                {cr.revisions.map(rv => (
+                                                                    <li key={rv.id}>v{rv.fromVersion} → {rv.byName || rv.by}: {rv.text}</li>
+                                                                ))}
+                                                            </ul>
+                                                        </details>
+                                                    )}
+                                                    {cr.reviewer && <div className="text-[11px] text-emerald-800">承認: {cr.reviewer.name || cr.reviewer.id}</div>}
+                                                    <div className="flex flex-wrap gap-2 pt-1">
+                                                        {(cr.status === 'draft' || cr.status === 'failed') && (
+                                                            <button disabled={c.busy} className="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-ink-900 text-white disabled:opacity-40"
+                                                                onClick={() => cvGenerate(cr.id)}>③へ生成を依頼</button>
+                                                        )}
+                                                        {cr.status === 'review' && (
+                                                            <>
+                                                                <button disabled={c.busy} className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-300 hover:bg-ink-50 disabled:opacity-40"
+                                                                    onClick={() => {
+                                                                        const text = window.prompt('どこを直しますか？（修正履歴に残ります）');
+                                                                        if (text && text.trim()) cvAct({ action: 'revise', creative_id: cr.id, text }, '修正を依頼しました');
+                                                                    }}>修正を依頼</button>
+                                                                <button disabled={c.busy} className="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-emerald-700 text-white disabled:opacity-40"
+                                                                    onClick={() => cvAct({ action: 'approve', creative_id: cr.id }, '承認しました')}>承認する</button>
+                                                            </>
+                                                        )}
+                                                        {cr.status === 'approved' && (
+                                                            <button disabled={c.busy} className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-300 hover:bg-ink-50 disabled:opacity-40"
+                                                                onClick={() => cvDeliver(cr.id)}>完成ファイルを取得</button>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </section>
+                                ))}
+
+                                {/* 複数案の比較 */}
+                                {c.comparing && (
+                                    <section className="p-4 rounded-2xl bg-white border-2 border-ink-900 space-y-3">
+                                        <div className="flex items-center gap-2">
+                                            <h3 className="text-[14px] font-black">「{c.comparing.asset.title}」の案を見比べる</h3>
+                                            <button className="ml-auto text-[12px] font-bold text-ink-400" onClick={() => setCv(p => ({ ...p, comparing: null }))}>閉じる</button>
+                                        </div>
+                                        <div className="flex gap-3 overflow-x-auto pb-2">
+                                            {c.comparing.creatives.map(x => (
+                                                <div key={x.id} className="w-64 shrink-0 p-3 rounded-xl border border-ink-200 space-y-2">
+                                                    <div className="flex flex-wrap items-center gap-1 text-[11px]">
+                                                        <span className={`px-2 py-0.5 rounded-md font-bold ${ST[x.status]}`}>{x.statusLabel}</span>
+                                                        <ModeTag m={x.dataMode} />
+                                                        <span className="text-ink-400">v{x.version}</span>
+                                                    </div>
+                                                    {x.files.map(f => <Media key={f.fileId} f={f} tall />)}
+                                                    <div className="text-[13px] font-bold">{x.headline || '(見出しなし)'}</div>
+                                                    <div className="text-[12px] text-ink-500">{x.appeal}</div>
+                                                    <div className="text-[11px] text-ink-400">修正 {x.revisionCount}回</div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </section>
+                                )}
+
+                                {/* 完成ファイル */}
+                                {c.files && (
+                                    <section className="p-4 rounded-2xl bg-emerald-50 border border-emerald-300 space-y-2">
+                                        <div className="flex items-center gap-2">
+                                            <h3 className="text-[13px] font-black text-emerald-900">完成ファイル（承認済み v{c.files.version}）</h3>
+                                            <span className="text-[11px] text-emerald-800">{(MODE[c.files.dataMode] || MODE.not_connected).label}</span>
+                                            <button className="ml-auto text-[12px] font-bold text-emerald-800" onClick={() => setCv(p => ({ ...p, files: null }))}>閉じる</button>
+                                        </div>
+                                        <ul className="text-[12px] space-y-1">
+                                            {/* ⚠️ <a href> ではヘッダを付けられない。認証付きで取得してから保存する。 */}
+                                            {c.files.files.map(f => (
+                                                <li key={f.fileId}>
+                                                    <button type="button" data-cv-download={f.fileId} onClick={() => cvDownload(f)}
+                                                        className="font-bold text-emerald-900 underline">
+                                                        {f.name || `${f.fileId}.${f.kind === 'video' ? 'mp4' : 'png'}`}
+                                                    </button>
+                                                    <span className="ml-2 text-emerald-800">{f.kind === 'video' ? '動画' : '画像'}{f.bytes ? ` / ${Math.round(f.bytes / 1024)}KB` : ''}</span>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </section>
+                                )}
+                            </div>
+                        );
+                    })()}
+
                     {currentPage === 'aitrial' && ccOn('cc_ai_trial') && (() => {
                         const t = aiTrial;
                         // サーバーが返した名前付きの対象。未取得のときだけ設定値のIDへ退避する。
@@ -27039,6 +27419,7 @@
                     { id: 'agentlog', label: 'AI Agent Activity', icon: <Activity size={18} />, mobileIcon: <Activity size={18} />, rootOnly: true, flag: 'cc_agentlog' },
                     { id: 'metaov', label: 'Meta運用', icon: <span className="text-[17px] leading-none">📣</span>, mobileIcon: <span className="text-[17px] leading-none">📣</span>, rootOnly: true, flag: 'cc_meta_overview' },
                     { id: 'aitrial', label: '@AI 検証', icon: <span className="text-[17px] leading-none">🤖</span>, mobileIcon: <span className="text-[17px] leading-none">🤖</span>, rootOnly: true, flag: 'cc_ai_trial' },
+                    { id: 'creative', label: 'クリエイティブ', icon: <span className="text-[17px] leading-none">🎨</span>, mobileIcon: <span className="text-[17px] leading-none">🎨</span>, rootOnly: true, flag: 'cc_creative_library' },
                 ] },
             ];
             const canShow = (it) => (authRoot || !it.rootOnly) && !(it.hideForStaff && authRole === 'staff') && (!it.thanksOnly || authRole === 'staff' || authRole === 'owner' || authRoot) && (!it.flag || ccFlagOn(it.flag));

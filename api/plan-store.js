@@ -22,6 +22,21 @@ import {
   makeRequestRecord, buildSources, needsHqReview, wrapDocsAsData, upsertReview, appendCorrection,
   isTrialRoom, normalizeConfig as normalizeAiCfg, pickAllowedDocs,
 } from '../lib/chatai.js';
+import {
+  CREATIVE_KEY, STATUS_LABEL as CREATIVE_STATUS_LABEL, CHANNELS as CREATIVE_CHANNELS,
+  ENC_ALG as CREATIVE_ENC_ALG,
+  buildAsset, confirmRights, buildCreative, startJob, completeJob,
+  requestRevision, approve as approveCreative, deliverables, compareSet, normalizeStore as normalizeCreativeStore,
+  buildGenerateRequest, jobProgress, publicAsset, publicCreative,
+} from '../lib/creative.js';
+// 素材・制作物は暗号文でしか保存しない。復号はここ（認証付き配信口）だけで行う。
+import {
+  CHUNK as CREATIVE_CHUNK, masterKeyFrom as creativeMasterKeyFrom,
+  wrapKey as creativeWrapKey, unwrapKey as creativeUnwrapKey,
+  decryptChunk as creativeDecryptChunk, chunksForRange as creativeChunksForRange,
+  chunkCipherRange as creativeChunkCipherRange, parseRange as creativeParseRange,
+  fromB64 as creativeFromB64,
+} from '../lib/creative-crypto.js';
 import { parseSourceUrl as knowParseSource, isSyncable as knowSyncable,
   applyFetched as knowApplyFetched, markReviewed as knowMarkReviewed,
   syncSummary as knowSyncSummary } from '../lib/knowledge-sync.js';
@@ -297,7 +312,9 @@ export default async function handler(req, res) {
 
   // ⚠️ knowcand（ナレッジ候補）は**本部がチャットで送った回答の本文**をそのまま保持する。
   //    実体はチャット本文なので、公開範囲もチャットと同じ（本部/root限定）に揃える。
-  const chatTypes = ['chat', 'profile', 'chatai', 'knowcand'];
+  // ⚠️ creative（Creative Library）は素材・訴求文・実ファイルURLを扱うため、
+  //    chat と同じ本部/root限定ゲートを通す（名乗りは信用しない）。
+  const chatTypes = ['chat', 'profile', 'chatai', 'knowcand', 'creative'];
   // ── 社内限定データ: **ログインしていること**を要求する（役割は問わない）────────
   // ⚠️ チャットの「本部/root限定」をここへ広げない。
   //    掲示板・イベント・サンクスギフト・手当・FAQ などは、スタッフ／オーナーが
@@ -814,6 +831,425 @@ export default async function handler(req, res) {
     }
 
     return res.status(200).json(aiError('invalid_request'));
+  }
+
+  // ── Creative Library（本部/root限定・フラグ cc_creative_library）─────────
+  // 素材を登録し、③へ生成を依頼し、出てきた案を見比べ、修正を依頼し、承認して
+  // 完成ファイルを受け取るまで。**生成そのものと指標計算は③の担当**で、ここには入れない。
+  // 認可は上の chat 共通ゲート（本部/root・検証済み actor）をそのまま使う。
+  //
+  // ⚠️ 素材・制作物のバイト列は **暗号文でしか保存しない**（lib/creative-crypto.js）。
+  //    保存先URLは画面にも③にも渡さず、ここの認証付き配信口（action=file）だけが
+  //    復号したバイトを返す。「長いURLを隠す」だけの公開保存は採用しない。
+  if (reqType === 'creative') {
+    const body = req.body || {};
+    const action = String(body.action || req.query.action || '').slice(0, 40);
+    const tenantId = String(chatActor.tenantId || DEFAULT_TENANT).slice(0, 64);
+    const actorId = String(chatActor.id || '').slice(0, 64);
+    const actorName = String(chatActor.name || '本部').slice(0, 100);
+    const ctx = { tenantId, actorId, actorName };
+    const cerr = (code, message, retryable = false) =>
+      ({ ok: false, error: { code, message: message || code, retryable } });
+
+    // フラグ確認（画面で隠すだけにしない）
+    const cFlags = normalizeFlags(await blobGet(ccKey(FLAGS_KEY), hasKV, hasSB, gas).catch(() => null));
+    if (cFlags.cc_all === false || cFlags.cc_creative_library !== true) {
+      return res.status(200).json(cerr('rollout_disabled', 'この機能は現在利用できません'));
+    }
+
+    const cAudit = async (input) => {
+      try {
+        const built = buildAuditEntry({ ...input, actor: chatActor, source: chatActor.source });
+        if (built.ok && hasKV) await kvAppendJson(ccKey(AUDIT_KEY), built.entry, AUDIT_CAP);
+      } catch (_) {}
+    };
+    const loadCreative = async () => normalizeCreativeStore(await blobGet(ccKey(CREATIVE_KEY), hasKV, hasSB, gas));
+    // 同時編集で消えないよう、@AI と同じ compare-and-set を使う（保存基盤は増やさない）。
+    const mutateCreative = async (apply) => {
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const cur = (await blobGet(ccKey(CREATIVE_KEY), hasKV, hasSB, gas)) || {};
+        const st = normalizeCreativeStore(cur);
+        const outcome = apply(st);
+        if (outcome === null || outcome === undefined) return { ok: false, aborted: true };
+        if (!hasKV) { await blobSet(ccKey(CREATIVE_KEY), st, hasKV, hasSB, gas); return { ok: true, state: st }; }
+        const base = Number(cur._v) || 0;
+        if (await kvCasSet(ccKey(CREATIVE_KEY), base, { ...st, _v: base + 1 })) return { ok: true, state: st };
+        await new Promise(r => setTimeout(r, Math.round((10 + Math.random() * 40) * (attempt + 1))));
+      }
+      return { ok: false, reason: 'conflict' };
+    };
+    // 自分のテナントのものだけ見せる
+    const mine = (x) => x && String(x.tenantId || tenantId) === tenantId;
+    const genBase = String(process.env.CREATIVE_GEN_API_BASE || '').trim().replace(/\/+$/, '');
+    const genKey = String(process.env.CREATIVE_GEN_API_KEY || '').trim();
+    const genReady = !!(genBase && genKey);
+
+    // ── 暗号化保存の親鍵 ────────────────────────────────────────────
+    // ⚠️ 未設定なら **保存させない**。平文で置いて「あとで暗号化する」にしない。
+    const creativeMaster = async () => await creativeMasterKeyFrom(process.env.CREATIVE_ASSET_KEY);
+
+    // ── 認証付き配信口: GET ?type=creative&action=file&owner=&ownerId=&fileId= ──
+    // ここを通るのは、上のゲートを通った本部/rootだけ。保存先URLは誰にも渡さない。
+    if (action === 'file') {
+      const owner = String(req.query.owner || '').slice(0, 20);
+      const ownerId = String(req.query.ownerId || '').slice(0, 64);
+      const fileId = String(req.query.fileId || '').slice(0, 64);
+      const st = await loadCreative();
+      const rec = owner === 'asset' ? st.assets[ownerId] : (owner === 'creative' ? st.creatives[ownerId] : null);
+      if (!mine(rec)) return res.status(404).json(cerr('not_found'));
+      const f = (Array.isArray(rec.files) ? rec.files : []).find(x => x && x.fileId === fileId);
+      if (!f) return res.status(404).json(cerr('not_found'));
+
+      // ③のジョブ成果物は、①がサービス鍵で取りに行って中継する（鍵はブラウザへ渡さない）。
+      if (f.src === 'job') {
+        if (!genReady) return res.status(503).json(cerr('generator_not_connected', '③の生成APIが未接続です'));
+        try {
+          const up = await fetch(`${genBase}/v1/creative/jobs/${encodeURIComponent(f.jobId)}/files/${f.index}`, {
+            headers: { Authorization: `Bearer ${genKey}`, 'X-Tenant-Id': tenantId,
+                       ...(req.headers.range ? { Range: String(req.headers.range) } : {}) },
+          });
+          if (!up.ok && up.status !== 206) return res.status(502).json(cerr('upstream_error', `③が ${up.status} を返しました`));
+          const buf = Buffer.from(await up.arrayBuffer());
+          res.setHeader('Content-Type', f.contentType || 'application/octet-stream');
+          res.setHeader('Cache-Control', 'private, no-store');       // 共有キャッシュに載せない
+          res.setHeader('Accept-Ranges', 'bytes');
+          const cr = up.headers && up.headers.get ? up.headers.get('content-range') : null;
+          if (cr) res.setHeader('Content-Range', cr);
+          return res.status(up.status === 206 ? 206 : 200).send(buf);
+        } catch (_) { return res.status(502).json(cerr('upstream_error', '③へ接続できませんでした')); }
+      }
+
+      const master = await creativeMaster();
+      if (!master) return res.status(503).json(cerr('key_missing', '保存鍵（CREATIVE_ASSET_KEY）が未設定です'));
+      // 鍵は「包んだときの持ち主ID＋fileId」で結びついている。
+      // 素材から案へ写したファイルは、素材のIDのまま（fromAssetId）で開く。
+      const keyOwner = String(f.fromAssetId || rec.id);
+      const dataKey = await creativeUnwrapKey(master, f.enc.key, `${keyOwner}:${f.fileId}`);
+      if (!dataKey) return res.status(500).json(cerr('key_invalid', '保存鍵で復号できませんでした'));
+      const plainLen = Number(f.enc.plainBytes) || 0;
+
+      const range = creativeParseRange(req.headers.range, plainLen);
+      if (range === 'invalid') {
+        res.setHeader('Content-Range', `bytes */${plainLen}`);
+        return res.status(416).end();
+      }
+      const want = range || { start: 0, end: Math.max(0, plainLen - 1) };
+      // 必要な区切りだけを保存先から取り出して復号する（動画全体をメモリに載せない）。
+      const idx = creativeChunksForRange(want.start, want.end, plainLen);
+      const parts = [];
+      for (const i of idx) {
+        const cr = creativeChunkCipherRange(i, plainLen);
+        let up;
+        try {
+          up = await fetch(f.storageUrl, { headers: { Range: `bytes=${cr.start}-${cr.end - 1}` }, cache: 'no-store' });
+        } catch (_) { return res.status(502).json(cerr('storage_error', '保存先へ接続できませんでした')); }
+        if (!up.ok && up.status !== 206) return res.status(502).json(cerr('storage_error', `保存先が ${up.status} を返しました`));
+        const ct = new Uint8Array(await up.arrayBuffer());
+        const dec = await creativeDecryptChunk(dataKey, f.fileId, i, ct);
+        // ⚠️ 1区切りでも復号できなければ返さない（一部だけ正しいふりをしない）。
+        if (!dec) return res.status(500).json(cerr('decrypt_failed', 'ファイルを復号できませんでした'));
+        parts.push(dec);
+      }
+      const joined = Buffer.concat(parts.map(p => Buffer.from(p)));
+      const off = want.start - (idx.length ? idx[0] * CREATIVE_CHUNK : 0);
+      const out = joined.subarray(off, off + (want.end - want.start + 1));
+      res.setHeader('Content-Type', f.contentType || 'application/octet-stream');
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Content-Length', String(out.length));
+      if (range) {
+        res.setHeader('Content-Range', `bytes ${want.start}-${want.end}/${plainLen}`);
+        return res.status(206).send(out);
+      }
+      return res.status(200).send(out);
+    }
+
+    if (action === 'list' || (!action && req.method === 'GET')) {
+      const st = await loadCreative();
+      const assets = Object.values(st.assets).filter(mine).map(publicAsset);
+      const creatives = Object.values(st.creatives).filter(mine).map(publicCreative);
+      const master = await creativeMaster();
+      return res.status(200).json({ ok: true, assets, creatives,
+        channels: CREATIVE_CHANNELS, statusLabels: CREATIVE_STATUS_LABEL,
+        // 保存の準備。鍵が無ければ**登録させない**（平文で置かない）。
+        storage: { ready: !!master, reason: master ? '' : '素材の保存鍵（CREATIVE_ASSET_KEY・32文字以上）が未設定です' },
+        // 生成の接続状態。未接続なら画面で「未接続」と出す（sample と混ぜない）。
+        generator: { connected: genReady,
+                     reason: genBase ? (genKey ? '' : '③生成APIの認証キー（CREATIVE_GEN_API_KEY）が未設定です')
+                                     : '③生成APIの接続先（CREATIVE_GEN_API_BASE）が未設定です' } });
+    }
+
+    // 暗号化して保存したファイルを、記録できる形に直す。
+    // 画面は「データ鍵で暗号化 → 保存先へ書き込み → 鍵とURLをここへ渡す」の順で呼ぶ。
+    const sealFiles = async (raw, ownerId, master) => {
+      const out = [];
+      for (const f of (Array.isArray(raw) ? raw : []).slice(0, 10)) {
+        if (!f || typeof f !== 'object') continue;
+        const fileId = String(f.fileId || '').slice(0, 64) || `f_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        const key = String(f.dataKey || '');
+        if (!key) return { ok: false, error: 'key_required' };
+        const wrapped = await creativeWrapKey(master, creativeFromB64(key), `${ownerId}:${fileId}`);
+        out.push({ ...f, fileId, dataKey: undefined,
+          enc: { alg: CREATIVE_ENC_ALG, key: wrapped, plainBytes: Number(f.plainBytes) || Number(f.bytes) || 0 } });
+      }
+      return { ok: true, files: out };
+    };
+
+    if (action === 'asset_create') {
+      const master = await creativeMaster();
+      if (!master) return res.status(200).json(cerr('key_missing', '素材の保存鍵（CREATIVE_ASSET_KEY・32文字以上）が未設定です。設定するまで素材は登録できません'));
+      const input = body.asset || {};
+      // IDはサーバーが発番する。ここで先に決めて、ファイルの鍵をそのIDに結びつける。
+      const assetId = `as_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      const sealed = await sealFiles(input.files, assetId, master);
+      if (!sealed.ok) return res.status(200).json(cerr(sealed.error, '保存したファイルの鍵がありません'));
+      const built = buildAsset({ ...input, files: sealed.files }, ctx);
+      if (!built.ok) return res.status(200).json(cerr(built.error));
+      built.asset.id = assetId;
+      let err = '';
+      const done = await mutateCreative((st) => {
+        // ⚠️ 既存レコードの上書きを作らない（ID衝突は保存せず止める）。
+        if (st.assets[assetId]) { err = 'id_conflict'; return null; }
+        st.assets[assetId] = built.asset; return true;
+      });
+      if (err) return res.status(200).json(cerr(err, 'もう一度お試しください', true));
+      if (!done.ok) return res.status(200).json(cerr('busy_retry', '同時に更新が重なりました。もう一度お試しください', true));
+      await cAudit({ action: 'creative_asset_create', entity: 'creative_asset', entityId: assetId,
+        after: { title: built.asset.title, channel: built.asset.channel, files: built.asset.files.length } });
+      return res.status(200).json({ ok: true, asset: publicAsset(built.asset) });
+    }
+
+    if (action === 'asset_rights') {
+      const id = String(body.asset_id || '').slice(0, 64);
+      let out = null, err = '';
+      const done = await mutateCreative((st) => {
+        const a = st.assets[id];
+        if (!mine(a)) { err = 'not_found'; return null; }
+        const r = confirmRights(a, body.status, { ...ctx, note: body.note });
+        if (!r.ok) { err = r.error; return null; }
+        st.assets[id] = r.asset; out = r.asset; return true;
+      });
+      if (err) return res.status(200).json(cerr(err));
+      if (!done.ok) return res.status(200).json(cerr('busy_retry', '', true));
+      await cAudit({ action: 'creative_rights', entity: 'creative_asset', entityId: id, after: { status: out.rights.status } });
+      return res.status(200).json({ ok: true, asset: publicAsset(out) });
+    }
+
+    if (action === 'creative_create') {
+      const assetId = String(body.asset_id || '').slice(0, 64);
+      const master = await creativeMaster();
+      const creativeId = `cr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      let sealedFiles = [];
+      if (Array.isArray(body.creative && body.creative.files) && body.creative.files.length) {
+        if (!master) return res.status(200).json(cerr('key_missing', '素材の保存鍵（CREATIVE_ASSET_KEY）が未設定です'));
+        const s = await sealFiles(body.creative.files, creativeId, master);
+        if (!s.ok) return res.status(200).json(cerr(s.error, '保存したファイルの鍵がありません'));
+        sealedFiles = s.files;
+      }
+      // 「この素材をそのまま案にする」。⚠️ ファイルの実体はサーバー側で写す。
+      //    画面に保存先URL・鍵を通さないため、クライアントからは受け取らない。
+      const useAssetFiles = !!(body.creative && body.creative.use_asset_files);
+      let out = null, err = '';
+      const done = await mutateCreative((st) => {
+        const a = st.assets[assetId];
+        if (!mine(a)) { err = 'asset_not_found'; return null; }
+        // ⚠️ 既存の案の上書きを作らない。
+        if (st.creatives[creativeId]) { err = 'id_conflict'; return null; }
+        // 鍵は「持ち主のID＋fileId」で包んでいるので、案へ写すときに包み直す必要がある。
+        // ここは同期処理なので、写し先の owner を素材のままにする（配信口は owner=asset で引く）。
+        const copied = useAssetFiles ? (Array.isArray(a.files) ? a.files : []).map(f => ({ ...f, fromAssetId: a.id })) : sealedFiles;
+        const r = buildCreative(a, { ...(body.creative || {}), files: copied }, ctx);
+        if (!r.ok) { err = r.error; return null; }
+        r.creative.id = creativeId;
+        st.creatives[creativeId] = r.creative; out = r.creative; return true;
+      });
+      if (err) return res.status(200).json(cerr(err));
+      if (!done.ok) return res.status(200).json(cerr('busy_retry', '', true));
+      await cAudit({ action: 'creative_create', entity: 'creative', entityId: out.id, after: { assetId, origin: out.origin } });
+      return res.status(200).json({ ok: true, creative: publicCreative(out) });
+    }
+
+    // ③へ生成を依頼する。**受付だけ**して即返す（長い動画を同期で待たない）。
+    // 生成ロジックはここに書かない。結果は job_status で受け取る。
+    if (action === 'generate') {
+      const id = String(body.creative_id || '').slice(0, 64);
+      let started = null, job = null, assetRec = null, err = '';
+      const done = await mutateCreative((st) => {
+        const c = st.creatives[id];
+        if (!mine(c)) { err = 'not_found'; return null; }
+        const r = startJob(c, ctx);
+        if (!r.ok) { err = r.error; return null; }
+        st.creatives[id] = r.creative; st.jobs[r.job.id] = r.job;
+        started = r.creative; job = r.job; assetRec = st.assets[c.assetId]; return true;
+      });
+      if (err) return res.status(200).json(cerr(err));
+      if (!done.ok) return res.status(200).json(cerr('busy_retry', '', true));
+
+      // ⚠️ 修正依頼は、人の原文・対象版・元素材とセットで渡す（③の契約）。
+      const built = buildGenerateRequest(started, assetRec, {
+        jobId: job.id, mode: 'sample',
+        formats: body.formats, brandVersion: body.brand_version,
+      });
+
+      const fail = async (reason) => {
+        let finished = null;
+        await mutateCreative((st) => {
+          const c = st.creatives[id];
+          if (!c || c.jobId !== job.id) return null;
+          const r = completeJob(c, { ok: false, reason });
+          if (!r.ok) return null;
+          st.creatives[id] = r.creative; finished = r.creative;
+          st.jobs[job.id] = { ...st.jobs[job.id], status: 'failed', finishedAt: Date.now(), reason };
+          return true;
+        });
+        return res.status(200).json({ ok: true, creative: finished ? publicCreative(finished) : null,
+          job_id: job.id, status: 'failed', reason });
+      };
+
+      if (!built.ok) return await fail(`依頼を組み立てられませんでした（${built.error}）`);
+      // ⚠️ 未接続。**sample を作って成功に見せない。**
+      if (!genReady) return await fail('③の生成APIが未接続です（接続先・認証キーが未設定）');
+
+      let accepted = null;
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 10000);     // 受付は10秒以内（③の契約）
+        let up;
+        try {
+          up = await fetch(`${genBase}/v1/creative/generate`, {
+            method: 'POST', signal: ctrl.signal,
+            headers: { Authorization: `Bearer ${genKey}`, 'Content-Type': 'application/json',
+                       'X-Tenant-Id': tenantId, Accept: 'application/json' },
+            body: JSON.stringify(built.request),
+          });
+        } finally { clearTimeout(timer); }
+        const raw = await up.json().catch(() => null);
+        if (up.status === 202 || (up.ok && raw && raw.job_id)) accepted = raw || {};
+        else if (up.status === 422) return await fail(`③が修正内容を解釈できませんでした（${(raw && raw.error && raw.error.code) || 422}）`);
+        else if (up.status === 409) return await fail('同じIDで別の内容の依頼があります（版の競合）');
+        else return await fail(`生成APIが ${up.status} を返しました`);
+      } catch (_) { return await fail('生成APIへ接続できませんでした'); }
+
+      const upstreamJobId = String(accepted.job_id || job.id).slice(0, 64);
+      await mutateCreative((st) => {
+        const c = st.creatives[id];
+        if (!c || c.jobId !== job.id) return null;
+        st.creatives[id] = { ...c, jobId: upstreamJobId };
+        st.jobs[job.id] = { ...st.jobs[job.id], status: 'queued', upstreamJobId,
+          mode: String(built.request.mode), isRevision: built.isRevision,
+          targetVersion: built.request.target_version };
+        return true;
+      });
+      await cAudit({ action: 'creative_generate', entity: 'creative', entityId: id,
+        after: { jobId: upstreamJobId, mode: built.request.mode, revision: built.isRevision,
+                 targetVersion: built.request.target_version } });
+      return res.status(200).json({ ok: true, job_id: upstreamJobId, status: 'queued',
+        poll_after_ms: Math.min(10000, Math.max(1000, Number(accepted.poll_after_ms) || 1000)),
+        creative_id: id, revision: built.isRevision });
+    }
+
+    // 生成の進み具合を聞く。**画面を閉じても結果は③に残る**ので、開き直せば取れる。
+    if (action === 'job_status') {
+      const id = String(body.creative_id || req.query.creativeId || '').slice(0, 64);
+      const st0 = await loadCreative();
+      const c0 = st0.creatives[id];
+      if (!mine(c0)) return res.status(200).json(cerr('not_found'));
+      if (c0.status !== 'generating') {
+        return res.status(200).json({ ok: true, status: 'done', creative: publicCreative(c0) });
+      }
+      if (!genReady) return res.status(200).json(cerr('generator_not_connected', '③の生成APIが未接続です'));
+      let raw = null;
+      try {
+        const up = await fetch(`${genBase}/v1/creative/jobs/${encodeURIComponent(c0.jobId)}`, {
+          headers: { Authorization: `Bearer ${genKey}`, 'X-Tenant-Id': tenantId, Accept: 'application/json' },
+        });
+        raw = await up.json().catch(() => null);
+        if (!up.ok) raw = { status: 'failed', error: { message: `③が ${up.status} を返しました` } };
+      } catch (_) { raw = null; }
+      // ⚠️ 取れなかったときに「失敗した」ことにしない。まだ生成中のまま、もう一度聞く。
+      if (!raw) return res.status(200).json({ ok: true, status: 'running', poll_after_ms: 3000,
+        note: '③の状態を取得できませんでした。もう一度確認します' });
+
+      const prog = jobProgress(raw);
+      if (!prog.done) {
+        return res.status(200).json({ ok: true, status: prog.unknown ? 'running' : prog.status,
+          poll_after_ms: prog.pollAfterMs, creative: publicCreative(c0) });
+      }
+      let finished = null;
+      const done2 = await mutateCreative((st) => {
+        const c = st.creatives[id];
+        if (!c || c.jobId !== c0.jobId) return null;              // 別の依頼が引き継いだ
+        const r = completeJob(c, prog.result);
+        if (!r.ok) return null;
+        st.creatives[id] = r.creative; finished = r.creative;
+        const jk = Object.keys(st.jobs).find(k => st.jobs[k] && (st.jobs[k].upstreamJobId === c0.jobId || k === c0.jobId));
+        if (jk) st.jobs[jk] = { ...st.jobs[jk], status: r.creative.status === 'failed' ? 'failed' : 'done',
+          mode: r.creative.dataMode, finishedAt: Date.now() };
+        return true;
+      });
+      if (!done2.ok) return res.status(200).json(cerr('superseded', 'この依頼は別の処理が引き継ぎました'));
+      await cAudit({ action: 'creative_job_done', entity: 'creative', entityId: id,
+        after: { jobId: c0.jobId, status: finished.status, mode: finished.dataMode } });
+      return res.status(200).json({ ok: true, status: 'done', creative: publicCreative(finished) });
+    }
+
+    if (action === 'revise') {
+      const id = String(body.creative_id || '').slice(0, 64);
+      let out = null, err = '';
+      const done = await mutateCreative((st) => {
+        const c = st.creatives[id];
+        if (!mine(c)) { err = 'not_found'; return null; }
+        const r = requestRevision(c, { text: body.text, textChanges: body.text_changes }, ctx);
+        if (!r.ok) { err = r.error; return null; }
+        st.creatives[id] = r.creative; out = r.creative; return true;
+      });
+      if (err) return res.status(200).json(cerr(err));
+      if (!done.ok) return res.status(200).json(cerr('busy_retry', '', true));
+      await cAudit({ action: 'creative_revise', entity: 'creative', entityId: id, after: { version: out.version } });
+      return res.status(200).json({ ok: true, creative: publicCreative(out) });
+    }
+
+    if (action === 'approve') {
+      const id = String(body.creative_id || '').slice(0, 64);
+      let out = null, err = '';
+      const done = await mutateCreative((st) => {
+        const c = st.creatives[id];
+        if (!mine(c)) { err = 'not_found'; return null; }
+        const r = approveCreative(c, st.assets[c.assetId], ctx);
+        if (!r.ok) { err = r.error; return null; }
+        st.creatives[id] = r.creative; out = r.creative; return true;
+      });
+      if (err) {
+        const msg = { sample_not_approvable: 'サンプル・未接続の案は承認できません（実生成の結果だけを承認します）',
+                      rights_unconfirmed: '素材の権利が未確認です。先に権利を確認してください',
+                      invalid_transition: 'いまの状態では承認できません' }[err];
+        return res.status(200).json(cerr(err, msg));
+      }
+      if (!done.ok) return res.status(200).json(cerr('busy_retry', '', true));
+      await cAudit({ action: 'creative_approve', entity: 'creative', entityId: id,
+        after: { version: out.version, mode: out.dataMode, by: actorId } });
+      return res.status(200).json({ ok: true, creative: publicCreative(out) });
+    }
+
+    if (action === 'deliverables') {
+      const st = await loadCreative();
+      const c = st.creatives[String(body.creative_id || req.query.creativeId || '').slice(0, 64)];
+      if (!mine(c)) return res.status(200).json(cerr('not_found'));
+      const d = deliverables(c);
+      if (!d.ok) return res.status(200).json(cerr('not_approved', '承認済みの案だけ取得できます'));
+      await cAudit({ action: 'creative_download', entity: 'creative', entityId: c.id, after: { files: d.files.length } });
+      return res.status(200).json({ ok: true, ...d });
+    }
+
+    if (action === 'compare') {
+      const st = await loadCreative();
+      const assetId = String(body.asset_id || req.query.assetId || '').slice(0, 64);
+      if (!mine(st.assets[assetId])) return res.status(200).json(cerr('not_found'));
+      return res.status(200).json({ ok: true, asset: publicAsset(st.assets[assetId]),
+        creatives: compareSet(Object.values(st.creatives).filter(mine), assetId) });
+    }
+
+    return res.status(200).json(cerr('invalid_request', '送信内容を確認してください'));
   }
 
   const ccType = (req.method === 'GET' ? req.query.type : (req.body || {}).type);

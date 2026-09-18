@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import handler from '../api/plan-store.js';
+import { hashOwnerToken } from '../lib/settlement.js';
 
 // 共有ストア未設定（KV/Supabase/GAS のいずれも無い）状態を作る。
 // この状態でも「既存機能が壊れない」「新機能は必ずOFF」ことを固定する。
@@ -20,7 +21,18 @@ function mockRes() {
   r.end = () => r;
   return r;
 }
-const call = async (req) => { const res = mockRes(); await handler({ headers: {}, query: {}, body: {}, ...req }, res); return res; };
+// 社内限定データはログインが必須（誰でも取れる状態を塞いだため）。
+// テストは「ログイン済みの正規ユーザー」を表すので、資格情報を付けて呼ぶ。
+const AUTH_HDR = () => {
+  process.env.DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || 'pw-for-test';
+  process.env.AUTH_SALT = process.env.AUTH_SALT || 'salt-for-test';
+  return { 'x-cc-owner': '__root__', 'x-cc-token': hashOwnerToken('__root__', process.env.DASHBOARD_PASSWORD, process.env.AUTH_SALT) };
+};
+const call = async (req) => {
+  const res = mockRes();
+  await handler({ headers: { ...AUTH_HDR(), ...(req.headers || {}) }, query: {}, body: {}, ...req, headers: { ...AUTH_HDR(), ...(req.headers || {}) } }, res);
+  return res;
+};
 
 describe('Command Center API - ストア未設定でも安全side（fail closed）', () => {
   it('フラグは cc_all=false で返る＝新機能は全てOFF', async () => {

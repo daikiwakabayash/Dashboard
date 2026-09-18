@@ -168,10 +168,17 @@ describe('画像を共有キャッシュに載せない', () => {
 });
 
 describe('他の機能を巻き込んでいない', () => {
-  it('掲示板・手当・イベントは従来どおり（このPRの対象外）', async () => {
+  it('掲示板・手当・イベントはログイン済みなら従来どおり使える', async () => {
+    for (const t of ['board', 'allowance', 'events', 'thanksgift']) {
+      const res = await call({ method: 'GET', headers: ROOT(), query: { type: t } });
+      expect(res.statusCode, t).toBe(200);
+    }
+  });
+  it('🔴 未ログインでは取れない（ただしチャットと違い役割は問わない）', async () => {
     for (const t of ['board', 'allowance', 'events', 'thanksgift']) {
       const res = await call({ method: 'GET', query: { type: t } });
-      expect(res.statusCode, t).toBe(200);
+      expect(res.statusCode, t).toBe(403);
+      expect(res.body.code, t).toBe('login_required');   // chat_admin_only ではない
     }
   });
 });

@@ -218,9 +218,10 @@ describe('?type=meta - 接続できているとき', () => {
 
 describe('?type=meta - 既存機能を壊さない', () => {
   it('他の type= は従来どおり（metaブロックに吸い込まれない）', async () => {
+    // 社内限定データはログイン必須（別PR）。未ログインは 403、ログイン済みは 200。
     for (const t of ['board', 'allowance', 'events']) {
-      const res = await call({ method: 'GET', query: { type: t } });
-      expect(res.statusCode, t).toBe(200);
+      expect((await call({ method: 'GET', query: { type: t } })).statusCode, t).toBe(403);
+      expect((await call({ method: 'GET', headers: rootHeaders(), query: { type: t } })).statusCode, t).toBe(200);
     }
     // chat / profile は別PR(#390)で本人確認必須になった＝未認証は403が正しい
     for (const t of ['chat', 'profile']) {

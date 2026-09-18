@@ -3,8 +3,7 @@ import fs from 'fs';
 import {
   normalizeMetric, normalizeMetrics, normalizeOverview, normalizeFreshness,
   buildTree, lastCompleteDays, connectionState, META_API_VERSION,
-  looksLikeSample, currencySymbol,
-} from '../lib/meta-read.js';
+  looksLikeSample, currencySymbol, normalizeUnit, isCurrencyUnit} from '../lib/meta-read.js';
 
 const FIXTURE = JSON.parse(fs.readFileSync(new URL('../fixtures/meta-overview-sample.json', import.meta.url), 'utf8'));
 
@@ -364,5 +363,36 @@ describe('(6) 行数上限は黙って切らない', () => {
   it('上流のページング情報を引き継ぐ', () => {
     const r = normalizeOverview({ ...FIXTURE, paging: { has_more: true, next_cursor: 'abc' } });
     expect(r.paging).toEqual({ hasMore: true, nextCursor: 'abc' });
+  });
+});
+
+// ── ③からの指摘（固定参照 3396a18 時点の差分）──────────────────────────
+// (3) 外貨の単位が count（件数）へ潰れていた
+describe('🔴 金額の単位は広告アカウントの通貨を保持する', () => {
+  it('AUD / MYR / USD をそのまま通貨単位として残す', () => {
+    for (const c of ['AUD', 'MYR', 'USD', 'SGD']) {
+      expect(normalizeUnit(c)).toBe(c);
+      expect(isCurrencyUnit(normalizeUnit(c))).toBe(true);
+    }
+  });
+  it('小文字の通貨コードも大文字で保持する', () => {
+    expect(normalizeUnit('aud')).toBe('AUD');
+  });
+  it('JPY も従来どおり保持する（回帰）', () => {
+    expect(normalizeUnit('JPY')).toBe('JPY');
+  });
+  it('count / ratio はそのまま', () => {
+    expect(normalizeUnit('count')).toBe('count');
+    expect(normalizeUnit('ratio')).toBe('ratio');
+    expect(isCurrencyUnit('count')).toBe(false);
+    expect(isCurrencyUnit('ratio')).toBe(false);
+  });
+  it('通貨コードでない未知の値は count（従来どおり控えめ）', () => {
+    for (const v of ['', null, undefined, 'dollars', '¥', 'JP']) expect(normalizeUnit(v)).toBe('count');
+  });
+  it('🔴 豪州アカウントの消化額が「件数」にならない', () => {
+    const m = normalizeMetric({ value: 1234, unit: 'AUD', quality: 'VERIFIED' }, 'spend');
+    expect(m.unit).toBe('AUD');
+    expect(m.unit).not.toBe('count');
   });
 });

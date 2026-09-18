@@ -36,7 +36,7 @@ import { APPROVAL_KEY, APPROVAL_CAP, buildApproval, decide as decideApproval, re
 import { AGENTLOG_KEY, AGENTLOG_CAP, startRun, finishRun, listRuns, summarize as summarizeRuns, anomalies as runAnomalies } from '../lib/agentlog.js';
 import { check as authzCheck, can as authzCan, enforce as authzEnforce, decisionRecord, needsReverify, DEFAULT_TENANT, canViewRoom } from '../lib/authz.js';
 import { resolveActor } from '../lib/actor.js';
-import { normalizeOverview as normalizeMetaOverview, connectionState as metaConnectionState, lastCompleteDays, looksLikeSample as metaLooksLikeSample, META_API_VERSION } from '../lib/meta-read.js';
+import { normalizeOverview as normalizeMetaOverview, connectionState as metaConnectionState, lastCompleteDays, looksLikeSample as metaLooksLikeSample, normalizeFreshness as metaNormalizeFreshness, META_API_VERSION } from '../lib/meta-read.js';
 import META_FIXTURE from '../fixtures/meta-overview-sample.json' with { type: 'json' };
 import { verifySalonOneBearer } from '../lib/salonone-auth.js';
 import { hashOwnerToken, verifyOwnerToken, parseOwnerPasswords, parseOwnerShops } from '../lib/settlement.js';
@@ -773,10 +773,14 @@ export default async function handler(req, res) {
       if (!up.ok) {
         const code = up.status === 401 || up.status === 403 ? 'AUTH_FAILED'
           : up.status === 429 ? 'RATE_LIMITED' : 'UPSTREAM_ERROR';
+        // ⚠️ HTTPエラーでも freshness は**捨てない**。上流が「最後に取れたのはいつか」を
+        //    返しているのに null で上書きすると、画面が「一度も取れていない」ように見え、
+        //    復旧待ちなのか未接続なのか区別できなくなる。lastAttemptAt だけ今回の試行で補う。
+        const upFresh = metaNormalizeFreshness(raw && raw.freshness);
         const data = {
           ok: false, connected: true, isSample: metaLooksLikeSample(raw),
           error: { code, message: `接続先が ${up.status} を返しました`, retryable: up.status >= 500 || up.status === 429 },
-          freshness: { lastSuccessAt: null, lastAttemptAt: new Date().toISOString(), lagMinutes: null },
+          freshness: { ...upFresh, lastAttemptAt: upFresh.lastAttemptAt || new Date().toISOString() },
         };
         return res.status(200).json({ ok: true, connection: metaConnectionState(process.env, data), data, sample: data.isSample, apiVersion: META_API_VERSION });
       }

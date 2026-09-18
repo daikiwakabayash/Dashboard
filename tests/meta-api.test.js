@@ -374,6 +374,28 @@ describe('(5) HTTPエラー・不正schema を昇格させない', () => {
     expect(d.ok).toBe(false);
     expect(d.totals).toBeUndefined();
   });
+
+  // ③からの指摘(2): 非2xx で raw.freshness を捨てており、最終成功日時が常に null になっていた。
+  // 「一度も取れていない」と「復旧待ち」を画面が区別できなくなるため保持する。
+  it('🔴 HTTPエラーでも最終成功日時を捨てない', async () => {
+    withStatus(502, { freshness: { last_success_at: '2026-09-18T03:00:00+09:00', lag_minutes: 45 } });
+    const d = (await asRoot({ accountId: 'act_x' })).body.data;
+    expect(d.ok).toBe(false);
+    expect(d.freshness.lastSuccessAt).toBe('2026-09-18T03:00:00+09:00');
+    expect(d.freshness.lagMinutes).toBe(45);
+    expect(d.totals).toBeUndefined();          // 数字は作らないまま
+  });
+  it('上流が freshness を返さない場合は最終試行だけ埋める', async () => {
+    withStatus(502, {});
+    const d = (await asRoot({ accountId: 'act_x' })).body.data;
+    expect(d.freshness.lastSuccessAt).toBeNull();
+    expect(typeof d.freshness.lastAttemptAt).toBe('string');
+  });
+  it('上流が last_attempt_at を返せばそれを優先する', async () => {
+    withStatus(502, { freshness: { last_attempt_at: '2026-09-18T04:00:00+09:00' } });
+    const d = (await asRoot({ accountId: 'act_x' })).body.data;
+    expect(d.freshness.lastAttemptAt).toBe('2026-09-18T04:00:00+09:00');
+  });
 });
 
 describe('(6) タイムゾーン・通貨・行数上限', () => {

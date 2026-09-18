@@ -578,3 +578,60 @@ describe('再試行：サーバーに保存済みで応答だけ失われたと�
     expect(roomMsgs('g_trial').filter(m => m.fromStaffId === '__root__')).toHaveLength(1);  // 質問も1件
   });
 });
+
+// ── 検証の設定: 候補（ルーム/FAQ）の返し方 ──────────────────────────
+// ⚠️ 画面は設定の **読み取りも POST** で呼ぶ。GET のときだけ候補を返すと
+//    選択肢が常に空になり、設定画面から先へ進めない（実際に本番で起きた）。
+describe('検証の設定: 名前で選ぶための候補', () => {
+  const cfgCall = (over = {}) => call({ method: 'POST', headers: ROOT(),
+    body: { type: 'chatai', action: 'config', ...over } });
+
+  it('🔴 POST での読み取りでも候補が返る（画面はPOSTで読む）', async () => {
+    const r = await cfgCall();
+    expect(r.body.ok).toBe(true);
+    expect(r.body.choices.rooms.map(x => x.id)).toContain('g_trial');
+    expect(r.body.choices.rooms.find(x => x.id === 'g_trial').name).toBe('検証用');
+    expect(r.body.choices.docs.map(x => x.id)).toContain('faq1');
+  });
+
+  it('🔴 読み取りでは設定を書き換えない（読むたびに保存しない）', async () => {
+    const before = store.get(CFG);
+    await cfgCall();
+    expect(store.get(CFG)).toBe(before);
+  });
+
+  it('config を渡したときだけ保存する', async () => {
+    const r = await cfgCall({ config: { trialRooms: ['g_trial'], allowedDocIds: ['faq1'] } });
+    expect(r.body.config.trialRooms).toEqual(['g_trial']);
+    expect(JSON.parse(store.get(CFG)).trialRooms).toEqual(['g_trial']);
+    expect(r.body.choices.rooms.length).toBeGreaterThan(0);   // 保存後も候補を返す
+  });
+
+  it('ルーム名と参加者数を返す（本部限定か選ぶ前に分かる）', async () => {
+    const r = await cfgCall();
+    const room = r.body.choices.rooms.find(x => x.id === 'g_trial');
+    expect(room.name).toBe('検証用');
+    expect(room.members).toBe(1);
+  });
+
+  it('🔴 候補が空のときは理由を返す（「ありません」だけで詰まらせない）', async () => {
+    store.set('naoru:faq:v1', JSON.stringify({ faqs: [] }));
+    store.set(CHAT, JSON.stringify({ rooms: [], dir: { staff: [] }, notes: {} }));
+    const r = await cfgCall();
+    expect(r.body.choices.rooms).toHaveLength(0);
+    expect(r.body.choicesEmptyReason.join('')).toContain('ルーム');
+    expect(r.body.choicesEmptyReason.join('')).toContain('FAQ');
+  });
+
+  it('🔴 見えないルームは候補に出さない', async () => {
+    store.set(CHAT, JSON.stringify({ rooms: [
+      { id: 'g_ok', kind: 'group', name: '見える', members: ['__root__'] },
+      { id: 'dm_x', kind: 'dm', name: '他人のDM', members: ['s1', 's2'] },
+      { id: 'g_tenant', kind: 'group', name: '別テナント', members: ['__root__'], tenantId: 'other' },
+    ], dir: { staff: [] }, notes: {} }));
+    const ids = (await cfgCall()).body.choices.rooms.map(x => x.id);
+    expect(ids).toContain('g_ok');
+    expect(ids).not.toContain('dm_x');          // rootでも非参加のDMは出さない
+    expect(ids).not.toContain('g_tenant');
+  });
+});

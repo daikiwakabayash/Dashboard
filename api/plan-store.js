@@ -462,33 +462,43 @@ export default async function handler(req, res) {
 
     // 設定の参照・更新（root/本部のみ。検証用Roomと許可FAQを人が決める）
     if (action === 'config') {
-      if (req.method === 'GET') {
-        // 画面が **IDではなく名前で選べる** よう、対象ルーム・許可資料を名前付きで返す。
-        // 対象の判定はサーバーが持つ（画面の申告を信用しない）。
-        const [roomsSrc, faqSrc] = await Promise.all([
-          blobGet(CHAT_KEY, hasKV, hasSB, gas).catch(() => null),
-          blobGet(FAQ_KEY, hasKV, hasSB, gas).catch(() => null),
-        ]);
-        const allRooms = (Array.isArray(roomsSrc && roomsSrc.rooms) ? roomsSrc.rooms : [])
-          .filter(r => canViewRoom(chatActor, r));      // 見えないルームは選択肢にも出さない
-        const names = {};
-        for (const m of (Array.isArray(roomsSrc && roomsSrc.dir && roomsSrc.dir.staff) ? roomsSrc.dir.staff : [])) {
-          if (m && m.id) names[String(m.id)] = String(m.name || '');
-        }
-        const targets = buildTrialTargets({ config: cfg, rooms: allRooms,
-          docs: Array.isArray(faqSrc && faqSrc.faqs) ? faqSrc.faqs : [], names });
-        // 設定欄で名前から選べるよう、候補も返す（登録済みのIDだけを送らせる）
-        const choices = {
-          rooms: allRooms.map(r => ({ id: String(r.id), name: String(r.name || r.id), kind: String(r.kind || '') })),
-          docs: (Array.isArray(faqSrc && faqSrc.faqs) ? faqSrc.faqs : [])
-            .map(d => ({ id: String(d.id), title: String(d.title || d.q || d.id) })),
-        };
-        return res.status(200).json({ ok: true, config: cfg, enabled: aiOn, targets, choices });
+      // 画面が **IDではなく名前で選べる** よう、対象ルーム・許可資料を名前付きで返す。
+      // 対象の判定はサーバーが持つ（画面の申告を信用しない）。
+      // ⚠️ 読み書きの判定は **メソッドではなく body.config の有無**で行う。
+      //    画面は読み取りも POST で呼ぶため、GET のときだけ候補を返すと
+      //    選択肢が常に空になり、設定を読むたびに保存が走っていた。
+      const isSave = body.config && typeof body.config === 'object';
+      let current = cfg;
+      if (isSave) {
+        current = normalizeAiCfg({ ...cfg, ...body.config, updatedAt: new Date().toISOString(), updatedBy: actorId });
+        await blobSet(ccKey(CHATAI_CFG_KEY), current, hasKV, hasSB, gas);
+        await audit({ action: 'chatai_config', entity: 'chatai', entityId: 'config', after: current });
       }
-      const next = normalizeAiCfg({ ...cfg, ...(body.config || {}), updatedAt: new Date().toISOString(), updatedBy: actorId });
-      await blobSet(ccKey(CHATAI_CFG_KEY), next, hasKV, hasSB, gas);
-      await audit({ action: 'chatai_config', entity: 'chatai', entityId: 'config', after: next });
-      return res.status(200).json({ ok: true, config: next });
+      const [roomsSrc, faqSrc] = await Promise.all([
+        blobGet(CHAT_KEY, hasKV, hasSB, gas).catch(() => null),
+        blobGet(FAQ_KEY, hasKV, hasSB, gas).catch(() => null),
+      ]);
+      const allRooms = (Array.isArray(roomsSrc && roomsSrc.rooms) ? roomsSrc.rooms : [])
+        .filter(r => canViewRoom(chatActor, r));      // 見えないルームは選択肢にも出さない
+      const names = {};
+      for (const m of (Array.isArray(roomsSrc && roomsSrc.dir && roomsSrc.dir.staff) ? roomsSrc.dir.staff : [])) {
+        if (m && m.id) names[String(m.id)] = String(m.name || '');
+      }
+      const faqs = Array.isArray(faqSrc && faqSrc.faqs) ? faqSrc.faqs : [];
+      const targets = buildTrialTargets({ config: current, rooms: allRooms, docs: faqs, names });
+      // 設定欄で名前から選べるよう、候補も返す（登録済みのIDだけを送らせる）
+      const choices = {
+        rooms: allRooms.map(r => ({ id: String(r.id), name: String(r.name || r.id), kind: String(r.kind || ''),
+          members: (Array.isArray(r.members) ? r.members : []).length })),
+        docs: faqs.map(d => ({ id: String(d.id), title: String(d.title || d.q || d.id) })),
+      };
+      // 候補が空のときは **理由を返す**（画面に「ありません」とだけ出して詰まらせない）
+      const why = [];
+      if (!allRooms.length) why.push(Array.isArray(roomsSrc && roomsSrc.rooms) && roomsSrc.rooms.length
+        ? 'あなたが参加・閲覧できるチャットルームがありません'
+        : 'チャットルームがまだありません。先にチャットでルームを作ってください');
+      if (!faqs.length) why.push('FAQがまだ登録されていません。「FAQ管理（AI）」で1件以上登録してください');
+      return res.status(200).json({ ok: true, config: current, enabled: aiOn, targets, choices, choicesEmptyReason: why });
     }
 
     if (!aiOn) return res.status(200).json(aiError('rollout_disabled'));

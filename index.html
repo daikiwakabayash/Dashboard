@@ -2505,6 +2505,7 @@
                 const rid = aiTrial.roomId || (targets.rooms[0] && targets.rooms[0].id) || ((cfg && cfg.trialRooms[0]) || '');
                 const allowedDocIds = targets.docs.map(d => d.id);
                 setAiTrial(p => ({ ...p, cfg, targets, choices: j.choices || { rooms: [], docs: [] },
+                    choicesEmptyReason: Array.isArray(j.choicesEmptyReason) ? j.choicesEmptyReason : [],
                     roomId: p.roomId || rid, picked: { roomId: rid, hintDocIds: allowedDocIds } }));
                 // 設定を読んだら、そのルームの保存済み質問・回答も読み直す
                 // （再読み込み後に画面が空にならないように）
@@ -21517,12 +21518,21 @@
                                         <div>
                                             <span className="font-bold text-ink-400">検証に使うルーム（名前で選びます）</span>
                                             <div className="mt-1 max-h-40 overflow-auto rounded-lg border border-ink-200 divide-y divide-ink-100">
-                                                {choices.rooms.length === 0 && <div className="px-3 py-2 text-ink-400">選べるルームがありません</div>}
+                                                {choices.rooms.length === 0 && (
+                                                    <div className="px-3 py-2 text-ink-400">
+                                                        選べるルームがありません
+                                                        {(t.choicesEmptyReason || []).filter(x => x.includes('ルーム')).map(x => (
+                                                            <div key={x} className="mt-0.5 text-[11px] text-amber-700">{x}</div>
+                                                        ))}
+                                                    </div>
+                                                )}
                                                 {choices.rooms.map(r => (
                                                     <label key={r.id} className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-ink-50">
                                                         <input type="checkbox" data-ai-room={r.id}
                                                             defaultChecked={((t.cfg && t.cfg.trialRooms) || []).includes(r.id)} />
                                                         <span>{r.name}</span>
+                                                        {/* 参加者数。本部限定のルームかを選ぶ前に確かめられるように */}
+                                                        {r.members ? <span className="text-[11px] text-ink-400">参加 {r.members}名</span> : null}
                                                     </label>
                                                 ))}
                                             </div>
@@ -21530,7 +21540,14 @@
                                         <div>
                                             <span className="font-bold text-ink-400">AIに渡すFAQ（タイトルで選びます・少数のみ）</span>
                                             <div className="mt-1 max-h-40 overflow-auto rounded-lg border border-ink-200 divide-y divide-ink-100">
-                                                {choices.docs.length === 0 && <div className="px-3 py-2 text-ink-400">選べるFAQがありません</div>}
+                                                {choices.docs.length === 0 && (
+                                                    <div className="px-3 py-2 text-ink-400">
+                                                        選べるFAQがありません
+                                                        {(t.choicesEmptyReason || []).filter(x => x.includes('FAQ')).map(x => (
+                                                            <div key={x} className="mt-0.5 text-[11px] text-amber-700">{x}</div>
+                                                        ))}
+                                                    </div>
+                                                )}
                                                 {choices.docs.map(d => (
                                                     <label key={d.id} className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-ink-50">
                                                         <input type="checkbox" data-ai-doc={d.id}

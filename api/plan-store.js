@@ -36,7 +36,7 @@ import { APPROVAL_KEY, APPROVAL_CAP, buildApproval, decide as decideApproval, re
 import { AGENTLOG_KEY, AGENTLOG_CAP, startRun, finishRun, listRuns, summarize as summarizeRuns, anomalies as runAnomalies } from '../lib/agentlog.js';
 import { check as authzCheck, can as authzCan, enforce as authzEnforce, decisionRecord, needsReverify, DEFAULT_TENANT, canViewRoom } from '../lib/authz.js';
 import { resolveActor } from '../lib/actor.js';
-import { normalizeOverview as normalizeMetaOverview, connectionState as metaConnectionState, lastCompleteDays, looksLikeSample as metaLooksLikeSample, normalizeFreshness as metaNormalizeFreshness, META_API_VERSION } from '../lib/meta-read.js';
+import { normalizeOverview as normalizeMetaOverview, connectionState as metaConnectionState, lastCompleteDays, looksLikeSample as metaLooksLikeSample, normalizeFreshness as metaNormalizeFreshness, parseAccountAllowList as metaParseAccountAllowList, META_API_VERSION } from '../lib/meta-read.js';
 import META_FIXTURE from '../fixtures/meta-overview-sample.json' with { type: 'json' };
 import { verifySalonOneBearer } from '../lib/salonone-auth.js';
 import { hashOwnerToken, verifyOwnerToken, parseOwnerPasswords, parseOwnerShops } from '../lib/settlement.js';
@@ -700,11 +700,12 @@ export default async function handler(req, res) {
 
     // (2) accountId は **そのテナントに許可されたアカウントのみ**。
     //     許可一覧は環境変数（META_AD_ACCOUNT_IDS: カンマ区切り）で人が設定する。
-    //     未設定なら META_AD_ACCOUNT_ID の1件のみを許可する。
-    const allowList = String(process.env.META_AD_ACCOUNT_IDS || process.env.META_AD_ACCOUNT_ID || '')
-      .split(',').map(x => x.trim()).filter(Boolean)
-      // 形式が明らかに不正なものは許可リストとして採用しない（Metaの広告アカウントは act_ で始まる）
-      .filter(x => /^act_[A-Za-z0-9]+$/.test(x));
+    //     ⚠️ **部分採用しない。** 1件でも不正／重複があればリスト全体を無効にする。
+    //        不正な1件を黙って捨てると、設定者の意図より狭い／違うリストで動いてしまう。
+    //     ⚠️ 旧 META_AD_ACCOUNT_ID（単数）は許可リストに**使わない**（③が受け付けないため）。
+    //        設定が残っていても黙って壊さず、移行が必要なことを理由として表示する。
+    const allow = metaParseAccountAllowList(process.env);
+    const allowList = allow.ids;
     const requested = String(req.query.accountId || '').slice(0, 64);
     const accountId = requested || allowList[0] || '';
     if (requested && allowList.length && !allowList.includes(requested)) {
@@ -721,9 +722,7 @@ export default async function handler(req, res) {
         sample: false,                     // ← サンプル表示ではない
         connection: {
           connected: false, mode: 'misconfigured',
-          reason: !allowList.length
-            ? '広告アカウントの許可リスト（META_AD_ACCOUNT_IDS）が未設定または不正です'
-            : 'この広告アカウントは許可リストにありません',
+          reason: allow.valid ? 'この広告アカウントは許可リストにありません' : allow.reason,
           hint: '実データの取得は行いませんでした。許可リストの設定を確認してください（設定は人が行います）',
         },
         data: {

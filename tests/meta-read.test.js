@@ -3,7 +3,8 @@ import fs from 'fs';
 import {
   normalizeMetric, normalizeMetrics, normalizeOverview, normalizeFreshness,
   buildTree, lastCompleteDays, connectionState, META_API_VERSION,
-  looksLikeSample, currencySymbol, normalizeUnit, isCurrencyUnit} from '../lib/meta-read.js';
+  looksLikeSample, currencySymbol, normalizeUnit, isCurrencyUnit,
+  parseAccountAllowList, declaredMode} from '../lib/meta-read.js';
 
 const FIXTURE = JSON.parse(fs.readFileSync(new URL('../fixtures/meta-overview-sample.json', import.meta.url), 'utf8'));
 
@@ -394,5 +395,97 @@ describe('🔴 金額の単位は広告アカウントの通貨を保持する',
     const m = normalizeMetric({ value: 1234, unit: 'AUD', quality: 'VERIFIED' }, 'spend');
     expect(m.unit).toBe('AUD');
     expect(m.unit).not.toBe('count');
+  });
+});
+
+// ── 実データ接続の受入ゲート（③ naoru-ai-platform と揃える）─────────────
+describe('parseAccountAllowList - 部分採用しない', () => {
+  it('🔴 1件でも不正なら、リスト全体を無効にする（残りだけ採用しない）', () => {
+    const r = parseAccountAllowList({ META_AD_ACCOUNT_IDS: 'act_1335477837049931,invalid' });
+    expect(r.valid).toBe(false);
+    expect(r.ids).toEqual([]);
+    expect(r.reason).toContain('リスト全体を無効');
+  });
+  it('🔴 act_ + 数字以外は不正（③が受け付けない形式を通さない）', () => {
+    for (const v of ['act_live', 'act_ABC', '1335477837049931', 'act_', 'act_12a']) {
+      expect(parseAccountAllowList({ META_AD_ACCOUNT_IDS: v }).valid, v).toBe(false);
+    }
+  });
+  it('🔴 重複はリスト全体を無効にする', () => {
+    expect(parseAccountAllowList({ META_AD_ACCOUNT_IDS: 'act_123,act_123' }).valid).toBe(false);
+  });
+  it('🔴 旧 META_AD_ACCOUNT_ID（単数）は許可リストに使わない。黙って無視せず移行を伝える', () => {
+    const r = parseAccountAllowList({ META_AD_ACCOUNT_ID: 'act_1335477837049931' });
+    expect(r.valid).toBe(false);
+    expect(r.ids).toEqual([]);
+    expect(r.reason).toContain('META_AD_ACCOUNT_IDS');
+  });
+  it('正しいリストは採用する（空白は許す）', () => {
+    const r = parseAccountAllowList({ META_AD_ACCOUNT_IDS: ' act_1335477837049931 , act_222 ' });
+    expect(r.valid).toBe(true);
+    expect(r.ids).toEqual(['act_1335477837049931', 'act_222']);
+  });
+});
+
+describe('unknown mode を実データとして表示しない', () => {
+  // FIXTURE は act_0000000000000 で「明らかな作り物」と判定されるため、実アカウント形のIDで組む
+  const ok = { ...FIXTURE, api_version: 'meta-read-1',
+    account: { ...FIXTURE.account, id: 'act_1335477837049931' } };
+  it('🔴 mode/data_mode が unknown なら数値を出さない', () => {
+    const r = normalizeOverview({ ...ok, mode: 'unknown', data_mode: 'unknown', sample: false, _fixture: false });
+    expect(r.ok).toBe(false);
+    expect(r.error.code).toBe('MODE_UNCONFIRMED');
+    expect(r.totals).toBeUndefined();
+    expect(r.isSample).toBe(false);          // サンプルとも偽らない
+  });
+  it('🔴 unknown を live へ昇格させない', () => {
+    expect(declaredMode({ mode: 'unknown' })).toBe('unconfirmed');
+    expect(declaredMode({ data_mode: 'unknown' })).toBe('unconfirmed');
+    expect(declaredMode({ mode: 'live' })).toBe('live');
+    expect(declaredMode({ _fixture: true })).toBe('sample');
+    expect(declaredMode({})).toBe('unstated');      // 旧形式は従来どおり
+  });
+  it('エラー応答は従来どおり理由を出す（MODE_UNCONFIRMED に吸い込まない）', () => {
+    const r = normalizeOverview({ api_version: 'meta-read-1', status: 'error', data_mode: 'unknown',
+      error: { code: 'RATE_LIMITED', retryable: true }, freshness: { last_success_at: '2026-09-17T00:00:00Z' } });
+    expect(r.error.code).toBe('RATE_LIMITED');
+    expect(r.freshness.lastSuccessAt).toBe('2026-09-17T00:00:00Z');
+  });
+});
+
+describe('金額の単位と広告アカウント通貨の一致', () => {
+  it('🔴 通貨が一致しない金額は数字を出さない（桁も意味も違う値を実績にしない）', () => {
+    expect(normalizeMetric({ value: 1234, unit: 'JPY', quality: 'VERIFIED' }, 'spend', 'AUD').value).toBe(null);
+    expect(normalizeMetric({ value: 1234, unit: 'JPY', quality: 'VERIFIED' }, 'spend', 'AUD').missingReason)
+      .toContain('通貨');
+  });
+  it('一致していれば保持する（円へ寄せない）', () => {
+    for (const c of ['JPY', 'USD', 'AUD', 'MYR']) {
+      const m = normalizeMetric({ value: 100, unit: c, quality: 'VERIFIED' }, 'spend', c);
+      expect(m.unit, c).toBe(c);
+      expect(m.value, c).toBe(100);
+    }
+  });
+  it('🔴 3文字ならなんでも通貨と判断しない', () => {
+    expect(normalizeUnit('xyz', 'JPY')).toBe(null);
+    expect(normalizeUnit('JPY', 'JPY')).toBe('JPY');
+  });
+  it('🔴 アカウント通貨が不明なら金額は表示しない', () => {
+    expect(normalizeMetric({ value: 1234, unit: 'JPY' }, 'spend', '').value).toBe(null);
+  });
+  it('count / ratio は通貨に関係なくそのまま（表示回数やCTRまで消さない）', () => {
+    expect(normalizeMetric({ value: 5, unit: 'count' }, 'clicks', 'AUD').value).toBe(5);
+    expect(normalizeMetric({ value: 0.02, unit: 'ratio' }, 'ctr', 'AUD').value).toBe(0.02);
+  });
+  it('normalizeOverview は account.currency を使って totals を検証する', () => {
+    const r = normalizeOverview({ api_version: 'meta-read-1', status: 'ok', _fixture: true,
+      account: { id: 'act_1', currency: 'AUD' }, period: { from: 'a', to: 'b' },
+      totals: { spend: { value: 100, unit: 'JPY', quality: 'VERIFIED' }, clicks: { value: 3, unit: 'count' } },
+      rows: [], freshness: {} });
+    expect(r.totals.spend.value).toBe(null);
+    expect(r.totals.clicks.value).toBe(3);
+  });
+  it('2引数の従来呼び出しは挙動を変えない（外貨をcountに潰さない）', () => {
+    expect(normalizeMetric({ value: 1234, unit: 'AUD', quality: 'VERIFIED' }, 'spend').unit).toBe('AUD');
   });
 });

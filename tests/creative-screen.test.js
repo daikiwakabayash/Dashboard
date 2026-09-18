@@ -1,5 +1,14 @@
-// 本番で使う画面（index.html「クリエイティブ」）の確認。
-// カードが出るだけで完成にせず、実ファイルを表示・再生・比較できることを表明する。
+// ⚠️ **これは「表示の確認」ではありません。**
+//    index.html の**記述**（配線・条件・文言）が抜けていないかを見るだけの試験です。
+//    ここが緑でも「画像が実際に開ける／動画が実際に再生できる」ことは何も示しません。
+//
+//    実際の表示・再生の確認は **scripts/creative-screen-check.mjs**（実ブラウザ）で行い、
+//    報告も分けてください:
+//      ・コード保存 …… この試験（記述の確認）
+//      ・デモでの確認 … scripts/creative-screen-check.mjs（ローカル実画面＋スタブAPI）
+//      ・本番での確認 … 配備先で同じ手順を人が確認したとき
+//
+//    実行方法は scripts/creative-screen-check.mjs の先頭に書いてあります。
 import { describe, it, expect, beforeAll } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,22 +39,43 @@ describe('クリエイティブ画面: 入口と権限', () => {
   });
 });
 
-describe('クリエイティブ画面: 実ファイルを表示・再生する', () => {
-  it('🔴 動画は <video controls> で再生できる', () => {
-    expect(screen).toContain('<video src={f.url}');
-    expect(screen).toContain('controls');
+describe('クリエイティブ画面: 実ファイルを出す配線がある（表示できたことの確認ではない）', () => {
+  it('動画は <video controls> を書いている', () => {
+    expect(html).toContain('<video data-cv-media="video"');
+    expect(html).toContain('controls');
   });
-  it('🔴 画像は <img> で表示する（URLの羅列で終わらせない）', () => {
-    expect(screen).toContain('<img src={f.url}');
+  it('画像は <img> を書いている（URLの羅列で終わらせない）', () => {
+    expect(html).toContain('<img data-cv-media="image"');
+  });
+  it('🔴 保存先URLを画面で使わない（①の認証付き配信口だけを見る）', () => {
+    expect(screen).not.toContain('f.url');
+    const media = html.slice(html.indexOf('const CvMedia'), html.indexOf('const CvMedia') + 1800);
+    expect(media).toContain('cvMediaFetch(key)');
+    const fetcher = html.slice(html.indexOf('const cvMediaFetch'), html.indexOf('const CvMedia'));
+    expect(fetcher).toContain('cvMediaAuth.headers()');
+    expect(html).toContain('cvMediaAuth.headers = () => ccAuthHeaders();');
+  });
+  it('🔴 保存先へは暗号文だけを送る（平文をアップロードしない）', () => {
+    const up = html.slice(html.indexOf('const cvUpload'), html.indexOf('const cvBusy'));
+    expect(up).toContain('cvcEncrypt(dataKey, fileId, plain)');
+    expect(up).toContain("__blobUpload(`creative/${fileId}.enc`");
+    expect(up).not.toContain('__blobUpload(`creative/${Date.now()}');
+  });
+  it('🔴 生成は受付だけして、進み具合を聞きに行く（同期で待たない）', () => {
+    expect(html).toContain("action: 'job_status'");
+    const poll = html.slice(html.indexOf('const cvPoll ='), html.indexOf('const cvGenerate'));
+    expect(poll).toContain('Math.min(10000');          // 無制限に叩かない
   });
   it('🔴 複数案を横に並べて見比べられる', () => {
     expect(screen).toContain('複数案を比較');
     expect(screen).toContain('c.comparing.creatives.map');
     expect(screen).toContain('overflow-x-auto');
   });
-  it('🔴 完成ファイルはダウンロードできる', () => {
+  it('🔴 完成ファイルは認証付きで取ってから保存する（保存先URLを開かない）', () => {
     expect(screen).toContain('完成ファイルを取得');
-    expect(screen).toContain('download');
+    expect(screen).toContain('cvDownload(f)');
+    const dl = html.slice(html.indexOf('const cvDownload'), html.indexOf('const cvBusy'));
+    expect(dl).toContain('cvMediaFetch(f && f.src)');
   });
 });
 

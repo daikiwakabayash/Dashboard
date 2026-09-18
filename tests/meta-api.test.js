@@ -179,7 +179,9 @@ describe('?type=meta - 接続できているとき', () => {
     await asRoot({ accountId: 'act_live' });
     const u = new URL(upstreamCalls[0].url);
     const from = u.searchParams.get('from'), to = u.searchParams.get('to');
-    const today = new Date().toISOString().slice(0, 10);
+    // ⚠️ 「当日」はアカウントの時間帯（Asia/Tokyo）で数える。
+    //    UTC で数えると JST の 0〜9時（UTC 15〜24時）に日付がずれて誤検知する。
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
     expect(to).not.toBe(today);
     expect(Math.round((Date.parse(to) - Date.parse(from)) / 86400000)).toBe(6);   // 7日分
   });

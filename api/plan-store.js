@@ -921,7 +921,10 @@ export default async function handler(req, res) {
 
       const master = await creativeMaster();
       if (!master) return res.status(503).json(cerr('key_missing', '保存鍵（CREATIVE_ASSET_KEY）が未設定です'));
-      const dataKey = await creativeUnwrapKey(master, f.enc.key, `${rec.id}:${f.fileId}`);
+      // 鍵は「包んだときの持ち主ID＋fileId」で結びついている。
+      // 素材から案へ写したファイルは、素材のIDのまま（fromAssetId）で開く。
+      const keyOwner = String(f.fromAssetId || rec.id);
+      const dataKey = await creativeUnwrapKey(master, f.enc.key, `${keyOwner}:${f.fileId}`);
       if (!dataKey) return res.status(500).json(cerr('key_invalid', '保存鍵で復号できませんでした'));
       const plainLen = Number(f.enc.plainBytes) || 0;
 
@@ -1043,13 +1046,19 @@ export default async function handler(req, res) {
         if (!s.ok) return res.status(200).json(cerr(s.error, '保存したファイルの鍵がありません'));
         sealedFiles = s.files;
       }
+      // 「この素材をそのまま案にする」。⚠️ ファイルの実体はサーバー側で写す。
+      //    画面に保存先URL・鍵を通さないため、クライアントからは受け取らない。
+      const useAssetFiles = !!(body.creative && body.creative.use_asset_files);
       let out = null, err = '';
       const done = await mutateCreative((st) => {
         const a = st.assets[assetId];
         if (!mine(a)) { err = 'asset_not_found'; return null; }
         // ⚠️ 既存の案の上書きを作らない。
         if (st.creatives[creativeId]) { err = 'id_conflict'; return null; }
-        const r = buildCreative(a, { ...(body.creative || {}), files: sealedFiles }, ctx);
+        // 鍵は「持ち主のID＋fileId」で包んでいるので、案へ写すときに包み直す必要がある。
+        // ここは同期処理なので、写し先の owner を素材のままにする（配信口は owner=asset で引く）。
+        const copied = useAssetFiles ? (Array.isArray(a.files) ? a.files : []).map(f => ({ ...f, fromAssetId: a.id })) : sealedFiles;
+        const r = buildCreative(a, { ...(body.creative || {}), files: copied }, ctx);
         if (!r.ok) { err = r.error; return null; }
         r.creative.id = creativeId;
         st.creatives[creativeId] = r.creative; out = r.creative; return true;

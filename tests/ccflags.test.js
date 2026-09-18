@@ -58,3 +58,30 @@ describe('ccflags - 変更', () => {
     expect(applyFlagChange(DEFAULT_FLAGS, 'cc_authz', 'yolo', {})).toBeNull();
   });
 });
+
+// ── オーナー設定のスイッチ一覧 ──────────────────────────────────────
+// ⚠️ 画面があるフラグがこの一覧から漏れると、メニューはフラグOFFで隠れているのに
+//    ONにする手段が無くなる（鶏と卵）。実際に cc_ai_trial で起きた。
+import fs from 'node:fs';
+import path from 'node:path';
+describe('オーナー設定: フラグのスイッチ一覧', () => {
+  const html = fs.readFileSync(path.join(process.cwd(), 'index.html'), 'utf8');
+  const list = html.slice(html.indexOf("['cc_approval', '承認センター'"), html.indexOf("].map(([k, label, note])"));
+
+  it('🔴 画面のあるフラグはすべてスイッチがある', () => {
+    for (const k of ['cc_approval', 'cc_agentlog', 'cc_ai_trial']) expect(list, k).toContain(`'${k}'`);
+  });
+  it('🔴 @AI 検証のスイッチがある（無いとONにできない）', () => {
+    expect(list).toContain("'cc_ai_trial'");
+    expect(list).toContain('@AI 検証');
+  });
+  it('メニュー側のフラグ名と一致している', () => {
+    const nav = html.slice(html.indexOf("id: 'aitrial'"), html.indexOf("id: 'aitrial'") + 300);
+    expect(nav).toContain("flag: 'cc_ai_trial'");
+    expect(list).toContain("'cc_ai_trial'");
+  });
+  it('本番以外では環境名を画面に出す（本番と取り違えないため）', () => {
+    expect(html).toContain('PREVIEW専用');
+    expect(html).toContain('この環境の設定は本番とは別に保存され、本番には影響しません');
+  });
+});

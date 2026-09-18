@@ -490,6 +490,58 @@
         .so-shopsticky { max-height: calc(100vh - 120px); overflow-y: auto; } /* 店舗別コホート */
         .so-flsticky thead th, .so-shopsticky thead th { position: sticky; top: 0; z-index: 10; background: #fff; box-shadow: inset 0 -1px 0 #e2e8f0; }
         .so-flsticky thead th:first-child, .so-shopsticky thead th:first-child { z-index: 20; }
+
+        /* ── ニュース・組織図のデザイン（UI試作V3）──────────────────────
+           赤・白・墨黒。細い境界線、控えめな影、余白。
+           ⚠️ この2画面だけに効かせる（.nowl を付けた要素の中だけ）。
+              他の経営分析ページの見た目は変えない。 */
+        .nowl {
+            --nowl-red: #b92d3d;
+            --nowl-red-dark: #9d2433;
+            --nowl-red-soft: #fdf2f3;
+            --nowl-ink: #18191c;
+            --nowl-muted: #72747d;
+            --nowl-line: #e8e8ec;
+            --nowl-bg: #f6f6f8;
+        }
+        .nowl-title { font-weight: 800; letter-spacing: -0.01em; color: var(--nowl-ink); }
+        .nowl-meta { color: var(--nowl-muted); }
+        .nowl-card {
+            background: #fff;
+            border: 1px solid var(--nowl-line);
+            border-radius: 14px;
+            box-shadow: 0 1px 2px rgba(24, 25, 28, 0.04);
+        }
+        .nowl-card:hover { box-shadow: 0 4px 14px rgba(24, 25, 28, 0.07); }
+        .nowl-accent { color: var(--nowl-red); }
+        .nowl-btn { background: var(--nowl-red); color: #fff; border-radius: 10px; font-weight: 700; }
+        .nowl-btn:hover { background: var(--nowl-red-dark); }
+
+        /* ポップアップ: 背景のぼかしと短い浮き上がり */
+        .nowl-overlay {
+            background: rgba(24, 25, 28, 0.42);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            animation: nowl-fade 0.16s ease-out;
+        }
+        .nowl-pop { animation: nowl-rise 0.18s cubic-bezier(0.22, 1, 0.36, 1); }
+        @keyframes nowl-fade { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes nowl-rise {
+            from { opacity: 0; transform: translateY(10px) scale(0.985); }
+            to   { opacity: 1; transform: none; }
+        }
+        /* ⚠️ 動きを減らす設定（OSの「視差効果を減らす」）を尊重する */
+        @media (prefers-reduced-motion: reduce) {
+            .nowl-overlay, .nowl-pop { animation: none !important; }
+        }
+        /* キーボード操作のときだけフォーカスの枠を出す */
+        .nowl :focus-visible { outline: 2px solid var(--nowl-red); outline-offset: 2px; border-radius: 6px; }
+
+        /* スタッフカード: PC4列・中間3列・スマホ2列。長い氏名も崩れない。 */
+        .nowl-people { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+        @media (min-width: 768px)  { .nowl-people { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; } }
+        @media (min-width: 1280px) { .nowl-people { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+        .nowl-name { overflow-wrap: anywhere; line-height: 1.35; }
     </style>
     <!-- pdf.js は財務PDF機能でのみ使用。deferで初回描画をブロックしない（deferはDOMContentLoaded前に順序実行される） -->
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -843,10 +895,278 @@
         const ORG_KW_KEYS = Object.keys(ORG_KW).sort((a, b) => b.length - a.length);
         const orgGeoRank = (name) => { const s = String(name || '').replace(/NAORU/gi, '').replace(/院/g, '').trim(); for (const k of ORG_KW_KEYS) { if (s.includes(k)) return ORG_KW[k]; } return 950; };
         const orgRegionOf = (r) => r === 1 ? '北海道' : (r >= 2 && r <= 7) ? '東北' : (r >= 8 && r <= 14) ? '関東' : (r >= 15 && r <= 23) ? '中部' : (r >= 24 && r <= 30) ? '近畿' : (r >= 31 && r <= 35) ? '中国' : (r >= 36 && r <= 39) ? '四国' : (r >= 40 && r <= 46) ? '九州' : r === 47 ? '沖縄' : r >= 1000 ? '海外' : 'その他';
+        // ── ニュース: 記事の項目（lib/news-post.js と同じ）────────────────
+        const NEWS_CATEGORIES = [
+            { key: 'notice', label: 'お知らせ', cls: 'bg-slate-100 text-slate-700' },
+            { key: 'event',  label: 'イベント', cls: 'bg-rose-100 text-rose-700' },
+            { key: 'rule',   label: 'ルール・手順', cls: 'bg-indigo-100 text-indigo-700' },
+            { key: 'study',  label: '勉強会・教育', cls: 'bg-teal-100 text-teal-700' },
+            { key: 'case',   label: '症例・事例', cls: 'bg-amber-100 text-amber-700' },
+            { key: 'praise', label: '表彰・お祝い', cls: 'bg-pink-100 text-pink-700' },
+        ];
+        const newsCatOf = (k) => NEWS_CATEGORIES.find(c => c.key === String(k || '')) || null;
+        // 期限: 'none' / 'ok' / 'soon'（3日以内） / 'over'
+        const newsDueState = (d, now) => {
+            const v = String(d || '').trim();
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return 'none';
+            const end = Date.parse(`${v}T23:59:59+09:00`);
+            if (!Number.isFinite(end)) return 'none';
+            const t = (now instanceof Date ? now : new Date()).getTime();
+            if (t > end) return 'over';
+            return (end - t) <= 3 * 24 * 3600 * 1000 ? 'soon' : 'ok';
+        };
+        // 表紙にする画像（未指定なら1枚目。添付から消えた指定は使わない）
+        const newsCoverOf = (p) => {
+            const ids = (Array.isArray(p && p.imgIds) ? p.imgIds : []).map(String).filter(Boolean);
+            const c = String((p && p.coverImgId) || '');
+            return (c && ids.includes(c)) ? c : (ids[0] || '');
+        };
+        // この記事が自分に向けられているか（公開対象）
+        const newsForMe = (p, me) => {
+            const a = (p && p.audience && typeof p.audience === 'object') ? p.audience : { kind: 'all' };
+            if (a.kind !== 'shops') return true;
+            const mine = [...((me && me.shops) || []), (me && me.shop) || ''].map(String).filter(Boolean);
+            if (!mine.length) return false;
+            return (a.shops || []).some(t => mine.some(sx => sx.includes(t) || String(t).includes(sx)));
+        };
+
+        // ── 組織図: 自己紹介の入力候補（lib/profile-fields.js と同じ）────────
+        const PROF_TAGS = {
+            goodAt: ['骨盤矯正','猫背・姿勢','産後ケア','肩こり','腰痛','スポーツ障害','自律神経','問診・カウンセリング','新人教育','予約管理','SNS発信','店販提案'],
+            learning: ['解剖学','栄養','トレーニング指導','マーケティング','店舗運営','数字の読み方','接客英語','動画編集','AI活用'],
+            hobbies: ['筋トレ','サウナ','キャンプ','登山','釣り','ゴルフ','サッカー','野球','ランニング','料理','カフェ巡り','旅行','映画','読書','音楽','ゲーム','ペット','カメラ'],
+        };
+        const PROF_TAG_LABEL = { goodAt: '得意なこと・相談できること', learning: '学びたいこと', hobbies: '趣味・好きなこと' };
+        const profNormTags = (v) => {
+            const out = [], seen = new Set();
+            for (const raw of (Array.isArray(v) ? v : [])) {
+                const t = String(raw == null ? '' : raw).replace(/[　\s]+/g, ' ').trim().slice(0, 24);
+                if (!t || seen.has(t.toLowerCase())) continue;
+                seen.add(t.toLowerCase()); out.push(t);
+                if (out.length >= 8) break;
+            }
+            return out;
+        };
+        // 検索用（名前・店舗に加えて得意分野・趣味でも当たるように）
+        const profSearchNorm = (x) => String(x == null ? '' : x).normalize('NFKC').toLowerCase()
+            .replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60)).replace(/[\s　]/g, '');
+        const profIntroHay = (prof) => {
+            const p = prof || {};
+            return profSearchNorm([p.oneLine, ...(p.goodAt || []), ...(p.learning || []), ...(p.hobbies || [])].filter(Boolean).join(' '));
+        };
+
+        // ── ニュース記事のイベントリンク（lib/news-event.js の画面側ミラー）────
+        // ⚠️ 押した本人だけが参加する。自分のイベントリンクだけを受け付け、外部URLは読みに行かない。
+        const evLinkFor = (rowId) => {
+            const id = String(rowId || '').trim();
+            return id ? `${location.origin}/?tab=events&ev=${encodeURIComponent(id)}` : '';
+        };
+        const evLinksIn = (text) => {
+            const found = String(text == null ? '' : text).match(/https?:\/\/[^\s<>"'）)】」]+/g) || [];
+            const out = [], seen = new Set();
+            for (const raw of found) {
+                const url = raw.replace(/[.,、。]+$/, '');
+                let u; try { u = new URL(url); } catch { continue; }
+                if (u.host !== location.host) continue;               // 別サイトは対象外
+                if (u.searchParams.get('tab') !== 'events') continue;
+                const rowId = String(u.searchParams.get('ev') || '').trim();
+                if (!rowId || seen.has(rowId)) continue;
+                seen.add(rowId); out.push({ url, rowId });
+                if (out.length >= 10) break;
+            }
+            return out;
+        };
+        const evResolveRow = (rowId, sections) => {
+            const id = String(rowId || '').trim();
+            if (!id) return { found: false, reason: 'no_id' };
+            const map = (sections && typeof sections === 'object') ? sections : {};
+            for (const [section, rows] of Object.entries(map)) {
+                for (const row of (Array.isArray(rows) ? rows : [])) {
+                    if (!row || String(row.id) !== id) continue;
+                    const c = (row.cells && typeof row.cells === 'object') ? row.cells : {};
+                    return { found: true, section, rowId: id, title: String(c.chatTitle || '').trim() || section,
+                        date: String(c.date || ''), roomId: String(c.roomId || ''), ownerId: String(c.ownerId || '') };
+                }
+            }
+            return { found: false, reason: 'not_found' };
+        };
+        const EV_JOIN_LABEL = {
+            no_event: 'このイベントは見つかりません（削除された可能性があります）',
+            no_room: 'このイベントにはまだグループチャットがありません',
+            no_access: 'このグループチャットを開く権限がありません',
+            joined: 'グループチャットを開く',
+            can_join: 'グループチャットへ参加',
+        };
+        const evJoinStateOf = (ev, rooms, myId) => {
+            if (!ev || !ev.found) return 'no_event';
+            if (!ev.roomId) return 'no_room';
+            const room = (Array.isArray(rooms) ? rooms : []).find(r => r && String(r.id) === String(ev.roomId));
+            if (!room) return 'no_access';
+            const me = String(myId || ''); if (!me) return 'no_access';
+            return (Array.isArray(room.members) ? room.members : []).map(String).includes(me) ? 'joined' : 'can_join';
+        };
+
+        // ── 送信先の絞り込み（エリア）──────────────────────────────────────
+        // 「神奈川のエリアに送る」「大阪以外に送る」を、いまある所属店舗名だけで組み立てる。
+        // 判定ロジックは lib/audience.js と同じ（tests/audience.test.js ＋ html-structure テストで一致を担保）。
+        // ⚠️ 店舗名からの推定なので、地名を含まない店舗名は「エリア未設定」に入る。
+        //    画面では必ず**対象者の氏名を出してから**送ること（黙って外れる人を作らない）。
+        const AUD_PREF_NAMES = { 1:'北海道',2:'青森県',3:'岩手県',4:'宮城県',5:'秋田県',6:'山形県',7:'福島県',8:'茨城県',9:'栃木県',10:'群馬県',11:'埼玉県',12:'千葉県',13:'東京都',14:'神奈川県',15:'新潟県',16:'富山県',17:'石川県',18:'福井県',19:'山梨県',20:'長野県',21:'岐阜県',22:'静岡県',23:'愛知県',24:'三重県',25:'滋賀県',26:'京都府',27:'大阪府',28:'兵庫県',29:'奈良県',30:'和歌山県',31:'鳥取県',32:'島根県',33:'岡山県',34:'広島県',35:'山口県',36:'徳島県',37:'香川県',38:'愛媛県',39:'高知県',40:'福岡県',41:'佐賀県',42:'長崎県',43:'熊本県',44:'大分県',45:'宮崎県',46:'鹿児島県',47:'沖縄県',950:'エリア未設定',1000:'海外' };
+        const audAreaOf = (shopName) => { const rank = orgGeoRank(shopName); return { rank, pref: AUD_PREF_NAMES[rank] || 'エリア未設定', region: orgRegionOf(rank) }; };
+        const audIsEmpty = (f) => { const x = f || {}; return !(x.prefs || []).length && !(x.regions || []).length && !(x.shops || []).length; };
+        const audMatches = (person, f) => {
+            const x = f || {}; if (audIsEmpty(x)) return true;
+            const shop = String((person && person.shop) || ''); const a = audAreaOf(shop);
+            if ((x.prefs || []).some(p => String(p) === a.pref)) return true;
+            if ((x.regions || []).some(r => String(r) === a.region)) return true;
+            return (x.shops || []).some(t => { t = String(t); return t && shop && (shop.includes(t) || t.includes(shop)); });
+        };
+        const audSelect = (staff, f) => {
+            const x = f || {}; const empty = audIsEmpty(x);
+            return (Array.isArray(staff) ? staff : []).filter(p => {
+                if (!p || !String(p.id || '')) return false;
+                const m = audMatches(p, x);
+                return empty ? true : (x.exclude ? !m : m);   // 条件なしで「以外」にしても0人にはしない
+            }).slice().sort((a, b) => {
+                const ra = orgGeoRank(a.shop), rb = orgGeoRank(b.shop);
+                return (ra !== rb) ? ra - rb : String(a.name || '').localeCompare(String(b.name || ''), 'ja');
+            });
+        };
+        const audOptions = (staff) => {
+            const prefs = new Map(), regions = new Map();
+            for (const p of (Array.isArray(staff) ? staff : [])) {
+                if (!p || !String(p.id || '')) continue;
+                const a = audAreaOf(String(p.shop || ''));
+                prefs.set(a.pref, { key: a.pref, rank: a.rank, count: ((prefs.get(a.pref) || {}).count || 0) + 1 });
+                regions.set(a.region, { key: a.region, rank: a.rank, count: ((regions.get(a.region) || {}).count || 0) + 1 });
+            }
+            const byRank = (m) => [...m.values()].sort((x, y) => (x.rank - y.rank) || String(x.key).localeCompare(String(y.key), 'ja'));
+            return { prefs: byRank(prefs), regions: byRank(regions) };
+        };
+        const audLabel = (f) => {
+            const x = f || {}; if (audIsEmpty(x)) return '全員';
+            const parts = [...(x.regions || []), ...(x.prefs || []), ...(x.shops || [])].map(String);
+            const head = parts.slice(0, 3).join('・') + (parts.length > 3 ? `ほか${parts.length - 3}件` : '');
+            return x.exclude ? `${head} 以外` : head;
+        };
+        // まだ既読がついていない人（reads[staffId][roomId] がその投稿より前、または無い）
+        const audUnread = (people, reads, roomId, sinceMs, excludeIds) => {
+            const rid = String(roomId || ''); const since = Number(sinceMs) || 0;
+            const skip = new Set((excludeIds || []).map(String));
+            const r = (reads && typeof reads === 'object') ? reads : {};
+            return (Array.isArray(people) ? people : []).filter(p => {
+                const id = String((p && p.id) || ''); if (!id || skip.has(id)) return false;
+                return (Number((r[id] || {})[rid]) || 0) < since;
+            });
+        };
+        // ── 宛先をテキストで指定する（lib/recipients.js の画面側ミラー）────────
+        // 「鶴見院と関内院のグループに送って」「山田、藤川のそれぞれに」「その人たちのグループを作って」
+        // ⚠️ 勝手に送らない。曖昧なものは候補として出し、当たらなかった言葉は必ず表示する。
+        const RCP_STOPWORDS = new Set(['これ','それ','あれ','こちら','そちら','あちら','文','文章','文面','メッセージ','内容','件','話','以下','下記','上記','次','みんな','皆','皆さん','全員','各位','こと','もの','ため']);
+        const RCP_ACTIONS = [
+            /(で|に|へ|を)?グループ(を)?(組|作|つく)[んりっるってら]*(で|て)?(ほし[いく]|下さい|ください)?/g,
+            /(に|へ)?(以下|下記|この|次|上記)の?(文章|文面|文|メッセージ|内容|件|話)?(を)?/g,
+            /(それぞれ|各自|各々|おのおの)(に|へ)?/g,
+            /(を)?(送|おく|連絡|通知|共有|流)[っりるってらしじ]*(て)?(おいて)?(ほし[いく]|下さい|ください)?/g,
+            /(に|へ)?(DM|dm|ダイレクト)(を)?(送|出)?[っりるってら]*(て)?/g,
+            /(の)?(グループ|部屋|ルーム)(すべて|全部|全て)?(に|へ)?/g,
+            /(の)?(店舗|お店|院)(すべて|全部|全て|全店)?(の)?(に|へ)?/g,
+            /(この|その|あの)?\s*\d+\s*つ(の)?/g,
+            /(その|この|あの)(人|方)(たち)?(の)?(に|へ)?/g,
+            /(の)?(人|方|みんな|全員|メンバー|スタッフ)(たち)?(に|へ)?/g,
+            /(すべて|全て|全部|全店)(の)?(に|へ)?/g,
+            /(お願いします|おねがいします|よろしく)[。、!！]?/g,
+        ];
+        const rcpNorm = (v) => String(v == null ? '' : v)
+            .replace(/[Ａ-Ｚａ-ｚ０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+            .replace(/[　\t]/g, ' ').replace(/ +/g, ' ').trim();
+        const rcpKey = (v) => rcpNorm(v).replace(/NAORU/gi, '').replace(/院$/, '')
+            .replace(/(さん|くん|ちゃん|様|さま|氏)$/, '').replace(/ /g, '').toLowerCase();
+        const rcpSplitSoft = (v) => String(v == null ? '' : v)
+            .split(/(?:と|や|あと|および|ならびに|プラス)/).map(x => x.trim()).filter(Boolean);
+        const rcpParse = (text) => {
+            const src = rcpNorm(text);
+            let intent = null;
+            if (/グループ(を)?(組|作|つく)/.test(src) || /まとめて(1|一)つ/.test(src)) intent = 'new_group';
+            else if (/(グループ|部屋|ルーム)(に|へ)/.test(src)) intent = 'store_rooms';
+            else if (/個別|一人ずつ|ひとりずつ|それぞれ|DM|dm|ダイレクト/.test(src)) intent = 'dm';
+            const hints = [];
+            let work = src.replace(/[（(]([^）)]{1,20})[）)]/g, (_m, inner) => { hints.push(inner); return `@@h${hints.length - 1}h@@`; });
+            for (const re of RCP_ACTIONS) work = work.replace(re, ' ');
+            const pieces = work.split(/[、,，・･/／＆&\n]+/).flatMap(x => x.split(/ +/)).map(x => x.trim()).filter(Boolean);
+            const tokens = [];
+            for (const piece of pieces) {
+                const m = piece.match(/^(.*?)@@h(\d+)h@@(.*)$/);
+                if (m) {
+                    const name = (m[1] + m[3]).replace(/^(と|や|あと)/, '').trim();
+                    const hintRaw = hints[Number(m[2])] || '';
+                    const hint = (hintRaw.match(/^(.+?)の(.+)$/) || [])[1] || hintRaw;
+                    if (name) tokens.push({ raw: `${name}（${hintRaw}）`, name, hint: String(hint).trim() });
+                    continue;
+                }
+                const plain = piece.replace(/@@h\d+h@@/g, '').replace(/^(と|や|あと|および|ならびに|プラス)/, '').trim();
+                if (!plain || RCP_STOPWORDS.has(plain)) continue;
+                const wh = plain.match(/^(.{1,12}?)の(.{1,12})$/);
+                if (wh) { tokens.push({ raw: plain, name: wh[2], hint: wh[1] }); continue; }
+                tokens.push({ raw: plain, name: plain, hint: '' });
+            }
+            return { intent, tokens };
+        };
+        const RCP_REGIONS = ['北海道','東北','関東','中部','近畿','中国','四国','九州','沖縄','海外'];
+        const rcpResolveToken = (token, idx) => {
+            const key = rcpKey(token.name); if (!key) return null;
+            const hintKey = rcpKey(token.hint);
+            const byHint = (p) => !hintKey || rcpKey(p.shop).includes(hintKey) || rcpKey(p.name).includes(hintKey);
+            const exact = idx.people.filter(p => rcpKey(p.name) === key && byHint(p));
+            if (exact.length === 1) return { kind: 'staff', people: exact, label: exact[0].name };
+            if (exact.length > 1) return { kind: 'ambiguous', people: exact, label: token.name };
+            const shopHit = idx.shopNames.filter(n => rcpKey(n).includes(key));
+            if (shopHit.length) return { kind: 'shop', shops: shopHit,
+                people: idx.people.filter(p => shopHit.some(n => rcpKey(p.shop) === rcpKey(n))),
+                label: shopHit.length === 1 ? shopHit[0] : `${shopHit[0]} ほか${shopHit.length - 1}店` };
+            const prefName = Object.values(AUD_PREF_NAMES).find(n => rcpKey(n) === key || rcpKey(n).replace(/(都|府|県)$/, '') === key);
+            if (prefName) return { kind: 'area', label: prefName, people: idx.people.filter(p => audAreaOf(p.shop).pref === prefName) };
+            const region = RCP_REGIONS.find(r => rcpKey(r) === key);
+            if (region) return { kind: 'area', label: region, people: idx.people.filter(p => orgRegionOf(orgGeoRank(p.shop)) === region) };
+            const partial = idx.people.filter(p => rcpKey(p.name).includes(key) && byHint(p));
+            if (partial.length === 1) return { kind: 'staff', people: partial, label: partial[0].name };
+            if (partial.length > 1) return { kind: 'ambiguous', people: partial, label: token.name };
+            return null;
+        };
+        const rcpResolve = (text, ctx) => {
+            const { intent, tokens } = rcpParse(text);
+            const people0 = ((ctx || {}).staff || []).filter(p => p && String(p.id || ''));
+            const shopSet = new Set(((ctx || {}).shops || []).map(x => String((x && x.name) || x || '')).filter(Boolean));
+            for (const p of people0) if (p.shop) shopSet.add(String(p.shop));
+            const idx = { people: people0, shopNames: [...shopSet] };
+            const seen = new Map(), rooms = new Map(), groups = [], ambiguous = [], unknown = [];
+            const expand = (t) => {
+                const r = rcpResolveToken(t, idx); if (r) return [{ token: t, res: r }];
+                const trimmed = t.name.replace(/(の|に|へ|を|は|も|が)$/, '');
+                if (trimmed && trimmed !== t.name) {
+                    const sub = { raw: trimmed, name: trimmed, hint: t.hint };
+                    const r2 = rcpResolveToken(sub, idx); if (r2) return [{ token: sub, res: r2 }];
+                }
+                const parts = rcpSplitSoft(t.name);
+                if (!parts.length || (parts.length === 1 && parts[0] === t.name)) return [{ token: t, res: null }];
+                return parts.map(name => { const sub = { raw: name, name, hint: t.hint }; return { token: sub, res: rcpResolveToken(sub, idx) }; });
+            };
+            for (const t of tokens) for (const { token, res } of expand(t)) {
+                if (!res) { unknown.push(token.raw); continue; }
+                if (res.kind === 'ambiguous') { ambiguous.push({ token: token.raw, candidates: res.people }); continue; }
+                if (!res.people.length) { unknown.push(token.raw); continue; }
+                for (const p of res.people) if (!seen.has(String(p.id))) seen.set(String(p.id), p);
+                const shopNames = res.kind === 'shop' ? (res.shops || [])
+                    : (res.kind === 'area' ? [...new Set(res.people.map(p => String(p.shop)).filter(Boolean))] : []);
+                for (const name of shopNames) { const id = `store_${name}`; if (!rooms.has(id)) rooms.set(id, { id, name, kind: 'store' }); }
+                groups.push({ token: token.raw, kind: res.kind, label: res.label, count: res.people.length, shops: shopNames, people: res.people });
+            }
+            return { intent, people: [...seen.values()], rooms: [...rooms.values()], groups, ambiguous, unknown, total: seen.size };
+        };
         const ORG_REGION_RANK = { '北海道':1,'東北':2,'関東':8,'中部':15,'近畿':24,'中国':31,'四国':36,'九州':40,'沖縄':47,'その他':950,'海外':1000 };
         const ORG_REGION_EMOJI = { '北海道':'🗻','東北':'🍎','関東':'🗼','中部':'🗻','近畿':'🏯','中国':'⛩️','四国':'🌉','九州':'🌋','沖縄':'🏝️','海外':'🌏','その他':'📍' };
 
-        // 掲示板: 動画URL → 埋め込み情報（lib/board.js と同仕様のフロント版）
+        // ニュース: 動画URL → 埋め込み情報（lib/board.js と同仕様のフロント版）
         const boardVideoEmbed = (url) => {
             const u = String(url || '').trim(); if (!u) return null; let m;
             if ((m = u.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/))) return { kind: 'youtube', embedUrl: `https://www.youtube.com/embed/${m[1]}` };
@@ -854,7 +1174,7 @@
             if (/\.(mp4|webm|ogg|mov|m4v)(\?.*)?$/i.test(u)) return { kind: 'file', src: u };
             return { kind: 'link', src: u };
         };
-        // 掲示板: 添付ファイルのダウンロードチップ（クリックで取得→保存）
+        // ニュース: 添付ファイルのダウンロードチップ（クリックで取得→保存）
         const BoardFile = ({ file }) => {
             const [busy, setBusy] = React.useState(false);
             const dl = async () => {
@@ -883,7 +1203,7 @@
             String(a.readMembers) === String(b.readMembers) &&
             JSON.stringify(a.roomReads) === JSON.stringify(b.roomReads)
         );
-        const ChatMessageList = React.memo(({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, onReply, stamps, onImageClick, readMembers, roomReads, resolveName, resolveShop, roomId, onSaveMedia, resolveAvatar, onOpenProfile, onForward, onPin, onCaptureRange, pinnedId, onOpenVideo, onAddFaq }) => {
+        const ChatMessageList = React.memo(({ msgs, myId, openReadTs, staffName, isRoot, onReact, onDelete, onReply, stamps, onImageClick, readMembers, roomReads, resolveName, resolveShop, roomId, onSaveMedia, resolveAvatar, onOpenProfile, onForward, onPin, onCaptureRange, pinnedId, onOpenVideo, onAddFaq, onRemindUnread }) => {
             // ルーム内の全画像ID（アルバム/ライトボックスのスライド用）と各IDの位置
             const allImgIds = []; (msgs || []).forEach(m => (m.imgIds || []).forEach(id => allImgIds.push(id)));
             const imgIndexOf = (id) => allImgIds.indexOf(id);
@@ -1056,6 +1376,12 @@
                                             <button onClick={() => { onForward && onForward(m); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-[3px] rounded-lg text-[13px] font-medium leading-tight text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 17 20 12 15 7" /><path d="M4 18v-2a4 4 0 0 1 4-4h12" /></svg>転送</button>
                                             <button onClick={() => { onPin && onPin(m); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-[3px] rounded-lg text-[13px] font-medium leading-tight text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></svg>{pinnedId === m.id ? 'アナウンス解除' : 'アナウンス（上部に固定）'}</button>
                                             <button onClick={() => { startCapture(m.id); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-[3px] rounded-lg text-[13px] font-medium leading-tight text-[#344054] hover:bg-[#F8F9FB]"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2" /></svg>キャプチャ（範囲を選んで保存）</button>
+                                            {/* まだ既読がついていない人にだけ、同じ内容をもう一度届ける（@メンション＝通知が飛ぶ） */}
+                                            {mine && onRemindUnread && Array.isArray(readMembers) && readMembers.length > 1 && (() => {
+                                                const un = readMembers.filter(id => String(id) !== String(m.fromStaffId) && ((roomReads || {})[String(id)] || 0) < t);
+                                                if (!un.length) return null;
+                                                return <button data-remind-unread onClick={() => { onRemindUnread(m, un); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-[3px] rounded-lg text-[13px] font-medium leading-tight text-amber-700 hover:bg-amber-50"><span className="text-[15px] leading-none">🔁</span>未読の{un.length}名にもう一度送る</button>;
+                                            })()}
                                             {isRoot && m.text && onAddFaq && <button onClick={() => { onAddFaq(m); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-[3px] rounded-lg text-[13px] font-medium leading-tight text-indigo-600 hover:bg-indigo-50"><span className="text-[15px] leading-none">{m.fromStaffId === '__ai__' ? '✏️' : '🤖'}</span>{m.fromStaffId === '__ai__' ? '訂正して学習（FAQに登録）' : 'この回答をFAQに追加'}</button>}
                                             {(mine || isRoot) && <button onClick={() => { onDelete(m.id); setMenuFor(null); }} className="w-full flex items-center gap-2.5 px-3 py-[3px] rounded-lg text-[13px] font-medium leading-tight text-rose-600 hover:bg-rose-50 border-t border-[#F2F4F7] mt-0.5 pt-1.5"><Trash2 size={15} />{mine ? '送信を取り消す' : '削除'}</button>}
                                         </div>
@@ -1177,7 +1503,7 @@
             );
         };
 
-        // お知らせハブのコメント入力（@メンション補完・返信対応）。トップレベル定義で状態消失を防ぐ。
+        // ニュースのコメント入力（@メンション補完・返信対応）。トップレベル定義で状態消失を防ぐ。
         const BoardCommentBox = ({ users, replyTo, onCancelReply, onSubmit, placeholder }) => {
             const [draft, setDraft] = React.useState('');
             const [mention, setMention] = React.useState(null);
@@ -2212,7 +2538,7 @@
                 if (!authState.authenticated) return;
                 if (!authState.root && currentPage === 'settings') setCurrentPage('salonone');
                 if (authRole === 'staff' && currentPage === 'settlement') setCurrentPage('salonone');
-                // コミュニケーション4機能（チャット/お知らせ/勉強会/組織図）は当面 本部(hq)・管理者(root) のみ。
+                // コミュニケーション4機能（チャット/ニュース/勉強会/組織図）は当面 本部(hq)・管理者(root) のみ。
                 if (!authState.root && ['chat', 'board', 'events', 'org'].includes(currentPage)) setCurrentPage('salonone');
             }, [authState.authenticated, authState.root, authRole, currentPage]);
             const [rawData, setRawData] = useState(() => {
@@ -2369,6 +2695,7 @@
             const [acqSort, setAcqSort] = useState('new');    // 新規顧客一覧の並び順（'new'=新しい順 / 'old'=古い順）
             const [acqLinkFilter, setAcqLinkFilter] = useState(''); // 新規顧客一覧: 施策リンクのフィルタ（''=全て / '__none__'=リンクなし / それ以外=リンク名）
             const [acqLinkSort, setAcqLinkSort] = useState(null);   // 新規顧客一覧: 施策リンクの並び（null=受付日順のまま / 'asc' / 'desc'）
+            const [acqReservedSort, setAcqReservedSort] = useState(null); // 新規顧客一覧: 初回来店予定(reserved_at)の並び（null / 'asc' / 'desc'）
             const [acqPivotMetric, setAcqPivotMetric] = useState('booking'); // 媒体×店舗ピボットの指標（booking=新規予約/visit=来店/join=入会）
             const [acqMediaSel, setAcqMediaSel] = useState('');  // マーケ: 媒体フィルタ（''=全媒体 / visit_source_name）
             const [acqMediaSort, setAcqMediaSort] = useState({ key: 'booking', dir: 'desc' }); // 媒体別コホートの並び替え
@@ -2510,6 +2837,7 @@
                 const rid = aiTrial.roomId || (targets.rooms[0] && targets.rooms[0].id) || ((cfg && cfg.trialRooms[0]) || '');
                 const allowedDocIds = targets.docs.map(d => d.id);
                 setAiTrial(p => ({ ...p, cfg, targets, choices: j.choices || { rooms: [], docs: [] },
+                    choicesEmptyReason: Array.isArray(j.choicesEmptyReason) ? j.choicesEmptyReason : [],
                     roomId: p.roomId || rid, picked: { roomId: rid, hintDocIds: allowedDocIds } }));
                 // 設定を読んだら、そのルームの保存済み質問・回答も読み直す
                 // （再読み込み後に画面が空にならないように）
@@ -2759,7 +3087,9 @@
             // ナレッジ資料の保存/削除
             const knowSave = async () => {
                 const e = knowEdit; if (!e || !String(e.body || '').trim()) return;
-                const doc = { id: e.id || undefined, title: e.title || '', body: e.body, shopScope: e.shopScope || '', source: e.source || '', updatedBy: authState.staffName || authState.owner || '管理者' };
+                const doc = { id: e.id || undefined, title: e.title || '', body: e.body, shopScope: e.shopScope || '', source: e.source || '',
+                    autoSync: e.autoSync !== false, sync: e.sync, revisions: e.revisions,
+                    updatedBy: authState.staffName || authState.owner || '管理者' };
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'knowledge', action: e.id ? 'update' : 'add', doc }) }); } catch {}
                 setKnowEdit(null); await faqAdminLoad();
             };
@@ -2767,6 +3097,35 @@
                 if (!id || !window.confirm('この資料を削除しますか？')) return;
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'knowledge', action: 'delete', id }) }); } catch {}
                 await faqAdminLoad();
+            };
+            // 自動更新で変わった資料の「確認しました」（未確認の印を外す）
+            const knowMarkSeen = async (id) => {
+                try {
+                    await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() },
+                        body: JSON.stringify({ type: 'knowledge', action: 'reviewed', id }) });
+                } catch {}
+                await faqAdminLoad();
+            };
+            // いま取り直す（1日1回の自動更新を待たずに手で動かす）
+            const [knowSyncing, setKnowSyncing] = useState(false);
+            const [knowSyncMsg, setKnowSyncMsg] = useState('');
+            const knowSyncNow = async () => {
+                if (knowSyncing) return;
+                setKnowSyncing(true); setKnowSyncMsg('');
+                try {
+                    const r = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() },
+                        body: JSON.stringify({ type: 'knowledge', action: 'sync' }) });
+                    const j = await r.json().catch(() => null);
+                    if (!j || !j.ok) setKnowSyncMsg('取り直せませんでした');
+                    else if (j.reason) setKnowSyncMsg(j.reason);
+                    else {
+                        // 失敗があるときは理由まで出す（画面を見ただけで次に何をすればよいか分かるように）
+                        const why = j.failed ? (((j.summary && j.summary.failedReasons) || [])[0] || '') : '';
+                        setKnowSyncMsg(`${j.checked}件を確認し、${j.updated}件が新しくなりました`
+                            + (j.failed ? `（${j.failed}件は取得できず${why ? `：${why}` : ''}）` : ''));
+                    }
+                } catch { setKnowSyncMsg('取り直せませんでした'); }
+                finally { setKnowSyncing(false); await faqAdminLoad(); }
             };
             // 一括貼付インポート: 1行=「質問<TAB>回答[<TAB>店舗]」（Googleスプレッドシート/Excelからコピー）。カンマ区切りも可。
             const faqBulkImport = async () => {
@@ -3409,7 +3768,7 @@
                 const onKey = (e) => { const list = (chatLightbox.list || []); if (!list.length) return; if (e.key === 'ArrowRight') setChatLightbox(v => ({ ...v, i: ((v.i || 0) + 1) % list.length })); else if (e.key === 'ArrowLeft') setChatLightbox(v => ({ ...v, i: ((v.i || 0) - 1 + list.length) % list.length })); else if (e.key === 'Escape') setChatLightbox(null); };
                 window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
             }, [chatLightbox]);
-            // 本部(hq)は root権限だが、チャット/掲示板の表示は「管理者」ではなく本人名で行う（＝個人アカウント）。
+            // 本部(hq)は root権限だが、チャット/ニュースの表示は「管理者」ではなく本人名で行う（＝個人アカウント）。
             const authIsHq = isHqRole(authState.role);
             const chatMyId = (authState.root && !authIsHq) ? '__root__' : String(authState.staffId || authState.owner || '');
             const [orgHq, setOrgHq] = useState([]); // 本部メンバー [{owner, name, staffId}]（accountmetaのrole==='hq'）。名前解決にも使う
@@ -3467,6 +3826,11 @@
                     ((chatData.dir && chatData.dir.staff) || []).forEach(s => add(s.id, s.name));
                 }
                 if (room.kind !== 'dm') out.unshift({ id: '__all__', name: '全員' });
+                // 🤖 AI を候補の先頭へ。**挿入されるのは `@AI`** で、これは
+                // 既存の起動条件 /[@＠]\s*ai\b/i と同じ。動きは「AIに質問」ボタンと同一で、
+                // 出せる範囲が広がるわけではない（同じ経路・同じ資料）。
+                out.unshift({ id: '__ai__', name: 'AI', label: '🤖 AI（NAORUアシスタント）',
+                    hint: 'この内容をAIに質問' });
                 return out;
             };
             const CHAT_STAMPS = ['👍', '🎉', '🔥', '❤️‍🔥', '❤️', '☺️', '😊', '🥺', '😭', '😂', '🤩', '👏', '✨', '🙌', '💪', '🙇‍♂️'];
@@ -3623,6 +3987,141 @@
                     setChatData(d => ({ ...d, messages: { ...d.messages, [roomId]: (d.messages[roomId] || []).filter(x => x.id !== tmpId) } }));
                     setChatDraft(prev => prev ? prev : t);
                 } finally { chatSendingRef.current = false; setChatSending(false); }
+            };
+
+            // ── テキストで宛先を指定して送る ──────────────────────────────
+            // 「鶴見院と関内院のグループに送って」「山田、藤川のそれぞれに」「その人たちのグループを作って」
+            // ⚠️ 送る前に必ず宛先を画面へ出す。曖昧・未一致が残っているあいだは送信させない。
+            // 宛先候補（dirStaff と同じ顔ぶれ。あちらはチャット画面の中でしか使えないため、
+            // ここでも同じ作り方で用意する。自分自身とAI・システムIDは入れない）
+            const rcpStaff = React.useMemo(() => {
+                const map = new Map();
+                const add = (id, name, shop) => {
+                    id = String(id || '');
+                    if (!id || id === chatMyId || id === '__root__' || id === '__ai__' || !name) return;
+                    if (!map.has(id)) map.set(id, { id, name: String(name), shop: shop || '' });
+                };
+                ((chatData.dir && chatData.dir.staff) || []).forEach(s => add(s.id, s.name, s.shop));
+                (soStaffs || []).forEach(s => {
+                    if (s.deleted) return;
+                    const sh = (soShopsRaw || []).find(x => String(x.id) === String(s.shop_id));
+                    add(s.id, s.name, sh ? sh.name : '');
+                });
+                (orgHq || []).forEach(m => {
+                    const id = (m.staffId && /^\d+$/.test(m.staffId)) ? String(m.staffId) : String(m.owner);
+                    add(id, m.name || id, '本部');
+                });
+                return [...map.values()];
+            }, [chatData.dir, soStaffs, soShopsRaw, orgHq, chatMyId]);
+            const rcpShops = React.useMemo(() => (soShopsRaw || []).map(x => String(x.name || '')).filter(Boolean), [soShopsRaw]);
+
+            const [rcpOpen, setRcpOpen] = useState(false);
+            const [rcpTo, setRcpTo] = useState('');           // 宛先の文章
+            const [rcpBody, setRcpBody] = useState('');       // 本文（宛先とは必ず分ける）
+            const [rcpMode, setRcpMode] = useState('');       // '' = 文章から自動判定
+            const [rcpPicked, setRcpPicked] = useState({});   // 曖昧だったものを人が選んだ結果 {token: staffId}
+            const [rcpLast, setRcpLast] = useState([]);       // 直前の宛先（「その人たち」用）
+            const [rcpBusy, setRcpBusy] = useState(false);
+            const [rcpMsg, setRcpMsg] = useState('');
+
+            const rcpResult = React.useMemo(() => {
+                const base = rcpResolve(rcpTo, { staff: rcpStaff, shops: rcpShops });
+                // 曖昧だったものは、人が選んだぶんだけ宛先へ入れる
+                const picked = [], stillAmb = [];
+                for (const a of base.ambiguous) {
+                    const id = rcpPicked[a.token];
+                    const hit = id && a.candidates.find(c => String(c.id) === String(id));
+                    if (hit) picked.push(hit); else stillAmb.push(a);
+                }
+                const map = new Map(base.people.map(p => [String(p.id), p]));
+                for (const p of picked) map.set(String(p.id), p);
+                // 「その人たちのグループを作って」＝宛先が書かれていなければ直前の相手を引き継ぐ
+                let people = [...map.values()];
+                let inherited = false;
+                if (!people.length && !stillAmb.length && !base.unknown.length && (rcpLast || []).length) {
+                    people = rcpLast; inherited = true;
+                }
+                return { ...base, people, ambiguous: stillAmb, total: people.length, inherited };
+            }, [rcpTo, rcpPicked, rcpStaff, rcpShops, rcpLast]);
+
+            // 送り方: 画面の選択 > 文章からの判定 > 既定（店舗が出ていれば店舗グループ、なければ個別）
+            const rcpMode2 = rcpMode || rcpResult.intent
+                || (rcpResult.rooms.length ? 'store_rooms' : 'dm');
+            // 店舗ルームは**既にあるものだけ**に送る（部屋を勝手に増やさない）
+            const rcpRooms = React.useMemo(() => {
+                const have = new Map((chatData.rooms || []).filter(r => r && r.kind === 'store').map(r => [String(r.id), r]));
+                return (rcpResult.rooms || []).map(x => ({ ...x, exists: have.has(x.id) }));
+            }, [rcpResult, chatData.rooms]);
+            const rcpMissingRooms = rcpRooms.filter(r => !r.exists);
+            const rcpBlocked = rcpResult.ambiguous.length ? 'ambiguous'
+                : rcpResult.unknown.length ? 'unknown'
+                : (rcpMode2 === 'store_rooms' ? (rcpRooms.filter(r => r.exists).length ? '' : 'no_rooms')
+                                              : (rcpResult.people.length ? '' : 'no_recipients'));
+
+            const rcpSend = async () => {
+                const text = rcpBody.trim();
+                if (!text || rcpBlocked || rcpBusy) return;
+                const targets = rcpMode2 === 'store_rooms' ? rcpRooms.filter(r => r.exists) : rcpResult.people;
+                const label = rcpMode2 === 'store_rooms' ? `店舗グループ ${targets.length}件`
+                    : rcpMode2 === 'new_group' ? `新しいグループ（${targets.length}名）` : `${targets.length}名へ個別に`;
+                if (!window.confirm(`${label}に送ります。よろしいですか？\n\n宛先: ${targets.map(t => t.name).slice(0, 12).join('、')}${targets.length > 12 ? ` ほか${targets.length - 12}` : ''}`)) return;
+                setRcpBusy(true); setRcpMsg('');
+                const msg = { fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text, imgIds: [], media: [], mentions: [] };
+                let done = 0, failed = 0;
+                try {
+                    if (rcpMode2 === 'new_group') {
+                        const name = `${(rcpResult.groups.map(g => g.label)[0] || 'グループ')}${targets.length > 1 ? ` ほか（${targets.length}名）` : ''}`.slice(0, 60);
+                        const r = await chatPost({ action: 'createRoom', room: { kind: 'group', name,
+                            members: [...new Set([chatMyId, ...targets.map(p => String(p.id))])], createdBy: chatMyId } });
+                        const j = await r.json().catch(() => ({}));
+                        if (j && j.ok && j.room) { await chatPost({ action: 'send', roomId: j.room.id, msg }); done = 1; setChatRoomId(j.room.id); }
+                        else failed = 1;
+                    } else if (rcpMode2 === 'store_rooms') {
+                        for (const room of targets) {
+                            try { await chatPost({ action: 'send', roomId: room.id, msg }); done++; } catch { failed++; }
+                        }
+                    } else {
+                        for (const p of targets) {
+                            const other = String(p.id);
+                            try {
+                                let room = (chatData.rooms || []).find(r => r.kind === 'dm' && (r.members || []).map(String).sort().join(',') === [chatMyId, other].sort().join(','));
+                                if (!room) {
+                                    const r = await chatPost({ action: 'createRoom', room: { kind: 'dm', name: '', members: [chatMyId, other], createdBy: chatMyId } });
+                                    const j = await r.json().catch(() => ({}));
+                                    room = j && j.room;
+                                }
+                                if (room) { await chatPost({ action: 'send', roomId: room.id, msg }); done++; } else failed++;
+                            } catch { failed++; }
+                        }
+                    }
+                    setRcpLast(rcpResult.people);           // 「その人たちのグループを作って」に引き継ぐ
+                    setRcpMsg(`${done}件に送りました${failed ? `（${failed}件は失敗）` : ''}`);
+                    if (!failed) { setRcpBody(''); }
+                    await chatLoad();
+                } catch { setRcpMsg('送れませんでした'); }
+                finally { setRcpBusy(false); }
+            };
+
+            // ── まだ既読がついていない人にもう一度送る ──────────────────────
+            // 同じルームに、未読の人だけを@メンションして同じ内容を流し直す。
+            // 新しいルームは作らない（会話が散らばらない・@なので「メンションのみ通知」の人にも届く）。
+            const chatRemindUnread = async (m, unreadIds) => {
+                const ids = [...new Set((unreadIds || []).map(String))].filter(Boolean);
+                if (!m || !ids.length || chatSendingRef.current) return;
+                const names = ids.map(id => chatResolveName(id, '') || 'スタッフ');
+                const shown = names.slice(0, 5).join('、') + (ids.length > 5 ? ` ほか${ids.length - 5}名` : '');
+                if (!window.confirm(`まだ読めていない ${ids.length}名（${shown}）に、もう一度送ります。よろしいですか？`)) return;
+                const roomId = chatRoomId;
+                const mentions = ids.map((id, i) => ({ id, name: names[i] }));
+                const orig = String(m.text || '').slice(0, 1200);
+                const head = `🔁 まだ読めていない方へ再送します\n${mentions.map(x => '@' + x.name).join(' ')}`;
+                const text = orig ? `${head}\n\n${orig}` : head;
+                chatSendingRef.current = true; setChatSending(true);
+                try {
+                    await chatPost({ action: 'send', roomId, msg: { fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop,
+                        text, imgIds: [], media: [], mentions, replyTo: { id: m.id, name: chatMyName, text: orig.slice(0, 140) } } });
+                    await chatLoad();
+                } catch {} finally { chatSendingRef.current = false; setChatSending(false); }
             };
 
             // ── @AI（NAORUアシスタント）: 店舗データ(SalonOne)＋社内FAQに基づき、グループ/店舗チャットで自動返信 ──
@@ -4202,7 +4701,7 @@
             const [chatMemberQ, setChatMemberQ] = useState('');   // メンバー招待の検索
             const [chatRenameVal, setChatRenameVal] = useState(null); // 名前編集中の値（nullで非編集）
 
-            // ── 掲示板（全社発信） ────────────────────────────────────────
+            // ── ニュース（全社発信） ────────────────────────────────────────
             const [boardData, setBoardData] = useState({ posts: [], reads: {}, version: 0, configured: true, loaded: false });
             const boardVersionRef = useRef(0);   // 最後に読み込んだ版（古いデータでの上書きを検出するため送る）
             const [boardText, setBoardText] = useState('');
@@ -4210,10 +4709,19 @@
             const [boardFiles, setBoardFiles] = useState([]);    // [{id,name,type,size}]
             const [boardVideo, setBoardVideo] = useState('');
             const [boardPosting, setBoardPosting] = useState(false);
-            const [boardFilter, setBoardFilter] = useState('all'); // all | hq | staff | important
+            const [boardFilter, setBoardFilter] = useState('all'); // all | unread | featured | hq | staff | important
+            const [boardCatFilter, setBoardCatFilter] = useState('');  // カテゴリーで絞る（'' = 絞らない）
             const [boardTitle, setBoardTitle] = useState('');
             const [boardLink, setBoardLink] = useState('');
             const [boardImportant, setBoardImportant] = useState(false);
+            // ニュースの項目（カテゴリー／公開対象／確認要否／期限／ピックアップ／表紙）
+            const [boardCat, setBoardCat] = useState('');
+            const [boardAudKind, setBoardAudKind] = useState('all');
+            const [boardAudShops, setBoardAudShops] = useState([]);
+            const [boardNeedsAck, setBoardNeedsAck] = useState(false);
+            const [boardDue, setBoardDue] = useState('');
+            const [boardFeatured, setBoardFeatured] = useState(false);
+            const [boardCover, setBoardCover] = useState('');
             const [boardSort, setBoardSort] = useState('new');    // new | old
             const [boardView, setBoardView] = useState('list');   // list | grid
             const [boardMenuId, setBoardMenuId] = useState('');   // 「…」メニュー展開中の投稿id
@@ -4221,7 +4729,7 @@
             const [boardStatusId, setBoardStatusId] = useState(''); // リアクション状況モーダルの投稿id
             const [boardOpenId, setBoardOpenId] = useState('');     // 全画面表示中の投稿id（もっと見る）
             const [boardComposerOpen, setBoardComposerOpen] = useState(false); // 投稿作成モーダル（既定は閉＝一覧がメイン）
-            const [boardSearch, setBoardSearch] = useState(''); // お知らせのキーワード検索
+            const [boardSearch, setBoardSearch] = useState(''); // ニュースのキーワード検索
             const [boardDrag, setBoardDrag] = useState(false);    // ドラッグ&ドロップ中ハイライト
             const BOARD_STAMPS = ['👍', '🙏', '🎉', '🔥', '💛', '👏', '✅', '😊'];
             const [boardBm, setBoardBm] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_board_bm') || '[]') || []; } catch { return []; } });
@@ -4231,7 +4739,7 @@
             const boardLastSeen = Math.max(((boardData.reads || {})[chatMyId]) || 0, boardSeenLocal || 0);
             const boardIsUnread = (p) => (Date.parse(p.createdAt || '') || 0) > boardLastSeen && String(p.authorId) !== chatMyId;
             const boardUnreadTotal = useMemo(() => (boardData.posts || []).reduce((n, p) => boardIsUnread(p) ? n + 1 : n, 0), [boardData, boardLastSeen, chatMyId]);
-            // ── アプリアイコンのバッジ（未読の赤丸＋数字）: チャット＋お知らせハブの合計。 ──
+            // ── アプリアイコンのバッジ（未読の赤丸＋数字）: チャット＋ニュースの合計。 ──
             // PWA(ホーム画面に追加)でiOS16.4+/Android/デスクトップに表示。SWにも同期し、閉じている間の
             // プッシュ受信でインクリメントされる基準値を最新化する。
             useEffect(() => {
@@ -4263,7 +4771,7 @@
                     setBoardData({ posts: Array.isArray(j.posts) ? j.posts : [], reads: (j.reads && typeof j.reads === 'object') ? j.reads : {}, version: boardVersionRef.current, configured: j.configured !== false, loaded: true });
                 } catch { setBoardData(d => ({ ...d, loaded: true })); }
             };
-            // 掲示板の更新系はこれを通す。
+            // ニュースの更新系はこれを通す。
             //  ・見ていた版(expectedVersion)を送り、他の人が先に更新していたらサーバーが 409 を返す
             //  ・409 のときは最新を読み直して**1回だけ**やり直す（利用者の操作は変わらない）
             //  ・clientId を付けるので、再送されても二重に登録されない
@@ -4288,6 +4796,42 @@
             };
             const boardMarkAllRead = () => boardSetSeen(Date.now());
             const boardMarkReadUpTo = (p) => { const t = Date.parse(p.createdAt || '') || 0; if (t > boardLastSeen) boardSetSeen(t); };
+            // ── 記事ごとの既読・「確認しました」 ──────────────────────────
+            // ⚠️ 記事を**開いて表示できたとき**だけ既読を送る。一覧を開いただけで全件既読にしない。
+            //    既存の未読バッジ（最後に見た時刻）とは別のデータ。
+            const boardReadSent = useRef(new Set());
+            const boardMarkPostRead = (postId) => {
+                const id = String(postId || ''); if (!id || !chatMyId) return;
+                if (boardReadSent.current.has(id)) return;        // 同じ記事で何度も送らない
+                boardReadSent.current.add(id);
+                fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() },
+                    body: JSON.stringify({ type: 'board', action: 'readpost', id, staffId: chatMyId }) }).catch(() => {});
+            };
+            // 状況一覧（サーバーから取得）。氏名の一覧はサーバー側でも権限を確かめている。
+            const [boardStatus, setBoardStatus] = useState({ loading: false, error: '', counts: null, people: null, total: 0, detail: false, note: '', outOfAudience: 0 });
+            const boardLoadStatus = async (postId, audience) => {
+                const id = String(postId || ''); if (!id) return;
+                setBoardStatus({ loading: true, error: '', counts: null, people: null, total: 0, detail: false, note: '', outOfAudience: 0 });
+                try {
+                    const r = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() },
+                        body: JSON.stringify({ type: 'board', action: 'status', id, audience: (audience || []).map(a => ({ id: a.id, name: a.name, shop: a.shop })) }) });
+                    const j = await r.json().catch(() => null);
+                    if (!j || !j.ok) { setBoardStatus(x => ({ ...x, loading: false, error: (j && j.error) || `HTTP ${r.status}` })); return; }
+                    setBoardStatus({ loading: false, error: '', counts: j.counts, people: j.people || null, total: j.total || 0,
+                        detail: !!j.detail, note: j.note || '', outOfAudience: j.outOfAudience || 0 });
+                } catch (e) { setBoardStatus(x => ({ ...x, loading: false, error: '通信できませんでした' })); }
+            };
+            const [boardAckBusy, setBoardAckBusy] = useState('');
+            const [boardAcked, setBoardAcked] = useState({});     // {postId: true}（押した直後の表示用）
+            const boardAck = async (postId) => {
+                const id = String(postId || ''); if (!id || !chatMyId || boardAckBusy) return;
+                setBoardAckBusy(id);
+                try {
+                    await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() },
+                        body: JSON.stringify({ type: 'board', action: 'ack', id, staffId: chatMyId }) });
+                    setBoardAcked(x => ({ ...x, [id]: true }));
+                } catch {} finally { setBoardAckBusy(''); }
+            };
             const boardUploadImage = (file) => chatUploadImageTo('board', file);
             const boardUploadFile = (file) => new Promise((resolve) => {
                 if (!file) return resolve(null);
@@ -4306,11 +4850,16 @@
             const boardPost = async () => {
                 const t = boardText.trim(); const ti = boardTitle.trim();
                 if (!t && !ti && boardImgs.length === 0 && boardFiles.length === 0 && !boardVideo.trim() && !boardLink.trim()) return;
+                // ⚠️ 曖昧な宛先・期限のまま出さない
+                if (boardAudKind === 'shops' && !boardAudShops.length) return;
+                if (boardNeedsAck && !/^\d{4}-\d{2}-\d{2}$/.test(boardDue)) return;
                 setBoardPosting(true);
                 try {
                     // clientId は1回の送信で固定。再送・409リトライでも同じ値を使うため二重投稿にならない。
-                    await boardMutate({ action: 'post', post: { clientId: boardClientId(), authorId: chatMyId, authorName: chatMyName, authorShop: chatMyShop, authorRoot: chatIsRoot, title: ti, important: boardImportant, text: t, link: boardLink.trim(), imgIds: boardImgs.map(i => i.id), files: boardFiles, videoUrl: boardVideo.trim() } });
+                    await boardMutate({ action: 'post', post: { clientId: boardClientId(), authorId: chatMyId, authorName: chatMyName, authorShop: chatMyShop, authorRoot: chatIsRoot, title: ti, important: boardImportant, text: t, link: boardLink.trim(), imgIds: boardImgs.map(i => i.id), files: boardFiles, videoUrl: boardVideo.trim(),
+                        category: boardCat, audience: { kind: boardAudKind, shops: boardAudShops }, needsAck: boardNeedsAck, dueDate: boardDue, featured: boardFeatured, coverImgId: boardCover } });
                     setBoardText(''); setBoardTitle(''); setBoardLink(''); setBoardImportant(false); setBoardImgs([]); setBoardFiles([]); setBoardVideo('');
+                    setBoardCat(''); setBoardAudKind('all'); setBoardAudShops([]); setBoardNeedsAck(false); setBoardDue(''); setBoardFeatured(false); setBoardCover('');
                     setBoardComposerOpen(false);
                     await boardLoad();
                 } catch {} finally { setBoardPosting(false); }
@@ -4333,7 +4882,7 @@
                 setBoardData(d => ({ ...d, posts: (d.posts || []).map(p => { if (!p || p.id !== id) return p; return { ...p, reactions: reactToggleOne(p.reactions, emoji, chatMyId) }; }), reads: { ...(d.reads || {}), [chatMyId]: Math.max((d.reads || {})[chatMyId] || 0, Date.now()) } }));
                 try { await boardMutate({ action: 'react', id, emoji, staffId: chatMyId }); await boardLoad(); } catch {}
             };
-            // ── お知らせハブ: コメント（返信・メンション対応） ──
+            // ── ニュース: コメント（返信・メンション対応） ──
             const [boardReplyTo, setBoardReplyTo] = useState({});   // {postId:{id,name}} 返信先コメント
             const [boardActOpen, setBoardActOpen] = useState(false); // 更新（アクティビティ）パネル
             const [boardActSeen, setBoardActSeen] = useState(() => { try { return Number(localStorage.getItem('naoru_board_act_seen')) || 0; } catch { return 0; } });
@@ -4353,7 +4902,7 @@
                 const items = [];
                 (boardData.posts || []).forEach(p => {
                     items.push({ ts: Date.parse(p.createdAt || '') || 0, kind: 'post', postId: p.id, by: p.authorId, title: p.title || p.text || '（無題）', important: !!p.important });
-                    (Array.isArray(p.comments) ? p.comments : []).forEach(c => items.push({ ts: Date.parse(c.createdAt || '') || 0, kind: 'comment', postId: p.id, by: c.fromStaffId, name: c.fromName, title: p.title || 'お知らせ', text: c.text }));
+                    (Array.isArray(p.comments) ? p.comments : []).forEach(c => items.push({ ts: Date.parse(c.createdAt || '') || 0, kind: 'comment', postId: p.id, by: c.fromStaffId, name: c.fromName, title: p.title || 'ニュース', text: c.text }));
                 });
                 return items.sort((a, b) => b.ts - a.ts).slice(0, 60);
             }, [boardData]);
@@ -4375,7 +4924,7 @@
                     return { enabled: !!j.enabled, publicKey: j.publicKey || '' };   // 最新値を返す（stateは非同期のため呼び出し側で使う）
                 } catch { return { enabled: false, publicKey: '' }; }
             };
-            // 通知の種類（掲示板ON/OFF・チャット all/mention/off）を保存
+            // 通知の種類（ニュースON/OFF・チャット all/mention/off）を保存
             const pushSetPrefs = async (next) => {
                 setPushState(s => ({ ...s, prefs: next }));   // 楽観更新
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'push', action: 'setPrefs', staffId: chatMyId, prefs: next }) }); } catch {}
@@ -4429,7 +4978,7 @@
             //   タブ単位の安定ID（共有rootログインでも複数人を別アイコンで区別）。表示名は本人・page=今見ているタブ。
             const presenceIdRef = useRef('');
             if (!presenceIdRef.current) { try { let t = sessionStorage.getItem('naoru_presence_tab'); if (!t) { t = Math.random().toString(36).slice(2, 10); sessionStorage.setItem('naoru_presence_tab', t); } presenceIdRef.current = `${String(authState.staffId || authState.owner || (authState.root ? 'root' : 'anon'))}__${t}`; } catch { presenceIdRef.current = `anon__${Math.random().toString(36).slice(2, 10)}`; } }
-            const presencePageLabel = (id) => ({ dashboard: 'ダッシュボード', charts: 'グラフ', finance: '財務', zenkanri: '全体管理シート', salonone: 'SalonOne売上', mktg: 'マーケティング', marketing: 'マーケティング', square: 'サブスク分析', cohort: 'コホートLTV', planning: '事業計画', allowance: '手当・領収書', settlement: '返金明細書', thanksgift: 'サンクスギフト', chat: 'チャット', board: 'お知らせ', events: '勉強会・イベント', org: '組織図', askai: 'AIに質問', patrol: 'AIパトロール', meo: 'MEO対策', faqadmin: 'FAQ管理', customers: '顧客', settings: '設定' }[id] || '');
+            const presencePageLabel = (id) => ({ dashboard: 'ダッシュボード', charts: 'グラフ', finance: '財務', zenkanri: '全体管理シート', salonone: 'SalonOne売上', mktg: 'マーケティング', marketing: 'マーケティング', square: 'サブスク分析', cohort: 'コホートLTV', planning: '事業計画', allowance: '手当・領収書', settlement: '返金明細書', thanksgift: 'サンクスギフト', chat: 'チャット', board: 'ニュース', events: '勉強会・イベント', org: '組織図', askai: 'AIに質問', patrol: 'AIパトロール', meo: 'MEO対策', faqadmin: 'FAQ管理', customers: '顧客', settings: '設定' }[id] || '');
             const presenceRole = authIsHq ? 'hq' : authState.root ? 'root' : (authRole || '');
             // ハートビート: 30秒ごと＋タブ切替時に送信。離脱時は sendBeacon で即削除。
             useEffect(() => {
@@ -4528,11 +5077,11 @@
             // 組織図から非表示/再表示（root専用）。楽観更新→サーバー反映。
             const orgHide = async (id) => {
                 setProfileData(d => ({ ...d, hidden: [...new Set([...(d.hidden || []), String(id)])] }));
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'hide', id: String(id), root: !!authState.root }) }); await profileLoad(); } catch {}
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() }, body: JSON.stringify({ type: 'profile', action: 'hide', id: String(id) }) }); await profileLoad(); } catch {}
             };
             const orgUnhide = async (id) => {
                 setProfileData(d => ({ ...d, hidden: (d.hidden || []).filter(x => x !== String(id)) }));
-                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'unhide', id: String(id), root: !!authState.root }) }); await profileLoad(); } catch {}
+                try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() }, body: JSON.stringify({ type: 'profile', action: 'unhide', id: String(id) }) }); await profileLoad(); } catch {}
             };
             const profileUploadImage = (file) => chatUploadImageTo('profile', file);
             // ── プロフィール写真トリミング（正方形・ドラッグで移動＋ピンチ/スライダーで拡大／iOSのCropと同じ操作感） ──
@@ -4613,7 +5162,8 @@
             };
             const profileSave = async (pid, profile) => {
                 setProfileSaving(true);
-                try { const r = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'save', pid, profile, staffId: myPid, root: !!authState.root }) }); const j = await r.json().catch(() => ({})); await profileLoad(); return j; }
+                // ⚠️ 認証ヘッダを必ず付ける。サーバーは body.root ではなく**確かめた本人**で権限を判定する。
+                try { const r = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() }, body: JSON.stringify({ type: 'profile', action: 'save', pid, profile, staffId: myPid }) }); const j = await r.json().catch(() => ({})); await profileLoad(); return j; }
                 catch { return { ok: false }; } finally { setProfileSaving(false); }
             };
             const [orgProgress, setOrgProgress] = useState({ month: '', done: 0, total: 0, loading: false });
@@ -4863,7 +5413,7 @@
                 if (ST_NON_THERAPIST.has(n)) return true;
                 return /^ヘルプ/.test(n) || /^受付/.test(n) || /オーナー/.test(n) || /^楽トレ/.test(n);
             };
-            // お知らせの対象者（＝閲覧想定メンバー）: 全店スタッフ（施術者以外/退職除外）。未リアクション者の母集団に使う。
+            // ニュースの対象者（＝閲覧想定メンバー）: 全店スタッフ（施術者以外/退職除外）。未リアクション者の母集団に使う。
             // ※ isNonTherapistName / ST_NON_THERAPIST 定義後に置く（useMemoは描画時に同期実行されるためTDZ回避）。
             const boardAudience = useMemo(() => {
                 const seen = new Set(); const out = [];
@@ -5097,14 +5647,14 @@
                 const iv = setInterval(chatLoad, currentPage === 'chat' ? 6000 : 25000);
                 return () => clearInterval(iv);
             }, [authState.authenticated, currentPage]);
-            // 掲示板: 認証後に定期ポーリング（未読バッジ更新）。※開いただけでは既読にしない（未読は読むまで残す）。
+            // ニュース: 認証後に定期ポーリング（未読バッジ更新）。※開いただけでは既読にしない（未読は読むまで残す）。
             useEffect(() => {
                 if (!authState.authenticated) return;
                 boardLoad();
                 const iv = setInterval(boardLoad, currentPage === 'board' ? 8000 : 30000);
                 return () => clearInterval(iv);
             }, [authState.authenticated, currentPage]);
-            // 掲示板を開いたら soStaffs（本名解決用）＋プロフィール（担当店舗解決用）を確保
+            // ニュースを開いたら soStaffs（本名解決用）＋プロフィール（担当店舗解決用）を確保
             useEffect(() => {
                 if (currentPage !== 'board') return;
                 profileLoad();
@@ -5137,6 +5687,32 @@
                 document.body.style.overflow = 'hidden';
                 return () => { document.body.style.overflow = prev; };
             }, [profileView, profileEdit, boardComposerOpen, boardStatusId, boardOpenId, chatNewRoom, chatPanel, mobileNavOpen, mobileAcctOpen, chatLightbox, chatAlbumOpen, chatNotesOpen]);
+            // ── ニュース・組織図のポップアップ: Escape で閉じ、フォーカスを元へ戻す ──
+            // ⚠️ 開く前にフォーカスがあった要素を覚えておき、閉じたらそこへ戻す。
+            //    キーボードだけで操作している人が、閉じたあとに迷子にならないようにする。
+            const nowlFocusRef = useRef(null);
+            useEffect(() => {
+                const open = profileEdit || profileView || boardComposerOpen || boardStatusId || boardOpenId;
+                if (!open) {
+                    // 閉じた: 覚えていた場所へフォーカスを戻す
+                    const el = nowlFocusRef.current; nowlFocusRef.current = null;
+                    if (el && typeof el.focus === 'function' && document.contains(el)) { try { el.focus({ preventScroll: true }); } catch {} }
+                    return;
+                }
+                if (!nowlFocusRef.current) nowlFocusRef.current = document.activeElement;
+                const onKey = (e) => {
+                    if (e.key !== 'Escape') return;
+                    e.stopPropagation();
+                    // 内側（記事の全画面・状況）から先に閉じる
+                    if (boardStatusId) { setBoardStatusId(''); return; }
+                    if (profileEdit) { setProfileEdit(null); return; }
+                    if (boardComposerOpen) { setBoardComposerOpen(false); return; }
+                    if (boardOpenId) { setBoardOpenId(''); return; }
+                    if (profileView) { setProfileView(null); return; }
+                };
+                window.addEventListener('keydown', onKey);
+                return () => window.removeEventListener('keydown', onKey);
+            }, [profileEdit, profileView, boardComposerOpen, boardStatusId, boardOpenId]);
             // 組織図: 「売上で絞る」がONのときだけ、選択月の店舗別スタッフ売上（by_staff）を集計取得。
             // 既定はOFF＝在籍ロスターを即表示（読み込みなし）。
             useEffect(() => {
@@ -5406,7 +5982,7 @@
             useEffect(() => {
                 if (((currentPage === 'settlement' && stAdminOpen) || currentPage === 'settings') && stAccounts === null) stLoadAccounts();
             }, [currentPage, stAdminOpen]);
-            // ログイン後＋チャット/組織図/掲示板/イベントを開いた時に本部メンバー（accountmetaのrole==='hq'）を読み込む
+            // ログイン後＋チャット/組織図/ニュース/イベントを開いた時に本部メンバー（accountmetaのrole==='hq'）を読み込む
             // （組織図・チャットDM名・イベント参加者名の解決に使う・plan-storeは未認証GET）
             const refreshOrgHq = React.useCallback(() => {
                 return loadAcctMeta().then(meta => {
@@ -5608,10 +6184,23 @@
                     const j = await r.json().catch(() => null);
                     if (j && j.cust && typeof j.cust === 'object') setAcqSoflMap(j.cust);
                     if (j && j.dismissed && typeof j.dismissed === 'object') setAcqDismissed(j.dismissed); // 予約取り消し（テスト予約）
-                    // 追いついている(caughtUp)なら末尾同期は軽い（1ページ）。セッション初回 or 更新時にだけキック。
-                    if ((force || !acqSoflSyncedRef.current) && j && j.caughtUp) {
+                    // 施策リンクは appointments を updated_at 昇順で差分同期して顧客へ紐付ける。当日の新しい予約は同期が到達するまで「リンクなし」になる。
+                    // → 初回/「更新」時に同期をキックして前進させる。追いついていない(caughtUp=false)＝当日ぶんが埋まっていない時も前進させたいので caughtUp では止めない。
+                    //   「更新」時は最大3回まで連続で前進（各回サーバー側45s上限）＝1回押すだけで当日の受付までなるべく追いつく。追いついたら早期終了。
+                    if (force || !acqSoflSyncedRef.current) {
                         acqSoflSyncedRef.current = true;
-                        fetch('/api/plan-store?type=soflmap&action=sync').then(() => fetch('/api/plan-store?type=soflmap')).then(x => x.json()).then(x => { if (x && x.cust) setAcqSoflMap(x.cust); if (x && x.dismissed) setAcqDismissed(x.dismissed); }).catch(() => {});
+                        (async () => {
+                            const iters = force ? 3 : 1;
+                            for (let i = 0; i < iters; i++) {
+                                try {
+                                    const s = await fetch('/api/plan-store?type=soflmap&action=sync');
+                                    const sj = await s.json().catch(() => null);
+                                    if (sj && sj.cust && typeof sj.cust === 'object') setAcqSoflMap(sj.cust);
+                                    if (sj && sj.dismissed && typeof sj.dismissed === 'object') setAcqDismissed(sj.dismissed);
+                                    if (!sj || sj.caughtUp) break; // 追いついたら終了
+                                } catch { break; }
+                            }
+                        })();
                     }
                 } catch {}
             };
@@ -12816,7 +13405,7 @@
             }
 
             // GAS経営データ(rawData)を必要とするのは一部の分析ページのみ。
-            // それ以外（チャット/重要掲示板/勉強会/組織図/全体管理シート/SalonOne 等）は
+            // それ以外（チャット/ニュース/勉強会/組織図/全体管理シート/SalonOne 等）は
             // データ取得を待たずに即表示＝アプリ/チャットが素早く開く（データは裏で読み込み継続）。
             const BIZ_DATA_PAGES = ['dashboard', 'charts', 'marketing', 'planning'];
             if (loading && BIZ_DATA_PAGES.includes(currentPage)) {
@@ -12956,7 +13545,7 @@
                             </div>
                         );
                     })()}
-                    {/* 通知の種類設定モーダル（チャット/掲示板の受け取り方を選ぶ） */}
+                    {/* 通知の種類設定モーダル（チャット/ニュースの受け取り方を選ぶ） */}
                     {pushPrefsOpen && (
                         <div className="fixed inset-0 z-[110] bg-black/40 flex items-end md:items-center justify-center p-0 md:p-4" onClick={() => setPushPrefsOpen(false)}>
                             <div className="bg-white w-full md:max-w-md rounded-t-2xl md:rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
@@ -12977,7 +13566,7 @@
                                         </div>
                                     </div>
                                     <div>
-                                        <div className="text-[13px] font-bold text-ink-800 mb-2">📣 重要掲示板</div>
+                                        <div className="text-[13px] font-bold text-ink-800 mb-2">📣 ニュース</div>
                                         <button onClick={() => pushSetPrefs({ ...pushState.prefs, board: !pushState.prefs.board })} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl border text-[14px] font-medium transition ${pushState.prefs.board ? 'border-brand-300 bg-brand-50 text-brand-700' : 'border-[#EAECF0] bg-white text-ink-700'}`}>
                                             <span>新しい投稿・コメントを通知</span>
                                             <span className={`relative w-11 h-6 rounded-full transition ${pushState.prefs.board ? 'bg-brand-500' : 'bg-[#CBD2DC]'}`}><span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition ${pushState.prefs.board ? 'left-[22px]' : 'left-0.5'}`} /></span>
@@ -13037,7 +13626,7 @@
                                         </button>}
                                         {authState.root && <button onClick={() => { setMobileAcctOpen(false); setCurrentPage('board'); }} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-[14px] font-semibold text-ink-800 hover:bg-ink-50 active:bg-ink-50 transition">
                                             <span className="w-9 h-9 rounded-lg bg-ink-50 text-ink-600 flex items-center justify-center shrink-0"><Megaphone size={18} /></span>
-                                            重要掲示板
+                                            ニュース
                                         </button>}
                                         {/* 通知のON/OFF（スマホはここから設定できる） */}
                                         <button onClick={() => { if (pushState.subscribed) { pushUnsubscribe(); } else { pushSubscribe(); } }} disabled={pushState.busy} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-[14px] font-semibold text-ink-800 hover:bg-ink-50 active:bg-ink-50 transition disabled:opacity-60">
@@ -13045,7 +13634,7 @@
                                             <span className="flex-1 text-left">{pushState.subscribed ? '通知はオン' : '通知をオンにする'}</span>
                                             {pushState.subscribed && <span className="text-[11px] font-bold text-emerald-600">ON</span>}
                                         </button>
-                                        {/* 通知の種類（チャット/掲示板の受け取り方を選ぶ） */}
+                                        {/* 通知の種類（チャット/ニュースの受け取り方を選ぶ） */}
                                         <button onClick={() => { setMobileAcctOpen(false); setPushPrefsOpen(true); }} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-[14px] font-semibold text-ink-800 hover:bg-ink-50 active:bg-ink-50 transition">
                                             <span className="w-9 h-9 rounded-lg bg-ink-50 text-ink-600 flex items-center justify-center shrink-0"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 7h-9" /><path d="M14 17H5" /><circle cx="17" cy="17" r="3" /><circle cx="7" cy="7" r="3" /></svg></span>
                                             <span className="flex-1 text-left">通知の種類を設定</span>
@@ -13109,7 +13698,9 @@
                                 const q = chatParseMention(v.slice(0, caret));
                                 if (q == null) { setChatMention(null); return; }
                                 const ql = q.toLowerCase();
-                                const list = chatMentionCandidates(activeRoom).filter(c => !q || String(c.name).toLowerCase().includes(ql)).slice(0, 8);
+                                // 表示名（label）でも絞り込めるようにする。「アシ」「NAORU」でもAIに辿り着ける。
+                                const list = chatMentionCandidates(activeRoom)
+                                    .filter(c => !q || `${c.name} ${c.label || ''}`.toLowerCase().includes(ql)).slice(0, 8);
                                 setChatMention(list.length ? { query: q, list, index: 0 } : null);
                             };
                             // 候補を選んで @名前 を挿入
@@ -13178,6 +13769,7 @@
                                             </div>
                                             <div className="flex items-center gap-1.5 shrink-0">
                                                 <button onClick={chatMarkAllRead} className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-[#667085] font-medium text-[13px] hover:bg-[#EFF1F5] transition"><CheckCircle size={15} />すべて既読</button>
+                                                <button data-rcp-open onClick={() => { setRcpOpen(true); setRcpMsg(''); }} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[#EAECF0] bg-white hover:bg-[#F8F9FB] text-[#344054] font-semibold text-[13px] whitespace-nowrap transition" title="宛先を文章で書いて送る"><span className="text-[15px] leading-none">✍️</span><span className="hidden md:inline">文章で送る</span></button>
                                                 <button onClick={() => setChatNewRoom({ kind: 'group', name: '', members: [], q: '' })} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-brand-500 hover:bg-brand-600 text-white font-semibold text-[13px] whitespace-nowrap transition shadow-sm shadow-brand-200/50"><Plus size={16} /><span>新規<span className="hidden md:inline">ルーム</span></span></button>
                                             </div>
                                         </div>
@@ -13247,7 +13839,7 @@
                                                             </div>
                                                         )}
 
-                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(list, i) => openLightbox(list, i)} onReply={(msg) => { setChatReplyTo(msg); requestAnimationFrame(() => { try { chatTaRef.current && chatTaRef.current.focus(); } catch {} }); }} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} resolveShop={chatResolveShop} roomId={activeRoom ? activeRoom.id : ''} onSaveMedia={chatSaveMedia} resolveAvatar={chatAvatarImg} onOpenProfile={chatOpenProfile} onForward={setChatForward} onPin={chatPinMsg} onCaptureRange={chatCaptureRange} pinnedId={activeRoom && activeRoom.pinned ? activeRoom.pinned.id : ''} onOpenVideo={(url, name) => { setChatVideoRate(1); setChatVideoErr(false); setChatVideoView({ url, name }); }} onAddFaq={(m) => { const arr = activeMsgs || []; const idx = arr.findIndex(x => x.id === m.id); let q = ''; for (let i = idx - 1; i >= 0; i--) { const p = arr[i]; if (p && p.text && String(p.fromStaffId) !== '__ai__') { q = String(p.text).replace(/[@＠]\s*ai\b/ig, '').trim(); break; } } setFaqEdit({ q, a: String(m.text || '').replace(/^🙋\s*/, '').replace(/\n*（本部に確認します）\s*$/, '').trim(), shopScope: '' }); setCurrentPage('faqadmin'); }} />
+                                                        <ChatMessageList msgs={activeMsgs} myId={chatMyId} openReadTs={chatOpenReadTs} staffName={chatStaffName} isRoot={chatIsRoot} onReact={chatReact} onDelete={chatDeleteMsg} stamps={CHAT_STAMPS} onImageClick={(list, i) => openLightbox(list, i)} onReply={(msg) => { setChatReplyTo(msg); requestAnimationFrame(() => { try { chatTaRef.current && chatTaRef.current.focus(); } catch {} }); }} readMembers={canShowReads ? activeMemberIds : null} roomReads={activeReadsMap} resolveName={chatResolveName} resolveShop={chatResolveShop} roomId={activeRoom ? activeRoom.id : ''} onSaveMedia={chatSaveMedia} resolveAvatar={chatAvatarImg} onOpenProfile={chatOpenProfile} onForward={setChatForward} onPin={chatPinMsg} onCaptureRange={chatCaptureRange} pinnedId={activeRoom && activeRoom.pinned ? activeRoom.pinned.id : ''} onOpenVideo={(url, name) => { setChatVideoRate(1); setChatVideoErr(false); setChatVideoView({ url, name }); }} onRemindUnread={chatRemindUnread} onAddFaq={(m) => { const arr = activeMsgs || []; const idx = arr.findIndex(x => x.id === m.id); let q = ''; for (let i = idx - 1; i >= 0; i--) { const p = arr[i]; if (p && p.text && String(p.fromStaffId) !== '__ai__') { q = String(p.text).replace(/[@＠]\s*ai\b/ig, '').trim(); break; } } setFaqEdit({ q, a: String(m.text || '').replace(/^🙋\s*/, '').replace(/\n*（本部に確認します）\s*$/, '').trim(), shopScope: '' }); setCurrentPage('faqadmin'); }} />
 
                                                         {/* コンポーザー（ChatGPT/Slack風の一体型）。スマホは全画面なのでホームバー分の余白を確保 */}
                                                         <div className="px-3 md:px-4 pt-1 pb-[max(env(safe-area-inset-bottom,0px),12px)] shrink-0">
@@ -13257,10 +13849,13 @@
                                                                     <div className="px-3 py-1.5 text-[11px] font-bold text-[#98A2B3] border-b border-[#F2F4F7]">メンションする相手</div>
                                                                     {chatMention.list.map((c, i) => (
                                                                         <button key={c.id} onMouseDown={e => { e.preventDefault(); chatPickMention(c.name); }} className={`w-full flex items-center gap-2.5 px-3 py-2 text-left transition ${i === chatMention.index ? 'bg-brand-50' : 'hover:bg-[#F8F9FB]'}`}>
-                                                                            {c.id === '__all__'
+                                                                            {c.id === '__ai__'
+                                                                                ? <span className="w-7 h-7 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center text-[14px] shrink-0">🤖</span>
+                                                                                : c.id === '__all__'
                                                                                 ? <span className="w-7 h-7 rounded-full bg-brand-100 text-brand-600 flex items-center justify-center text-[13px] font-bold shrink-0">@</span>
                                                                                 : <span className={`w-7 h-7 rounded-full flex items-center justify-center text-[12px] font-semibold shrink-0 ${chatAvatarColor(c.name)}`}>{(c.name || '？').trim().charAt(0)}</span>}
-                                                                            <span className="text-[14px] text-[#111827] font-medium truncate">{c.name}</span>
+                                                                            <span className="text-[14px] text-[#111827] font-medium truncate">{c.label || c.name}</span>
+                                                                            {c.hint && <span className="ml-auto text-[11px] text-indigo-500 shrink-0">{c.hint}</span>}
                                                                             {c.id === '__all__' && <span className="ml-auto text-[11px] text-[#98A2B3]">このルーム全員</span>}
                                                                         </button>
                                                                     ))}
@@ -13325,8 +13920,7 @@
                                                                     </label>
                                                                     <button onClick={() => setChatEmojiOpen(o => !o)} className={`w-8 h-8 flex items-center justify-center rounded-md text-lg transition ${chatEmojiOpen ? 'bg-brand-50 text-brand-600' : 'text-[#667085] hover:bg-[#F2F4F7]'}`} title="スタンプ">☺</button>
                                                                     <button onClick={() => { const ta = chatTaRef.current; const caret = ta ? (ta.selectionStart || chatDraft.length) : chatDraft.length; const needSp = caret > 0 && !/\s|　/.test(chatDraft.charAt(caret - 1)); const ins = (needSp ? ' @' : '@'); const nv = chatDraft.slice(0, caret) + ins + chatDraft.slice(caret); setChatDraft(nv); const list = chatMentionCandidates(activeRoom).slice(0, 8); setChatMention(list.length ? { query: '', list, index: 0 } : null); requestAnimationFrame(() => { if (ta) { ta.focus(); const c = caret + ins.length; try { ta.setSelectionRange(c, c); } catch {} } }); }} className="w-8 h-8 flex items-center justify-center rounded-md text-[17px] font-bold text-[#667085] hover:bg-[#F2F4F7] transition" title="メンション">@</button>
-                                                                    <button onClick={() => chatSend(true)} disabled={chatSending || chatAiBusy || !chatDraft.trim()} title="この内容をAIに質問（店舗データ＋FAQで自動回答・不明なら本部へ）" className={`ml-auto inline-flex items-center gap-1 h-9 px-2.5 rounded-lg text-[12px] font-bold transition disabled:opacity-40 ${chatAiBusy ? 'bg-indigo-100 text-indigo-600' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'}`}><span className="text-[15px] leading-none">🤖</span><span className="hidden sm:inline">{chatAiBusy ? '考え中…' : 'AIに質問'}</span></button>
-                                                                    <button onClick={chatSend} disabled={chatSending || (!chatDraft.trim() && chatStaged.length === 0 && chatStagedMedia.length === 0)} className="w-9 h-9 flex items-center justify-center rounded-lg bg-brand-500 hover:bg-brand-600 text-white disabled:bg-[#EAECF0] disabled:text-[#98A2B3] active:scale-95 transition"><Send size={16} /></button>
+                                                                    <button onClick={chatSend} disabled={chatSending || (!chatDraft.trim() && chatStaged.length === 0 && chatStagedMedia.length === 0)} className="ml-auto w-9 h-9 flex items-center justify-center rounded-lg bg-brand-500 hover:bg-brand-600 text-white disabled:bg-[#EAECF0] disabled:text-[#98A2B3] active:scale-95 transition"><Send size={16} /></button>
                                                                 </div>
                                                             </div>
                                                         </div>
@@ -13428,6 +14022,96 @@
                                     })()}
 
                                     {/* 新しいルーム モーダル */}
+                                    {/* ── 文章で宛先を書いて送る ───────────────────────────────── */}
+                                    {rcpOpen && (
+                                        <div className="fixed inset-0 z-[90] bg-[#111827]/40 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setRcpOpen(false)}>
+                                            <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[88vh] flex flex-col overflow-hidden border border-[#EAECF0]" onClick={e => e.stopPropagation()}>
+                                                <div className="px-5 py-3.5 border-b border-[#EAECF0] flex items-center justify-between">
+                                                    <h3 className="font-semibold text-[15px] text-[#111827]">✍️ 文章で宛先を書いて送る</h3>
+                                                    <button onClick={() => setRcpOpen(false)} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3]"><X size={18} /></button>
+                                                </div>
+                                                <div className="px-5 py-4 space-y-3 overflow-y-auto">
+                                                    <div>
+                                                        <div className="text-[12px] font-semibold text-[#667085] mb-1.5">誰に送りますか（文章でどうぞ）</div>
+                                                        <textarea data-rcp-to value={rcpTo} onChange={e => { setRcpTo(e.target.value); setRcpMode(''); }} rows={2}
+                                                            placeholder={'例）鶴見院と関内院と仙台院のグループに送って\n例）神奈川の店舗すべてのグループに\n例）山田、藤川、宮崎のそれぞれに'}
+                                                            className="w-full px-3 py-2 rounded-lg bg-[#F8F9FB] border border-[#EAECF0] text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 resize-y" />
+                                                    </div>
+
+                                                    {/* 送り方。文章から自動で決まるが、手でも変えられる */}
+                                                    <div className="flex gap-1.5 flex-wrap">
+                                                        {[['store_rooms', '店舗グループへ'], ['dm', '一人ずつDM'], ['new_group', '新しくグループ']].map(([k, label]) => (
+                                                            <button key={k} data-rcp-mode={k} onClick={() => setRcpMode(k)}
+                                                                className={`px-2.5 py-1.5 rounded-lg text-[12px] font-bold border transition ${rcpMode2 === k ? 'bg-brand-500 border-brand-500 text-white' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{label}</button>
+                                                        ))}
+                                                        {!rcpMode && rcpTo.trim() && <span className="self-center text-[10px] font-bold text-[#98A2B3]">文章から判断しました</span>}
+                                                    </div>
+
+                                                    {/* 宛先の確認。送る前に必ず出す */}
+                                                    {rcpTo.trim() && (
+                                                        <div data-rcp-preview className="rounded-lg border border-[#EAECF0] bg-[#F8F9FB]/60 p-2.5 space-y-1.5">
+                                                            {rcpMode2 === 'store_rooms' ? (
+                                                                <div className="text-[12px] font-bold text-[#344054]">
+                                                                    既存の店舗グループ {rcpRooms.filter(r => r.exists).length}件へ送ります：
+                                                                    <span className="font-medium text-[#667085]">{rcpRooms.filter(r => r.exists).map(r => r.name).join('、') || '—'}</span>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="text-[12px] font-bold text-[#344054]">
+                                                                    {rcpMode2 === 'new_group' ? '新しいグループに入れる' : '一人ずつ送る'} {rcpResult.total}名：
+                                                                    <span className="font-medium text-[#667085]">{rcpResult.people.slice(0, 12).map(p => p.name).join('、')}{rcpResult.total > 12 ? ` ほか${rcpResult.total - 12}名` : ''}</span>
+                                                                    {rcpResult.inherited && <span className="ml-1 text-[10px] text-brand-600">（直前の宛先を引き継ぎました）</span>}
+                                                                </div>
+                                                            )}
+                                                            {rcpMissingRooms.length > 0 && (
+                                                                <div className="text-[11px] font-bold text-amber-700">⚠️ グループが未作成のため送れない店舗：{rcpMissingRooms.map(r => r.name).join('、')}</div>
+                                                            )}
+                                                            {/* 曖昧: 候補から選んでもらう */}
+                                                            {rcpResult.ambiguous.map(a => (
+                                                                <div key={a.token} data-rcp-ambiguous className="text-[11px] font-bold text-rose-700">
+                                                                    「{a.token}」は{a.candidates.length}人います。選んでください：
+                                                                    <span className="inline-flex gap-1 flex-wrap ml-1">
+                                                                        {a.candidates.map(c => (
+                                                                            <button key={c.id} onClick={() => setRcpPicked(x => ({ ...x, [a.token]: String(c.id) }))}
+                                                                                className="px-2 py-0.5 rounded-md bg-white border border-rose-200 text-rose-700 hover:bg-rose-50">{c.name}{c.shop ? `（${String(c.shop).replace(/^NAORU\s*/, '')}）` : ''}</button>
+                                                                        ))}
+                                                                    </span>
+                                                                </div>
+                                                            ))}
+                                                            {rcpResult.unknown.length > 0 && (
+                                                                <div data-rcp-unknown className="text-[11px] font-bold text-rose-700">
+                                                                    見つかりませんでした：{rcpResult.unknown.join('、')}（書き方を変えてみてください）
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
+
+                                                    <div>
+                                                        <div className="text-[12px] font-semibold text-[#667085] mb-1.5">送る本文</div>
+                                                        <textarea data-rcp-body value={rcpBody} onChange={e => setRcpBody(e.target.value)} rows={6}
+                                                            placeholder="ここに送る内容を書いてください。"
+                                                            className="w-full px-3 py-2 rounded-lg bg-[#F8F9FB] border border-[#EAECF0] text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 resize-y" />
+                                                        <div className="text-[10px] font-bold text-[#98A2B3] mt-1">宛先と本文は別の欄です（本文が宛先として読まれないようにしています）</div>
+                                                    </div>
+                                                    {rcpMsg && <div data-rcp-msg className="px-3 py-2 rounded-lg bg-[#F8F9FB] border border-[#EAECF0] text-[12px] font-bold text-[#344054]">{rcpMsg}</div>}
+                                                </div>
+                                                <div className="px-5 py-3.5 border-t border-[#EAECF0]">
+                                                    <button data-rcp-send onClick={rcpSend} disabled={!!rcpBlocked || !rcpBody.trim() || rcpBusy}
+                                                        className="w-full py-2.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white font-semibold text-[14px] disabled:bg-[#EAECF0] disabled:text-[#98A2B3] transition">
+                                                        {rcpBusy ? '送っています…'
+                                                            : rcpBlocked === 'ambiguous' ? '同じ名前の人がいます。選んでください'
+                                                            : rcpBlocked === 'unknown' ? '見つからない宛先があります'
+                                                            : rcpBlocked === 'no_rooms' ? '送り先の店舗グループがありません'
+                                                            : rcpBlocked ? '宛先を入れてください'
+                                                            : !rcpBody.trim() ? '本文を入れてください'
+                                                            : rcpMode2 === 'store_rooms' ? `店舗グループ ${rcpRooms.filter(r => r.exists).length}件に送る`
+                                                            : rcpMode2 === 'new_group' ? `${rcpResult.total}名でグループを作って送る`
+                                                            : `${rcpResult.total}名に一人ずつ送る`}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
                                     {chatNewRoom && (
                                         <div className="fixed inset-0 z-[90] bg-[#111827]/40 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setChatNewRoom(null)}>
                                             <div className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[85vh] flex flex-col overflow-hidden border border-[#EAECF0]" onClick={e => e.stopPropagation()}>
@@ -13447,6 +14131,54 @@
                                                     </div>}
                                                     <div>
                                                         <div className="text-[12px] font-semibold text-[#667085] mb-1.5">{chatNewRoom.kind === 'dm' ? '相手を選択' : 'メンバーを追加'}{chatNewRoom.kind === 'group' && chatNewRoom.members.length > 0 && <span className="text-brand-600 ml-1">{chatNewRoom.members.length}名</span>}</div>
+                                                        {/* ── エリアでまとめて選ぶ（例: 神奈川のエリアに送る / 大阪以外に送る）── */}
+                                                        {chatNewRoom.kind === 'group' && (() => {
+                                                            const f = chatNewRoom.area || { prefs: [], regions: [], exclude: false };
+                                                            const opt = audOptions(dirStaff);
+                                                            const hit = audIsEmpty(f) ? [] : audSelect(dirStaff, f);
+                                                            const setF = (next) => setChatNewRoom(n => ({ ...n, area: next }));
+                                                            const toggle = (kind, key) => {
+                                                                const cur = (f[kind] || []).map(String);
+                                                                const next = { ...f, [kind]: cur.includes(key) ? cur.filter(x => x !== key) : [...cur, key] };
+                                                                setF(next);
+                                                            };
+                                                            const chip = (on) => `px-2 py-1 rounded-full text-[11px] font-bold border transition ${on ? 'bg-brand-500 border-brand-500 text-white' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`;
+                                                            return (
+                                                                <div className="mb-2 border border-[#EAECF0] rounded-lg p-2.5 bg-[#F8F9FB]/60">
+                                                                    <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                                                                        <span className="text-[12px] font-bold text-[#344054]">エリアでまとめて選ぶ</span>
+                                                                        <label className="ml-auto flex items-center gap-1 text-[11px] font-bold text-[#667085] cursor-pointer">
+                                                                            <input type="checkbox" data-aud-exclude checked={!!f.exclude} onChange={e => setF({ ...f, exclude: e.target.checked })} />
+                                                                            選んだエリア以外に送る
+                                                                        </label>
+                                                                    </div>
+                                                                    <div className="text-[10px] font-bold text-[#98A2B3] mb-1">都道府県</div>
+                                                                    <div className="flex flex-wrap gap-1 mb-1.5">
+                                                                        {opt.prefs.map(o => <button key={o.key} type="button" data-aud-pref={o.key} onClick={() => toggle('prefs', o.key)} className={chip((f.prefs || []).includes(o.key))}>{o.key} {o.count}名</button>)}
+                                                                    </div>
+                                                                    <div className="text-[10px] font-bold text-[#98A2B3] mb-1">地域（まとめて）</div>
+                                                                    <div className="flex flex-wrap gap-1">
+                                                                        {opt.regions.map(o => <button key={o.key} type="button" data-aud-region={o.key} onClick={() => toggle('regions', o.key)} className={chip((f.regions || []).includes(o.key))}>{o.key} {o.count}名</button>)}
+                                                                    </div>
+                                                                    {!audIsEmpty(f) && (
+                                                                        <div className="mt-2 pt-2 border-t border-[#EAECF0]">
+                                                                            <div className="text-[11px] font-bold text-[#344054] mb-1" data-aud-preview>
+                                                                                {audLabel(f)} の {hit.length}名{hit.length ? '：' : ''}
+                                                                                <span className="font-medium text-[#667085]">{hit.slice(0, 8).map(p => p.name).join('、')}{hit.length > 8 ? ` ほか${hit.length - 8}名` : ''}</span>
+                                                                            </div>
+                                                                            <button type="button" disabled={!hit.length} data-aud-apply
+                                                                                onClick={() => setChatNewRoom(n => ({ ...n,
+                                                                                    members: [...new Set([...(n.members || []), ...hit.map(p => String(p.id))])],
+                                                                                    name: (n.name || '').trim() ? n.name : `${audLabel(f)}（${hit.length}名）` }))}
+                                                                                className="px-3 py-1.5 rounded-lg bg-[#111827] text-white font-bold text-[12px] hover:bg-black disabled:bg-[#EAECF0] disabled:text-[#98A2B3]">
+                                                                                この{hit.length}名をメンバーに入れる
+                                                                            </button>
+                                                                            <span className="ml-2 text-[10px] font-bold text-[#98A2B3]">下の一覧で個別に外せます</span>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            );
+                                                        })()}
                                                         <div className="relative mb-2"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]" /><input value={chatNewRoom.q} onChange={e => setChatNewRoom(n => ({ ...n, q: e.target.value }))} placeholder="スタッフを検索" className="w-full h-9 pl-9 pr-3 rounded-lg bg-[#F8F9FB] border border-[#EAECF0] text-[13px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" /></div>
                                                         <div className="max-h-56 overflow-y-auto space-y-0.5 border border-[#EAECF0] rounded-lg p-1.5">
                                                             {dirStaff.length === 0 && <div className="text-center text-[#98A2B3] text-[12px] py-6">スタッフ一覧を読み込み中…<br />（管理者ログインで全社一覧が同期されます）</div>}
@@ -13637,8 +14369,15 @@
                             const WD = ['日', '月', '火', '水', '木', '金', '土'];
                             const bq = boardSearch.trim();
                             const filtered = (boardData.posts || []).filter(p => {
-                                const catOk = boardFilter === 'all' ? true : boardFilter === 'hq' ? p.authorRoot : boardFilter === 'staff' ? !p.authorRoot : p.important;
+                                const catOk = boardFilter === 'all' ? true : boardFilter === 'hq' ? p.authorRoot : boardFilter === 'staff' ? !p.authorRoot
+                                    : boardFilter === 'important' ? p.important
+                                    : boardFilter === 'featured' ? p.featured
+                                    : boardFilter === 'unread' ? boardIsUnread(p)
+                                    : true;
                                 if (!catOk) return false;
+                                if (boardCatFilter && String(p.category || '') !== boardCatFilter) return false;
+                                // ⚠️ 公開対象が店舗指定の記事は、対象の人にだけ出す（本部は全部見える）
+                                if (!chatIsRoot && !newsForMe(p, { shop: chatMyShop, shops: authState.shops })) return false;
                                 if (!bq) return true;
                                 const hay = `${p.title || ''} ${p.text || ''} ${p.link || ''} ${chatResolveName(p.authorId, p.authorName || '')} ${p.authorShop || ''}`;
                                 return hay.includes(bq);
@@ -13656,7 +14395,7 @@
                             const inputCls = 'w-full h-10 rounded-lg border border-[#EAECF0] bg-white px-3.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition';
                             const BmIcon = ({ on }) => <svg width="16" height="16" viewBox="0 0 24 24" fill={on ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" /></svg>;
                             const MoreIcon = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" /></svg>;
-                            const openBoardPost = (p) => { if (boardIsUnread(p)) boardMarkReadUpTo(p); setBoardOpenId(p.id); };
+                            const openBoardPost = (p) => { if (boardIsUnread(p)) boardMarkReadUpTo(p); setBoardOpenId(p.id); boardMarkPostRead(p.id); };
                             const PostCard = (p, full) => {
                                 const unread = boardIsUnread(p);
                                 const longText = !full && ((p.text || '').length > 180 || (p.text || '').split('\n').length > 6);
@@ -13687,11 +14426,73 @@
                                                 {rel(p.createdAt) && <div className="text-[11px] text-[#B0B7C3]">{rel(p.createdAt)}</div>}
                                             </div>
                                         </div>
+                                        {/* 表紙写真（一覧のファーストビュー用）。画像が無ければ代替表紙。 */}
+                                        {(() => {
+                                            const cover = newsCoverOf(p);
+                                            const cat = newsCatOf(p.category);
+                                            if (full) return null;
+                                            return cover
+                                                ? <div data-news-cover className="mt-2 rounded-xl overflow-hidden bg-[#F2F4F7] cursor-pointer" style={{ aspectRatio: '16 / 9' }} onClick={e => { e.stopPropagation(); openBoardPost(p); }}><ChatImage imgId={cover} className="w-full h-full object-cover" /></div>
+                                                : (p.featured ? <div data-news-cover-alt className="mt-2 rounded-xl bg-gradient-to-br from-[#F6F7F9] to-[#EEF0F3] border border-[#EAECF0] flex items-center justify-center" style={{ aspectRatio: '16 / 5' }}><span className="text-[13px] font-black text-[#98A2B3]">{cat ? cat.label : 'ニュース'}</span></div> : null);
+                                        })()}
+                                        {/* カテゴリー・ピックアップ・期限 */}
+                                        {(() => {
+                                            const cat = newsCatOf(p.category);
+                                            const due = newsDueState(p.dueDate);
+                                            if (!cat && !p.featured && due === 'none') return null;
+                                            return (
+                                                <div data-news-badges className="flex items-center gap-1.5 flex-wrap mt-2">
+                                                    {cat && <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${cat.cls}`}>{cat.label}</span>}
+                                                    {p.featured && <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-[#111827] text-white">ピックアップ</span>}
+                                                    {due !== 'none' && (
+                                                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${due === 'over' ? 'bg-rose-100 text-rose-700' : due === 'soon' ? 'bg-amber-100 text-amber-800' : 'bg-[#F2F4F7] text-[#667085]'}`}>
+                                                            {due === 'over' ? `期限切れ（${p.dueDate}）` : `${p.dueDate} まで`}
+                                                        </span>
+                                                    )}
+                                                    {p.audience && p.audience.kind === 'shops' && (
+                                                        <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-violet-50 text-violet-700">{(p.audience.shops || []).length}店舗限定</span>
+                                                    )}
+                                                </div>
+                                            );
+                                        })()}
                                         {p.title && <div onClick={full ? undefined : e => { e.stopPropagation(); openBoardPost(p); }} className={`text-[16px] font-bold text-[#111827] mt-2 leading-snug break-words ${full ? '' : 'cursor-pointer'}`} style={{ wordBreak: 'break-word' }}>{p.title}</div>}
                                         {p.text && <div className={`${p.title ? 'mt-1' : 'mt-2'}`}>
                                             <div className={`text-[14px] text-[#475467] leading-[1.5] whitespace-pre-wrap break-words ${longText ? 'line-clamp-6' : ''}`} style={{ wordBreak: 'break-word' }}>{chatLinkify((p.text || '').replace(/\n{3,}/g, '\n\n'))}</div>
                                             {longText && <button onClick={e => { e.stopPropagation(); openBoardPost(p); }} className="mt-1 text-[13px] font-bold text-brand-600 hover:underline">…もっと見る</button>}
                                         </div>}
+                                        {/* ── 記事に貼られたイベントリンク → グループチャットへ参加 ──
+                                            ⚠️ 押した本人だけが参加する。リンクを貼っただけで全員は入らない。
+                                            ⚠️ 自分のイベントリンクだけを見る（外部URLは読みに行かない）。 */}
+                                        {(() => {
+                                            const links = evLinksIn(`${p.text || ''} ${p.link || ''}`);
+                                            if (!links.length) return null;
+                                            return (
+                                                <div data-news-events className="mt-2.5 space-y-1.5" onClick={e => e.stopPropagation()}>
+                                                    {links.map(({ url, rowId }) => {
+                                                        const ev = evResolveRow(rowId, (evData && evData.sections) || {});
+                                                        const st = evJoinStateOf(ev, chatData.rooms, chatMyId);
+                                                        const ok = st === 'can_join' || st === 'joined';
+                                                        return (
+                                                            <div key={rowId} className={`rounded-xl border px-3 py-2.5 ${ok ? 'border-brand-200 bg-brand-50/40' : 'border-[#EAECF0] bg-[#F8F9FB]'}`}>
+                                                                <div className="flex items-center gap-2 flex-wrap">
+                                                                    <span className="text-[15px] leading-none">📅</span>
+                                                                    <span className="text-[13px] font-bold text-[#111827] truncate">{ev.found ? ev.title : 'イベント'}</span>
+                                                                    {ev.found && ev.date && <span className="text-[11px] font-bold text-[#98A2B3]">{ev.date}</span>}
+                                                                </div>
+                                                                {ok ? (
+                                                                    <button data-news-join={rowId} onClick={() => evJoinChat(ev.roomId)} disabled={evChatBusy === ev.roomId}
+                                                                        className={`mt-2 inline-flex items-center justify-center gap-1.5 h-9 px-4 rounded-xl text-[13px] font-bold transition disabled:opacity-50 ${st === 'joined' ? 'border border-brand-300 text-brand-600 hover:bg-brand-50' : 'bg-brand-500 hover:bg-brand-600 text-white shadow-sm shadow-brand-200/50'}`}>
+                                                                        <MessageSquare size={15} />{evChatBusy === ev.roomId ? '開いています…' : EV_JOIN_LABEL[st]}
+                                                                    </button>
+                                                                ) : (
+                                                                    <div className="mt-1.5 text-[12px] font-bold text-[#98A2B3]">{EV_JOIN_LABEL[st]}</div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            );
+                                        })()}
                                         {/* リンク・画像・動画・ファイルは全画面表示でのみ展開。一覧は「表示」チップに集約してコンパクトに。 */}
                                         {full ? (<>
                                             {p.link && <a href={p.link} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="mt-2.5 inline-flex items-center gap-1.5 text-[13px] text-brand-600 hover:underline break-all">🔗 {p.link}</a>}
@@ -13708,6 +14509,16 @@
                                             const nFile = Array.isArray(p.files) ? p.files.length : 0; if (nFile) parts.push(`📎 ファイル${nFile}`);
                                             return parts.length ? <button onClick={e => { e.stopPropagation(); openBoardPost(p); }} className="mt-2.5 inline-flex items-center gap-1.5 text-[12px] font-semibold text-[#475467] bg-[#F6F7F9] hover:bg-[#EEF0F3] rounded-full px-3 py-1.5 transition">{parts.join('・')}<span className="text-brand-600">を表示</span></button> : null;
                                         })()}
+                                        {/* 「確認しました」。既読（自動）・リアクション（スタンプ）とは別の明示の記録。 */}
+                                        {full && (
+                                            <div className="mt-3 flex items-center gap-2 flex-wrap">
+                                                <button data-board-ack={p.id} onClick={e => { e.stopPropagation(); boardAck(p.id); }} disabled={boardAckBusy === p.id || !!boardAcked[p.id]}
+                                                    className={`inline-flex items-center gap-1.5 h-9 px-4 rounded-xl text-[13px] font-bold transition disabled:opacity-60 ${boardAcked[p.id] ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-[#111827] text-white hover:bg-black'}`}>
+                                                    {boardAcked[p.id] ? '✅ 確認しました' : (boardAckBusy === p.id ? '送信中…' : '確認しました')}
+                                                </button>
+                                                <span className="text-[11px] font-bold text-[#98A2B3]">読んだことを本部に伝えます（スタンプとは別です）</span>
+                                            </div>
+                                        )}
                                         {/* リアクション（既読の代わりに「読んだらスタンプ」） */}
                                         {(reactEntries.length > 0 || boardPickId === p.id) && (
                                             <div className="flex items-center gap-1.5 mt-2.5 flex-wrap">
@@ -13721,7 +14532,7 @@
                                         <div className="flex items-center gap-1.5 mt-2.5 pt-2 border-t border-[#F2F4F7]">
                                             {p.important && <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-full">⭐ 重要</span>}
                                             <button onClick={e => { e.stopPropagation(); setBoardPickId(boardPickId === p.id ? '' : p.id); }} className={`inline-flex items-center gap-1.5 px-3 h-8 rounded-full text-[12px] font-semibold border transition ${myReacted ? 'text-brand-700 bg-brand-50 border-brand-200' : 'text-[#667085] border-[#EAECF0] hover:bg-[#F8F9FB]'}`}><span className="text-[15px] leading-none">👍</span>{myReacted ? 'リアクション済み' : 'いいね'}</button>
-                                            <button onClick={e => { e.stopPropagation(); setBoardStatusId(p.id); }} title="リアクション状況を確認" className="inline-flex items-center gap-1.5 px-3 h-8 rounded-full text-[12px] font-semibold text-[#667085] border border-[#EAECF0] hover:bg-[#F8F9FB] transition"><Users size={14} />{reactorCount}人{boardAudience.length ? <span className="text-[#98A2B3] font-normal">/{boardAudience.length}</span> : null}</button>
+                                            <button data-board-statusbtn onClick={e => { e.stopPropagation(); setBoardStatusId(p.id); boardLoadStatus(p.id, boardAudience); }} title="閲覧・リアクション状況を確認" className="inline-flex items-center gap-1.5 px-3 h-8 rounded-full text-[12px] font-semibold text-[#667085] border border-[#EAECF0] hover:bg-[#F8F9FB] transition"><Users size={14} />{reactorCount}人{boardAudience.length ? <span className="text-[#98A2B3] font-normal">/{boardAudience.length}</span> : null}</button>
                                             <div className="ml-auto flex items-center gap-0.5">
                                                 <button onClick={e => { e.stopPropagation(); boardToggleBm(p.id); }} title={bm ? 'ブックマーク解除' : 'ブックマーク'} className={`w-8 h-8 flex items-center justify-center rounded-lg transition ${bm ? 'text-brand-600 bg-brand-50' : 'text-[#98A2B3] hover:bg-[#F2F4F7]'}`}><BmIcon on={bm} /></button>
                                                 {canManage && (
@@ -13779,12 +14590,12 @@
                                 );
                             };
                             return (
-                                <div className="p-4 md:p-6 font-sans" style={{ background: 'linear-gradient(180deg, #EDF1F8 0%, #F8F9FB 18%, #F8F9FB 90%, #FCF6F1 100%)', color: '#111827' }} onClick={() => boardMenuId && setBoardMenuId('')}>
+                                <div data-nowl="news" className="nowl p-4 md:p-6 font-sans" style={{ background: 'linear-gradient(180deg, #FBFBFC 0%, #F6F6F8 40%, #F6F6F8 100%)', color: '#18191c' }} onClick={() => boardMenuId && setBoardMenuId('')}>
                                     <div className="max-w-6xl mx-auto">
                                         <div className="flex items-center justify-between gap-3 mb-4">
                                             <div className="flex items-center gap-2.5 min-w-0">
                                                 <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-600 flex items-center justify-center text-white shrink-0 shadow-md shadow-brand-500/25"><Megaphone size={18} /></div>
-                                                <h1 className="text-[20px] md:text-[22px] font-semibold tracking-tight text-ink-900">重要掲示板</h1>
+                                                <h1 className="nowl-title text-[22px] md:text-[26px]">ニュース</h1>
                                             </div>
                                             <div className="flex items-center gap-2 shrink-0">
                                                 {/* 更新フィード（何がいつ更新されたか） */}
@@ -13807,7 +14618,7 @@
                                                                         <button key={i} onClick={() => setBoardActOpen(false)} className={`w-full text-left px-4 py-2.5 border-b border-[#F6F7F9] hover:bg-[#F8F9FB] transition ${fresh ? 'bg-brand-50/40' : ''}`}>
                                                                             <div className="flex items-center gap-1.5">
                                                                                 <span className="text-[13px]">{it.kind === 'post' ? (it.important ? '❗' : '📣') : '💬'}</span>
-                                                                                <span className="text-[12px] font-bold text-[#111827] truncate flex-1">{it.kind === 'post' ? '新しいお知らせ' : `${who} さんがコメント`}</span>
+                                                                                <span className="text-[12px] font-bold text-[#111827] truncate flex-1">{it.kind === 'post' ? '新しいニュース' : `${who} さんがコメント`}</span>
                                                                                 {fresh && <span className="w-2 h-2 rounded-full bg-rose-500 shrink-0" />}
                                                                             </div>
                                                                             <div className="text-[12px] text-[#475467] truncate mt-0.5">{it.kind === 'comment' ? (it.text || '') : it.title}{it.kind === 'post' ? `（${who}）` : ''}</div>
@@ -13823,16 +14634,16 @@
                                             </div>
                                         </div>
 
-                                        {!boardData.configured && <div className="mb-4 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[13px]">共有ストア（KV/Supabase/GAS）が未設定のため、お知らせは保存されません。管理者に有効化を依頼してください。</div>}
+                                        {!boardData.configured && <div className="mb-4 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[13px]">共有ストア（KV/Supabase/GAS）が未設定のため、ニュースは保存されません。管理者に有効化を依頼してください。</div>}
 
                                         <div>
                                             {/* ── 投稿作成（ボタンで開くモーダル。投稿者は少数のため一覧をメインに） ── */}
                                             {canPost && boardComposerOpen && (
-                                            <div className="fixed inset-0 z-[95] bg-[#111827]/45 backdrop-blur-sm flex items-stretch md:items-center justify-center p-0 md:p-4" onClick={() => setBoardComposerOpen(false)}>
-                                                <div className="bg-white w-full md:max-w-lg rounded-none md:rounded-2xl shadow-2xl h-[100dvh] md:h-auto md:max-h-[92vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+                                            <div data-nowl-modal="compose" className="nowl nowl-overlay fixed inset-0 z-[95] flex items-stretch md:items-center justify-center p-0 md:p-4" onClick={() => setBoardComposerOpen(false)}>
+                                                <div className="nowl-pop bg-white w-full md:max-w-lg rounded-none md:rounded-2xl shadow-2xl h-[100dvh] md:h-auto md:max-h-[92vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
                                                     <div className="px-2 md:px-5 pb-3 border-b border-[#EAECF0] flex items-center gap-2 shrink-0 pt-[calc(env(safe-area-inset-top,0px)+12px)] md:pt-3">
                                                         <button onClick={() => setBoardComposerOpen(false)} className="md:hidden w-9 h-9 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-ink-700 shrink-0" title="戻る"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg></button>
-                                                        <div className="flex items-center gap-2 text-[15px] font-semibold text-[#111827]"><Send size={16} className="text-brand-500" />全社向けお知らせを作成</div>
+                                                        <div className="flex items-center gap-2 text-[15px] font-semibold text-[#111827]"><Send size={16} className="text-brand-500" />全社向けニュースを作成</div>
                                                         <button onClick={() => setBoardComposerOpen(false)} className="ml-auto w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3]"><X size={18} /></button>
                                                     </div>
                                                     <div className="overflow-y-auto px-5 py-4">
@@ -13841,7 +14652,51 @@
                                                     <Label opt="（任意・太字で表示されます）">タイトル</Label>
                                                     <input value={boardTitle} onChange={e => setBoardTitle(e.target.value)} placeholder="例）9月の運営連絡" className={inputCls} />
                                                     <Label>本文</Label>
-                                                    <textarea value={boardText} onChange={e => setBoardText(e.target.value)} rows={4} placeholder="お知らせの内容を入力してください…" className="w-full resize-none rounded-lg border border-[#EAECF0] bg-white px-3.5 py-2.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
+                                                    <textarea value={boardText} onChange={e => setBoardText(e.target.value)} rows={4} placeholder="ニュースの内容を入力してください…" className="w-full resize-none rounded-lg border border-[#EAECF0] bg-white px-3.5 py-2.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
+                                                    {/* ── ニュースの項目 ── */}
+                                                    <Label opt="（任意）">カテゴリー</Label>
+                                                    <div data-news-cat className="flex flex-wrap gap-1.5">
+                                                        {NEWS_CATEGORIES.map(c => (
+                                                            <button key={c.key} type="button" data-news-cat-btn={c.key} onClick={() => setBoardCat(boardCat === c.key ? '' : c.key)}
+                                                                className={`px-3 py-1.5 rounded-full text-[12px] font-bold border transition ${boardCat === c.key ? 'bg-[#111827] border-[#111827] text-white' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{c.label}</button>
+                                                        ))}
+                                                    </div>
+                                                    <Label>公開対象</Label>
+                                                    <div className="flex gap-1.5">
+                                                        {[['all', '全員'], ['shops', '店舗を指定']].map(([k, lab]) => (
+                                                            <button key={k} type="button" data-news-aud={k} onClick={() => setBoardAudKind(k)}
+                                                                className={`px-3 py-1.5 rounded-lg text-[12px] font-bold border transition ${boardAudKind === k ? 'bg-brand-500 border-brand-500 text-white' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{lab}</button>
+                                                        ))}
+                                                    </div>
+                                                    {boardAudKind === 'shops' && (
+                                                        <div className="mt-2">
+                                                            <div className="flex flex-wrap gap-1 max-h-32 overflow-y-auto border border-[#EAECF0] rounded-lg p-2">
+                                                                {(soShopsRaw || []).map((sh, i) => {
+                                                                    const nm = String(sh.name || '');
+                                                                    const on = boardAudShops.includes(nm);
+                                                                    if (!nm) return null;
+                                                                    return <button key={i} type="button" data-news-aud-shop={nm} onClick={() => setBoardAudShops(x => on ? x.filter(y => y !== nm) : [...x, nm])}
+                                                                        className={`px-2 py-1 rounded-full text-[11px] font-bold border transition ${on ? 'bg-brand-50 border-brand-200 text-brand-700' : 'bg-white border-[#EAECF0] text-[#667085]'}`}>{nm.replace(/^NAORU\s*/, '')}</button>;
+                                                                })}
+                                                            </div>
+                                                            {!boardAudShops.length && <div className="text-[11px] font-bold text-rose-600 mt-1">送る店舗を選んでください（選ぶまで投稿できません）</div>}
+                                                        </div>
+                                                    )}
+                                                    <Label opt="（任意）">確認・期限</Label>
+                                                    <div className="flex items-center gap-2 flex-wrap">
+                                                        <label className="inline-flex items-center gap-1.5 text-[12px] font-bold text-[#344054]">
+                                                            <input type="checkbox" data-news-needsack checked={boardNeedsAck} onChange={e => setBoardNeedsAck(e.target.checked)} />
+                                                            「確認しました」を求める
+                                                        </label>
+                                                        <input type="date" data-news-due value={boardDue} onChange={e => setBoardDue(e.target.value)}
+                                                            className="h-9 px-3 rounded-lg border border-[#EAECF0] text-[13px] text-[#111827]" />
+                                                    </div>
+                                                    {boardNeedsAck && !boardDue && <div className="text-[11px] font-bold text-rose-600 mt-1">期限を入れてください（いつまでに確認してほしいか）</div>}
+                                                    <Label opt="（任意）">ピックアップ</Label>
+                                                    <label className="inline-flex items-center gap-1.5 text-[12px] font-bold text-[#344054]">
+                                                        <input type="checkbox" data-news-featured checked={boardFeatured} onChange={e => setBoardFeatured(e.target.checked)} />
+                                                        ニュースの上部に大きく出す
+                                                    </label>
                                                     <Label opt="（任意）">関連リンク</Label>
                                                     <div className="relative"><span className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]">🔗</span><input value={boardLink} onChange={e => setBoardLink(e.target.value)} placeholder="例）https://example.com" className={inputCls + ' pl-9'} /></div>
                                                     <Label opt="（任意）">動画URL</Label>
@@ -13868,7 +14723,7 @@
                                                     </div>
                                                     </div>
                                                     <div className="px-5 pt-3.5 border-t border-[#EAECF0] shrink-0 pb-[max(env(safe-area-inset-bottom,0px),14px)]">
-                                                        <button onClick={boardPost} disabled={boardPosting || composerEmpty} className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-semibold text-[14px] disabled:bg-[#EAECF0] disabled:text-[#98A2B3] active:scale-[0.99] transition shadow-lg shadow-brand-200/40"><Send size={16} />お知らせを投稿</button>
+                                                        <button onClick={boardPost} disabled={boardPosting || composerEmpty} className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-semibold text-[14px] disabled:bg-[#EAECF0] disabled:text-[#98A2B3] active:scale-[0.99] transition shadow-lg shadow-brand-200/40"><Send size={16} />ニュースを投稿</button>
                                                     </div>
                                                 </div>
                                             </div>
@@ -13879,16 +14734,24 @@
                                                 <div className="bg-white rounded-2xl border border-[#EAECF0] p-4 md:p-5">
                                                     <div className="flex items-center gap-2 text-[15px] font-semibold text-[#111827] mb-3"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-brand-500"><path d="M22 12h-6l-2 3h-4l-2-3H2" /><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" /></svg>受信一覧{boardUnreadTotal > 0 && <span className="text-[11px] font-bold text-white bg-brand-500 rounded-full px-1.5 py-0.5">未読 {boardUnreadTotal}</span>}</div>
                                                     {/* キーワード検索（タイトル・本文・発信者・リンクを対象） */}
-                                                    <div className="relative mb-2.5"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]" /><input value={boardSearch} onChange={e => setBoardSearch(e.target.value)} placeholder="キーワードで過去のお知らせを検索" className="w-full h-9 pl-9 pr-8 rounded-lg bg-[#F8F9FB] border border-[#EAECF0] text-[13px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />{boardSearch && <button onClick={() => setBoardSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center justify-center rounded-full text-[#98A2B3] hover:bg-[#EAECF0]"><X size={13} /></button>}</div>
+                                                    <div className="relative mb-2.5"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]" /><input value={boardSearch} onChange={e => setBoardSearch(e.target.value)} placeholder="キーワードで過去のニュースを検索" className="w-full h-9 pl-9 pr-8 rounded-lg bg-[#F8F9FB] border border-[#EAECF0] text-[13px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />{boardSearch && <button onClick={() => setBoardSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center justify-center rounded-full text-[#98A2B3] hover:bg-[#EAECF0]"><X size={13} /></button>}</div>
                                                     <div className="flex items-center gap-1.5 flex-wrap">
-                                                        {[['all', 'すべて'], ['hq', '本部'], ['staff', '店舗'], ['important', '⭐ 重要']].map(([k, label]) => (
-                                                            <button key={k} onClick={() => setBoardFilter(k)} className={`px-2.5 py-1.5 rounded-full text-[12px] font-semibold border transition ${boardFilter === k ? 'bg-brand-500 border-brand-500 text-white' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{label}</button>
+                                                        {[['all', 'すべて'], ['unread', '未読'], ['featured', 'ピックアップ'], ['hq', '本部'], ['staff', '店舗'], ['important', '⭐ 重要']].map(([k, label]) => (
+                                                            <button key={k} data-news-filter={k} onClick={() => setBoardFilter(k)} className={`px-2.5 py-1.5 rounded-full text-[12px] font-semibold border transition ${boardFilter === k ? 'bg-brand-500 border-brand-500 text-white' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{label}</button>
                                                         ))}
+                                                    </div>
+                                                    {/* カテゴリーで絞る */}
+                                                    <div data-news-catfilter className="flex items-center gap-1.5 flex-wrap mt-2">
+                                                        {NEWS_CATEGORIES.map(c => (
+                                                            <button key={c.key} data-news-catfilter-btn={c.key} onClick={() => setBoardCatFilter(boardCatFilter === c.key ? '' : c.key)}
+                                                                className={`px-2.5 py-1 rounded-full text-[11px] font-bold border transition ${boardCatFilter === c.key ? 'bg-[#111827] border-[#111827] text-white' : `border-transparent ${c.cls} hover:opacity-80`}`}>{c.label}</button>
+                                                        ))}
+                                                        {boardCatFilter && <button onClick={() => setBoardCatFilter('')} className="px-2 py-1 rounded-full text-[11px] font-bold text-[#98A2B3] hover:bg-[#F2F4F7]">解除</button>}
                                                     </div>
                                                 </div>
 
                                                 {!boardData.loaded ? <div className="text-center text-[#98A2B3] text-[13px] py-10">読み込み中…</div>
-                                                 : posts.length === 0 ? <div className="mt-3 bg-white border border-[#EAECF0] rounded-2xl text-center text-[#98A2B3] text-[14px] py-16"><Megaphone size={40} className="mx-auto mb-3 opacity-50" />{bq ? `「${bq}」に一致するお知らせはありません。` : boardFilter === 'all' ? <>まだお知らせはありません。<br />右上の「投稿する」から発信してみましょう。</> : '該当するお知らせはありません。'}</div>
+                                                 : posts.length === 0 ? <div className="mt-3 bg-white border border-[#EAECF0] rounded-2xl text-center text-[#98A2B3] text-[14px] py-16"><Megaphone size={40} className="mx-auto mb-3 opacity-50" />{bq ? `「${bq}」に一致するニュースはありません。` : boardFilter === 'all' ? <>まだニュースはありません。<br />右上の「投稿する」から発信してみましょう。</> : '該当するニュースはありません。'}</div>
                                                  : (<>
                                                     <div className={`mt-3 ${boardView === 'grid' ? 'grid grid-cols-1 xl:grid-cols-2 gap-3' : 'space-y-3'}`}>
                                                         {posts.map(p => PostCard(p))}
@@ -13904,8 +14767,8 @@
                                         const op = (boardData.posts || []).find(p => p.id === boardOpenId);
                                         if (!op) return null;
                                         return (
-                                            <div className="fixed inset-0 z-[95] bg-[#111827]/50 backdrop-blur-sm flex items-stretch md:items-center justify-center md:p-4" onClick={() => setBoardOpenId('')}>
-                                                <div className="bg-[#F4F6F9] w-full md:max-w-2xl md:rounded-2xl shadow-2xl max-h-full md:max-h-[92vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+                                            <div data-nowl-modal="post" className="nowl nowl-overlay fixed inset-0 z-[95] flex items-stretch md:items-center justify-center md:p-4" onClick={() => setBoardOpenId('')}>
+                                                <div className="nowl-pop bg-[#F4F6F9] w-full md:max-w-2xl md:rounded-2xl shadow-2xl max-h-full md:max-h-[92vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
                                                     <div className="px-4 py-3 bg-white border-b border-[#EAECF0] flex items-center justify-between shrink-0">
                                                         <h3 className="font-semibold text-[15px] text-[#111827]">投稿</h3>
                                                         <button onClick={() => setBoardOpenId('')} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3]"><X size={18} /></button>
@@ -13915,7 +14778,7 @@
                                             </div>
                                         );
                                     })()}
-                                    {/* リアクション状況モーダル: 押した人（スタンプ別）／まだ押していない人 */}
+                                    {/* 閲覧・リアクション状況: 既読／未読／確認しました／リアクション */}
                                     {boardStatusId && (() => {
                                         const sp = (boardData.posts || []).find(p => p.id === boardStatusId);
                                         if (!sp) return null;
@@ -13924,18 +14787,53 @@
                                         const reactedIds = new Set(entries.flatMap(([, ids]) => (ids || []).map(String)));
                                         const nameFor = (id) => chatResolveName(id, (boardAudience.find(a => a.id === String(id)) || {}).name || 'スタッフ');
                                         const notYet = boardAudience.filter(a => !reactedIds.has(a.id));
+                                        const st = boardStatus;       // サーバーから取った既読・確認の状況
+                                        const chips = (list) => (list || []).length === 0
+                                            ? <div className="text-[13px] text-[#98A2B3]">該当なし</div>
+                                            : <div className="flex flex-wrap gap-1.5">{list.map(a => <span key={a.id} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white border border-[#EAECF0] text-[12px] font-medium text-[#667085]">{a.name || nameFor(a.id)}{a.shop && <span className="text-[#B0B7C3]">・{String(a.shop).replace(/^NAORU\s*/, '')}</span>}</span>)}</div>;
                                         return (
-                                            <div className="fixed inset-0 z-[60] flex items-end md:items-center justify-center bg-black/40 p-0 md:p-4" onClick={() => setBoardStatusId('')}>
-                                                <div className="bg-white w-full md:max-w-lg md:rounded-2xl rounded-t-2xl shadow-2xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                                            <div data-nowl-modal="status" className="nowl nowl-overlay fixed inset-0 z-[60] flex items-end md:items-center justify-center p-0 md:p-4" onClick={() => setBoardStatusId('')}>
+                                                <div className="nowl-pop bg-white w-full md:max-w-lg md:rounded-2xl rounded-t-2xl shadow-2xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
                                                     <div className="flex items-center justify-between px-5 py-4 border-b border-[#EAECF0]">
                                                         <div>
-                                                            <div className="text-[15px] font-semibold text-[#111827]">リアクション状況</div>
-                                                            <div className="text-[12px] text-[#98A2B3] mt-0.5 truncate max-w-[260px]">{sp.title || sp.text || 'お知らせ'}</div>
+                                                            <div className="text-[15px] font-semibold text-[#111827]">閲覧・リアクション状況</div>
+                                                            <div className="text-[12px] text-[#98A2B3] mt-0.5 truncate max-w-[260px]">{sp.title || sp.text || 'ニュース'}</div>
                                                         </div>
                                                         <button onClick={() => setBoardStatusId('')} className="w-8 h-8 flex items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F2F4F7]"><X size={18} /></button>
                                                     </div>
                                                     <div className="overflow-y-auto px-5 py-4 space-y-5">
-                                                        <div className="flex items-center gap-4 text-[13px]">
+                                                        {/* 既読・確認しました（サーバーの記録） */}
+                                                        {st.loading && <div className="text-[13px] text-[#98A2B3]">閲覧状況を読み込み中…</div>}
+                                                        {!st.loading && st.error && <div className="text-[13px] text-rose-600 font-bold">閲覧状況を取得できませんでした（{st.error}）</div>}
+                                                        {!st.loading && !st.error && st.counts && (
+                                                            <div data-board-status className="space-y-3">
+                                                                <div className="grid grid-cols-2 gap-2">
+                                                                    {[['既読', st.counts.read, 'text-emerald-700 bg-emerald-50'],
+                                                                      ['未読', st.counts.unread, 'text-[#667085] bg-[#F6F7F9]'],
+                                                                      ['確認しました', st.counts.acked, 'text-brand-600 bg-brand-50'],
+                                                                      ['未リアクション', st.counts.notReacted, 'text-[#667085] bg-[#F6F7F9]']].map(([lab, n, cls]) => (
+                                                                        <div key={lab} className={`rounded-xl px-3 py-2 ${cls}`}>
+                                                                            <div className="text-[11px] font-bold opacity-80">{lab}</div>
+                                                                            <div className="text-[18px] font-black leading-tight">{n}<span className="text-[11px] font-bold opacity-70"> / {st.total}人</span></div>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                                <div className="text-[11px] font-bold text-[#98A2B3]">{st.note}</div>
+                                                                {st.outOfAudience > 0 && <div className="text-[11px] font-bold text-[#98A2B3]">※ いまの対象者に含まれない人の記録が {st.outOfAudience}件あります（過去の記録として残しています）</div>}
+                                                                {!st.detail && <div className="text-[12px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">氏名の一覧は、本部の管理者と投稿者のみ表示できます。</div>}
+                                                                {st.detail && st.people && (<>
+                                                                    <div>
+                                                                        <div className="text-[12px] font-bold text-[#344054] mb-2">まだ読んでいない人（{st.counts.unread}）</div>
+                                                                        {chips(st.people.unread)}
+                                                                    </div>
+                                                                    <div>
+                                                                        <div className="text-[12px] font-bold text-[#344054] mb-2">「確認しました」を押した人（{st.counts.acked}）</div>
+                                                                        {chips(st.people.acked)}
+                                                                    </div>
+                                                                </>)}
+                                                            </div>
+                                                        )}
+                                                        <div className="flex items-center gap-4 text-[13px] pt-1 border-t border-[#EAECF0]">
                                                             <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-700"><span className="w-2 h-2 rounded-full bg-emerald-500" />押した {reactedIds.size}人</span>
                                                             <span className="inline-flex items-center gap-1.5 font-semibold text-[#98A2B3]"><span className="w-2 h-2 rounded-full bg-[#D0D5DD]" />未リアクション {notYet.length}人</span>
                                                         </div>
@@ -14059,6 +14957,8 @@
                                                                         </div>
                                                                     </div>
                                                                 )}
+                                                                {/* ニュース記事に貼るためのリンク。グループがある行だけ出す（未作成の部屋へは誘導しない） */}
+                                                                {room && <button data-ev-copylink onClick={() => { const u = evLinkFor(row.id); try { navigator.clipboard.writeText(u); } catch {} evNotify('リンクをコピーしました。ニュース記事に貼ると参加ボタンが出ます'); }} className="inline-flex items-center justify-center gap-1 h-9 px-3 rounded-xl border border-[#EAECF0] text-[12px] font-bold text-[#667085] hover:bg-[#F8F9FB] transition" title="ニュース記事に貼るリンクをコピー">🔗 リンク</button>}
                                                                 {hasContact && (room
                                                                     ? <button onClick={() => evJoinChat(cv(row, 'roomId'))} disabled={evChatBusy === cv(row, 'roomId')} className="flex-1 inline-flex items-center justify-center gap-1.5 h-9 rounded-xl bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-bold shadow-sm shadow-brand-200/50 disabled:opacity-50 transition"><MessageSquare size={15} />グループチャットへ参加</button>
                                                                     : (canEdit
@@ -14115,7 +15015,17 @@
                                 return [...out.values()].filter(o => !hidden.has(o.pid)); // root非表示を除外
                             };
                             const q = orgSearch.trim();
-                            const qHit = (s) => !!q && (String(dispName(s.id, s.name)).includes(q) || String(s.name || '').includes(q)); // 検索一致
+                            // 検索一致: 氏名に加えて、自己紹介（ひとこと・得意なこと・学びたいこと・趣味）でも当てる。
+                            // 全角半角・カナひらがな・大小文字の違いを吸収する。
+                            const qn = profSearchNorm(q);
+                            const qHit = (s) => {
+                                if (!q) return false;
+                                const nm = String(dispName(s.id, s.name) || '');
+                                if (nm.includes(q) || String(s.name || '').includes(q)) return true;
+                                if (!qn) return false;
+                                if (profSearchNorm(nm).includes(qn)) return true;
+                                return profIntroHay(profiles[String(s.id)]).includes(qn);
+                            };
                             // 既定＝在籍ロスター（読み込み不要・即表示）。楽トレ/ヘルプ/受付/役職は除外。＋プロフィール上書き。root非表示も除外。
                             // ⚠️ 検索中は施術者/予約可の絞り込みを緩め、名前一致するスタッフ（オーナー/受付/役職含む）も表示する。
                             // 検索語が「店舗名」に一致した店舗は、その店舗の在籍スタッフを“全員”表示する
@@ -14124,7 +15034,8 @@
                             const rosterStaff = (id, name) => {
                                 const showAll = !q || shopNameHit(name); // 検索なし or 店舗名一致 → 在籍全員（絞り込みを緩めない）
                                 const base = (soStaffs || []).filter(s => String(s.shop_id) === String(id) && !s.deleted && !reassigned.has(String(s.id)) && !hidden.has(String(s.id)) && (showAll ? (!isNonTherapistName(s.name) && s.acceptsRes !== false) : qHit(s))).map(s => ({ id: String(s.id), name: dispName(s.id, s.name) }));
-                                const added = (profStaffByShop[name] || []).filter(x => !hidden.has(String(x.id)) && (showAll || String(x.name || dispName(x.id) || '').includes(q))).map(x => ({ id: x.id, name: x.name || dispName(x.id) || (((soStaffs || []).find(s => String(s.id) === x.id) || {}).name) || 'スタッフ' }));
+                                // ⚠️ 氏名だけでなく得意分野・趣味でも当てる（qHit を使う）
+                                const added = (profStaffByShop[name] || []).filter(x => !hidden.has(String(x.id)) && (showAll || qHit({ id: x.id, name: x.name || dispName(x.id) || '' }))).map(x => ({ id: x.id, name: x.name || dispName(x.id) || (((soStaffs || []).find(s => String(s.id) === x.id) || {}).name) || 'スタッフ' }));
                                 const seen = new Set(); const out = [];
                                 for (const s of [...base, ...added]) { if (seen.has(s.id)) continue; seen.add(s.id); out.push(s); }
                                 return out;
@@ -14132,7 +15043,7 @@
                             // 売上モード時：その月に売上>0のスタッフ。未取得はnull（集計中）。root非表示も除外。店舗名一致時は施術者を全員表示。
                             const salesStaff = (id, name) => { const s = orgSales[`${id}__${orgMonth}`]; if (!s) return null; const showAll = !q || shopNameHit(name); return s.filter(x => x.gross > 0 && !hidden.has(String(x.id)) && (showAll ? !isNonTherapistName(x.name) : qHit(x))).sort((a, b) => b.gross - a.gross).map(x => ({ id: String(x.id), name: dispName(x.id, x.name) })); };
                             const staffFor = (id, name) => orgSalesMode ? salesStaff(id, name) : rosterStaff(id, name); // null=集計中(売上モードのみ)
-                            const nameMatch = (sh) => { if (String(sh.name).includes(q)) return true; if (ownersForShop(sh.name).some(o => String(o.name).includes(q))) return true; const ss = staffFor(sh.id, sh.name) || []; return ss.some(s => String(s.name).includes(q)); };
+                            const nameMatch = (sh) => { if (String(sh.name).includes(q)) return true; if (ownersForShop(sh.name).some(o => String(o.name).includes(q))) return true; const ss = staffFor(sh.id, sh.name) || []; return ss.some(s => qHit(s)); };   // 氏名だけでなく得意分野・趣味でも当てる
                             const shops = q ? allShops.filter(nameMatch) : allShops;
                             const regionGroups = (() => {
                                 const b = new Map();
@@ -14156,18 +15067,22 @@
                                     sns: { instagram: '', x: '', youtube: '', tiktok: '', ...(p.sns || {}) },
                                     shops: Array.isArray(p.shops) ? [...p.shops] : [],
                                     birthday: p.birthday || '',
+                                    oneLine: p.oneLine || '',
+                                    goodAt: Array.isArray(p.goodAt) ? [...p.goodAt] : [],
+                                    learning: Array.isArray(p.learning) ? [...p.learning] : [],
+                                    hobbies: Array.isArray(p.hobbies) ? [...p.hobbies] : [],
                                 });
                             };
                             // root: 新規に人を追加（SalonOneに居ない人・手動追加）。manual:のpidでプロフィール作成。
                             const openAddPerson = (shopName, kind) => {
                                 setProfileView(null);
-                                setProfileEdit({ pid: `manual:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`, kind: kind || 'therapist', nameKanji: '', nameKana: '', bio: '', mainImg: '', subImgs: [], sns: { instagram: '', x: '', youtube: '', tiktok: '' }, shops: shopName ? [shopName] : [], birthday: '' });
+                                setProfileEdit({ pid: `manual:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`, kind: kind || 'therapist', nameKanji: '', nameKana: '', bio: '', mainImg: '', subImgs: [], sns: { instagram: '', x: '', youtube: '', tiktok: '' }, shops: shopName ? [shopName] : [], birthday: '', oneLine: '', goodAt: [], learning: [], hobbies: [] });
                             };
                             // root: 組織図から人を削除。プロフィールがあれば削除、SalonOne由来/設定オーナーは非表示リストで隠す。
                             const orgRemove = async (pid, name) => {
                                 if (!window.confirm(`「${name}」を組織図から削除しますか？`)) return;
                                 setProfileView(null);
-                                if (profiles[pid]) { try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'delete', pid, staffId: myPid, root: true }) }); } catch {} }
+                                if (profiles[pid]) { try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() }, body: JSON.stringify({ type: 'profile', action: 'delete', pid, staffId: myPid }) }); } catch {} }
                                 if (/^\d+$/.test(String(pid)) || String(pid).startsWith('owner:')) await orgHide(pid);
                                 else await profileLoad();
                             };
@@ -14202,6 +15117,19 @@
                                         <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${prof.kind === 'hq' ? 'text-indigo-700 bg-indigo-50' : prof.kind === 'owner' ? 'text-brand-700 bg-brand-50' : 'text-teal-700 bg-teal-50'}`}>{prof.kind === 'hq' ? '本部' : prof.kind === 'owner' ? 'オーナー' : 'セラピスト'}</span>
                                     </div>
                                     {prof.nameKana && <div className="text-[12px] text-[#98A2B3] mt-0.5">{prof.nameKana}</div>}
+                                    {prof.oneLine && <div data-prof-oneline-view className={`${big ? 'text-[14px]' : 'text-[13px]'} font-bold text-[#344054] mt-2`}>「{prof.oneLine}」</div>}
+                                    {['goodAt', 'learning', 'hobbies'].map(key => {
+                                        const list = Array.isArray(prof[key]) ? prof[key] : [];
+                                        if (!list.length) return null;
+                                        return (
+                                            <div key={key} data-prof-tags={key} className="mt-2">
+                                                <div className="text-[10px] font-black text-[#98A2B3]">{PROF_TAG_LABEL[key]}</div>
+                                                <div className="flex flex-wrap gap-1 mt-1">{list.map(t => (
+                                                    <span key={t} className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold ${key === 'goodAt' ? 'bg-teal-50 text-teal-700' : key === 'learning' ? 'bg-indigo-50 text-indigo-700' : 'bg-amber-50 text-amber-700'}`}>{t}</span>
+                                                ))}</div>
+                                            </div>
+                                        );
+                                    })}
                                     {prof.bio && <p className={`${big ? 'text-[14px]' : 'text-[12px]'} text-[#475467] leading-relaxed mt-2.5 whitespace-pre-wrap break-words ${big ? '' : 'max-h-32 overflow-y-auto'}`}>{prof.bio}</p>}
                                     {snsList.length > 0 && <div className="flex flex-wrap gap-1.5 mt-3">{snsList.map(([k, v]) => { const m = snsMeta[k] || { label: k, color: 'text-brand-600' }; return <a key={k} href={/^https?:\/\//.test(v) ? v : `https://${v}`} target="_blank" rel="noopener noreferrer" className={`inline-flex items-center gap-1 text-[12px] font-semibold ${m.color} bg-[#F8F9FB] border border-[#EAECF0] rounded-full px-2.5 py-1 hover:bg-white transition`}>{m.label}<ExternalLink size={11} /></a>; })}</div>}
                                 </>) : (
@@ -14237,8 +15165,8 @@
                                 const dispNm = (prof && prof.nameKanji) || name || 'スタッフ';
                                 const bday = isBirthdayToday(prof);
                                 return (
-                                    <span key={pid} className="group relative inline-block align-top">
-                                        <button onClick={e => { e.stopPropagation(); setProfileView({ pid, name, kind }); }} className={`inline-flex items-center gap-1.5 text-[12px] pl-1 pr-2.5 py-1 rounded-full border transition ${bday ? 'text-pink-700 bg-gradient-to-r from-pink-50 to-amber-50 border-pink-200 font-bold hover:from-pink-100 hover:to-amber-100 ring-1 ring-pink-200' : kind === 'owner' ? 'text-brand-700 bg-brand-50 border-brand-100 font-semibold hover:bg-brand-100/70' : 'text-[#344054] bg-[#F8F9FB] border-[#EAECF0] hover:bg-white hover:border-[#D6DAE1]'}`} title={bday ? `本日 ${dispNm} さんのお誕生日です🎉` : undefined}>
+                                    <span key={pid} className="group relative block align-top min-w-0">
+                                        <button onClick={e => { e.stopPropagation(); setProfileView({ pid, name, kind }); }} className={`w-full min-w-0 inline-flex items-center gap-1.5 text-[12px] px-2 py-1.5 rounded-xl border transition text-left nowl-name ${bday ? 'text-pink-700 bg-gradient-to-r from-pink-50 to-amber-50 border-pink-200 font-bold hover:from-pink-100 hover:to-amber-100 ring-1 ring-pink-200' : kind === 'owner' ? 'text-brand-700 bg-brand-50 border-brand-100 font-semibold hover:bg-brand-100/70' : 'text-[#344054] bg-[#F8F9FB] border-[#EAECF0] hover:bg-white hover:border-[#D6DAE1]'}`} title={bday ? `本日 ${dispNm} さんのお誕生日です🎉` : undefined}>
                                             {prof && prof.mainImg ? <span className={`w-5 h-5 rounded-full overflow-hidden shrink-0 bg-[#F2F4F7] ${bday ? 'ring-2 ring-pink-300' : ''}`}><AuthImg imgId={prof.mainImg} className="w-full h-full object-cover" loading="lazy" alt="" /></span> : <span className={`w-5 h-5 rounded-full ${bday ? 'bg-pink-100 text-pink-600' : chatAvatarColor(dispNm)} inline-flex items-center justify-center text-[10px] font-semibold`}>{bday ? '🎂' : String(dispNm || '？').charAt(0)}</span>}
                                             {bday ? `🎂 ${dispNm}` : dispNm}
                                             {bday ? <span className="text-[9px] font-black text-pink-700 bg-pink-100 rounded-full px-1.5 py-0.5 leading-none">🎉お誕生日</span> : (prof && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" title="プロフィール登録済み" />)}
@@ -14251,7 +15179,7 @@
                                 );
                             };
                             return (
-                                <div className="p-4 md:p-6 font-sans" style={{ background: 'linear-gradient(180deg, #EDF1F8 0%, #F8F9FB 18%, #F8F9FB 90%, #FCF6F1 100%)', color: '#111827' }} onClick={() => profileView && setProfileView(null)}>
+                                <div data-nowl="org" className="nowl p-4 md:p-6 font-sans" style={{ background: 'linear-gradient(180deg, #FBFBFC 0%, #F6F6F8 40%, #F6F6F8 100%)', color: '#18191c' }} onClick={() => profileView && setProfileView(null)}>
                                     <div className="max-w-[1400px] mx-auto">
                                         <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
                                             <div className="flex items-start gap-2.5">
@@ -14271,7 +15199,7 @@
 
                                         {!loading && (
                                             <div className="flex flex-wrap items-center gap-2.5 mb-5">
-                                                <div className="relative flex-1 min-w-[200px] max-w-sm"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]" /><input value={orgSearch} onChange={e => setOrgSearch(e.target.value)} placeholder="店舗・スタッフ・オーナーを検索" className="w-full h-9 pl-9 pr-3 rounded-lg bg-white border border-[#EAECF0] text-[13px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" /></div>
+                                                <div className="relative flex-1 min-w-[200px] max-w-sm"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]" /><input value={orgSearch} onChange={e => setOrgSearch(e.target.value)} placeholder="名前・店舗・得意分野・趣味で検索" className="w-full h-9 pl-9 pr-3 rounded-lg bg-white border border-[#EAECF0] text-[13px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" /></div>
                                                 <label className="inline-flex items-center gap-2 h-9 px-3 rounded-lg bg-white border border-[#EAECF0] text-[13px] font-medium text-[#667085] cursor-pointer select-none">
                                                     <input type="checkbox" checked={orgSalesMode} onChange={e => setOrgSalesMode(e.target.checked)} className="w-4 h-4 accent-[#F37021]" />当月売上で絞る
                                                 </label>
@@ -14304,7 +15232,7 @@
                                                                     {owners.length > 0 && <div className="flex flex-wrap gap-1.5 mb-2.5">{owners.map(o => ProfilePop({ pid: o.pid, name: o.name, kind: 'owner' }))}</div>}
                                                                     {staff == null ? <div className="flex items-center gap-1.5 text-[12px] text-[#CBD2DC]"><Loader2 size={13} className="animate-spin" />集計中…</div>
                                                                      : staff.length === 0 ? <div className="text-[12px] text-[#CBD2DC]">{orgSalesMode ? 'この月の稼働スタッフはいません' : '在籍スタッフ情報なし'}</div>
-                                                                     : <div className="flex flex-wrap gap-1.5">{staff.map(s => ProfilePop({ pid: s.id, name: s.name, kind: 'therapist' }))}</div>}
+                                                                     : <div className="nowl-people">{staff.map(s => ProfilePop({ pid: s.id, name: s.name, kind: 'therapist' }))}</div>}
                                                                 </div>
                                                             );
                                                         })}
@@ -14365,7 +15293,7 @@
                                         const inputCls = 'w-full h-10 rounded-lg border border-[#EAECF0] bg-white px-3.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition';
                                         const isMine = d.pid === myPid;
                                         return (
-                                            <div className="fixed inset-0 z-[95] bg-[#111827]/45 backdrop-blur-sm flex items-end md:items-center justify-center p-0 md:p-4" onClick={() => setProfileEdit(null)}>
+                                            <div data-nowl-modal="profile" className="nowl nowl-overlay fixed inset-0 z-[95] flex items-end md:items-center justify-center p-0 md:p-4" onClick={() => setProfileEdit(null)}>
                                                 <div className="bg-white w-full md:max-w-lg md:rounded-2xl rounded-t-2xl shadow-2xl max-h-[92vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
                                                     <div className="px-5 py-3.5 border-b border-[#EAECF0] flex items-center justify-between shrink-0">
                                                         <h3 className="font-semibold text-[15px] text-[#111827]">{isMine ? 'マイプロフィール' : `プロフィール編集（本部）`}</h3>
@@ -14423,6 +15351,34 @@
                                                             <div className="text-[12px] font-bold text-[#344054] mb-1.5">生年月日 <span className="text-[#98A2B3] font-normal">任意・誕生日の当日だけ組織図で名前が変わります🎂</span></div>
                                                             <input type="date" value={d.birthday || ''} onChange={e => setD({ birthday: e.target.value })} className={inputCls} />
                                                         </div>
+                                                        {/* ひとこと（1行） */}
+                                                        <div>
+                                                            <div className="text-[12px] font-bold text-[#344054] mb-1.5">ひとこと<span className="ml-1 text-[10px] font-bold text-[#98A2B3]">任意</span></div>
+                                                            <input data-prof-oneline value={d.oneLine || ''} onChange={e => setD({ oneLine: e.target.value.slice(0, 60) })} maxLength={60}
+                                                                placeholder="例）産後ケアが得意です。お気軽にどうぞ！"
+                                                                className="w-full h-10 px-3.5 rounded-lg border border-[#EAECF0] bg-white text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
+                                                        </div>
+                                                        {/* 得意なこと／学びたいこと／趣味（タグ。候補を押すだけでも入る） */}
+                                                        {['goodAt', 'learning', 'hobbies'].map(key => {
+                                                            const cur = Array.isArray(d[key]) ? d[key] : [];
+                                                            const add = (t) => setD({ [key]: profNormTags([...cur, t]) });
+                                                            return (
+                                                                <div key={key} data-prof-tagfield={key}>
+                                                                    <div className="text-[12px] font-bold text-[#344054] mb-1.5">{PROF_TAG_LABEL[key]}<span className="ml-1 text-[10px] font-bold text-[#98A2B3]">任意・最大8つ</span></div>
+                                                                    {cur.length > 0 && <div className="flex flex-wrap gap-1.5 mb-1.5">{cur.map(t => (
+                                                                        <button key={t} onClick={() => setD({ [key]: cur.filter(x => x !== t) })} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-brand-50 border border-brand-200 text-[12px] font-bold text-brand-700 hover:bg-brand-100">{t}<X size={12} /></button>
+                                                                    ))}</div>}
+                                                                    <input data-prof-taginput={key} placeholder="入力して Enter で追加"
+                                                                        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); const v = e.currentTarget.value.trim(); if (v) { add(v); e.currentTarget.value = ''; } } }}
+                                                                        className="w-full h-9 px-3 rounded-lg border border-[#EAECF0] bg-white text-[13px] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400" />
+                                                                    <div className="flex flex-wrap gap-1 mt-1.5">
+                                                                        {PROF_TAGS[key].filter(t => !cur.includes(t)).slice(0, 10).map(t => (
+                                                                            <button key={t} onClick={() => add(t)} className="px-2 py-0.5 rounded-full border border-[#EAECF0] text-[11px] font-bold text-[#667085] hover:bg-[#F8F9FB]">＋{t}</button>
+                                                                        ))}
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })}
                                                         {/* 自己紹介 */}
                                                         <div>
                                                             <div className="text-[12px] font-bold text-[#344054] mb-1.5">自己紹介</div>
@@ -14458,7 +15414,7 @@
                                                         </div>
                                                     </div>
                                                     <div className="px-5 py-3.5 border-t border-[#EAECF0] flex items-center gap-2 shrink-0">
-                                                        {profiles[d.pid] && <button onClick={async () => { if (window.confirm('このプロフィールを削除しますか？')) { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'profile', action: 'delete', pid: d.pid, staffId: myPid, root: isRoot }) }).catch(() => {}); await profileLoad(); setProfileEdit(null); } }} className="h-10 px-3 rounded-lg text-[13px] font-semibold text-rose-600 hover:bg-rose-50 transition">削除</button>}
+                                                        {profiles[d.pid] && <button onClick={async () => { if (window.confirm('このプロフィールを削除しますか？')) { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() }, body: JSON.stringify({ type: 'profile', action: 'delete', pid: d.pid, staffId: myPid }) }).catch(() => {}); await profileLoad(); setProfileEdit(null); } }} className="h-10 px-3 rounded-lg text-[13px] font-semibold text-rose-600 hover:bg-rose-50 transition">削除</button>}
                                                         <button onClick={() => setProfileEdit(null)} className="ml-auto h-10 px-4 rounded-lg text-[13px] font-semibold text-[#667085] hover:bg-[#F2F4F7] transition">キャンセル</button>
                                                         <button onClick={doSave} disabled={profileSaving} className="h-10 px-5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-semibold disabled:opacity-60 transition">{profileSaving ? '保存中…' : '保存する'}</button>
                                                     </div>
@@ -19066,8 +20022,8 @@
                                                             );
                                                         })()}
                                                         <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
-                                                            <button onClick={() => { setAcqLinkSort(null); setAcqSort('new'); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${(!acqLinkSort && acqSort === 'new') ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>新しい順</button>
-                                                            <button onClick={() => { setAcqLinkSort(null); setAcqSort('old'); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${(!acqLinkSort && acqSort === 'old') ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>古い順(9/1〜)</button>
+                                                            <button onClick={() => { setAcqLinkSort(null); setAcqReservedSort(null); setAcqSort('new'); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${(!acqLinkSort && !acqReservedSort && acqSort === 'new') ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>新しい順</button>
+                                                            <button onClick={() => { setAcqLinkSort(null); setAcqReservedSort(null); setAcqSort('old'); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${(!acqLinkSort && !acqReservedSort && acqSort === 'old') ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>古い順(9/1〜)</button>
                                                         </div>
                                                     </div></div>
                                                 {acqCustLoading && !custRows.length ? (
@@ -19099,7 +20055,12 @@
                                                         const want = norm(acqLinkFilter);
                                                         rows = rows.filter(o => acqLinkFilter === '__none__' ? !o.link : (norm(o.link) === want));
                                                     }
-                                                    if (acqLinkSort) {
+                                                    // 初回来店予定(reserved_at)をUNIXミリ秒に。未設定は末尾へ。
+                                                    const rtms = (c) => { const t = Date.parse(String(c.reserved_at || '').replace(' ', 'T')); return isNaN(t) ? null : t; };
+                                                    if (acqReservedSort) {
+                                                        // 初回来店予定で昇順/降順（未設定は常に末尾）。同時刻は受付日で安定化。
+                                                        rows.sort((a, b) => { const ta = rtms(a.c), tb = rtms(b.c); if (ta === null && tb === null) return cmp(b.c, a.c); if (ta === null) return 1; if (tb === null) return -1; return (acqReservedSort === 'asc' ? (ta - tb) : (tb - ta)) || cmp(b.c, a.c); });
+                                                    } else if (acqLinkSort) {
                                                         // 施策リンク名で昇順/降順（リンクなしは末尾）。同名は受付日で安定化。
                                                         rows.sort((a, b) => { const r = (a.link || '￿').localeCompare(b.link || '￿', 'ja'); return (acqLinkSort === 'asc' ? r : -r) || cmp(b.c, a.c); });
                                                     } else {
@@ -19111,7 +20072,7 @@
                                                     <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
                                                         <table className="w-full text-[12px] whitespace-nowrap">
                                                             <thead><tr className="text-slate-400 font-black border-b border-slate-200">
-                                                                <th className="text-left pb-2 px-2">受付日時</th><th className="text-left pb-2 px-2">初回来店予定</th><th className="text-left pb-2 px-2">店舗</th><th className="text-left pb-2 px-2">顧客名</th><th className="text-left pb-2 px-2">担当</th><th className="text-left pb-2 px-2">媒体</th><th onClick={() => setAcqLinkSort(s => s === 'asc' ? 'desc' : s === 'desc' ? null : 'asc')} title="クリックで施策リンク名の昇順/降順に並び替え（もう一度で解除）" className={`text-left pb-2 px-2 cursor-pointer select-none whitespace-nowrap ${acqLinkSort ? 'text-emerald-600' : 'hover:text-slate-600'}`}>施策リンク{acqLinkSort === 'asc' ? ' ▲' : acqLinkSort === 'desc' ? ' ▼' : ''} <span onClick={e => e.stopPropagation()}><InfoTip side="bottom" text="獲得時に使った施策リンク（強制リンク）を、SalonOneのappointmentsを差分同期して顧客に紐づけて表示。『リンクなし』＝その媒体経由でも強制リンクを通っていない予約（例:広告は見たが店舗の通常予約フォームから予約）。ホットペッパーは常にリンクなし（HPB側の予約で自社リンクを通らないため）。直近（当日〜前日）の顧客は同期がまだ追いついておらず、後から自動でリンクが付くことがあります。クリックで昇順/降順に並び替え、上部の「施策リンク：全て」で絞り込みできます。" /></span></th><th className="text-center pb-2 px-2">状態</th><th className="text-center pb-2 px-2">購入</th><th className="text-right pb-2 px-2">LTV</th><th className="text-center pb-2 px-2">操作</th>
+                                                                <th onClick={() => { setAcqLinkSort(null); setAcqReservedSort(null); setAcqSort(s => s === 'new' ? 'old' : 'new'); }} title="クリックで受付日時の新しい順/古い順を切替" className={`text-left pb-2 px-2 cursor-pointer select-none whitespace-nowrap ${(!acqLinkSort && !acqReservedSort) ? 'text-emerald-600' : 'hover:text-slate-600'}`}>受付日時{(!acqLinkSort && !acqReservedSort) ? (acqSort === 'new' ? ' ▼' : ' ▲') : ''}</th><th onClick={() => setAcqReservedSort(s => { setAcqLinkSort(null); return s === 'asc' ? 'desc' : s === 'desc' ? null : 'asc'; })} title="クリックで初回来店予定の昇順/降順に並び替え（もう一度で解除＝受付日順に戻る）" className={`text-left pb-2 px-2 cursor-pointer select-none whitespace-nowrap ${acqReservedSort ? 'text-emerald-600' : 'hover:text-slate-600'}`}>初回来店予定{acqReservedSort === 'asc' ? ' ▲' : acqReservedSort === 'desc' ? ' ▼' : ''}</th><th className="text-left pb-2 px-2">店舗</th><th className="text-left pb-2 px-2">顧客名</th><th className="text-left pb-2 px-2">担当</th><th className="text-left pb-2 px-2">媒体</th><th onClick={() => setAcqLinkSort(s => { setAcqReservedSort(null); return s === 'asc' ? 'desc' : s === 'desc' ? null : 'asc'; })} title="クリックで施策リンク名の昇順/降順に並び替え（もう一度で解除）" className={`text-left pb-2 px-2 cursor-pointer select-none whitespace-nowrap ${acqLinkSort ? 'text-emerald-600' : 'hover:text-slate-600'}`}>施策リンク{acqLinkSort === 'asc' ? ' ▲' : acqLinkSort === 'desc' ? ' ▼' : ''} <span onClick={e => e.stopPropagation()}><InfoTip side="bottom" text="獲得時に使った施策リンク（強制リンク）を、SalonOneのappointmentsを差分同期して顧客に紐づけて表示。『リンクなし』＝その媒体経由でも強制リンクを通っていない予約（例:広告は見たが店舗の通常予約フォームから予約）。ホットペッパーは常にリンクなし（HPB側の予約で自社リンクを通らないため）。直近（当日〜前日）の顧客は同期がまだ追いついておらず、後から自動でリンクが付くことがあります。クリックで昇順/降順に並び替え、上部の「施策リンク：全て」で絞り込みできます。" /></span></th><th className="text-center pb-2 px-2">状態</th><th className="text-center pb-2 px-2">購入</th><th className="text-right pb-2 px-2">LTV</th><th className="text-center pb-2 px-2">操作</th>
                                                             </tr></thead>
                                                             <tbody>
                                                                 {list.map(({ c, ex, link }, i) => (
@@ -21189,9 +22150,19 @@
                                 <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 md:p-5">
                                     <div className="flex items-center gap-2 mb-3 flex-wrap">
                                         <span className="text-[14px] font-black text-slate-800">📚 ナレッジ資料（長文）</span>
-                                        <span className="text-[10px] text-slate-400 font-bold">本文（中身）を貼るとAIが学習します＝「✅反映済み」。⚠️ URLだけでは学習されません（Googleスライド/ドキュメントはClaudeに取込を依頼、または中身を貼付）。</span>
-                                        {!knowEdit && <button onClick={() => setKnowEdit({ title: '', body: '', shopScope: '', source: '' })} className="ml-auto px-3 py-1.5 rounded-lg bg-slate-800 text-white font-bold text-[12px] hover:bg-slate-900">＋ 資料を追加</button>}
+                                        <span className="text-[10px] text-slate-400 font-bold">本文（中身）を貼るとAIが学習します＝「✅反映済み」。出典にGoogleスプレッドシート／スライド／ドキュメントのURLを入れておくと、1日1回そこから自動で最新にします。</span>
+                                        {/* 1日1回の自動更新を待たずに、いますぐ取り直す */}
+                                        {/* 最後に自動更新が動いた時刻。ここが古いままなら日次の自動更新が動いていない（CRON_SECRET 未設定など）。 */}
+                                        {(() => {
+                                            const last = (knowDocs || []).reduce((a, d) => Math.max(a, (d && d.sync && d.sync.lastCheckedAt) || 0), 0);
+                                            return <span className={`ml-auto text-[10px] font-bold ${last ? 'text-slate-400' : 'text-amber-600'}`}>
+                                                {last ? `最終更新確認 ${new Date(last).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : 'まだ自動更新が動いていません'}
+                                            </span>;
+                                        })()}
+                                        <button onClick={knowSyncNow} disabled={knowSyncing} className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 font-bold text-[12px] hover:bg-slate-50 disabled:opacity-40">{knowSyncing ? '取り直しています…' : '🔄 いま取り直す'}</button>
+                                        {!knowEdit && <button onClick={() => setKnowEdit({ title: '', body: '', shopScope: '', source: '' })} className="px-3 py-1.5 rounded-lg bg-slate-800 text-white font-bold text-[12px] hover:bg-slate-900">＋ 資料を追加</button>}
                                     </div>
+                                    {knowSyncMsg && <div className="mb-2 px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 text-[12px] font-bold text-slate-600">{knowSyncMsg}</div>}
                                     {knowEdit && (
                                         <div className="space-y-2 mb-3 border border-slate-200 rounded-xl p-3 bg-slate-50/50">
                                             <div className="flex gap-2 flex-wrap">
@@ -21201,7 +22172,20 @@
                                                     {shopList.map((s, i) => <option key={i} value={s.name}>{s.name.replace(/^NAORU\s*/, '')} 限定</option>)}
                                                 </select>
                                             </div>
-                                            <input value={knowEdit.source} onChange={e => setKnowEdit(k => ({ ...k, source: e.target.value }))} placeholder="出典（任意・例: GoogleスライドURL / 議事録）" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-[12px] font-medium outline-none focus:border-indigo-400" />
+                                            <input value={knowEdit.source} onChange={e => setKnowEdit(k => ({ ...k, source: e.target.value }))} placeholder="出典（GoogleスプレッドシートやスライドのURLを貼ると、1日1回ここから自動で最新にします）" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-[12px] font-medium outline-none focus:border-indigo-400" />
+                                            {/* Google の URL なら自動更新の対象。それ以外（自由文）は対象外だと分かるように出す。 */}
+                                            {(() => {
+                                                const ok = /^https:\/\/docs\.google\.com\/(spreadsheets|presentation|document)\/d\/[A-Za-z0-9_-]{20,}/.test(String(knowEdit.source || '').trim());
+                                                if (!String(knowEdit.source || '').trim()) return null;
+                                                return ok ? (
+                                                    <label className="flex items-center gap-2 text-[12px] font-bold text-emerald-700">
+                                                        <input type="checkbox" checked={knowEdit.autoSync !== false} onChange={e => setKnowEdit(k => ({ ...k, autoSync: e.target.checked }))} />
+                                                        1日1回このURLから自動で最新にする（更新があれば「更新あり」と出します）
+                                                    </label>
+                                                ) : (
+                                                    <div className="text-[11px] font-bold text-slate-400">※ 自動更新はGoogleのスプレッドシート・スライド・ドキュメントのURLのときだけ働きます。</div>
+                                                );
+                                            })()}
                                             <textarea value={knowEdit.body} onChange={e => setKnowEdit(k => ({ ...k, body: e.target.value }))} rows={8} placeholder="ここに本文（文字起こし・資料の中身）を貼り付け。長文OK。" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-medium outline-none focus:border-indigo-400 resize-y" />
                                             <div className="flex items-center gap-2">
                                                 <button onClick={() => setKnowEdit(null)} className="text-[12px] font-bold text-slate-400 hover:text-slate-600">キャンセル</button>
@@ -21224,10 +22208,29 @@
                                                             ? <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-emerald-100 text-emerald-700 shrink-0">✅ 反映済み</span>
                                                             : <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-amber-100 text-amber-700 shrink-0">⚠️ 未反映（中身が空/URLのみ）</span>}
                                                         {d.shopScope ? <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-violet-50 text-violet-600 shrink-0">{String(d.shopScope).replace(/^NAORU\s*/, '')}</span> : <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-slate-100 text-slate-500 shrink-0">全店</span>}
+                                                        {/* 自動更新の状態。更新があったら本部が「確認しました」を押すまで残す。 */}
+                                                        {d.sync && d.sync.needsReview && (
+                                                            <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-amber-100 text-amber-800 shrink-0">🔔 更新あり（未確認）</span>
+                                                        )}
+                                                        {d.sync && d.sync.lastError && (
+                                                            <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-rose-100 text-rose-700 shrink-0" title={d.sync.lastError}>⚠️ 取得できず</span>
+                                                        )}
+                                                        {d.autoSync !== false && /^https:\/\/docs\.google\.com\//.test(String(d.source || '')) && !(d.sync && d.sync.needsReview) && (
+                                                            <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-sky-50 text-sky-600 shrink-0">🔄 自動更新</span>
+                                                        )}
                                                     </div>
                                                     <div className="text-[11px] text-slate-400 truncate">{(d.body || '').slice(0, 80)}{bodyLen > 80 ? '…' : ''}（{bodyLen.toLocaleString()}字）</div>
+                                                    {/* 取得に失敗した理由は、マウスを乗せなくても読めるようにそのまま出す */}
+                                                    {d.sync && d.sync.lastError && (
+                                                        <div data-know-error className="mt-1 px-2 py-1 rounded-md bg-rose-50 border border-rose-100 text-[11px] font-bold text-rose-700 break-words">
+                                                            取得できなかった理由: {String(d.sync.lastError).slice(0, 200)}
+                                                        </div>
+                                                    )}
                                                 </div>
-                                                <button onClick={() => setKnowEdit({ id: d.id, title: d.title, body: d.body, shopScope: d.shopScope || '', source: d.source || '' })} className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-bold text-slate-500 hover:bg-slate-100">編集</button>
+                                                <button onClick={() => setKnowEdit({ id: d.id, title: d.title, body: d.body, shopScope: d.shopScope || '', source: d.source || '', autoSync: d.autoSync !== false, sync: d.sync, revisions: d.revisions })} className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-bold text-slate-500 hover:bg-slate-100">編集</button>
+                                                {d.sync && d.sync.needsReview && (
+                                                    <button onClick={() => knowMarkSeen(d.id)} className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-black text-amber-800 bg-amber-100 hover:bg-amber-200">確認しました</button>
+                                                )}
                                                 <button onClick={() => knowDelete(d.id)} className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-bold text-rose-500 hover:bg-rose-50">削除</button>
                                             </div>
                                             );
@@ -21794,12 +22797,21 @@
                                         <div>
                                             <span className="font-bold text-ink-400">検証に使うルーム（名前で選びます）</span>
                                             <div className="mt-1 max-h-40 overflow-auto rounded-lg border border-ink-200 divide-y divide-ink-100">
-                                                {choices.rooms.length === 0 && <div className="px-3 py-2 text-ink-400">選べるルームがありません</div>}
+                                                {choices.rooms.length === 0 && (
+                                                    <div className="px-3 py-2 text-ink-400">
+                                                        選べるルームがありません
+                                                        {(t.choicesEmptyReason || []).filter(x => x.includes('ルーム')).map(x => (
+                                                            <div key={x} className="mt-0.5 text-[11px] text-amber-700">{x}</div>
+                                                        ))}
+                                                    </div>
+                                                )}
                                                 {choices.rooms.map(r => (
                                                     <label key={r.id} className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-ink-50">
                                                         <input type="checkbox" data-ai-room={r.id}
                                                             defaultChecked={((t.cfg && t.cfg.trialRooms) || []).includes(r.id)} />
                                                         <span>{r.name}</span>
+                                                        {/* 参加者数。本部限定のルームかを選ぶ前に確かめられるように */}
+                                                        {r.members ? <span className="text-[11px] text-ink-400">参加 {r.members}名</span> : null}
                                                     </label>
                                                 ))}
                                             </div>
@@ -21807,7 +22819,14 @@
                                         <div>
                                             <span className="font-bold text-ink-400">AIに渡すFAQ（タイトルで選びます・少数のみ）</span>
                                             <div className="mt-1 max-h-40 overflow-auto rounded-lg border border-ink-200 divide-y divide-ink-100">
-                                                {choices.docs.length === 0 && <div className="px-3 py-2 text-ink-400">選べるFAQがありません</div>}
+                                                {choices.docs.length === 0 && (
+                                                    <div className="px-3 py-2 text-ink-400">
+                                                        選べるFAQがありません
+                                                        {(t.choicesEmptyReason || []).filter(x => x.includes('FAQ')).map(x => (
+                                                            <div key={x} className="mt-0.5 text-[11px] text-amber-700">{x}</div>
+                                                        ))}
+                                                    </div>
+                                                )}
                                                 {choices.docs.map(d => (
                                                     <label key={d.id} className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-ink-50">
                                                         <input type="checkbox" data-ai-doc={d.id}
@@ -22198,10 +23217,19 @@
                                         </div>
                                     )}
 
+                                    {/* ⚠️ 画面があるフラグは**必ずここに出す**。一覧から漏れると、
+                                           メニューがフラグOFFで隠れているのに ON にする手段が無くなる。 */}
                                     <div className="space-y-1.5">
-                                        {[['cc_approval', '承認センター'], ['cc_agentlog', 'AI Agent Activity']].map(([k, label]) => (
+                                        {[
+                                            ['cc_approval', '承認センター', ''],
+                                            ['cc_agentlog', 'AI Agent Activity', ''],
+                                            ['cc_ai_trial', '@AI 検証', '本部・管理者のみ。許可した検証用ルームだけでAIが答えます'],
+                                        ].map(([k, label, note]) => (
                                             <div key={k} className="flex items-center gap-3 py-1.5">
-                                                <span className="text-[13px] font-bold text-slate-800 flex-1">{label}</span>
+                                                <span className="text-[13px] font-bold text-slate-800 flex-1">
+                                                    {label}
+                                                    {note ? <span className="block text-[11px] font-medium text-slate-400">{note}</span> : null}
+                                                </span>
                                                 <span className={`text-[11px] font-black ${ccOn(k) ? 'text-emerald-600' : 'text-slate-400'}`}>{ccOn(k) ? '公開中' : 'OFF'}</span>
                                                 <button onClick={() => ccSetFlag(k, !(ccFlags && ccFlags[k] === true))} disabled={ccBusy === k || !ccFlags || ccFlags.configured === false}
                                                     className={`px-3 py-1.5 rounded-lg text-[12px] font-black disabled:opacity-40 ${(ccFlags && ccFlags[k] === true) ? 'bg-white text-slate-700 ring-1 ring-slate-300 hover:bg-slate-50' : 'bg-slate-900 text-white hover:bg-slate-800'}`}>
@@ -26253,7 +27281,7 @@
                 //    問題なければ rootOnly を外して全ロールに開放する。チャットを一番上に配置。
                 { label: 'コミュニケーション', accent: { pill: 'bg-blue-50 text-blue-700', dot: 'bg-blue-500', chip: 'group-hover:bg-blue-50 group-hover:text-blue-600' }, items: [
                     { id: 'chat', label: 'チャット', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, badge: chatUnread, rootOnly: true },
-                    { id: 'board', label: '重要掲示板', icon: <Megaphone size={18} />, mobileIcon: <Megaphone size={18} />, badge: boardUnread, rootOnly: true },
+                    { id: 'board', label: 'ニュース', icon: <Megaphone size={18} />, mobileIcon: <Megaphone size={18} />, badge: boardUnread, rootOnly: true },
                     { id: 'events', label: '勉強会・イベント', icon: <Calendar size={18} />, mobileIcon: <Calendar size={18} />, badge: eventsUnread, rootOnly: true },
                     { id: 'org', label: '組織図', icon: <Users size={18} />, mobileIcon: <Users size={18} />, rootOnly: true },
                     { id: 'askai', label: 'AIに質問', icon: <span className="text-[17px] leading-none">🤖</span>, mobileIcon: <span className="text-[17px] leading-none">🤖</span> },

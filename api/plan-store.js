@@ -27,6 +27,9 @@ import {
   buildAsset, confirmRights, buildCreative, startJob, completeJob,
   requestRevision, approve as approveCreative, deliverables, compareSet, normalizeStore as normalizeCreativeStore,
 } from '../lib/creative.js';
+import { parseSourceUrl as knowParseSource, isSyncable as knowSyncable,
+  applyFetched as knowApplyFetched, markReviewed as knowMarkReviewed,
+  syncSummary as knowSyncSummary } from '../lib/knowledge-sync.js';
 // ②が作った「名前で選ぶ」ための組み立て。画面側で同じ判定を書き直さないよう、
 // サーバーがここで組み立てて返す（どのルーム・どの資料が対象かはサーバーが決める）。
 import { buildTrialTargets } from '../lib/chat-ai-adapter.js';
@@ -37,6 +40,10 @@ import { recordSnapshot, computeDeltas, meoFlags, meoScore, alertWeight, jstYmd,
 import { mergeAppointments, mergeDismissed, flatten as soflFlatten } from '../lib/soflmap.js';
 import { ALLOWANCE_LOG_KEY, ALLOWANCE_PROD_KEY, ALLOWANCE_LOG_CAP, makeEntry as makeAllowanceEntry, mergeSubmissions, isDuplicateSubmit, mergeProductivity, bumpProductivity } from '../lib/allowance-store.js';
 import { BOARD_READS_KEY, normalizeReads, mergeReads, bumpRead, versionOf, isStale, upsertPost, upsertComment } from '../lib/board-store.js';
+import { normalizeIntro, canEditProfile } from '../lib/profile-fields.js';
+import { normalizeMeta as newsMeta, audienceFor as newsAudienceFor } from '../lib/news-post.js';
+import { prKey as boardPrKey, normalizePr, markRead as boardMarkRead, markAck as boardMarkAck,
+         postStatus as boardPostStatus, canSeeDetail as boardCanSeeDetail, outOfAudience as boardOutOfAudience } from '../lib/board-status.js';
 // ── Command Center（Phase 0〜2）。既存の type= には一切触れない追加のみ ──
 import { FLAGS_KEY, DEFAULT_FLAGS, normalizeFlags, applyFlagChange, killAll } from '../lib/ccflags.js';
 import { AUDIT_KEY, AUDIT_CAP, buildEntry as buildAuditEntry, listEntries as listAuditEntries } from '../lib/audit.js';
@@ -56,6 +63,9 @@ const KV_TOKEN = () => process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDI
 const SB_URL = () => process.env.SUPABASE_URL || '';
 const SB_KEY = () => process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || '';
 const GAS_URL = () => process.env.PLAN_GAS_URL || process.env.SETTLEMENT_GAS_URL || '';
+// どちらの環境変数が使われているか（設定の取り違えを切り分けるため。URL そのものは出さない）
+const GAS_SOURCE = () => (process.env.PLAN_GAS_URL ? 'PLAN_GAS_URL'
+  : (process.env.SETTLEMENT_GAS_URL ? 'SETTLEMENT_GAS_URL' : ''));
 const GOALS_KEY = 'naoru:plan:goals';
 const ACTIONS_KEY = 'naoru:plan:actions';
 const ALLOWANCE_KEY = 'naoru:allowance:v1'; // { submissions:[...], productivity:{…} } 旧形式。提出は追記ログ(ALLOWANCE_LOG_KEY)・生産性は別キー(ALLOWANCE_PROD_KEY)へ移行済み。ここはRollback用の写しとして維持
@@ -469,33 +479,43 @@ export default async function handler(req, res) {
 
     // 設定の参照・更新（root/本部のみ。検証用Roomと許可FAQを人が決める）
     if (action === 'config') {
-      if (req.method === 'GET') {
-        // 画面が **IDではなく名前で選べる** よう、対象ルーム・許可資料を名前付きで返す。
-        // 対象の判定はサーバーが持つ（画面の申告を信用しない）。
-        const [roomsSrc, faqSrc] = await Promise.all([
-          blobGet(CHAT_KEY, hasKV, hasSB, gas).catch(() => null),
-          blobGet(FAQ_KEY, hasKV, hasSB, gas).catch(() => null),
-        ]);
-        const allRooms = (Array.isArray(roomsSrc && roomsSrc.rooms) ? roomsSrc.rooms : [])
-          .filter(r => canViewRoom(chatActor, r));      // 見えないルームは選択肢にも出さない
-        const names = {};
-        for (const m of (Array.isArray(roomsSrc && roomsSrc.dir && roomsSrc.dir.staff) ? roomsSrc.dir.staff : [])) {
-          if (m && m.id) names[String(m.id)] = String(m.name || '');
-        }
-        const targets = buildTrialTargets({ config: cfg, rooms: allRooms,
-          docs: Array.isArray(faqSrc && faqSrc.faqs) ? faqSrc.faqs : [], names });
-        // 設定欄で名前から選べるよう、候補も返す（登録済みのIDだけを送らせる）
-        const choices = {
-          rooms: allRooms.map(r => ({ id: String(r.id), name: String(r.name || r.id), kind: String(r.kind || '') })),
-          docs: (Array.isArray(faqSrc && faqSrc.faqs) ? faqSrc.faqs : [])
-            .map(d => ({ id: String(d.id), title: String(d.title || d.q || d.id) })),
-        };
-        return res.status(200).json({ ok: true, config: cfg, enabled: aiOn, targets, choices });
+      // 画面が **IDではなく名前で選べる** よう、対象ルーム・許可資料を名前付きで返す。
+      // 対象の判定はサーバーが持つ（画面の申告を信用しない）。
+      // ⚠️ 読み書きの判定は **メソッドではなく body.config の有無**で行う。
+      //    画面は読み取りも POST で呼ぶため、GET のときだけ候補を返すと
+      //    選択肢が常に空になり、設定を読むたびに保存が走っていた。
+      const isSave = body.config && typeof body.config === 'object';
+      let current = cfg;
+      if (isSave) {
+        current = normalizeAiCfg({ ...cfg, ...body.config, updatedAt: new Date().toISOString(), updatedBy: actorId });
+        await blobSet(ccKey(CHATAI_CFG_KEY), current, hasKV, hasSB, gas);
+        await audit({ action: 'chatai_config', entity: 'chatai', entityId: 'config', after: current });
       }
-      const next = normalizeAiCfg({ ...cfg, ...(body.config || {}), updatedAt: new Date().toISOString(), updatedBy: actorId });
-      await blobSet(ccKey(CHATAI_CFG_KEY), next, hasKV, hasSB, gas);
-      await audit({ action: 'chatai_config', entity: 'chatai', entityId: 'config', after: next });
-      return res.status(200).json({ ok: true, config: next });
+      const [roomsSrc, faqSrc] = await Promise.all([
+        blobGet(CHAT_KEY, hasKV, hasSB, gas).catch(() => null),
+        blobGet(FAQ_KEY, hasKV, hasSB, gas).catch(() => null),
+      ]);
+      const allRooms = (Array.isArray(roomsSrc && roomsSrc.rooms) ? roomsSrc.rooms : [])
+        .filter(r => canViewRoom(chatActor, r));      // 見えないルームは選択肢にも出さない
+      const names = {};
+      for (const m of (Array.isArray(roomsSrc && roomsSrc.dir && roomsSrc.dir.staff) ? roomsSrc.dir.staff : [])) {
+        if (m && m.id) names[String(m.id)] = String(m.name || '');
+      }
+      const faqs = Array.isArray(faqSrc && faqSrc.faqs) ? faqSrc.faqs : [];
+      const targets = buildTrialTargets({ config: current, rooms: allRooms, docs: faqs, names });
+      // 設定欄で名前から選べるよう、候補も返す（登録済みのIDだけを送らせる）
+      const choices = {
+        rooms: allRooms.map(r => ({ id: String(r.id), name: String(r.name || r.id), kind: String(r.kind || ''),
+          members: (Array.isArray(r.members) ? r.members : []).length })),
+        docs: faqs.map(d => ({ id: String(d.id), title: String(d.title || d.q || d.id) })),
+      };
+      // 候補が空のときは **理由を返す**（画面に「ありません」とだけ出して詰まらせない）
+      const why = [];
+      if (!allRooms.length) why.push(Array.isArray(roomsSrc && roomsSrc.rooms) && roomsSrc.rooms.length
+        ? 'あなたが参加・閲覧できるチャットルームがありません'
+        : 'チャットルームがまだありません。先にチャットでルームを作ってください');
+      if (!faqs.length) why.push('FAQがまだ登録されていません。「FAQ管理（AI）」で1件以上登録してください');
+      return res.status(200).json({ ok: true, config: current, enabled: aiOn, targets, choices, choicesEmptyReason: why });
     }
 
     if (!aiOn) return res.status(200).json(aiError('rollout_disabled'));
@@ -1988,6 +2008,55 @@ export default async function handler(req, res) {
     }
   }
 
+  // ── ナレッジ資料の自動更新（Google シート/スライド/ドキュメント）──
+  // 取得そのものは **既存の Apps Script（GAS）** に任せる。
+  // 専用の共有秘密値で認証し、未設定の場合は GAS を呼び出さない。
+  const knowRunSync = async (docs) => {
+    const gasUrl = GAS_URL();
+    const knowledgeSecret = process.env.KNOWLEDGE_GAS_SECRET || '';
+    const targets = docs.filter(knowSyncable);
+    if (!gasUrl) return { configured: false, checked: 0, updated: 0, failed: 0,
+      reason: 'Apps Script の接続先（PLAN_GAS_URL / SETTLEMENT_GAS_URL）が未設定です', summary: knowSyncSummary(docs) };
+    if (knowledgeSecret.length < 32) return { configured: false, checked: 0, updated: 0, failed: 0,
+      reason: 'Apps Script との通信用認証（KNOWLEDGE_GAS_SECRET）が未設定または短すぎます', summary: knowSyncSummary(docs) };
+    if (!targets.length) return { configured: true, checked: 0, updated: 0, failed: 0,
+      reason: '出典に Google の URL が入っていて、自動更新がONの資料がありません', summary: knowSyncSummary(docs) };
+    const started = Date.now(); const BUDGET_MS = 50000;   // 関数の上限60秒に収める
+    const byId = new Map(docs.map(d => [String(d && d.id), d]));
+    let updated = 0, failed = 0, checked = 0;
+    // 前回の確認が古いものから順に。時間切れになっても次回続きから進む。
+    const ordered = targets.slice().sort((a, b) =>
+      (((a.sync && a.sync.lastCheckedAt) || 0) - ((b.sync && b.sync.lastCheckedAt) || 0)));
+    for (const doc of ordered) {
+      if (Date.now() - started > BUDGET_MS) break;
+      const src = knowParseSource(doc.source);
+      let fetched;
+      try {
+        const j = await gasCall(gasUrl, 'POST', { action: 'readKnowledgeDoc', kind: src.kind, fileId: src.fileId, secret: knowledgeSecret });
+        fetched = (j && j.ok) ? { ok: true, body: j.body, title: j.title }
+          : { ok: false, error: String((j && (j.error || j.message)) || '取得できませんでした').slice(0, 300) };
+      } catch (e) {
+        // ⚠️ どの設定を使って失敗したかを添える。URL は出さない（設定名だけで切り分けられる）。
+        const msg = String((e && e.message) || e).slice(0, 200);
+        fetched = { ok: false, error: `${msg}（接続先の設定: ${GAS_SOURCE() || '未設定'}）` };
+      }
+      const r = knowApplyFetched(doc, fetched);
+      if (r.doc && typeof r.doc.body === 'string') r.doc.body = r.doc.body.slice(0, 40000);  // 保存上限に合わせる
+      byId.set(String(doc.id), r.doc);
+      checked++;
+      if (r.changed) updated++;
+      else if (r.reason === 'fetch_failed' || r.reason === 'empty_body') failed++;
+    }
+    const next = docs.map(d => byId.get(String(d && d.id)) || d);
+    await blobSet(KNOWLEDGE_KEY, { docs: next }, hasKV, hasSB, gas);
+    try {
+      const built = buildAuditEntry({ action: 'knowledge_autosync', entity: 'knowledge', entityId: 'sync',
+        after: { checked, updated, failed }, actor: chatActor, source: 'cron' });
+      if (built.ok && hasKV) await kvAppendJson(ccKey(AUDIT_KEY), built.entry, AUDIT_CAP);
+    } catch (_) {}
+    return { configured: true, checked, updated, failed, summary: knowSyncSummary(next) };
+  };
+
   // ── ナレッジ資料（長文: 文字起こし/シート・スライドの中身/マニュアル）: ?type=knowledge ──
   const isKnow = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'knowledge';
   if (isKnow) {
@@ -1995,16 +2064,31 @@ export default async function handler(req, res) {
     try {
       const cur = (await blobGet(KNOWLEDGE_KEY, hasKV, hasSB, gas)) || {};
       const docs = Array.isArray(cur.docs) ? cur.docs : [];
-      if (req.method === 'GET') return res.status(200).json({ docs, configured: true });
+      if (req.method === 'GET') {
+        // 日次の自動更新（Vercel Cron）。人の操作ではないので CRON_SECRET で認証する。
+        if (String(req.query.action || '') === 'cronsync') {
+          const secret = process.env.CRON_SECRET || '';
+          if (secret && String(req.headers.authorization || '') !== `Bearer ${secret}`) {
+            return res.status(401).json({ ok: false, error: 'unauthorized' });
+          }
+          return res.status(200).json({ ok: true, ...(await knowRunSync(docs)) });
+        }
+        return res.status(200).json({ docs, configured: true, summary: knowSyncSummary(docs) });
+      }
       const body = req.body || {};
       const clean = (d) => ({
         id: String(d.id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6))),
         title: String(d.title || '').slice(0, 200),
         body: String(d.body || '').slice(0, 40000),          // 長文（1資料上限4万字）
         shopScope: String(d.shopScope || '').slice(0, 60),   // '' = 全社共通
-        source: String(d.source || '').slice(0, 200),        // 例: Googleスライドのタイトル/URL、議事録2026-09 等
+        source: String(d.source || '').slice(0, 500),        // 例: GoogleスライドのURL、議事録2026-09 等
         updatedAt: new Date().toISOString(),
         updatedBy: String(d.updatedBy || '').slice(0, 60),
+        // ⚠️ 自動更新の情報は落とさない。ここで消すと、画面から1回編集しただけで
+        //    「未確認」の印や履歴が消え、更新に気づけなくなる。
+        autoSync: d.autoSync !== false,
+        sync: (d.sync && typeof d.sync === 'object') ? d.sync : undefined,
+        revisions: Array.isArray(d.revisions) ? d.revisions.slice(0, 20) : undefined,
       });
       if ((body.action === 'add' || body.action === 'update') && body.doc) {
         const rec = clean(body.doc);
@@ -2024,6 +2108,20 @@ export default async function handler(req, res) {
         const next = [...map.values()].slice(0, 1000);
         await blobSet(KNOWLEDGE_KEY, { docs: next }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true, count: next.length });
+      }
+      // 手動での「いま取り直す」
+      if (body.action === 'sync') return res.status(200).json({ ok: true, ...(await knowRunSync(docs)) });
+      // 「更新を確認しました」（未確認の印を外す）
+      if (body.action === 'reviewed' && body.id) {
+        const id = String(body.id);
+        const next = docs.map(d => (d && d.id === id) ? knowMarkReviewed(d, chatActor) : d);
+        await blobSet(KNOWLEDGE_KEY, { docs: next }, hasKV, hasSB, gas);
+        try {
+          const built = buildAuditEntry({ action: 'knowledge_sync_reviewed', entity: 'knowledge', entityId: id,
+            actor: chatActor, source: chatActor && chatActor.source });
+          if (built.ok && hasKV) await kvAppendJson(ccKey(AUDIT_KEY), built.entry, AUDIT_CAP);
+        } catch (_) {}
+        return res.status(200).json({ ok: true, doc: next.find(d => d && d.id === id) || null, summary: knowSyncSummary(next) });
       }
       return res.status(400).json({ ok: false, error: 'invalid knowledge action' });
     } catch (err) {
@@ -2269,6 +2367,55 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
+      // ══ 投稿ごとの既読・「確認しました」（閲覧・リアクション状況一覧）══
+      // 既存の未読バッジ（BOARD_READS_KEY の「最後に見た時刻」）とは**別のデータ**。
+      // 投稿1件につき小さなキー1つ（naoru:board:pr:<postId>）に持つ。
+      // ⚠️ 同時に何人も読むので、読み→書きの間に他の人の記録を消さないよう CAS で書く。
+      const BOARD_PR_TRIES = 6;
+      const boardPrMutate = async (postId, apply) => {
+        const key = boardPrKey(postId);
+        for (let i = 0; i < BOARD_PR_TRIES; i++) {
+          const cur = (await blobGet(key, hasKV, hasSB, gas)) || {};
+          const next = apply(normalizePr(cur));
+          if (!hasKV) { await blobSet(key, next, hasKV, hasSB, gas); return true; }
+          const base = Number(cur._v) || 0;
+          if (await kvCasSet(key, base, { ...next, _v: base + 1 })) return true;
+          await new Promise(r => setTimeout(r, Math.round((10 + Math.random() * 40) * (i + 1))));
+        }
+        return false;
+      };
+
+      // 記事を表示できたときだけ呼ぶ（一覧を開いただけで全件既読にしない）
+      if (req.method === 'POST' && (action === 'readpost' || action === 'ack') && body.id && body.staffId) {
+        const staffId = String(body.staffId).slice(0, 64);
+        const ts = Number(body.ts) || Date.now();
+        const ok = await boardPrMutate(String(body.id),
+          (pr) => (action === 'ack' ? boardMarkAck(pr, staffId, ts) : boardMarkRead(pr, staffId, ts)));
+        return res.status(200).json({ ok, ...(ok ? {} : { error: 'conflict' }) });
+      }
+
+      // 状況一覧: POST { action:'status', id, audience:[{id,name,shop}] }
+      // ⚠️ 人数は対象者なら見てよいが、**氏名の一覧は本部の管理者と投稿者だけ**。
+      //    ここでサーバー側でも確かめる（画面で隠すだけにしない）。
+      // ⚠️ 対象者の名簿はURLに載せずPOSTで渡す（人数が増えても切れない）。
+      if (req.method === 'POST' && action === 'status' && body.id) {
+        const pid = String(body.id).slice(0, 64);
+        const cur0 = (await blobGet(BOARD_KEY, hasKV, hasSB, gas)) || {};
+        const post = (Array.isArray(cur0.posts) ? cur0.posts : []).find(x => x && String(x.id) === pid);
+        if (!post) return res.status(404).json({ ok: false, error: 'not_found' });
+        const pr = (await blobGet(boardPrKey(pid), hasKV, hasSB, gas)) || {};
+        // ⚠️ 分母は**その投稿の公開対象**。全員向けでなければ、対象の店舗の人だけを数える。
+        const audience = newsAudienceFor(post, Array.isArray(body.audience) ? body.audience.slice(0, 5000) : []);
+        const st = boardPostStatus(post, audience, pr);
+        const detail = boardCanSeeDetail(chatActor, post);
+        return res.status(200).json({
+          ok: true, postId: pid, total: st.total, counts: st.counts, note: st.note,
+          outOfAudience: boardOutOfAudience(audience, pr).count,
+          people: detail ? st.people : undefined,   // 氏名の一覧は権限がある人にだけ
+          detail,
+        });
+      }
+
       // 投稿側。旧 blob の reads は**移行のためそのまま保持**する（旧コードへ戻しても既読が消えない）。
       const cur = (await blobGet(BOARD_KEY, hasKV, hasSB, gas)) || {};
       const posts = Array.isArray(cur.posts) ? cur.posts : [];
@@ -2351,6 +2498,9 @@ export default async function handler(req, res) {
           files: (Array.isArray(p.files) ? p.files : []).slice(0, 8).map(f => ({ id: String(f.id || ''), name: String(f.name || 'file').slice(0, 120), type: String(f.type || ''), size: Number(f.size) || 0 })),
           videoUrl: (() => { const v = videoEmbed(p.videoUrl); return v ? String(p.videoUrl).slice(0, 500) : ''; })(),
           pinned: false,
+          // ニュースの項目（カテゴリー／公開対象／確認要否／期限／ピックアップ／表紙）。
+          // ⚠️ 既存の投稿は項目が無いままでよい。ここで既定値を過去の投稿に書き込まない。
+          ...newsMeta(p),
           createdAt: new Date().toISOString(),
         };
         if (!upsertPost(posts, rec, BOARD_POST_CAP).added) {  // 再送＝既にある。通知も送り直さない
@@ -2388,6 +2538,14 @@ export default async function handler(req, res) {
       }
       if (action === 'pin' && body.id) {
         await savePosts(posts.map(p => p && p.id === String(body.id) ? { ...p, pinned: !!body.pinned } : p));
+        return res.status(200).json({ ok: true });
+      }
+      // ピックアップの切り替え（本部の管理者・投稿者）。記事の内容には触れない。
+      if (action === 'feature' && body.id) {
+        const target = posts.find(x => x && String(x.id) === String(body.id));
+        if (!target) return res.status(404).json({ ok: false, error: 'not_found' });
+        if (!boardCanSeeDetail(chatActor, target)) return res.status(403).json({ ok: false, error: 'forbidden', code: 'hq_or_author' });
+        await savePosts(posts.map(x => x && x.id === String(body.id) ? { ...x, featured: !!body.featured } : x));
         return res.status(200).json({ ok: true });
       }
       if (action === 'react' && body.id && body.emoji && body.staffId) {
@@ -2498,7 +2656,9 @@ export default async function handler(req, res) {
       // 保存（本人 or root）。pid＝本人の識別子（staffId or owner:<name>）。
       if (action === 'save' && body.pid && body.profile) {
         const pid = String(body.pid);
-        if (!(body.root || String(body.staffId) === pid)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        // ⚠️ クライアントの申告（body.root / body.staffId）を根拠にしない。
+        //    サーバーが確かめた本人（chatActor）で判定する。本人か本部の管理者だけ。
+        if (!canEditProfile(chatActor, pid)) return res.status(403).json({ ok: false, error: 'forbidden', code: 'profile_not_owner' });
         const p = body.profile;
         const clean = {
           pid,
@@ -2520,6 +2680,9 @@ export default async function handler(req, res) {
           shops: (Array.isArray(p.shops) ? p.shops : []).map(x => String(x).slice(0, 80)).slice(0, 50),
           // 生年月日（任意）。YYYY-MM-DD または MM-DD のみ許可。誕生日の当日表示に使用。
           birthday: (() => { const b = String(p.birthday || '').trim(); return /^(\d{4}-)?\d{2}-\d{2}$/.test(b) ? b : ''; })(),
+          // 自己紹介（任意）。ひとこと／得意なこと／学びたいこと／趣味。
+          // ⚠️ 氏名・所属・役割・社員IDはここに入らない（normalizeIntro が落とす）。
+          ...normalizeIntro(p),
           updatedAt: new Date().toISOString(),
         };
         const next = { ...profiles, [pid]: clean };
@@ -2530,7 +2693,7 @@ export default async function handler(req, res) {
       // 削除（本人 or root）
       if (action === 'delete' && body.pid) {
         const pid = String(body.pid);
-        if (!(body.root || String(body.staffId) === pid)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        if (!canEditProfile(chatActor, pid)) return res.status(403).json({ ok: false, error: 'forbidden', code: 'profile_not_owner' });
         const next = { ...profiles }; delete next[pid];
         await blobSet(PROFILE_KEY, { profiles: next, hidden }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true });
@@ -2538,13 +2701,19 @@ export default async function handler(req, res) {
 
       // 組織図から非表示/再表示（root専用）。SalonOne由来の人はこのリストで隠す。
       if (action === 'hide' && body.id) {
-        if (!body.root) return res.status(403).json({ ok: false, error: 'forbidden' });
+        // ⚠️ クライアントの申告ではなく、サーバーが確かめた役割で判定する（組織図からの非表示は本部だけ）
+        if (!(chatActor && chatActor.verified === true && ['root', 'admin'].includes(String(chatActor.role)))) {
+          return res.status(403).json({ ok: false, error: 'forbidden', code: 'hq_only' });
+        }
         const nextHidden = [...new Set([...hidden, String(body.id)])].slice(0, 5000);
         await blobSet(PROFILE_KEY, { profiles, hidden: nextHidden }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true, hidden: nextHidden });
       }
       if (action === 'unhide' && body.id) {
-        if (!body.root) return res.status(403).json({ ok: false, error: 'forbidden' });
+        // ⚠️ クライアントの申告ではなく、サーバーが確かめた役割で判定する（組織図からの非表示は本部だけ）
+        if (!(chatActor && chatActor.verified === true && ['root', 'admin'].includes(String(chatActor.role)))) {
+          return res.status(403).json({ ok: false, error: 'forbidden', code: 'hq_only' });
+        }
         const nextHidden = hidden.filter(x => x !== String(body.id));
         await blobSet(PROFILE_KEY, { profiles, hidden: nextHidden }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true, hidden: nextHidden });

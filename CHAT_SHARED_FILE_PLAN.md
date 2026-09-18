@@ -14,7 +14,9 @@
 | ブランチ | 基準 commit | 共有ファイルの変更 |
 |---|---|---|
 | `feature/chat-room-sync-dryrun`（PR #385） | `main` = `581a660`（#379 マージ前） | **なし**（新規5ファイルのみ） |
-| `feature/chat-ai-mention-logic`（本ブランチ） | `main` = `45ad3e3`（#379 Command Center Foundation マージ後） | **なし**（新規3ファイルのみ） |
+| `feature/chat-ai-mention-logic` | `main` = `45ad3e3` | **なし**（#389 に内包） |
+| `feature/chat-ai-trial` | `main` = `45ad3e3` | **なし**（#391 に内包） |
+| `feature/chat-ai-contract`（現在） | **`main` = `20f80dc`** へ rebase 済み | **なし**（新規ファイルのみ） |
 
 ②が push 済みのブランチに、共有ファイルの変更は1件もありません。
 PR #385 は #379 より前の main から分岐していますが、共有ファイルに触れていないため競合しません。

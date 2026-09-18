@@ -2,7 +2,7 @@
 
 チャット担当（②）の @AI 試用版。**質問 → @AIモードで送信 → 同じルームにAI回答 → 出典確認 → 本部に確認 → 本部が訂正**までを画面で通しで試せます。
 
-- 基準 commit: `main` = `45ad3e3`（#379 Command Center Foundation マージ後）
+- **基準 commit: `main` = `20f80dc`**（#390 チャットのアクセス制御 / #387 Meta / #388 #385取り込み まで反映。ブランチは rebase 済み）
 - **共有ファイルは無変更**（`index.html` / `api/plan-store.js` / `lib/authz.js` / `lib/actor.js` / `lib/chat.js` / `scripts/precompile.mjs`）
 - 追加は新規ファイルのみ: `chat-ai-trial.html` / `lib/chat-ai-session.js` / `lib/chat-ai-adapter.js` / テスト2本 / 本書
 
@@ -56,6 +56,26 @@ npx serve .     # もしくは python3 -m http.server 8931
 | 音声入力 | 外部アプリの文字起こしを**貼り付けて使う**だけ（音声認識基盤は作っていません） |
 
 ⚠️ **フロントの絞り込みは UX であり、セキュリティ境界ではありません。** 参照権限・回答先 room_id・投稿権限の最終判定はサーバー側（①の authz）で行う前提です。
+
+## 3.5 ①の実サーバーに対する結合テスト
+
+`tests/chat-server-integration.test.js` は **①のハンドラ（`api/plan-store.js`）そのもの**を呼び、
+保存層だけ Upstash REST 互換の擬似KVをローカルに立てて動かします（本番へは書き込みません）。
+
+| 確認したこと | 結果 |
+|---|---|
+| 未認証の `?type=chat` 取得 | 403 `chat_admin_only` ✅ |
+| `body.root` / `staffId` の申告だけ | 403（申告は認可の材料にならない）✅ |
+| オーナー（未公開ロール） | 403 ✅ |
+| 本部・管理者（`X-CC-Owner`/`X-CC-Token`） | 200・ルーム取得 ✅ |
+| ルーム作成 → 同じIDで作り直し | 重複しない ✅ |
+| 送信 → 再取得（再読み込み相当） | 本文が残る ✅ |
+| 同じ本文を2回送信 | サーバーは2件になる（＝**重複防止はクライアント側の責任**）✅ 記録 |
+| 非参加のDM | root でも返らない ✅ |
+| 既読の更新 | 保存される ✅ |
+| ①のエラー形 → ②の `normalizeError` | `chat_admin_only` / `retryable:false` に正規化 ✅ |
+| `createLiveAdapter` を①のハンドラへ | 権限拒否として扱い、自動再試行しない ✅ |
+| @AI 用エンドポイント | **まだ存在しない**（①の実装待ち）⏳ |
 
 ## 4. テスト
 

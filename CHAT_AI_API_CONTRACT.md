@@ -4,8 +4,9 @@
 ②はこの形に合わせて **クライアント側だけ**実装済み（`lib/chat-ai-adapter.js`）。
 サーバー実装・認可・保存・本番反映は①の担当です。
 
-- 基準 commit: `main` = `45ad3e3`（#379 Command Center Foundation）
-- ②のブランチはすべてこの commit を基準にしています。①が別の基準を指定する場合はそちらへ追従します。
+- **基準 commit: `main` = `20f80dc`**（#388「#385取り込み: Room付加フィールドの保存対応＋認可の追加確認4点」まで反映）
+  ②のブランチはこの commit へ rebase 済みです。①が別の基準を指定する場合はそちらへ追従します。
+- 以下は**①の実装済みの仕様に合わせて更新**しました（`lib/actor.js` / `api/plan-store.js` の実コードを確認）。
 
 ---
 
@@ -24,13 +25,20 @@
 ## 1. リクエスト
 
 ```
-POST <①が決めるエンドポイント>          例) /api/plan-store?type=chatai&action=ask
-Authorization: Bearer <SalonOne SSO>    // 既存の認証情報をそのまま使う
-X-Chat-Token / X-Chat-Owner / X-Chat-Role  // 既存の root/hq 経路もそのまま
+POST <①が決めるエンドポイント>          例) /api/plan-store （body.type='chatai', body.action='ask'）
+Authorization: Bearer <SalonOne SSO>    // SSO
+X-CC-Owner: <encodeURIComponent(アカウント名)>   // ①の lib/actor.js が読むヘッダ
+X-CC-Token: <settlement-auth のトークン>
 ```
+> **実仕様に合わせた点（②の修正済み）**
+> - 認証ヘッダは **`X-CC-Owner` / `X-CC-Token`**（旧案の `X-Chat-*` は誤りでした）。日本語アカウント名は
+>   ヘッダに直接載せられないため **percent-encode** します（サーバーは `decodeURIComponent` 済み）。
+> - `POST` は **`body.type` / `body.action`** で振り分けられるため、body にも `type` / `action` を載せます。
+> - クライアントは **role / tenant をヘッダにも body にも入れません**（申告は認可の材料にしない）。
 
 ```jsonc
 {
+  "type": "chatai", "action": "ask",       // ①の振り分け規約に合わせる
   "question": "家族施術のルールは？",       // 必須
   "room_id": "store_A",                    // 必須。回答が投稿されるルーム
   "request_id": "req_l3f9_ab12",           // 必須。冪等キー（再試行・複数タブで同値）
@@ -74,9 +82,14 @@ X-Chat-Token / X-Chat-Owner / X-Chat-Role  // 既存の root/hq 経路もその�
 ```
 
 ### 表示のしかた（②の実装）
+
+> **「確認済み」の意味**: 出典の **実在・版・参照箇所** をサーバーが確かめた、という意味です。
+> **回答内容の正解保証・正式承認ではありません。** 画面にもその注記を出します。
+> 本部による確認・訂正の状態は、この出典確認とは**別の表示**にしています。
+
 | `verification` | 画面表示 |
 |---|---|
-| `server_verified` かつ `verified[]` あり | **「検証済みの出典」**（資料名・版・更新日・該当箇所） |
+| `server_verified` かつ `verified[]` あり | **「出典を確認済み（実在・版・参照箇所）」**（資料名・版・更新日・該当箇所）＋「回答内容の正しさを保証するものではありません」 |
 | `unverified`（候補のみ） | **「参照候補として渡した資料（未検証）」** ＋「正式な社内規程としての回答ではありません」 |
 | `none` | **「根拠不足・本部確認が必要」**（回答を正式規程として断定しない） |
 
@@ -85,13 +98,20 @@ X-Chat-Token / X-Chat-Owner / X-Chat-Role  // 既存の root/hq 経路もその�
 
 ## 3. エラーレスポンス
 
+①の既存形式（`?type=chat` が実際に返している形）と、契約形式のどちらでも②は解釈できます。
+
 ```jsonc
-{ "ok": false,
-  "error": { "code": "forbidden_room", "message": "…", "retryable": false } }
+// ①の既存形式（実サーバーで確認済み）
+{ "ok": false, "error": "forbidden", "code": "chat_admin_only", "message": "チャットは本部・管理者のみ…" }
+// 契約形式（retryable を明示できる）
+{ "ok": false, "error": { "code": "forbidden_room", "message": "…", "retryable": false } }
 ```
+②の `normalizeError()` が両方を `{ code, message, retryable }` に正規化します。
+`retryable` が無い場合は **コード表と HTTP ステータスから安全側に判定**します（403/401/400 → 再試行しない）。
 
 | code | 意味 | retryable | ②の画面 |
 |---|---|---|---|
+| `chat_admin_only` | チャットが本部・管理者限定（①の現行仕様） | false | 「チャットは本部・管理者のみ利用できます（再ログインが必要な場合があります）」 |
 | `invalid_request` | 必須項目不足 | false | 「送信内容を確認してください」 |
 | `rollout_disabled` | そのロールにはチャット/AI が未公開 | false | 機能を出さない（タブ自体を隠す） |
 | `forbidden_room` | 非参加ルーム / 別ルーム宛 | false | 「このルームでは利用できません」 |

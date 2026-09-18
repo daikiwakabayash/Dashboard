@@ -179,7 +179,9 @@ $('notes').innerHTML = `
     <li>通知・監査は共通基盤に接続予定です。<b>未接続のため「通知済み」とは表示しません</b>。</li>
     <li>音声入力は外部アプリの文字起こしを貼り付けて使います（この画面では音声認識を持ちません）。</li>
     <li><b>ロール切替は合成データのデモ表示専用</b>です。実際の権限はサーバーが確定し、画面の操作では変わりません。</li>
-    <li>出典は「<b>検証済みの出典</b>（サーバーが資料ID・版・該当箇所を確認）」と「<b>参照候補として渡した資料（未検証）</b>」を区別して表示します。</li>
+    <li>出典は「<b>出典を確認済み</b>（実在・版・参照箇所の確認）」と「<b>参照候補として渡した資料（未検証）</b>」を区別して表示します。
+      「確認済み」は<b>回答の正解保証ではありません</b>。</li>
+    <li><b>本部の確認・訂正</b>は、サーバーの出典確認とは<b>別の表示</b>にしています。</li>
   </ul>`;
 
 function switchRole(next) {
@@ -307,13 +309,14 @@ function answerCard(a) {
   <div class="ai-card" data-answer="${esc(a.id)}">
     <div class="lbl">🤖 AIによる回答
       ${a.sample ? '<span class="chip">サンプル回答（mock）</span>' : ''}
-      ${ver === 'server_verified' ? '<span class="chip" style="background:#fff">検証済みの出典あり</span>' : ''}
+      ${ver === 'server_verified' ? '<span class="chip" style="background:#fff">出典を確認済み</span>' : ''}
     </div>
     <div class="q">この質問への回答: 「${esc(q.text || '')}」（${esc(q.fromName || '')} ${esc(hhmm(q.createdAt || a.createdAt))}）</div>
     <div class="ans">${esc(a.text)}</div>
-    ${ver === 'server_verified' ? `<div class="src">📚 検証済みの出典（サーバーが資料ID・版・該当箇所を確認）
+    ${ver === 'server_verified' ? `<div class="src">📚 出典を確認済み（資料の実在・版・参照箇所をサーバーが確認）
         <ul>${verified.map(s => `<li>${esc(s.title)}${s.version ? ` <span class="muted">v${esc(s.version)}</span>` : ''}
           <span class="muted">${s.updatedAt ? `（${esc(String(s.updatedAt).slice(0,10).replace(/-/g,'/'))} 更新）` : '（更新日不明）'}</span>${s.locator ? ` <span class="muted">${esc(s.locator)}</span>` : ''}</li>`).join('')}</ul>
+        <div class="muted" style="margin-top:4px">※ 出典の実在・版・参照箇所を確認したものです。<b>回答内容の正しさ（正解保証・正式承認）を示すものではありません。</b></div>
       </div>`
       : ver === 'unverified' ? `<div class="nosrc" style="background:var(--warn-bg);border-color:#FDE68A;color:#92400E">
         ⚠️ 参照候補として渡した資料（未検証）— サーバーで出典の検証がされていないため、正式な社内規程としての回答ではありません
@@ -327,9 +330,11 @@ function answerCard(a) {
       <button class="btn ${fb.mine === 'up' ? 'on' : ''}" data-fb="up" data-a="${esc(a.id)}">👍 参考になった${fb.up ? ` ${fb.up}` : ''}</button>
       <button class="btn ${fb.mine === 'down' ? 'on' : ''}" data-fb="down" data-a="${esc(a.id)}">👎 ならなかった${fb.down ? ` ${fb.down}` : ''}</button>
     </div>
+    ${(st.hq || fixes.length) ? '<div class="muted" style="margin-top:9px;font-weight:700">本部による確認・訂正（出典の確認とは別です）</div>' : ''}
     ${st.hq ? `<div class="hq">🙋 本部確認: ${st.hq.status === 'pending' ? '確認待ち' : '対応済み'}
         （依頼: ${esc(st.hq.byName || st.hq.by)} / ${esc(hhmm(st.hq.at))}）
         ・通知: <b>未接続</b>（共通基盤に接続後に通知されます）</div>` : ''}
+    ${fixes.length ? `<div class="chipline" style="margin-top:6px"><span class="chip" style="background:var(--ok-bg);color:var(--ok)">本部が訂正しました</span></div>` : ''}
     ${fixes.map(f => `<div class="fix"><div class="meta">✏️ 訂正 — ${esc(f.byName || f.by)}（${esc(f.role)}） ${esc(hhmm(f.at))}
         ・ナレッジ反映: <b>承認候補</b>（自動更新しません）</div>${esc(f.text)}</div>`).join('')}
   </div>`;

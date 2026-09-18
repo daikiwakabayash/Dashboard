@@ -169,7 +169,8 @@ describe('chat-ai-adapter: resolveSources（出典表示の判定）', () => {
   it('サーバーが検証した出典だけを「検証済み」にする', () => {
     const info = resolveSources({ sources: { verification: 'server_verified', verified: [{ doc_id: 'f1', title: 'T', version: '1.0', locator: '§1' }], candidates: [] } });
     expect(info.verification).toBe('server_verified');
-    expect(info.label).toBe('検証済みの出典');
+    expect(info.label).toBe('出典を確認済み（実在・版・参照箇所）');
+    expect(info.note).toMatch(/回答内容の正しさを保証するものではありません/);
     expect(info.verified[0]).toMatchObject({ docId: 'f1', version: '1.0', locator: '§1' });
     expect(info.caution).toBe('');
   });

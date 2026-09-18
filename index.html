@@ -843,6 +843,57 @@
         const ORG_KW_KEYS = Object.keys(ORG_KW).sort((a, b) => b.length - a.length);
         const orgGeoRank = (name) => { const s = String(name || '').replace(/NAORU/gi, '').replace(/院/g, '').trim(); for (const k of ORG_KW_KEYS) { if (s.includes(k)) return ORG_KW[k]; } return 950; };
         const orgRegionOf = (r) => r === 1 ? '北海道' : (r >= 2 && r <= 7) ? '東北' : (r >= 8 && r <= 14) ? '関東' : (r >= 15 && r <= 23) ? '中部' : (r >= 24 && r <= 30) ? '近畿' : (r >= 31 && r <= 35) ? '中国' : (r >= 36 && r <= 39) ? '四国' : (r >= 40 && r <= 46) ? '九州' : r === 47 ? '沖縄' : r >= 1000 ? '海外' : 'その他';
+        // ── ニュース記事のイベントリンク（lib/news-event.js の画面側ミラー）────
+        // ⚠️ 押した本人だけが参加する。自分のイベントリンクだけを受け付け、外部URLは読みに行かない。
+        const evLinkFor = (rowId) => {
+            const id = String(rowId || '').trim();
+            return id ? `${location.origin}/?tab=events&ev=${encodeURIComponent(id)}` : '';
+        };
+        const evLinksIn = (text) => {
+            const found = String(text == null ? '' : text).match(/https?:\/\/[^\s<>"'）)】」]+/g) || [];
+            const out = [], seen = new Set();
+            for (const raw of found) {
+                const url = raw.replace(/[.,、。]+$/, '');
+                let u; try { u = new URL(url); } catch { continue; }
+                if (u.host !== location.host) continue;               // 別サイトは対象外
+                if (u.searchParams.get('tab') !== 'events') continue;
+                const rowId = String(u.searchParams.get('ev') || '').trim();
+                if (!rowId || seen.has(rowId)) continue;
+                seen.add(rowId); out.push({ url, rowId });
+                if (out.length >= 10) break;
+            }
+            return out;
+        };
+        const evResolveRow = (rowId, sections) => {
+            const id = String(rowId || '').trim();
+            if (!id) return { found: false, reason: 'no_id' };
+            const map = (sections && typeof sections === 'object') ? sections : {};
+            for (const [section, rows] of Object.entries(map)) {
+                for (const row of (Array.isArray(rows) ? rows : [])) {
+                    if (!row || String(row.id) !== id) continue;
+                    const c = (row.cells && typeof row.cells === 'object') ? row.cells : {};
+                    return { found: true, section, rowId: id, title: String(c.chatTitle || '').trim() || section,
+                        date: String(c.date || ''), roomId: String(c.roomId || ''), ownerId: String(c.ownerId || '') };
+                }
+            }
+            return { found: false, reason: 'not_found' };
+        };
+        const EV_JOIN_LABEL = {
+            no_event: 'このイベントは見つかりません（削除された可能性があります）',
+            no_room: 'このイベントにはまだグループチャットがありません',
+            no_access: 'このグループチャットを開く権限がありません',
+            joined: 'グループチャットを開く',
+            can_join: 'グループチャットへ参加',
+        };
+        const evJoinStateOf = (ev, rooms, myId) => {
+            if (!ev || !ev.found) return 'no_event';
+            if (!ev.roomId) return 'no_room';
+            const room = (Array.isArray(rooms) ? rooms : []).find(r => r && String(r.id) === String(ev.roomId));
+            if (!room) return 'no_access';
+            const me = String(myId || ''); if (!me) return 'no_access';
+            return (Array.isArray(room.members) ? room.members : []).map(String).includes(me) ? 'joined' : 'can_join';
+        };
+
         // ── 送信先の絞り込み（エリア）──────────────────────────────────────
         // 「神奈川のエリアに送る」「大阪以外に送る」を、いまある所属店舗名だけで組み立てる。
         // 判定ロジックは lib/audience.js と同じ（tests/audience.test.js ＋ html-structure テストで一致を担保）。
@@ -14124,6 +14175,39 @@
                                             <div className={`text-[14px] text-[#475467] leading-[1.5] whitespace-pre-wrap break-words ${longText ? 'line-clamp-6' : ''}`} style={{ wordBreak: 'break-word' }}>{chatLinkify((p.text || '').replace(/\n{3,}/g, '\n\n'))}</div>
                                             {longText && <button onClick={e => { e.stopPropagation(); openBoardPost(p); }} className="mt-1 text-[13px] font-bold text-brand-600 hover:underline">…もっと見る</button>}
                                         </div>}
+                                        {/* ── 記事に貼られたイベントリンク → グループチャットへ参加 ──
+                                            ⚠️ 押した本人だけが参加する。リンクを貼っただけで全員は入らない。
+                                            ⚠️ 自分のイベントリンクだけを見る（外部URLは読みに行かない）。 */}
+                                        {(() => {
+                                            const links = evLinksIn(`${p.text || ''} ${p.link || ''}`);
+                                            if (!links.length) return null;
+                                            return (
+                                                <div data-news-events className="mt-2.5 space-y-1.5" onClick={e => e.stopPropagation()}>
+                                                    {links.map(({ url, rowId }) => {
+                                                        const ev = evResolveRow(rowId, (evData && evData.sections) || {});
+                                                        const st = evJoinStateOf(ev, chatData.rooms, chatMyId);
+                                                        const ok = st === 'can_join' || st === 'joined';
+                                                        return (
+                                                            <div key={rowId} className={`rounded-xl border px-3 py-2.5 ${ok ? 'border-brand-200 bg-brand-50/40' : 'border-[#EAECF0] bg-[#F8F9FB]'}`}>
+                                                                <div className="flex items-center gap-2 flex-wrap">
+                                                                    <span className="text-[15px] leading-none">📅</span>
+                                                                    <span className="text-[13px] font-bold text-[#111827] truncate">{ev.found ? ev.title : 'イベント'}</span>
+                                                                    {ev.found && ev.date && <span className="text-[11px] font-bold text-[#98A2B3]">{ev.date}</span>}
+                                                                </div>
+                                                                {ok ? (
+                                                                    <button data-news-join={rowId} onClick={() => evJoinChat(ev.roomId)} disabled={evChatBusy === ev.roomId}
+                                                                        className={`mt-2 inline-flex items-center justify-center gap-1.5 h-9 px-4 rounded-xl text-[13px] font-bold transition disabled:opacity-50 ${st === 'joined' ? 'border border-brand-300 text-brand-600 hover:bg-brand-50' : 'bg-brand-500 hover:bg-brand-600 text-white shadow-sm shadow-brand-200/50'}`}>
+                                                                        <MessageSquare size={15} />{evChatBusy === ev.roomId ? '開いています…' : EV_JOIN_LABEL[st]}
+                                                                    </button>
+                                                                ) : (
+                                                                    <div className="mt-1.5 text-[12px] font-bold text-[#98A2B3]">{EV_JOIN_LABEL[st]}</div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            );
+                                        })()}
                                         {/* リンク・画像・動画・ファイルは全画面表示でのみ展開。一覧は「表示」チップに集約してコンパクトに。 */}
                                         {full ? (<>
                                             {p.link && <a href={p.link} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="mt-2.5 inline-flex items-center gap-1.5 text-[13px] text-brand-600 hover:underline break-all">🔗 {p.link}</a>}
@@ -14491,6 +14575,8 @@
                                                                         </div>
                                                                     </div>
                                                                 )}
+                                                                {/* ニュース記事に貼るためのリンク。グループがある行だけ出す（未作成の部屋へは誘導しない） */}
+                                                                {room && <button data-ev-copylink onClick={() => { const u = evLinkFor(row.id); try { navigator.clipboard.writeText(u); } catch {} evNotify('リンクをコピーしました。ニュース記事に貼ると参加ボタンが出ます'); }} className="inline-flex items-center justify-center gap-1 h-9 px-3 rounded-xl border border-[#EAECF0] text-[12px] font-bold text-[#667085] hover:bg-[#F8F9FB] transition" title="ニュース記事に貼るリンクをコピー">🔗 リンク</button>}
                                                                 {hasContact && (room
                                                                     ? <button onClick={() => evJoinChat(cv(row, 'roomId'))} disabled={evChatBusy === cv(row, 'roomId')} className="flex-1 inline-flex items-center justify-center gap-1.5 h-9 rounded-xl bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-bold shadow-sm shadow-brand-200/50 disabled:opacity-50 transition"><MessageSquare size={15} />グループチャットへ参加</button>
                                                                     : (canEdit

@@ -100,3 +100,24 @@ describe('まとめ', () => {
     expect(s.failedTitles[0]).toMatchObject({ id: 'b', error: '権限なし' });
   });
 });
+
+// 取得に失敗したとき、理由が画面まで届くこと（マウスを乗せないと読めない状態にしない）
+describe('失敗の理由が集計に出る', () => {
+  it('同じ理由はまとめて、重複なく返す', () => {
+    const docs = [
+      { id: 'a', title: 'A', source: 'https://docs.google.com/spreadsheets/d/1AAAAAAAAAAAAAAAAAAAAAAAA/edit',
+        autoSync: true, sync: { lastError: 'unauthorized' } },
+      { id: 'b', title: 'B', source: 'https://docs.google.com/presentation/d/1BBBBBBBBBBBBBBBBBBBBBBBB/edit',
+        autoSync: true, sync: { lastError: 'unauthorized' } },
+      { id: 'c', title: 'C', source: 'https://docs.google.com/document/d/1CCCCCCCCCCCCCCCCCCCCCCCC/edit',
+        autoSync: true, sync: { lastError: 'このファイルを開く権限がありません（共有設定をご確認ください）' } },
+    ];
+    const s = syncSummary(docs);
+    expect(s.failed).toBe(3);
+    expect(s.failedReasons).toEqual(['unauthorized', 'このファイルを開く権限がありません（共有設定をご確認ください）']);
+  });
+
+  it('失敗がなければ空（余計な表示を出さない）', () => {
+    expect(syncSummary([]).failedReasons).toEqual([]);
+  });
+});

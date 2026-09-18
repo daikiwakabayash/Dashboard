@@ -22,6 +22,7 @@ const TYPES = { '.html':'text/html;charset=utf-8', '.js':'text/javascript', '.mj
 
 const SHEET = 'https://docs.google.com/spreadsheets/d/1AAAAAAAAAAAAAAAAAAAAAAAA/edit';
 // スタブの保存。sync で「中身が変わった」状態になる（Apps Script は呼ばない）。
+let failMode = false;
 let docs = [
   { id: 'd_sheet', title: '料金表（スプレッドシート）', body: '前の中身です。'.repeat(8), source: SHEET, autoSync: true },
   { id: 'd_free',  title: '定例MTG 文字起こし', body: '出典が自由文なので自動更新の対象外です。'.repeat(3), source: '2026-09 定例MTG' },
@@ -50,6 +51,12 @@ const server = http.createServer((req, res) => {
       if (type === 'faq') return json(res, { faqs: [], configured: true, ok: true });
       if (type === 'knowcand') return json(res, { cands: [], configured: true, ok: true });
       if (type === 'knowledge') {
+        if (action === 'sync' && failMode) {   // 取得できなかったときの見え方を確認する
+          docs = docs.map(d => (d.autoSync === false || !/docs\.google\.com/.test(d.source || '')) ? d
+            : { ...d, sync: { ...(d.sync || {}), lastError: 'unauthorized', lastCheckedAt: Date.now() } });
+          return json(res, { ok: true, configured: true, checked: 1, updated: 0, failed: 1,
+            summary: { ...summary(), failedReasons: ['unauthorized'] } });
+        }
         if (action === 'sync') {   // 「いま取り直す」: 中身が変わった体で返す
           let updated = 0;
           docs = docs.map(d => {
@@ -171,6 +178,18 @@ await src.fill(SHEET);
 await page.waitForTimeout(600);
 check('GoogleのURLなら自動更新のチェックが出る',
   (await page.getByText('1日1回このURLから自動で最新にする', { exact: false }).count()) > 0);
+
+// ⭐ 本題5: 取得できなかったとき、理由がマウスを乗せずに読める
+failMode = true;
+await page.getByRole('button', { name: /いま取り直す/ }).first().click().catch(() => {});
+await page.waitForTimeout(2500);
+const failText = await txt();
+check('失敗の件数と理由が一緒に出る', /1件は取得できず：unauthorized/.test(failText),
+  (failText.match(/\d件を確認し[^\n]*/) || [''])[0]);
+const inline = page.locator('[data-know-error]');
+check('資料の行にも理由がそのまま出る（マウスを乗せなくて良い）', (await inline.count()) > 0,
+  (await inline.first().innerText().catch(() => '')));
+check('理由の文言が読める', /取得できなかった理由: unauthorized/.test(await inline.first().innerText().catch(() => '')));
 
 check('JSエラーが出ていない', errors.length === 0, errors.slice(0, 2).join(' / '));
 await page.screenshot({ path: (process.env.OUT_DIR || '/tmp') + '/knowledge-sync-screen.png', fullPage: false });

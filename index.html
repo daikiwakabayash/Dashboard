@@ -2791,7 +2791,12 @@
                     const j = await r.json().catch(() => null);
                     if (!j || !j.ok) setKnowSyncMsg('取り直せませんでした');
                     else if (j.reason) setKnowSyncMsg(j.reason);
-                    else setKnowSyncMsg(`${j.checked}件を確認し、${j.updated}件が新しくなりました${j.failed ? `（${j.failed}件は取得できず）` : ''}`);
+                    else {
+                        // 失敗があるときは理由まで出す（画面を見ただけで次に何をすればよいか分かるように）
+                        const why = j.failed ? (((j.summary && j.summary.failedReasons) || [])[0] || '') : '';
+                        setKnowSyncMsg(`${j.checked}件を確認し、${j.updated}件が新しくなりました`
+                            + (j.failed ? `（${j.failed}件は取得できず${why ? `：${why}` : ''}）` : ''));
+                    }
                 } catch { setKnowSyncMsg('取り直せませんでした'); }
                 finally { setKnowSyncing(false); await faqAdminLoad(); }
             };
@@ -21383,6 +21388,12 @@
                                                         )}
                                                     </div>
                                                     <div className="text-[11px] text-slate-400 truncate">{(d.body || '').slice(0, 80)}{bodyLen > 80 ? '…' : ''}（{bodyLen.toLocaleString()}字）</div>
+                                                    {/* 取得に失敗した理由は、マウスを乗せなくても読めるようにそのまま出す */}
+                                                    {d.sync && d.sync.lastError && (
+                                                        <div data-know-error className="mt-1 px-2 py-1 rounded-md bg-rose-50 border border-rose-100 text-[11px] font-bold text-rose-700 break-words">
+                                                            取得できなかった理由: {String(d.sync.lastError).slice(0, 200)}
+                                                        </div>
+                                                    )}
                                                 </div>
                                                 <button onClick={() => setKnowEdit({ id: d.id, title: d.title, body: d.body, shopScope: d.shopScope || '', source: d.source || '', autoSync: d.autoSync !== false, sync: d.sync, revisions: d.revisions })} className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-bold text-slate-500 hover:bg-slate-100">編集</button>
                                                 {d.sync && d.sync.needsReview && (

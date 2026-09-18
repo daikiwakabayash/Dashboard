@@ -3495,6 +3495,7 @@
                 if (currentPage === 'agentlog' && ccOn('cc_agentlog')) { ccLoadRuns(); const iv = setInterval(ccLoadRuns, 20000); return () => clearInterval(iv); }
                 if (currentPage === 'metaov' && ccOn('cc_meta_overview')) { metaLoad(); }
                 if (currentPage === 'aitrial' && ccOn('cc_ai_trial')) { aiTrialLoadCfg(); }
+                if (currentPage === 'owner') { setupLoad(); }
                 if (currentPage === 'creative' && ccOn('cc_creative_library')) { cvLoad(); }
             }, [currentPage, authState.authenticated, ccFlags]);
 
@@ -3540,6 +3541,16 @@
                     if (pr.ok) await ccPost({ type: 'agentlog', action: 'finish', id: pr.run.id, outcome: { status: 'completed', approvalId: (ap.ok && ap.approval.id) || '', approvalRequired: true, result: { proposed: 1 }, usage: { tokensIn: 3100, tokensOut: 1200, costJpy: 9.8, model: 'claude-sonnet-5' } } });
                     await ccLoadApprovals(); await ccLoadRuns();
                 } finally { setCcBusy(''); }
+            };
+            // ── 設定状況（どの設定が済んでいるか）──────────────────────
+            // ⚠️ 値そのものは受け取らない。設定されているかどうかだけ。
+            const [setupStatus, setSetupStatus] = useState(null);
+            const setupLoad = async () => {
+                try {
+                    const r = await fetch('/api/plan-store?type=setupstatus', { headers: { ...ccAuthHeaders() } });
+                    const j = await r.json().catch(() => null);
+                    setSetupStatus(j && j.ok ? j : { ok: false });
+                } catch { setSetupStatus({ ok: false }); }
             };
             const ccSetFlag = async (key, value) => {
                 setCcBusy(key);
@@ -24551,6 +24562,43 @@
                                         </div>
                                     )}
 
+                                    {/* ── 設定状況（環境変数が入っているか）────────────────
+                                        ⚠️ 値そのものは表示しない。入っているかどうかだけ。 */}
+                                    <div data-setup-status className="mb-4 rounded-xl border border-slate-200 bg-white overflow-hidden">
+                                        <div className="px-3 py-2.5 border-b border-slate-100 flex items-center gap-2">
+                                            <span className="text-[13px] font-black text-slate-800">設定の状況</span>
+                                            <span className="text-[11px] text-slate-400">値は表示しません（入っているかどうかだけ）</span>
+                                            <button onClick={setupLoad} className="ml-auto text-[11px] font-bold text-slate-500 hover:text-slate-800">再確認</button>
+                                        </div>
+                                        {!setupStatus ? (
+                                            <div className="px-3 py-3 text-[12px] text-slate-400">読み込み中…</div>
+                                        ) : !setupStatus.ok ? (
+                                            <div className="px-3 py-3 text-[12px] text-amber-700">設定状況を取得できませんでした（ログインし直すと取れることがあります）。</div>
+                                        ) : (
+                                            <div className="divide-y divide-slate-50">
+                                                {(setupStatus.items || []).map(it => (
+                                                    <div key={it.key} data-setup-item={it.key} className="px-3 py-2.5 flex items-start gap-3">
+                                                        <span className={`mt-0.5 text-[11px] font-black px-2 py-0.5 rounded-full shrink-0 ${it.ok ? 'bg-emerald-50 text-emerald-700' : it.set ? 'bg-amber-50 text-amber-800' : 'bg-slate-100 text-slate-500'}`}>
+                                                            {it.ok ? '済み' : it.set ? '要確認' : '未設定'}
+                                                        </span>
+                                                        <span className="min-w-0 flex-1">
+                                                            <span className="block text-[13px] font-bold text-slate-800">{it.label}<span className="ml-1.5 text-[10px] font-medium text-slate-400">{it.key}</span></span>
+                                                            <span className="block text-[11px] text-slate-500 mt-0.5 leading-relaxed">
+                                                                {it.ok ? `使えます: ${it.enables}` : `${it.enables}に必要です。${it.note}`}
+                                                            </span>
+                                                            {it.warn && <span className="block text-[11px] text-rose-600 font-bold mt-0.5">{it.warn}</span>}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                                <div className="px-3 py-2.5 text-[11px] text-slate-400 leading-relaxed">
+                                                    保存先: {setupStatus.store && setupStatus.store.kv ? 'Vercel KV' : setupStatus.store && setupStatus.store.supabase ? 'Supabase' : setupStatus.store && setupStatus.store.gas ? 'GAS' : '未設定'}
+                                                    ／環境: {setupStatus.env}
+                                                    <br />変更は Vercel の Settings → Environment Variables で行い、保存後に Redeploy が必要です。
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+
                                     {/* ⚠️ 画面があるフラグは**必ずここに出す**。一覧から漏れると、
                                            メニューがフラグOFFで隠れているのに ON にする手段が無くなる。 */}
                                     <div className="space-y-1.5">
@@ -24558,6 +24606,8 @@
                                             ['cc_approval', '承認センター', ''],
                                             ['cc_agentlog', 'AI Agent Activity', ''],
                                             ['cc_ai_trial', '@AI 検証', '本部・管理者のみ。許可した検証用ルームだけでAIが答えます'],
+                                            ['cc_creative_library', 'クリエイティブ', '本部・管理者のみ。⚠️ 先に CREATIVE_ASSET_KEY（32文字以上）の登録が必要です'],
+                                            ['cc_home', '経営ホーム', '本部・管理者のみ。重要指標・要確認の店舗・承認待ちを1画面に'],
                                         ].map(([k, label, note]) => (
                                             <div key={k} className="flex items-center gap-3 py-1.5">
                                                 <span className="text-[13px] font-bold text-slate-800 flex-1">
@@ -28621,8 +28671,8 @@
                     { id: 'askai', label: 'AIに質問', icon: <span className="text-[17px] leading-none">🤖</span>, mobileIcon: <span className="text-[17px] leading-none">🤖</span> },
                 ] },
                 { label: '経営・分析', accent: { pill: 'bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500', chip: 'group-hover:bg-emerald-50 group-hover:text-emerald-600' }, items: [
-                    // 経営ホーム: フラグ cc_home が ON のときだけ出す（既定 OFF）
-                    ...(ccFlagOn('cc_home') ? [{ id: 'home', label: '経営ホーム', icon: <span className="text-[17px] leading-none">🏠</span>, mobileIcon: <span className="text-[17px] leading-none">🏠</span>, rootOnly: true, badge: approvalPending }] : []),
+                    // 経営ホーム: フラグ cc_home が ON のときだけ出す（既定 OFF・canShow が flag を見る）
+                    { id: 'home', label: '経営ホーム', icon: <span className="text-[17px] leading-none">🏠</span>, mobileIcon: <span className="text-[17px] leading-none">🏠</span>, rootOnly: true, flag: 'cc_home', badge: approvalPending },
                     { id: 'zenkanri', label: '全体管理シート', icon: <BarChart3 size={18} />, mobileIcon: <BarChart3 size={18} /> },
                     { id: 'salonone', label: 'SalonOne売上', icon: <Calendar size={18} />, mobileIcon: <Calendar size={18} /> },
                     { id: 'mktg', label: 'マーケティング', icon: <TrendingUp size={18} />, mobileIcon: <TrendingUp size={18} /> },

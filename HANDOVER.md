@@ -79,10 +79,13 @@
 ### A. ナレッジ自動更新（#406）を実際に動かす
 
 1. **Apps Script**: `gas-knowledge.gs` の中身を、いま使っているプロジェクト（`PLAN_GAS_URL` / `SETTLEMENT_GAS_URL` の接続先）に追加
-2. 同プロジェクトの**スクリプトプロパティ**に `KNOWLEDGE_GAS_SECRET`（32文字以上のランダム値）を設定
+2. 「実行する関数」で **`setupKnowledgeSecret`** を選んで実行 → 実行ログに出た48文字をコピー
+   （合言葉はこの操作で自動生成・自動保存されます。手で考える必要はありません）
 3. 「デプロイを管理」→ 既存ウェブアプリを編集 → **新バージョン**でデプロイ（URLは変わらない）
-4. **Vercel**（`dashboard` プロジェクト・Production）に、**同じ値**の `KNOWLEDGE_GAS_SECRET` と、別値の `CRON_SECRET`
+4. **Vercel**（`dashboard` プロジェクト・Production）に、2でコピーした値を `KNOWLEDGE_GAS_SECRET` として登録。
+   別途 `CRON_SECRET`（**別の値**）も登録
 5. Vercel を再デプロイ（環境変数は次のデプロイから効く）
+6. 動作確認: Apps Script で `testReadKnowledgeDoc`（FILE_ID を入れてから）→ Dashboard で「🔄 いま取り直す」
 
 確認方法: FAQ管理（AI）→ ナレッジ資料 →「🔄 いま取り直す」。
 「最終更新確認」の時刻が更新されれば動いています。止まっていれば理由が画面に出ます。

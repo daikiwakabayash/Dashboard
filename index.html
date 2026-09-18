@@ -3141,7 +3141,8 @@
             const [cv, setCv] = useState({
                 assets: [], creatives: [], channels: [], generator: null,
                 busy: false, error: '', notice: '', comparing: null, files: null,
-                newAsset: { title: '', channel: 'meta', companyId: '', shopId: '', rightsNote: '' }, uploading: [],
+                newAsset: { title: '', channel: 'meta', companyId: '', shopId: '', rightsNote: '', kind: 'demo' }, uploading: [],
+                approving: '', claims: {},
             });
             const [aiTrial, setAiTrial] = useState({
                 loading: false, cfg: null, roomId: '', q: '', answers: {}, order: [],
@@ -3220,6 +3221,13 @@
             // サーバーに回答が保存済みで応答だけ失われた場合は replay として
             // 同じ answer_message_id が返るので、回答が増えない。
             const aiTrialRetry = () => aiTrialAsk({ retry: true });
+            // 承認の前に人が確かめる項目（lib/creative.js の CLAIM_CHECKS と同じ）
+            const CV_CLAIM_CHECKS = [
+                { key: 'noFakeTestimonial', label: '架空の体験談を含まない' },
+                { key: 'noGuarantee', label: '効果を保証する表現を含まない' },
+                { key: 'noFakeBeforeAfter', label: '偽の Before / After を含まない' },
+                { key: 'brandFromSource', label: '店舗情報・価格・ロゴは承認済みの正本を使っている' },
+            ];
             // ── Creative Library: 暗号化の写し（lib/creative-crypto.js と同じ形式）────
             // ⚠️ 保存先(Vercel Blob)は公開URLしか出せないので、**暗号文だけを置く**。
             //    鍵はこの場で作り、暗号化してから保存先へ送り、鍵は①のサーバーへ渡す。
@@ -23404,8 +23412,15 @@
                                             className="px-3 py-2 rounded-lg border border-ink-200 font-bold">
                                             {(c.channels.length ? c.channels : ['meta']).map(ch => <option key={ch} value={ch}>{ch}</option>)}
                                         </select>
+                                        {/* ⚠️ デモ素材と実際の施術素材を混ぜない。実素材は写真の許可の確認が承認の前提。 */}
+                                        <select value={c.newAsset.kind} data-cv-kind
+                                            onChange={e => setCv(p => ({ ...p, newAsset: { ...p.newAsset, kind: e.target.value } }))}
+                                            className="px-3 py-2 rounded-lg border border-ink-200 font-bold">
+                                            <option value="demo">デモ素材</option>
+                                            <option value="real">実際の施術素材</option>
+                                        </select>
                                         <input type="file" multiple accept="image/*,video/*" id="cv-files"
-                                            className="md:col-span-3 px-3 py-2 rounded-lg border border-ink-200 bg-white" />
+                                            className="md:col-span-2 px-3 py-2 rounded-lg border border-ink-200 bg-white" />
                                     </div>
                                     <div className="flex flex-wrap items-center gap-2">
                                         <button disabled={c.busy || !c.newAsset.title.trim()} className="px-4 py-2 rounded-xl text-[13px] font-bold bg-ink-900 text-white disabled:opacity-40"
@@ -23437,10 +23452,20 @@
                                             <span className={`px-2 py-0.5 rounded-md text-[11px] font-bold ${a.rights.status === 'confirmed' ? 'bg-emerald-50 text-emerald-800' : 'bg-amber-50 text-amber-900'}`}>
                                                 権利 {a.rights.status === 'confirmed' ? `確認済み（${a.rights.confirmedName || a.rights.confirmedBy}）` : a.rights.status === 'restricted' ? '利用制限あり' : '未確認'}
                                             </span>
+                                            <span className={`px-2 py-0.5 rounded-md text-[11px] font-bold ${a.kind === 'real' ? 'bg-rose-50 text-rose-700' : 'bg-slate-100 text-slate-700'}`}>{a.kindLabel || (a.kind === 'real' ? '実際の施術素材' : 'デモ素材')}</span>
+                                            {a.kind === 'real' && (
+                                                <span className={`px-2 py-0.5 rounded-md text-[11px] font-bold ${a.consent && a.consent.photo ? 'bg-emerald-50 text-emerald-800' : 'bg-amber-50 text-amber-900'}`}>
+                                                    写真の許可 {a.consent && a.consent.photo ? '確認済み' : '未確認'}
+                                                </span>
+                                            )}
                                             <span className="text-[11px] text-ink-400">素材ID {a.id}</span>
                                             <div className="ml-auto flex gap-2">
+                                                {a.kind === 'real' && !(a.consent && a.consent.photo) && (
+                                                    <button disabled={c.busy} data-cv-consent={a.id} className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200 hover:bg-ink-50 disabled:opacity-40"
+                                                        onClick={() => { if (window.confirm('この素材に写っている方から、写真の利用許可を得ていますか？')) cvAct({ action: 'asset_rights', asset_id: a.id, status: a.rights.status, consent_photo: true }, '写真の許可を確認済みにしました'); }}>写真の許可を確認</button>
+                                                )}
                                                 {a.rights.status !== 'confirmed' && (
-                                                    <button disabled={c.busy} className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200 hover:bg-ink-50 disabled:opacity-40"
+                                                    <button disabled={c.busy} data-cv-rights={a.id} className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200 hover:bg-ink-50 disabled:opacity-40"
                                                         onClick={() => cvAct({ action: 'asset_rights', asset_id: a.id, status: 'confirmed' }, '権利を確認済みにしました')}>権利を確認済みにする</button>
                                                 )}
                                                 <button disabled={c.busy} data-cv-add-draft={a.id} className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200 hover:bg-ink-50 disabled:opacity-40"
@@ -23487,6 +23512,17 @@
                                                             </ul>
                                                         </details>
                                                     )}
+                                                    {cr.cta && <div className="text-[12px] text-ink-700"><span className="text-ink-400">CTA:</span> {cr.cta}</div>}
+                                                    {cr.parentCreativeId && cr.sourceCreativeVersion > 0 && (
+                                                        <div className="text-[11px] text-ink-400">v{cr.sourceCreativeVersion} を直した版（元の版は履歴に残っています）</div>
+                                                    )}
+                                                    {cr.genSettings && (cr.genSettings.formats || []).length > 0 && (
+                                                        <div className="text-[11px] text-ink-400">生成設定: {(cr.genSettings.formats || []).join(' / ')}{cr.genSettings.preset ? `・${cr.genSettings.preset}` : ''}{cr.genSettings.brandVersion ? `・${cr.genSettings.brandVersion}` : ''}</div>
+                                                    )}
+                                                    {/* ⚠️ 制作費は分からないものを 0 と書かない */}
+                                                    <div className="text-[11px] text-ink-400">制作費: {cr.cost && cr.cost.amount !== null && cr.cost.amount !== undefined
+                                                        ? `${Number(cr.cost.amount).toLocaleString()} ${cr.cost.currency || ''}` : '未記録'}</div>
+                                                    {cr.claims && cr.claims.at ? <div className="text-[11px] text-emerald-800">内容の確認済み（{cr.claims.by || '—'}）</div> : null}
                                                     {cr.reviewer && <div className="text-[11px] text-emerald-800">承認: {cr.reviewer.name || cr.reviewer.id}</div>}
                                                     <div className="flex flex-wrap gap-2 pt-1">
                                                         {(cr.status === 'draft' || cr.status === 'failed') && (
@@ -23500,8 +23536,8 @@
                                                                         const text = window.prompt('どこを直しますか？（修正履歴に残ります）');
                                                                         if (text && text.trim()) cvAct({ action: 'revise', creative_id: cr.id, text }, '修正を依頼しました');
                                                                     }}>修正を依頼</button>
-                                                                <button disabled={c.busy} className="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-emerald-700 text-white disabled:opacity-40"
-                                                                    onClick={() => cvAct({ action: 'approve', creative_id: cr.id }, '承認しました')}>承認する</button>
+                                                                <button disabled={c.busy} data-cv-approve={cr.id} className="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-emerald-700 text-white disabled:opacity-40"
+                                                                    onClick={() => setCv(p => ({ ...p, approving: p.approving === cr.id ? '' : cr.id, claims: {}, error: '' }))}>承認する</button>
                                                             </>
                                                         )}
                                                         {cr.status === 'approved' && (
@@ -23509,6 +23545,29 @@
                                                                 onClick={() => cvDeliver(cr.id)}>完成ファイルを取得</button>
                                                         )}
                                                     </div>
+                                                    {/* ⚠️ 承認の前に人が確かめる。自動でチェックを入れない。 */}
+                                                    {c.approving === cr.id && (
+                                                        <div data-cv-claims={cr.id} className="mt-2 p-3 rounded-xl border border-emerald-200 bg-emerald-50/50">
+                                                            <div className="text-[12px] font-black text-emerald-900">承認の前に確認してください</div>
+                                                            <div className="mt-2 space-y-1.5">
+                                                                {CV_CLAIM_CHECKS.map(ck => (
+                                                                    <label key={ck.key} className="flex items-start gap-2 text-[12px] text-ink-700">
+                                                                        <input type="checkbox" data-cv-claim={ck.key} checked={!!c.claims[ck.key]}
+                                                                            onChange={e => setCv(p => ({ ...p, claims: { ...p.claims, [ck.key]: e.target.checked } }))} />
+                                                                        <span>{ck.label}</span>
+                                                                    </label>
+                                                                ))}
+                                                            </div>
+                                                            <div className="flex items-center gap-2 mt-3">
+                                                                <button data-cv-approve-yes={cr.id} disabled={c.busy || !CV_CLAIM_CHECKS.every(ck => c.claims[ck.key])}
+                                                                    className="px-3 py-2 rounded-lg text-[12px] font-bold bg-emerald-700 text-white disabled:opacity-40"
+                                                                    onClick={async () => { await cvAct({ action: 'approve', creative_id: cr.id, claims: c.claims }, '承認しました'); setCv(p => ({ ...p, approving: '', claims: {} })); }}>
+                                                                    この内容で承認する
+                                                                </button>
+                                                                <button onClick={() => setCv(p => ({ ...p, approving: '', claims: {} }))} className="px-3 py-2 rounded-lg text-[12px] font-bold border border-ink-200">やめる</button>
+                                                            </div>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             ))}
                                         </div>

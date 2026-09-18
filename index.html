@@ -2519,24 +2519,40 @@
                 return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
             };
             const aiTrialAsk = async (opts = {}) => {
-                const q = aiTrial.q.trim(); const rid = aiTrial.roomId;
-                if (!q || !rid || aiTrial.busy) return;
+                if (aiTrial.busy) return;                         // 二重クリック防止（送信中は何もしない）
+                const retry = opts.retry === true;
+                // ⚠️ 再試行は **送信したときの内容をそのまま**使う。
+                //    入力欄はユーザーが編集できるので、再試行中に書き換えられていても
+                //    元の送信（依頼ID・本文・ルーム）を変えてはいけない。
+                //    変えてしまうと、サーバーからは「同じ依頼IDで内容が違う」＝
+                //    request_conflict になり、やり直せなくなる。
+                const q = retry ? String(aiTrial.lastQuestion || '') : aiTrial.q.trim();
+                const rid = retry ? String(aiTrial.lastRoomId || '') : aiTrial.roomId;
+                if (!q || !rid) return;
+                if (retry && !aiTrial.canRetry) return;            // 自動再試行できない失敗では動かさない
                 // 再試行のときだけ前回のIDを使う。新規送信なら必ず新しいID。
-                const requestId = opts.retry && aiTrial.lastRequestId ? aiTrial.lastRequestId : aiMakeRequestId();
+                const requestId = retry && aiTrial.lastRequestId ? aiTrial.lastRequestId : aiMakeRequestId();
                 // 資料は「選べたもの」だけを送る。選択肢に無いIDは送らない（②の pickedTarget と同じ考え方）
                 const picked = (aiTrial.picked && aiTrial.picked.roomId === rid) ? aiTrial.picked : null;
-                setAiTrial(p => ({ ...p, busy: true, error: '', lastRequestId: requestId, lastQuestion: q }));
+                const hintDocIds = retry ? aiTrial.lastHintDocIds : (picked ? picked.hintDocIds : undefined);
+                setAiTrial(p => ({ ...p, busy: true, error: '', canRetry: false,
+                    lastRequestId: requestId, lastQuestion: q, lastRoomId: rid, lastHintDocIds: hintDocIds }));
                 const j = await aiPost({ action: 'ask', question: q, room_id: rid, request_id: requestId,
-                    hint_doc_ids: picked ? picked.hintDocIds : undefined });
+                    hint_doc_ids: hintDocIds });
                 if (!j.ok) {
+                    // 再試行してよいかは **サーバーの retryable に従う**（画面で勝手に決めない）。
+                    // 認証切れ・権限剥奪・対象外ルーム・内容競合は retryable:false で返るため、
+                    // ここでボタンは出ない。自動再試行もしない（押すのは人）。
                     setAiTrial(p => ({ ...p, busy: false, canRetry: j.error.retryable === true,
-                        error: `${j.error.message}（${j.error.code}${j.error.retryable ? '・再試行できます' : ''}）` }));
+                        error: `${j.error.message}（${j.error.code}${j.error.retryable ? '・同じ送信を再試行できます' : ''}）` }));
                     return;   // ⚠️ 質問の下書きは消さない
                 }
                 await aiTrialLoadAnswers(rid);
                 setAiTrial(p => ({ ...p, busy: false, canRetry: false, q: j.replay ? p.q : '' }));
             };
-            // 同じ送信のやり直し。**新しいIDを発行しない**（回答が二重にならない）
+            // 同じ送信のやり直し。**新しいIDを発行しない**（回答が二重にならない）。
+            // サーバーに回答が保存済みで応答だけ失われた場合は replay として
+            // 同じ answer_message_id が返るので、回答が増えない。
             const aiTrialRetry = () => aiTrialAsk({ retry: true });
             const aiTrialReview = async (aid) => {
                 const a = aiTrial.answers[aid]; if (!a) return;
@@ -21385,14 +21401,35 @@
                                     <textarea value={t.q} onChange={e => setAiTrial(p => ({ ...p, q: e.target.value }))}
                                         placeholder="質問を入力（例: 家族施術のルールは？）" rows={3}
                                         className="w-full px-3 py-2 rounded-xl border border-ink-200 text-[13px] resize-y" />
-                                    <div className="flex items-center gap-2">
-                                        <button onClick={aiTrialAsk} disabled={!t.q.trim() || !t.roomId || t.busy}
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        {/* 新規の送信。押すたびに新しい依頼IDを発行する。 */}
+                                        <button onClick={() => aiTrialAsk()} disabled={!t.q.trim() || !t.roomId || t.busy}
                                             className="px-4 py-2 rounded-xl text-[13px] font-bold bg-ink-900 text-white disabled:opacity-40">
                                             {t.busy ? '回答を作成中…' : 'AIに質問する'}
                                         </button>
+                                        {/* 同じ送信のやり直し。**依頼IDを発行し直さない**ので回答が二重にならない。
+                                            通信の失敗など、サーバーが retryable と返した場合だけ出す。 */}
+                                        {t.canRetry && (
+                                            <button onClick={aiTrialRetry} disabled={t.busy}
+                                                className="px-4 py-2 rounded-xl text-[13px] font-bold border border-ink-300 text-ink-900 hover:bg-ink-50 disabled:opacity-40">
+                                                {t.busy ? '再試行中…' : '同じ送信を再試行'}
+                                            </button>
+                                        )}
                                         {t.error && <span className="text-[12px] text-red-700">{t.error}</span>}
                                     </div>
-                                    {t.error && <div className="text-[11px] text-ink-400">※ 質問の下書きは消していません。そのまま再試行できます。</div>}
+                                    {t.canRetry && (
+                                        <div className="text-[11px] text-ink-400">
+                                            ※「同じ送信を再試行」は、さきほど送った内容（{t.lastQuestion ? `「${String(t.lastQuestion).slice(0, 24)}${String(t.lastQuestion).length > 24 ? '…' : ''}」` : 'その質問'}）を
+                                            同じ依頼IDのまま送り直します。入力欄を書き換えても、送り直す内容は変わりません。
+                                            すでにサーバーに回答が保存されていた場合は、同じ回答がそのまま表示されます（二重になりません）。
+                                        </div>
+                                    )}
+                                    {t.error && !t.canRetry && (
+                                        <div className="text-[11px] text-ink-400">
+                                            ※ 質問の下書きは消していません。内容を確認してから、あらためて質問してください
+                                            （この失敗は同じ送信のやり直しでは解消しません）。
+                                        </div>
+                                    )}
                                 </section>
 
                                 <section className="space-y-3">

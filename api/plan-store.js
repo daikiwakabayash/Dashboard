@@ -553,12 +553,19 @@ export default async function handler(req, res) {
         }
         if (kind === 'pending' && !isStalePending(prev)) { decided = { type: 'pending', prev }; return null; }
         const rec = makeRequestRecord(input, { tenantId, actorId });
-        rec.questionMessageId = qMsgId;
+        // ⚠️ 前回この依頼で投稿した質問があれば **それを使い回す**。
+        //    失敗したあとに同じ依頼IDで再試行したとき、質問だけが2件に増えてしまう。
+        //    （失敗レコードは classifyRequest では 'new' 扱いになるため、ここで拾う）
+        const priorQ = prev && prev.questionMessageId
+          && msgs.some(m => m && String(m.id) === String(prev.questionMessageId))
+          ? String(prev.questionMessageId) : '';
+        rec.questionMessageId = priorQ || qMsgId;
         rec.runId = runId;
         st.requests[key] = rec;
-        decided = { type: 'claimed', rec };
+        decided = { type: 'claimed', rec, reuseQuestion: !!priorQ };
         return rec;
       });
+      if (decided && decided.reuseQuestion) { pendingQuestion = null; qMsgId = decided.rec.questionMessageId; }
       if (decided && decided.type === 'conflict') return res.status(200).json(aiError('request_conflict'));
       if (decided && decided.type === 'replay') {
         const { prev, ans } = decided;

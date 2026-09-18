@@ -505,3 +505,76 @@ describe('同時実行：4件の既知不具合', () => {
     expect(Object.keys(aiStore().answers)).toHaveLength(1);
   });
 });
+
+// ── 再試行：応答だけ失われた場合 ──────────────────────────────────────
+describe('再試行：サーバーに保存済みで応答だけ失われたとき', () => {
+  it('🔴 同じ request_id で再試行すると、同じ answer_message_id が返る（回答が増えない）', async () => {
+    // 1回目：サーバーは回答を保存したが、画面には応答が届かなかった、という状況。
+    // 画面は「失敗した」と思っているが、サーバーには回答がある。
+    const first = await ask({ request_id: 'lost_response' });
+    expect(first.body.ok).toBe(true);
+    const aid = first.body.answer_message_id;
+
+    // 画面から「同じ送信を再試行」＝ 同じ request_id・同じ本文・同じ room_id
+    const retry = await ask({ request_id: 'lost_response' });
+    expect(retry.body.replay).toBe(true);
+    expect(retry.body.answer_message_id).toBe(aid);       // 同じ回答が返る
+    expect(retry.body.body).toBe(first.body.body);
+    expect(Object.keys(aiStore().answers)).toHaveLength(1);
+    expect(roomMsgs('g_trial').filter(m => m.fromStaffId === '__ai__')).toHaveLength(1);
+  });
+
+  it('🔴 再試行で本文を変えてしまうと request_conflict（＝元の内容を保つ必要がある）', async () => {
+    await ask({ request_id: 'keep_body' });
+    const changed = await ask({ request_id: 'keep_body', question: '別の質問に変えてしまった' });
+    expect(changed.body.ok).toBe(false);
+    expect(changed.body.error.code).toBe('request_conflict');
+    expect(changed.body.error.retryable).toBe(false);      // 画面は再試行ボタンを出さない
+  });
+
+  it('🔴 再試行で room_id を変えてしまっても request_conflict', async () => {
+    await ask({ request_id: 'keep_room' });
+    store.set(CFG, JSON.stringify({ trialRooms: ['g_trial', 'g_other'], allowedDocIds: ['faq1'] }));
+    const moved = await ask({ request_id: 'keep_room', room_id: 'g_other' });
+    expect(moved.body.error.code).toBe('request_conflict');
+  });
+
+  it('再試行できない失敗は retryable:false で返る（画面が自動再試行しないため）', async () => {
+    store.set(FLAGS, JSON.stringify({ cc_all: true, cc_ai_trial: false, cc_authz: 'off' }));
+    const off = await ask({ request_id: 'no_retry' });
+    expect(off.body.error.retryable).toBe(false);
+    store.set(CFG, JSON.stringify({ trialRooms: [], allowedDocIds: ['faq1'] }));
+    store.set(FLAGS, JSON.stringify({ cc_all: true, cc_ai_trial: true, cc_authz: 'off' }));
+    const room = await ask({ request_id: 'no_retry2' });
+    expect(room.body.error.retryable).toBe(false);
+  });
+
+  it('通信失敗（上流エラー）は retryable:true で返る（画面が再試行ボタンを出す）', async () => {
+    installFetchMock({ fail: true });
+    store.set(FLAGS, JSON.stringify({ cc_all: true, cc_ai_trial: true, cc_authz: 'off' }));
+    store.set(CFG, JSON.stringify({ trialRooms: ['g_trial'], allowedDocIds: ['faq1'] }));
+    store.set(CHAT, JSON.stringify({ rooms: [{ id: 'g_trial', kind: 'group', name: '検証用', members: ['__root__'] }], dir: { staff: [] }, notes: {} }));
+    const res = await ask({ request_id: 'net_fail' });
+    expect(res.body.ok).toBe(false);
+    expect(res.body.error.code).toBe('upstream_failed');
+    expect(res.body.error.retryable).toBe(true);
+  });
+
+  it('🔴 上流失敗のあと同じ request_id で再試行すると、今度は成功して回答が1件だけできる', async () => {
+    installFetchMock({ fail: true });
+    store.set(FLAGS, JSON.stringify({ cc_all: true, cc_ai_trial: true, cc_authz: 'off' }));
+    store.set(CFG, JSON.stringify({ trialRooms: ['g_trial'], allowedDocIds: ['faq1'] }));
+    store.set(CHAT, JSON.stringify({ rooms: [{ id: 'g_trial', kind: 'group', name: '検証用', members: ['__root__'] }], dir: { staff: [] }, notes: {} }));
+    store.set('naoru:faq:v1', JSON.stringify({ faqs: [{ id: 'faq1', q: 'q', a: 'a', updatedAt: '2026-09-12T00:00:00Z' }] }));
+    const failed = await ask({ request_id: 'retry_ok' });
+    expect(failed.body.error.retryable).toBe(true);
+    // 上流が復旧 → 同じ依頼IDで再試行
+    const prev = store; installFetchMock(); store.clear();
+    for (const [k, v] of prev) store.set(k, v);
+    const ok = await ask({ request_id: 'retry_ok' });
+    expect(ok.body.ok).toBe(true);
+    expect(Object.keys(aiStore().answers)).toHaveLength(1);
+    expect(roomMsgs('g_trial').filter(m => m.fromStaffId === '__ai__')).toHaveLength(1);
+    expect(roomMsgs('g_trial').filter(m => m.fromStaffId === '__root__')).toHaveLength(1);  // 質問も1件
+  });
+});

@@ -37,6 +37,15 @@ import {
   chunkCipherRange as creativeChunkCipherRange, parseRange as creativeParseRange,
   fromB64 as creativeFromB64,
 } from '../lib/creative-crypto.js';
+import {
+  rsvpKey as evRsvpKey, normalizeRsvp as evNormalizeRsvp, counts as evCounts, myState as evMyState,
+  applyRsvp as evApplyRsvp, roster as evRoster, canSeeRoster as evCanSeeRoster,
+  chatOnlyMembers as evChatOnly, CHAT_ONLY_LABEL as EV_CHAT_ONLY_LABEL,
+} from '../lib/event-rsvp.js';
+import {
+  metaKey as evMetaKey, normalizeMeta as evNormalizeMeta, readEvent as evReadEvent,
+  canPublish as evCanPublish, SECTION_KEYS as EVENT_SECTION_KEYS,
+} from '../lib/event-fields.js';
 import { parseSourceUrl as knowParseSource, isSyncable as knowSyncable,
   applyFetched as knowApplyFetched, markReviewed as knowMarkReviewed,
   syncSummary as knowSyncSummary } from '../lib/knowledge-sync.js';
@@ -2487,39 +2496,206 @@ export default async function handler(req, res) {
     }
   }
 
-  // ── 勉強会・イベント日程ストア（共有編集グリッド）: ?type=events ──
+  // ── 勉強会・イベント日程ストア: ?type=events ────────────────────────
+  // 旧: スプレッドシート風の共有編集表（sections.study/event/bukatsu の行と cells）。
+  // 追加: 参加の状態（気になる／参加予定／キャンセル待ち／取消／招待）と、行ごとの追加項目。
+  //
+  // ⚠️ 旧データを壊さない。cells はそのまま。追加項目は別キー（naoru:events:meta:<id>）。
+  // ⚠️ 参加の状態も別キー（naoru:events:rsvp:<id>）。表の行は触らない。
+  // ⚠️ 定員はサーバーで原子的に判定する（連打・同時申込でも超過しない）。
   const isEvents = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'events';
   if (isEvents) {
     if (!hasKV && !hasSB && !gas) return res.status(200).json({ sections: {}, configured: false });
     try {
-      const cur = (await blobGet(EVENTS_KEY, hasKV, hasSB, gas)) || {};
-      const sections = (cur.sections && typeof cur.sections === 'object') ? cur.sections : {};
-      if (req.method === 'GET') return res.status(200).json({ sections, configured: true });
       const body = req.body || {};
+      const action = String(body.action || req.query.action || '');
+      const evActor = chatActor || {};
+      const meId = String(evActor.id || '').slice(0, 64);
+      const isHq = evActor.verified === true && ['root', 'admin'].includes(String(evActor.role || ''));
+
+      // 表の書き込みは compare-and-set で行う（同時編集で行が消えないように）。
+      const evMutate = async (apply) => {
+        for (let i = 0; i < 6; i++) {
+          const cur = (await blobGet(EVENTS_KEY, hasKV, hasSB, gas)) || {};
+          const sections = (cur.sections && typeof cur.sections === 'object') ? cur.sections : {};
+          const out = apply(sections);
+          if (out === null || out === undefined) return { ok: false, aborted: true };
+          if (!hasKV) { await blobSet(EVENTS_KEY, { sections: out }, hasKV, hasSB, gas); return { ok: true }; }
+          const base = Number(cur._v) || 0;
+          if (await kvCasSet(EVENTS_KEY, base, { sections: out, _v: base + 1 })) return { ok: true };
+          await new Promise(r => setTimeout(r, Math.round((10 + Math.random() * 40) * (i + 1))));
+        }
+        return { ok: false, reason: 'conflict' };
+      };
+
+      // ── 参加の状態（行ごとの小さなキー）──────────────────────────
+      // ⚠️ 定員の判定と席の確保を**同じ compare-and-set の中**で行う。
+      //    読んでから書くまでの間に他の人が申し込んでいたら、最新を読み直してやり直す。
+      const evRsvpMutate = async (rowId, apply) => {
+        const key = evRsvpKey(rowId);
+        for (let i = 0; i < 8; i++) {
+          const cur = (await blobGet(key, hasKV, hasSB, gas)) || {};
+          const out = apply(cur);
+          if (out === null || out === undefined) return { ok: false, aborted: true };
+          if (!hasKV) { await blobSet(key, out.state, hasKV, hasSB, gas); return { ok: true, ...out }; }
+          const base = Number(cur._v) || 0;
+          if (await kvCasSet(key, base, { ...out.state, _v: base + 1 })) return { ok: true, ...out };
+          await new Promise(r => setTimeout(r, Math.round((10 + Math.random() * 40) * (i + 1))));
+        }
+        return { ok: false, reason: 'conflict' };
+      };
+
+      const loadSections = async () => {
+        const cur = (await blobGet(EVENTS_KEY, hasKV, hasSB, gas)) || {};
+        return (cur.sections && typeof cur.sections === 'object') ? cur.sections : {};
+      };
+      const findRow = (sections, rowId) => {
+        for (const sk of EVENT_SECTION_KEYS) {
+          const r = (Array.isArray(sections[sk]) ? sections[sk] : []).find(x => x && String(x.id) === String(rowId));
+          if (r) return { row: r, section: sk };
+        }
+        return null;
+      };
+
+      // 参加・気になる・取消。⚠️ 本人IDは**サーバーが確かめた actor** から取る。
+      if (req.method === 'POST' && action === 'rsvp') {
+        const rowId = String(body.id || '').slice(0, 64);
+        const want = String(body.want || '');
+        if (!meId) return res.status(403).json({ ok: false, error: 'login_required' });
+        const sections = await loadSections();
+        const found = findRow(sections, rowId);
+        if (!found) return res.status(404).json({ ok: false, error: 'not_found' });
+        const ev = evReadEvent(found.row, found.section, await blobGet(evMetaKey(rowId), hasKV, hasSB, gas).catch(() => null));
+        if (ev.status === 'cancelled') return res.status(200).json({ ok: false, error: 'cancelled', message: 'この会は中止になりました' });
+        // ⚠️ 招待は主催者・本部だけ。自分の参加は本人だけ（他人の代理で登録させない）。
+        const targetId = want === 'invite' ? String(body.staffId || '').slice(0, 64) : meId;
+        if (want === 'invite' && !(isHq || (ev.ownerId && ev.ownerId === meId))) {
+          return res.status(403).json({ ok: false, error: 'forbidden', message: '招待は主催者と本部だけが送れます' });
+        }
+        if (!targetId) return res.status(400).json({ ok: false, error: 'no_target' });
+        let result = null;
+        const done = await evRsvpMutate(rowId, (cur) => {
+          const r = evApplyRsvp(cur, { staffId: targetId, want, capacity: ev.capacityRaw,
+            at: Date.now(), by: want === 'invite' ? 'host' : 'self' });
+          if (!r.ok) { result = { error: r.reason }; return null; }
+          result = { result: r.result, promoted: r.promoted || null };
+          return { state: r.state };
+        });
+        if (result && result.error) return res.status(400).json({ ok: false, error: result.error });
+        if (!done.ok) return res.status(200).json({ ok: false, error: 'busy_retry', retryable: true,
+          message: '同時に申し込みが重なりました。もう一度お試しください' });
+        const st = (await blobGet(evRsvpKey(rowId), hasKV, hasSB, gas)) || {};
+        return res.status(200).json({ ok: true, id: rowId, my: evMyState(st, meId),
+          result: result.result, promoted: result.promoted, counts: evCounts(st, ev.capacityRaw) });
+      }
+
+      // 一覧用の人数。⚠️ **1回のMGETでまとめて**取る（行の数だけ往復しない）。
+      if (req.method === 'POST' && action === 'rsvp_counts') {
+        const ids = (Array.isArray(body.ids) ? body.ids : []).map(x => String(x).slice(0, 64)).filter(Boolean).slice(0, 200);
+        if (!ids.length) return res.status(200).json({ ok: true, counts: {}, mine: {} });
+        const sections = await loadSections();
+        const metas = await blobMGet(ids.map(evMetaKey), hasKV, hasSB, gas);
+        const states = await blobMGet(ids.map(evRsvpKey), hasKV, hasSB, gas);
+        const out = {}, mine = {};
+        ids.forEach((id, i) => {
+          const found = findRow(sections, id);
+          if (!found) return;
+          const ev = evReadEvent(found.row, found.section, metas[i]);
+          out[id] = evCounts(states[i] || {}, ev.capacityRaw);
+          mine[id] = evMyState(states[i] || {}, meId);
+        });
+        return res.status(200).json({ ok: true, counts: out, mine });
+      }
+
+      // 氏名の一覧。⚠️ 本部の管理者と主催者だけ（画面で隠すだけにしない）。
+      if (req.method === 'POST' && action === 'rsvp_list') {
+        const rowId = String(body.id || '').slice(0, 64);
+        const sections = await loadSections();
+        const found = findRow(sections, rowId);
+        if (!found) return res.status(404).json({ ok: false, error: 'not_found' });
+        const ev = evReadEvent(found.row, found.section, await blobGet(evMetaKey(rowId), hasKV, hasSB, gas).catch(() => null));
+        const st = (await blobGet(evRsvpKey(rowId), hasKV, hasSB, gas)) || {};
+        const counts = evCounts(st, ev.capacityRaw);
+        if (!evCanSeeRoster(evActor, ev)) {
+          // 人数までは対象者にも見せる。氏名は返さない。
+          return res.status(200).json({ ok: true, id: rowId, counts, detail: false });
+        }
+        const people = Array.isArray(body.people) ? body.people.slice(0, 5000) : [];
+        const room = (Array.isArray(body.members) ? body.members : []).map(String);
+        return res.status(200).json({ ok: true, id: rowId, counts, detail: true,
+          roster: evRoster(st, people),
+          // ⚠️ チャットに入っているだけの人は**参加予定にしない**。分けて返す。
+          chatOnly: evChatOnly(st, room), chatOnlyLabel: EV_CHAT_ONLY_LABEL });
+      }
+
+      // 行ごとの追加項目（題名・要約・対象・料金・カバー等）。
+      // ⚠️ 編集は主催者と本部だけ。cells には触らない。
+      if (req.method === 'POST' && action === 'meta_set') {
+        const rowId = String(body.id || '').slice(0, 64);
+        const sections = await loadSections();
+        const found = findRow(sections, rowId);
+        if (!found) return res.status(404).json({ ok: false, error: 'not_found' });
+        const prev = await blobGet(evMetaKey(rowId), hasKV, hasSB, gas).catch(() => null);
+        const ev = evReadEvent(found.row, found.section, prev);
+        if (!(isHq || (ev.ownerId && ev.ownerId === meId))) {
+          return res.status(403).json({ ok: false, error: 'forbidden', message: '編集できるのは主催者と本部だけです' });
+        }
+        const meta = evNormalizeMeta({ ...(prev || {}), ...(body.meta || {}), updatedAt: Date.now(), updatedBy: meId });
+        // ⚠️ 中身が空のまま公開させない（空の予定が並ぶのを防ぐ）。
+        if (meta.status === 'open') {
+          const pub = evCanPublish(evReadEvent(found.row, found.section, meta));
+          if (!pub.ok) return res.status(200).json({ ok: false, error: pub.reason,
+            message: pub.reason === 'no_title' ? '題名を入れてください' : '開催日を入れてください' });
+        }
+        await blobSet(evMetaKey(rowId), meta, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, id: rowId, meta });
+      }
+
+      if (req.method === 'GET') {
+        const sections = await loadSections();
+        // 追加項目もまとめて返す（画面が行ごとに取りに来ないように）。
+        const ids = EVENT_SECTION_KEYS.flatMap(sk => (Array.isArray(sections[sk]) ? sections[sk] : []).map(r => r && r.id).filter(Boolean)).slice(0, 200);
+        let metas = {};
+        if (ids.length) {
+          const got = await blobMGet(ids.map(evMetaKey), hasKV, hasSB, gas).catch(() => []);
+          ids.forEach((id, i) => { if (got[i]) metas[id] = got[i]; });
+        }
+        return res.status(200).json({ sections, meta: metas, configured: true, me: meId });
+      }
+
       const sk = String(body.section || '');
-      if (!['study', 'event', 'bukatsu'].includes(sk)) return res.status(400).json({ ok: false, error: 'bad_section' });
-      const rows = Array.isArray(sections[sk]) ? sections[sk] : [];
+      if (!EVENT_SECTION_KEYS.includes(sk)) return res.status(400).json({ ok: false, error: 'bad_section' });
       if (body.action === 'upsertRow' && body.row && body.row.id) {
         const cells = (body.row.cells && typeof body.row.cells === 'object') ? body.row.cells : {};
         const clean = {}; for (const k of Object.keys(cells)) clean[String(k)] = String(cells[k] ?? '').slice(0, 300);
-        const rec = { id: String(body.row.id), cells: clean, updatedBy: String(body.row.updatedBy || ''), updatedAt: new Date().toISOString() };
-        const exists = rows.some(r => r && r.id === rec.id);
-        const next = exists ? rows.map(r => r && r.id === rec.id ? rec : r) : rows.concat(rec);
-        const nextSections = { ...sections, [sk]: next.slice(0, 400) };
-        await blobSet(EVENTS_KEY, { sections: nextSections }, hasKV, hasSB, gas);
+        const rec = { id: String(body.row.id), cells: clean, updatedBy: String(body.row.updatedBy || meId || ''), updatedAt: new Date().toISOString() };
+        const done = await evMutate((sections) => {
+          const rows = Array.isArray(sections[sk]) ? sections[sk] : [];
+          const exists = rows.some(r => r && r.id === rec.id);
+          const next = exists ? rows.map(r => r && r.id === rec.id ? rec : r) : rows.concat(rec);
+          return { ...sections, [sk]: next.slice(0, 400) };
+        });
+        if (!done.ok) return res.status(200).json({ ok: false, error: 'busy_retry', retryable: true });
         return res.status(200).json({ ok: true, row: rec });
       }
       if (body.action === 'deleteRow' && body.id) {
-        const next = rows.filter(r => r && r.id !== String(body.id));
-        await blobSet(EVENTS_KEY, { sections: { ...sections, [sk]: next } }, hasKV, hasSB, gas);
+        const done = await evMutate((sections) => {
+          const rows = Array.isArray(sections[sk]) ? sections[sk] : [];
+          return { ...sections, [sk]: rows.filter(r => r && r.id !== String(body.id)) };
+        });
+        if (!done.ok) return res.status(200).json({ ok: false, error: 'busy_retry', retryable: true });
         return res.status(200).json({ ok: true });
       }
       if (body.action === 'reorder' && Array.isArray(body.order)) {
-        const map = new Map(rows.map(r => [String(r.id), r]));
-        const next = body.order.map(id => map.get(String(id))).filter(Boolean);
-        // 並べ替えに含まれない行は末尾に温存
-        for (const r of rows) if (!body.order.map(String).includes(String(r.id))) next.push(r);
-        await blobSet(EVENTS_KEY, { sections: { ...sections, [sk]: next } }, hasKV, hasSB, gas);
+        const done = await evMutate((sections) => {
+          const rows = Array.isArray(sections[sk]) ? sections[sk] : [];
+          const map = new Map(rows.map(r => [String(r.id), r]));
+          const next = body.order.map(id => map.get(String(id))).filter(Boolean);
+          // 並べ替えに含まれない行は末尾に温存
+          for (const r of rows) if (!body.order.map(String).includes(String(r.id))) next.push(r);
+          return { ...sections, [sk]: next };
+        });
+        if (!done.ok) return res.status(200).json({ ok: false, error: 'busy_retry', retryable: true });
         return res.status(200).json({ ok: true });
       }
       return res.status(400).json({ ok: false, error: 'invalid events action' });

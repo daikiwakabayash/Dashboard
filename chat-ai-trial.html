@@ -81,6 +81,23 @@
 
   <ol class="steps" id="steps"></ol>
 
+  <!-- 内部IDを手入力させないための選択欄。名前で選び、送信するのは①が許可したID。 -->
+  <div class="card">
+    <div class="hd"><b>送信先の選択</b><span class="muted">名前で選びます（内部IDの入力は不要）</span></div>
+    <div class="bd" style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-start">
+      <label class="muted" style="display:flex;flex-direction:column;gap:4px">ルーム
+        <select id="roomPick" style="font-size:13px;padding:5px"></select>
+      </label>
+      <div class="muted" style="display:flex;flex-direction:column;gap:4px">参加者（サーバーが確定・変更できません）
+        <div id="memberList" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+      </div>
+      <div class="muted" style="display:flex;flex-direction:column;gap:4px">参照してよい資料（タイトルで選択）
+        <div id="docPick" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+      </div>
+    </div>
+    <div class="bd muted" id="targetNote" style="padding-top:0"></div>
+  </div>
+
   <div class="card">
     <div class="hd">
       <b id="roomName">店舗グループ</b>
@@ -131,14 +148,23 @@ import {
   createSession, toggleMode, setMode, setDraft, submit, applyAnswer, failAnswer, retry,
   requestHqReview, applyCorrection, setFeedback, feedbackCount, questionStatus,
 } from './lib/chat-ai-session.js';
-import { buildContext, createMockAdapter, adapterBadge, resolveSources } from './lib/chat-ai-adapter.js';
+import { buildContext, createMockAdapter, adapterBadge, resolveSources,
+  buildTrialTargets, pickedTarget } from './lib/chat-ai-adapter.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
 const hhmm = (iso) => { const d = new Date(iso); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
 
 // ── 合成データ（本番データは使わない）────────────────────────────────────
-const ROOM = { id: 'store_A', name: 'NAORU〇〇院グループ（検証用）', shopId: 'A' };
+// ルームは複数用意し、**名前で選ぶ**（内部IDは画面に出さない・手入力させない）。
+const ROOMS = [
+  { id: 'store_A', name: 'NAORU〇〇院グループ（検証用）', kind: 'group', shopId: 'A', members: ['s1', 'hq1'] },
+  { id: 'store_B', name: 'NAORU△△院グループ（検証用）', kind: 'group', shopId: 'B', members: ['s1', 'hq1'] },
+];
+// ①が許可した対象（mock では合成の許可リスト。実接続では adapter.getConfig() の値に差し替える）。
+// **許可リストに無いIDは選択肢に出さないし、送信もしない。**
+const TRIAL_CFG = { trialRooms: ['store_A', 'store_B'], allowedDocIds: ['faq_family', 'faq_shift', 'note_clean'] };
+let ROOM = ROOMS[0];
 const PEOPLE = {
   staff: { id: 's1', name: '佐藤', role: 'staff', canCorrect: false },
   hq:    { id: 'hq1', name: '本部 太郎', role: 'hq', canCorrect: true },
@@ -160,17 +186,55 @@ const DOCS = [
 
 const adapter = createMockAdapter({ delayMs: 350 });
 let viewer = PEOPLE.staff;
-let state = createSession({
+const newSession = () => createSession({
   roomId: ROOM.id, roomName: ROOM.name, viewerId: viewer.id, viewerName: viewer.name, viewerRole: viewer.role,
   participants: [PEOPLE.staff, PEOPLE.hq],
 });
+let state = newSession();
 let fixTarget = '';
+// 選択肢は①が許可したIDだけから作る（手入力欄は置かない）
+let targets = buildTrialTargets({ rooms: ROOMS, config: TRIAL_CFG, docs: DOCS,
+  names: Object.fromEntries(Object.values(PEOPLE).map(p => [p.id, p.name])) });
+let pickedDocIds = targets.docs.map(d => d.id);
 
 const badge = adapterBadge(adapter);
 $('adapterBanner').className = `banner ${badge.tone === 'live' ? 'live' : 'mock'}`;
 $('adapterBanner').innerHTML = `🧪 ${esc(badge.label)} — ${esc(badge.note)}`;
-$('roomName').textContent = ROOM.name;
-$('roomMeta').textContent = '参加者: 佐藤 / 本部 太郎（この画面の投稿はすべて合成データです）';
+
+// ── 送信先の選択（Room名・参加者・FAQタイトル）────────────────────────────
+function renderTargets() {
+  const picked = pickedTarget(targets, ROOM.id, pickedDocIds);
+  $('roomPick').innerHTML = targets.rooms.map(r =>
+    `<option value="${esc(r.id)}"${r.id === ROOM.id ? ' selected' : ''}>${esc(r.name)}</option>`).join('')
+    || '<option value="">（①が許可した検証用ルームがありません）</option>';
+  const members = picked.room ? picked.room.members : [];
+  $('memberList').innerHTML = members.length
+    ? members.map(m => `<span class="pill" style="cursor:default">${esc(m.name)}</span>`).join('')
+    : '<span class="muted">（サーバーから参加者を取得していません）</span>';
+  $('docPick').innerHTML = targets.docs.length
+    ? targets.docs.map(d => `<label class="pill" style="cursor:pointer;font-weight:500">
+        <input type="checkbox" data-doc="${esc(d.id)}"${pickedDocIds.includes(d.id) ? ' checked' : ''}> ${esc(d.title)}</label>`).join('')
+    : '<span class="muted">（①が許可した資料がありません）</span>';
+  const why = { no_trial_room: '検証用ルームが未設定です', trial_room_not_found: '許可されたルームが見つかりません',
+    no_allowed_doc: '参照を許可された資料がありません', allowed_doc_not_found: '許可IDに一致する資料がありません' };
+  $('targetNote').innerHTML = '選ぶのは名前、送るのは①が許可したIDです。許可されていない資料・ルームは選択肢に出ません。'
+    + (targets.reasons.length ? `<br>⚠️ ${targets.reasons.map(r => esc(why[r] || r)).join(' / ')}` : '');
+  $('roomName').textContent = ROOM.name;
+  $('roomMeta').textContent = `参加者: ${members.map(m => m.name).join(' / ') || '—'}（この画面の投稿はすべて合成データです）`;
+}
+$('roomPick').onchange = (e) => {
+  const next = ROOMS.find(r => r.id === e.target.value);
+  if (!next || next.id === ROOM.id) return;
+  ROOM = next;                       // ルームを変えたら会話も切り替える（別ルームに回答を持ち込まない）
+  state = newSession();
+  renderTargets(); render();
+};
+$('docPick').onchange = (e) => {
+  const id = e.target && e.target.dataset ? e.target.dataset.doc : '';
+  if (!id) return;
+  pickedDocIds = e.target.checked ? [...new Set([...pickedDocIds, id])] : pickedDocIds.filter(x => x !== id);
+  renderTargets();
+};
 $('notes').innerHTML = `
   <ul style="margin:0;padding-left:18px">
     <li>AI は<b>明示的に選ばれたときだけ</b>動きます。通常投稿や、貼り付け文に「@AI」が入っているだけでは起動しません。</li>
@@ -268,10 +332,16 @@ async function doSend() {
 
 async function askAi(req, keepDraft) {
   render();
-  const context = buildContext({ roomId: ROOM.id, shopId: ROOM.shopId, docs: DOCS, history: state.messages });
+  // 選択された資料だけを渡す（許可外の資料は buildContext 側でも弾かれることを残すため、
+  // 許可リストに無い合成データはそのまま渡して「渡さない理由」を表示に出す）
+  const picked = pickedTarget(targets, ROOM.id, pickedDocIds);
+  const scoped = DOCS.filter(d => picked.hintDocIds.includes(d.id) || !TRIAL_CFG.allowedDocIds.includes(d.id));
+  const context = buildContext({ roomId: ROOM.id, shopId: ROOM.shopId, docs: scoped, history: state.messages });
   const res = await adapter.ask({
     question: req.question, roomId: req.roomId, context,
-    requestId: req.questionId, clientId: 'trial', questionMessageId: req.questionId,
+    // 依頼IDは送信時に発行したものを使う（本文＋ルームから作らない）。
+    // 再試行は同じID、別々の新規質問は本文が同じでも別ID。
+    requestId: req.requestId, clientId: 'trial', questionMessageId: req.questionId,
   });
   if (!res || !res.ok) {
     const err = (res && res.error) || {};
@@ -392,6 +462,7 @@ $('fixSave').onclick = () => {
   if (r.ok) { state = r.state; $('fixDlg').close(); render(); }
 };
 
+renderTargets();
 render();
 </script>
 </body>

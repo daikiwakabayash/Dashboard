@@ -25,6 +25,9 @@ import { normalizeError, errorMessageFor, createLiveAdapter } from '../lib/chat-
 // ── Upstash REST 互換の擬似KV（EVAL の Lua は等価な JS で再現）──────────────
 function startFakeKv() {
   const store = new Map();
+  // 擬似上流（①のハンドラが呼ぶ /api/chat）。**実AIではない**。
+  // 生成に時間がかかる状況（pending の窓）を作るために遅延を差し込める。
+  const upstream = { delayMs: 0, calls: 0, reply: '（擬似上流の回答・実AIではありません）', fail: false };
   const evalLua = (script, keys, args) => {
     const key = keys[0];
     const read = () => { const raw = store.get(key); if (!raw) return null; try { return JSON.parse(raw); } catch { return null; } };
@@ -58,6 +61,15 @@ function startFakeKv() {
     req.on('end', () => {
       res.setHeader('Content-Type', 'application/json');
       const url = new URL(req.url, 'http://x');
+      // 擬似上流（/api/chat）。①のハンドラが host から自分自身を呼ぶ経路をここで受ける。
+      if (url.pathname === '/api/chat') {
+        upstream.calls += 1;
+        const done = () => {
+          if (upstream.fail) { res.statusCode = 500; return res.end(JSON.stringify({ error: 'upstream' })); }
+          res.end(JSON.stringify({ message: upstream.reply }));
+        };
+        return upstream.delayMs > 0 ? setTimeout(done, upstream.delayMs) : done();
+      }
       // SalonOne の /me を模す（SSO 経路を①の実コードで通すため）
       if (url.pathname.endsWith('/salonone/me')) {
         const bearer = String(req.headers.authorization || '');
@@ -79,7 +91,7 @@ function startFakeKv() {
       res.end(JSON.stringify({ result: null }));
     });
   });
-  return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port, store })));
+  return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port, store, upstream })));
 }
 
 const SALT = 'naoru-settlement-2026';
@@ -416,5 +428,147 @@ describe('ローカル結合（実ハンドラ+擬似KV）: @AI 実接続', () =
     const cfg = await adapter.getConfig();
     expect(cfg.ok).toBe(true);
     expect(cfg.config.trialRooms).toContain(ROOM);
+  });
+});
+
+// ── 回答生成中（pending の窓）の挙動 ──────────────────────────────────────
+// ⚠️ 位置づけ: 実ハンドラ＋擬似KV＋**擬似上流**。`/api/chat` は遅延を差し込める
+//    スタブで、**実AI（Anthropic）は呼んでいない**。確認しているのは
+//    「生成に時間がかかる間に別の操作が起きたとき、①のサーバーが何を守るか」。
+describe('ローカル結合（実ハンドラ+擬似KV+擬似上流）: 回答生成中の同時操作', () => {
+  const ROOM = 'room_ai_pending';
+  // host を擬似上流に向けると、①のハンドラは `${proto}://${host}/api/chat` を呼ぶ
+  const slowHeaders = () => ({ ...rootHeaders, host: `127.0.0.1:${kv.port}`, 'x-forwarded-proto': 'http' });
+  const ask = (over = {}) => call({
+    method: 'POST', headers: slowHeaders(),
+    body: { type: 'chatai', action: 'ask', question: '生成中の確認', room_id: ROOM, request_id: 'req_p_1', client_id: 'tab_1', ...over },
+  });
+  const msgs = async () => ((await call({ query: { type: 'chat' }, headers: rootHeaders })).body.messages[ROOM] || []);
+  const answersOf = async (rid = ROOM) => (await call({ method: 'POST', headers: rootHeaders,
+    body: { type: 'chatai', action: 'get', room_id: rid } })).body.answers || {};
+  const tick = (ms) => new Promise(r => setTimeout(r, ms));
+
+  beforeAll(async () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key-not-real';   // 擬似上流を通す分岐に入れるため
+    await call({ method: 'POST', headers: rootHeaders, body: { type: 'chat', action: 'createRoom',
+      room: { id: ROOM, kind: 'group', name: '本部/root 生成中テスト', members: ['__root__'], createdBy: '__root__' } } });
+    kv.store.set(ccK('naoru:cc:flags:v1'), JSON.stringify({ cc_all: true, cc_ai_trial: true }));
+    const cfg = (await call({ query: { type: 'chatai', action: 'config' }, headers: rootHeaders })).body.config || {};
+    await call({ method: 'POST', headers: rootHeaders, body: { type: 'chatai', action: 'config',
+      config: { trialRooms: [...(cfg.trialRooms || []), ROOM] } } });
+  });
+  afterAll(() => { delete process.env.ANTHROPIC_API_KEY; kv.upstream.delayMs = 0; });
+
+  it('生成中に同じ request_id を再送すると pending が返り、回答は増えない', async () => {
+    kv.upstream.delayMs = 250;
+    const inflight = ask({ request_id: 'req_p_inflight' });
+    await tick(60);
+    const resend = await ask({ request_id: 'req_p_inflight' });     // 同じ送信の再試行
+    expect(resend.body).toMatchObject({ ok: true, status: 'pending' });
+    expect(resend.body.answer_message_id).toBe('');
+    const first = await inflight;
+    expect(first.body.ok).toBe(true);
+    const ai = (await msgs()).filter(m => m.fromStaffId === '__ai__' && m.ai?.requestId === 'req_p_inflight');
+    expect(ai.length).toBe(1);
+    kv.upstream.delayMs = 0;
+  });
+
+  it('生成が終わった後の再送は replay（同じ回答・増えない）', async () => {
+    const again = await ask({ request_id: 'req_p_inflight' });
+    expect(again.body.replay).toBe(true);
+    const ai = (await msgs()).filter(m => m.ai?.requestId === 'req_p_inflight');
+    expect(ai.length).toBe(1);
+  });
+
+  it('生成中の通常投稿が失われない（質問・通常投稿・回答がすべて残る）', async () => {
+    kv.upstream.delayMs = 250;
+    const inflight = ask({ request_id: 'req_p_post', question: '生成中に通常投稿する' });
+    await tick(60);
+    const posted = await call({ method: 'POST', headers: rootHeaders, body: { type: 'chat', action: 'send',
+      roomId: ROOM, msg: { text: '生成中に入れた通常投稿', fromStaffId: '__root__', fromName: '本部' } } });
+    expect(posted.status).toBe(200);
+    const done = await inflight;
+    const texts = (await msgs()).map(m => m.text);
+    expect(texts).toContain('生成中に通常投稿する');
+    expect(texts).toContain('生成中に入れた通常投稿');
+    expect((await msgs()).some(m => m.id === done.body.answer_message_id)).toBe(true);
+    kv.upstream.delayMs = 0;
+  });
+
+  // ⚠️ 既知の不具合①-a（①へ報告）: 生成中に入れた訂正が、回答保存時に消える。
+  //    ask は生成の**前**に loadAi した `st` を、生成の**後**にそのまま saveAi する。
+  //    その間に correct が書いた corrections は上書きで失われる（lost update）。
+  //    対策案: 保存直前に読み直してマージする / 訂正は別キーに追記する / CAS。
+  //    直ったら失敗して気づけるよう it.fails で置いている。
+  it.fails('【既知の不具合】生成中に行った本部の訂正が、生成完了時の保存で消えない', async () => {
+    const base = await ask({ request_id: 'req_p_fixbase', question: '訂正の土台' });
+    expect(base.body.ok).toBe(true);
+    kv.upstream.delayMs = 250;
+    const inflight = ask({ request_id: 'req_p_fixwin', question: '生成中に訂正する' });
+    await tick(60);
+    const fix = await call({ method: 'POST', headers: rootHeaders, body: { type: 'chatai', action: 'correct',
+      answer_message_id: base.body.answer_message_id, text: '生成中に入れた訂正' } });
+    expect(fix.body.ok).toBe(true);
+    await inflight;
+    kv.upstream.delayMs = 0;
+    const answers = await answersOf();
+    const corrections = (answers[base.body.answer_message_id] || {}).corrections || [];
+    expect(corrections.map(c => c.text)).toContain('生成中に入れた訂正');
+  });
+
+  it('同じ質問文でも新しい送信（別 request_id）は別の回答になる', async () => {
+    const a = await ask({ request_id: 'req_p_same_1', question: 'まったく同じ本文の質問' });
+    const b = await ask({ request_id: 'req_p_same_2', question: 'まったく同じ本文の質問' });
+    expect(a.body.ok && b.body.ok).toBe(true);
+    expect(b.body.answer_message_id).not.toBe(a.body.answer_message_id);
+    expect(b.body.replay).not.toBe(true);
+    const q = (await msgs()).filter(m => m.text === 'まったく同じ本文の質問');
+    expect(q.length).toBe(2);                                  // 別々の依頼として2件
+  });
+
+  // ⚠️ 既知の不具合①-b（①へ報告）: **別々の** request_id を同時に送ると、片方の
+  //    回答がルームから消える。ルームのメッセージ配列も chatai ストアも
+  //    「読む→足す→書く」なので、同時実行だと後勝ちで一方が失われる。
+  //    （同じ request_id の同時送信＝重複生成とは別の不具合。こちらは**消失**。）
+  //    対策案: KV の CAS / SETNX、または追記専用（Lua append）での保存。
+  it.fails('【既知の不具合】別々の送信を同時に出しても、どちらの回答も失われない', async () => {
+    kv.upstream.delayMs = 120;
+    const [a, b] = await Promise.all([
+      ask({ request_id: 'req_p_par_a', question: '同時送信A' }),
+      ask({ request_id: 'req_p_par_b', question: '同時送信B' }),
+    ]);
+    kv.upstream.delayMs = 0;
+    expect(a.body.ok && b.body.ok).toBe(true);
+    const ids = (await msgs()).map(m => m.id);
+    expect(ids).toContain(a.body.answer_message_id);
+    expect(ids).toContain(b.body.answer_message_id);
+    // 保存済み回答の再取得でも両方見える（st の read-modify-write で消えない）
+    const answers = await answersOf();
+    expect(Object.keys(answers)).toEqual(expect.arrayContaining([a.body.answer_message_id, b.body.answer_message_id]));
+  });
+
+  // ⚠️ 既知の不具合①-c（①へ報告）: 生成中に cc_ai_trial を OFF にしても、
+  //    その回答はルームへ投稿される。配信直前の再確認（roomOf / isTrialRoom）に
+  //    **フラグの読み直しが含まれていない**ため。
+  //    → 「画面で隠すだけにしない・OFF で止まる」という前提が、生成中の窓では崩れる。
+  //    対策案: 保存直前に normalizeFlags を読み直し、OFF なら投稿せず rollout_disabled。
+  it.fails('【既知の不具合】生成中にフラグを OFF にしたら、その回答は投稿されない', async () => {
+    kv.upstream.delayMs = 250;
+    const inflight = ask({ request_id: 'req_p_flagoff', question: '生成中にフラグOFF' });
+    await tick(60);
+    kv.store.set(ccK('naoru:cc:flags:v1'), JSON.stringify({ cc_all: true, cc_ai_trial: false }));   // 途中でOFF
+    const out = await inflight;
+    kv.upstream.delayMs = 0;
+    const ai = (await msgs()).filter(m => m.ai?.requestId === 'req_p_flagoff');
+    kv.store.set(ccK('naoru:cc:flags:v1'), JSON.stringify({ cc_all: true, cc_ai_trial: true }));    // 後片付け
+    expect(out.body.ok).toBe(false);
+    expect(ai.length).toBe(0);
+  });
+
+  it('OFF にした後の新しい送信は rollout_disabled で始まらない', async () => {
+    kv.store.set(ccK('naoru:cc:flags:v1'), JSON.stringify({ cc_all: true, cc_ai_trial: false }));
+    const r = await ask({ request_id: 'req_p_afteroff', question: 'OFF後の送信' });
+    expect(r.body.error).toMatchObject({ code: 'rollout_disabled' });
+    kv.store.set(ccK('naoru:cc:flags:v1'), JSON.stringify({ cc_all: true, cc_ai_trial: true }));
   });
 });

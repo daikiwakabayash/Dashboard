@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildContext, createMockAdapter, createLegacyApiAdapter, createLiveAdapter,
-  adapterBadge, resolveSources, DOC_VISIBILITY,
+  adapterBadge, resolveSources, DOC_VISIBILITY, buildTrialTargets, pickedTarget,
 } from '../lib/chat-ai-adapter.js';
 import { parseAiReply, buildAiAnswerMessage } from '../lib/chat-ai-ux.js';
 
@@ -187,5 +187,46 @@ describe('chat-ai-adapter: resolveSources（出典表示の判定）', () => {
   it('verified が空なのに server_verified を名乗る応答は昇格させない', () => {
     expect(resolveSources({ sources: { verification: 'server_verified', verified: [], candidates: [{ doc_id: 'a' }] } }).verification).toBe('unverified');
     expect(resolveSources({ sources: { verification: 'server_verified', verified: [], candidates: [] } }).verification).toBe('none');
+  });
+});
+
+// ── 試用画面の選択肢（内部IDを手入力させない）──────────────────────────
+describe('chat-ai-adapter: 送信先の選択肢', () => {
+  const ROOMS = [
+    { id: 'store_A', name: 'A院グループ', kind: 'group', shopId: 'A', members: ['s1', 'hq1'] },
+    { id: 'store_B', name: 'B院グループ', kind: 'group', shopId: 'B', members: ['s2'] },
+    { id: 'dm_x', name: 'DM', kind: 'dm', members: ['s1', 's2'] },
+  ];
+  const DOCS = [{ id: 'faq_1', title: '家族施術制度' }, { id: 'faq_2', title: 'シフト提出ルール' }, { id: 'hr', title: '人事評価' }];
+  const names = { s1: '佐藤', hq1: '本部 太郎', s2: '鈴木' };
+  const CFG = { trialRooms: ['store_A'], allowedDocIds: ['faq_1', 'faq_2'] };
+
+  it('①が許可したルーム・資料だけを、名前で選べる形にする', () => {
+    const t = buildTrialTargets({ rooms: ROOMS, config: CFG, docs: DOCS, names });
+    expect(t.rooms.map(r => r.id)).toEqual(['store_A']);
+    expect(t.rooms[0].name).toBe('A院グループ');
+    expect(t.rooms[0].members.map(m => m.name)).toEqual(['佐藤', '本部 太郎']);   // 参加者は名前で表示
+    expect(t.docs.map(d => d.title)).toEqual(['家族施術制度', 'シフト提出ルール']);
+    expect(t.docs.map(d => d.id)).not.toContain('hr');
+  });
+
+  it('許可リストが空なら選択肢も空（「無いから全部出す」はしない）', () => {
+    const t = buildTrialTargets({ rooms: ROOMS, config: {}, docs: DOCS, names });
+    expect(t.rooms).toEqual([]);
+    expect(t.docs).toEqual([]);
+    expect(t.reasons).toEqual(expect.arrayContaining(['no_trial_room', 'no_allowed_doc']));
+  });
+
+  it('選択肢に無いIDは送信値にならない（手入力・古い選択の持ち越し対策）', () => {
+    const t = buildTrialTargets({ rooms: ROOMS, config: CFG, docs: DOCS, names });
+    expect(pickedTarget(t, 'store_B', ['faq_1'])).toMatchObject({ ok: false, roomId: '' });
+    const p = pickedTarget(t, 'store_A', ['faq_1', 'hr', 'faq_unknown']);
+    expect(p).toMatchObject({ ok: true, roomId: 'store_A' });
+    expect(p.hintDocIds).toEqual(['faq_1']);
+  });
+
+  it('許可IDに一致する実体が無いときは理由を返す', () => {
+    const t = buildTrialTargets({ rooms: [], config: CFG, docs: [], names });
+    expect(t.reasons).toEqual(expect.arrayContaining(['trial_room_not_found', 'allowed_doc_not_found']));
   });
 });

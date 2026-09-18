@@ -52,7 +52,8 @@ const server = http.createServer((req, res) => {
       }
       if (type === 'chatai') {
         if (action === 'config') {
-          if (req.method === 'POST' && body.config) { savedConfig = body.config; return json(res, { ok: true, config: savedConfig }); }
+          // ⚠️ 本番と同じく、画面は**読み取りもPOST**で呼ぶ。保存は body.config の有無で判定する。
+          if (body.config) savedConfig = body.config;
           return json(res, { ok: true, enabled: flags.cc_ai_trial, config: savedConfig,
             targets: { rooms: savedConfig.trialRooms.map(id => ({ id, name: ROOMS[id] || id, members: [] })),
                        docs: savedConfig.allowedDocIds.map(id => ({ id, title: FAQS[id] || id })), reasons: [] },

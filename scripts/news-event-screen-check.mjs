@@ -35,6 +35,7 @@ const posts = [
         + `外部リンク https://evil.example/?tab=events&ev=row_okinawa`,
     comments: [], reactions: {}, imgIds: [], files: [], createdAt: '2026-09-18T01:00:00.000Z' },
 ];
+const pr = { r: {}, a: {} };      // 記事ごとの既読・確認しました
 const calls = [];
 const json = (res, o) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(o)); };
 
@@ -54,6 +55,21 @@ const server = http.createServer((req, res) => {
       const type = req.method === 'GET' ? url.searchParams.get('type') : body.type;
       if (type === 'ccflags') return json(res, { flags: { cc_all: true, cc_authz: 'off' }, configured: true, env: 'preview' });
       if (type === 'board') {
+        if (req.method === 'POST' && body.action === 'readpost') { pr.r[String(body.staffId)] = pr.r[String(body.staffId)] || Date.now(); return json(res, { ok: true }); }
+        if (req.method === 'POST' && body.action === 'ack') { const t = Date.now(); pr.a[String(body.staffId)] = pr.a[String(body.staffId)] || t; pr.r[String(body.staffId)] = pr.r[String(body.staffId)] || t; return json(res, { ok: true }); }
+        if (req.method === 'POST' && body.action === 'status') {
+          const aud = (body.audience || []);
+          const read = aud.filter(a => pr.r[a.id]), unread = aud.filter(a => !pr.r[a.id]);
+          const acked = aud.filter(a => pr.a[a.id]);
+          const post = posts.find(x => x.id === body.id) || {};
+          const reacted = new Set(Object.values(post.reactions || {}).flat().map(String));
+          return json(res, { ok: true, postId: body.id, total: aud.length, detail: true,
+            note: '「未リアクション」には、まだ読んでいない人も含まれます。', outOfAudience: 0,
+            counts: { read: read.length, unread: unread.length, acked: acked.length, notAcked: aud.length - acked.length,
+                      reacted: aud.filter(a => reacted.has(a.id)).length, notReacted: aud.filter(a => !reacted.has(a.id)).length },
+            people: { read: read.map(a => ({ ...a, at: pr.r[a.id] })), unread: unread.map(a => ({ ...a, at: null })),
+                      acked: acked.map(a => ({ ...a, at: pr.a[a.id] })), notAcked: [], reacted: [], notReacted: [] } });
+        }
         if (req.method === 'POST') return json(res, { ok: true, posts });
         return json(res, { posts, reads: {}, configured: true });
       }
@@ -68,7 +84,11 @@ const server = http.createServer((req, res) => {
           return json(res, { ok: true, rooms });
         }
         if (req.method === 'POST') return json(res, { ok: true });
-        return json(res, { rooms, messages: {}, reads: {}, dir: { staff: [] }, notes: {}, configured: true });
+        return json(res, { rooms, messages: {}, reads: {}, dir: { staff: [
+            { id: 's1', name: '青木ひかる', shop: 'NAORU 鶴見院' },
+            { id: 's2', name: '石田なつ', shop: 'NAORU 関内院' },
+            { id: 's3', name: '上野かい', shop: 'NAORU 仙台院' },
+          ] }, notes: {}, configured: true });
       }
       return json(res, { ok: true, configured: true });
     }
@@ -150,6 +170,44 @@ check('他のイベントのルームは変わっていない',
   rooms.find(r => r.id === 'room_joined').members.join(',') === '__root__,s1');
 check('⚠️ 新しいルームは作られていない', !calls.some(c => c.body && c.body.action === 'createRoom'));
 check('参加後はチャット画面へ移動する', (await txt()).includes('沖縄セミナー 10/5'));
+
+// ── 閲覧・リアクション状況 ─────────────────────────────────────────
+await page.getByRole('button', { name: /ニュース/ }).first().click().catch(() => {});
+await page.waitForTimeout(2500);
+check('⚠️ 一覧を開いただけでは既読にしない', !calls.some(c => c.body && c.body.action === 'readpost'),
+  JSON.stringify(Object.keys(pr.r)));
+
+await page.getByText('10/5セミナー開催', { exact: false }).first().click().catch(() => {});
+await page.waitForTimeout(2500);
+const readCalls = calls.filter(c => c.body && c.body.action === 'readpost');
+check('記事を開くと既読が記録される', readCalls.length === 1, String(readCalls.length));
+check('記録されたのは自分だけ', Object.keys(pr.r).join(',') === '__root__', Object.keys(pr.r).join(','));
+
+// 「確認しました」
+const ackBtn = page.locator('[data-board-ack]').first();
+check('「確認しました」ボタンが記事に出る', (await ackBtn.count()) > 0);
+await ackBtn.click();
+await page.waitForTimeout(2000);
+check('サーバーへ確認が送られた', calls.some(c => c.body && c.body.action === 'ack'));
+check('押したあとは表示が変わる', /✅ 確認しました/.test(await ackBtn.innerText().catch(() => '')));
+check('既読だけの人には確認が付かない', Object.keys(pr.a).join(',') === '__root__', Object.keys(pr.a).join(','));
+
+// 状況一覧
+// 記事を開いたまま、その中の状況ボタンを押す（一覧側はモーダルの裏なので last を使う）
+await page.locator('[data-board-statusbtn]').last().click().catch(() => {});
+await page.waitForTimeout(2500);
+if (!(await page.locator('[data-board-status]').count()) && process.env.DUMP) {
+  console.log('--- 状況モーダルの中身 ---');
+  console.log((await txt()).slice(-900));
+}
+const sbox = page.locator('[data-board-status]').first();
+check('閲覧・リアクション状況が開く', (await sbox.count()) > 0);
+const sTxt = await sbox.innerText().catch(() => '');
+check('既読・未読・確認しました・未リアクションの人数が出る',
+  /既読/.test(sTxt) && /未読/.test(sTxt) && /確認しました/.test(sTxt) && /未リアクション/.test(sTxt),
+  sTxt.replace(/\n+/g, ' ').slice(0, 90));
+check('「未リアクションには未読も含む」と明記されている', sTxt.includes('まだ読んでいない人も含まれます'));
+check('まだ読んでいない人の氏名が出る', sTxt.includes('青木ひかる') || sTxt.includes('石田なつ'));
 
 check('JSエラーが出ていない', errors.length === 0, errors.slice(0, 2).join(' / '));
 await page.screenshot({ path: (process.env.OUT_DIR || '/tmp') + '/news-event-screen.png', fullPage: false });

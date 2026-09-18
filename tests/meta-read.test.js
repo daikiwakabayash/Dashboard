@@ -3,6 +3,7 @@ import fs from 'fs';
 import {
   normalizeMetric, normalizeMetrics, normalizeOverview, normalizeFreshness,
   buildTree, lastCompleteDays, connectionState, META_API_VERSION,
+  looksLikeSample, currencySymbol,
 } from '../lib/meta-read.js';
 
 const FIXTURE = JSON.parse(fs.readFileSync(new URL('../fixtures/meta-overview-sample.json', import.meta.url), 'utf8'));
@@ -34,8 +35,8 @@ describe('normalizeMetric - 未接続・欠損を 0 にしない（最重要）'
     expect(normalizeMetric({ value: 'abc' }, 'spend').value).toBe(null);
     expect(normalizeMetric({ value: NaN }, 'spend').value).toBe(null);
   });
-  it('未知の quality は値の有無から決める', () => {
-    expect(normalizeMetric({ value: 5, quality: 'なにか' }, 'spend').quality).toBe('VERIFIED');
+  it('🔴 未知の quality は VERIFIED にしない（ESTIMATED へ落とす）', () => {
+    expect(normalizeMetric({ value: 5, quality: 'なにか' }, 'spend').quality).toBe('ESTIMATED');
     expect(normalizeMetric({ value: null, quality: 'なにか' }, 'spend').quality).toBe('MISSING');
   });
 });
@@ -95,7 +96,10 @@ describe('normalizeOverview - サンプルデータの印', () => {
     expect(normalizeOverview(clean, { fixture: true }).isSample).toBe(true);
   });
   it('実データには印が付かない', () => {
-    const clean = { ...FIXTURE }; delete clean._fixture;
+    // サンプル判定は _fixture だけでなく「作り物のアカウントID」も見るので、
+    // 実データらしいIDに差し替えて確認する。
+    const clean = { ...FIXTURE, account: { ...FIXTURE.account, id: 'act_123456789012' } };
+    delete clean._fixture;
     expect(normalizeOverview(clean).isSample).toBe(false);
   });
   it('版エラーでも印は保たれる', () => {
@@ -189,10 +193,12 @@ describe('lastCompleteDays - 当日を含めない', () => {
     expect(p.from).toBe('2026-09-11');   // その6日前
   });
   it('日数を変えられる', () => {
-    expect(lastCompleteDays(1, new Date('2026-09-18T05:00:00Z'))).toEqual({ from: '2026-09-17', to: '2026-09-17' });
+    const p = lastCompleteDays(1, new Date('2026-09-18T05:00:00Z'));
+    expect({ from: p.from, to: p.to }).toEqual({ from: '2026-09-17', to: '2026-09-17' });
   });
   it('月をまたいでも正しい', () => {
-    expect(lastCompleteDays(7, new Date('2026-10-03T05:00:00Z'))).toEqual({ from: '2026-09-26', to: '2026-10-02' });
+    const p = lastCompleteDays(7, new Date('2026-10-03T05:00:00Z'));
+    expect({ from: p.from, to: p.to }).toEqual({ from: '2026-09-26', to: '2026-10-02' });
   });
 });
 
@@ -248,5 +254,115 @@ describe('契約とfixtureの整合', () => {
   });
   it('成果件数は SalonOne の予約数と別物だと明記している', () => {
     expect(FIXTURE.definitions.results.note).toContain('SalonOne');
+  });
+});
+
+// ── #387 の指摘（ロジック層）────────────────────────────────────
+describe('(5) 未知の quality を VERIFIED へ昇格させない', () => {
+  it('🔴 知らない quality は ESTIMATED（確定値として見せない）', () => {
+    expect(normalizeMetric({ value: 100, quality: 'SUPER_VERIFIED' }, 'spend').quality).toBe('ESTIMATED');
+    expect(normalizeMetric({ value: 100, quality: 'ok' }, 'spend').quality).toBe('ESTIMATED');
+  });
+  it('quality が無いときだけ値の有無から決める', () => {
+    expect(normalizeMetric({ value: 100 }, 'spend').quality).toBe('VERIFIED');
+    expect(normalizeMetric({ value: null }, 'spend').quality).toBe('MISSING');
+  });
+  it('知らない quality で値も無ければ MISSING', () => {
+    expect(normalizeMetric({ value: null, quality: 'weird' }, 'spend').quality).toBe('MISSING');
+  });
+});
+
+describe('(4) サンプル判定', () => {
+  it('🔴 上流の mode/mock/sample 申告を拾う', () => {
+    for (const d of [{ mode: 'mock' }, { mode: 'sample' }, { sample: true }, { mock: true }, { _fixture: true }, { environment: 'sandbox' }]) {
+      expect(looksLikeSample(d), JSON.stringify(d)).toBe(true);
+    }
+  });
+  it('🔴 作り物のアカウントID（act_000…）を拾う', () => {
+    expect(looksLikeSample({ account: { id: 'act_0000000000000' } })).toBe(true);
+  });
+  it('実データらしい応答は false', () => {
+    expect(looksLikeSample({ account: { id: 'act_123456789' } })).toBe(false);
+    expect(looksLikeSample(null)).toBe(false);
+  });
+});
+
+describe('(2) 要求と応答の一致を確認する', () => {
+  const base = JSON.parse(JSON.stringify(FIXTURE));
+  it('🔴 テナントが違えば表示しない', () => {
+    const r = normalizeOverview(base, { expect: { tenantId: 'other' } });
+    expect(r.ok).toBe(false);
+    expect(r.error.code).toBe('RESPONSE_MISMATCH');
+  });
+  it('🔴 アカウントが違えば表示しない', () => {
+    const r = normalizeOverview(base, { expect: { accountId: 'act_expected' } });
+    expect(r.ok).toBe(false);
+    expect(r.error.detail[0].field).toBe('account');
+  });
+  it('🔴 期間が違えば表示しない', () => {
+    const r = normalizeOverview(base, { expect: { from: '2026-01-01', to: '2026-01-07' } });
+    expect(r.ok).toBe(false);
+  });
+  it('🔴 食い違ったときに数字を返さない', () => {
+    const r = normalizeOverview(base, { expect: { tenantId: 'other' } });
+    expect(r.totals).toBeUndefined();
+    expect(r.rows).toBeUndefined();
+  });
+  it('一致していれば通る', () => {
+    const r = normalizeOverview(base, { expect: { tenantId: 'naoru', accountId: base.account.id, from: base.period.from, to: base.period.to } });
+    expect(r.ok).toBe(true);
+  });
+  it('expect を渡さなければ従来どおり（後方互換）', () => {
+    expect(normalizeOverview(base).ok).toBe(true);
+  });
+});
+
+describe('(6) タイムゾーン基準の期間', () => {
+  it('🔴 東京の朝（UTCではまだ前日）でも「昨日まで」が正しい', () => {
+    // 2026-09-18 02:00 UTC = 東京 11:00。東京の昨日は 09-17
+    const jst = lastCompleteDays(7, new Date('2026-09-18T02:00:00Z'), 'Asia/Tokyo');
+    expect(jst.to).toBe('2026-09-17');
+    expect(jst.from).toBe('2026-09-11');
+  });
+  it('🔴 UTC基準とずれる時間帯がある（タイムゾーンを見ている証拠）', () => {
+    // 2026-09-18 23:00 UTC = 東京は 09-19 08:00 → 東京の昨日は 09-18
+    const at = new Date('2026-09-18T23:00:00Z');
+    expect(lastCompleteDays(7, at, 'Asia/Tokyo').to).toBe('2026-09-18');
+    expect(lastCompleteDays(7, at, 'UTC').to).toBe('2026-09-17');
+  });
+  it('タイムゾーンを返す（画面に出せる）', () => {
+    expect(lastCompleteDays(7, new Date(), 'Australia/Sydney').timeZone).toBe('Australia/Sydney');
+  });
+  it('不正なタイムゾーンでも落ちない', () => {
+    expect(() => lastCompleteDays(7, new Date(), 'Not/AZone')).not.toThrow();
+  });
+});
+
+describe('(6) 通貨は JPY 以外も保持する', () => {
+  it('主要通貨の記号を返す', () => {
+    expect(currencySymbol('JPY')).toBe('¥');
+    expect(currencySymbol('AUD')).toBe('A$');
+    expect(currencySymbol('MYR')).toBe('RM');
+  });
+  it('知らない通貨は記号なし（勝手に¥にしない）', () => {
+    expect(currencySymbol('XYZ')).toBe('');
+    expect(currencySymbol(null)).toBe('');
+  });
+});
+
+describe('(6) 行数上限は黙って切らない', () => {
+  it('🔴 上限を超えたら truncated と総件数を返す', () => {
+    const many = { ...FIXTURE, rows: Array.from({ length: 1200 }, (_, i) => ({ level: 'ad', id: `x${i}`, name: `広告${i}`, metrics: {} })) };
+    const r = normalizeOverview(many);
+    expect(r.truncated).toBe(true);
+    expect(r.rowCountTotal).toBe(1200);
+    expect(r.rows).toHaveLength(r.rowCap);
+  });
+  it('上限以内なら truncated は false', () => {
+    expect(normalizeOverview(FIXTURE).truncated).toBe(false);
+  });
+  it('上流のページング情報を引き継ぐ', () => {
+    const r = normalizeOverview({ ...FIXTURE, paging: { has_more: true, next_cursor: 'abc' } });
+    expect(r.paging).toEqual({ hasMore: true, nextCursor: 'abc' });
   });
 });

@@ -9,6 +9,8 @@ let store, upstreamCalls;
 
 function installFetchMock(upstreamResponse) {
   store = new Map(); upstreamCalls = [];
+  // Meta画面のフラグ（サーバー側でも確認される）。store を作り直すたびに入れ直す。
+  store.set('naoru:cc:flags:v1:preview', JSON.stringify({ cc_all: true, cc_meta_overview: true, cc_authz: 'off' }));
   globalThis.fetch = vi.fn(async (url, opts = {}) => {
     const u = String(url);
     const ok = (b) => ({ ok: true, status: 200, json: async () => b, headers: new Map() });
@@ -17,7 +19,20 @@ function installFetchMock(upstreamResponse) {
       return ok({ result: store.has(key) ? store.get(key) : null });
     }
     if (u.startsWith(`${KV}/set/`)) { store.set(decodeURIComponent(u.slice(`${KV}/set/`.length)), String(opts.body)); return ok({ result: 'OK' }); }
-    if (u.includes('/v1/meta/overview')) { upstreamCalls.push({ url: u, opts }); return ok(upstreamResponse); }
+    if (u.includes('/v1/meta/overview')) {
+      upstreamCalls.push({ url: u, opts });
+      // 実APIは要求した期間・アカウントをそのまま返す。テストでも同じ振る舞いにする
+      // （要求と応答の一致チェックが働くため）。
+      const r = upstreamResponse;
+      if (r && r.period && r.account) {
+        const q = new URL(u);
+        return ok({ ...r,
+          account: { ...r.account, id: q.searchParams.get('account_id') || r.account.id },
+          period: { ...r.period, from: q.searchParams.get('from') || r.period.from, to: q.searchParams.get('to') || r.period.to },
+          tenant_id: q.searchParams.get('tenant_id') || r.tenant_id });
+      }
+      return ok(r);
+    }
     return ok({});
   });
 }
@@ -36,7 +51,10 @@ beforeEach(() => {
   delete process.env.META_READ_API_KEY;
   installFetchMock({});
   _clearBearerCache();
+  // Meta画面はフラグで守られている（サーバー側でも確認する）。既定で有効にしておく。
+  store.set('naoru:cc:flags:v1:preview', JSON.stringify({ cc_all: true, cc_meta_overview: true, cc_authz: 'off' }));
 });
+const setFlag = (patch) => store.set('naoru:cc:flags:v1:preview', JSON.stringify({ cc_all: true, cc_meta_overview: true, cc_authz: 'off', ...patch }));
 afterEach(() => {
   for (const [k, v] of [['KV_REST_API_URL', saved.u], ['KV_REST_API_TOKEN', saved.t], ['VERCEL_ENV', saved.e],
                         ['DASHBOARD_PASSWORD', saved.d], ['AUTH_SALT', saved.s],
@@ -176,7 +194,10 @@ describe('?type=meta - 接続できているとき', () => {
   it('🔴 上流が落ちても数字を作らない', async () => {
     globalThis.fetch = vi.fn(async (url) => {
       const u = String(url);
-      if (u.startsWith(`${KV}/get/`)) return { ok: true, status: 200, json: async () => ({ result: null }) };
+      if (u.startsWith(`${KV}/get/`)) {
+        const key = decodeURIComponent(u.slice(`${KV}/get/`.length));
+        return { ok: true, status: 200, json: async () => ({ result: store.has(key) ? store.get(key) : null }) };
+      }
       if (u.includes('/v1/meta/overview')) throw new Error('network down');
       return { ok: true, status: 200, json: async () => ({}) };
     });
@@ -209,5 +230,167 @@ describe('?type=meta - 既存機能を壊さない', () => {
   });
   it('type 未指定も従来どおり', async () => {
     expect((await call({ method: 'GET', query: {} })).statusCode).toBe(200);
+  });
+});
+
+// ── #387 の指摘6点 ──────────────────────────────────────────────
+describe('(1) tenant は検証済み actor から決める', () => {
+  beforeEach(() => {
+    process.env.META_READ_API_BASE = 'https://platform.test';
+    process.env.META_READ_API_KEY = 'service-key-not-a-real-secret';
+    installFetchMock({
+      api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
+      account: { id: 'act_live', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] },
+      period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true },
+      totals: {}, rows: [], freshness: {},
+    });
+  });
+  it('🔴 クエリの tenantId で会社を切り替えられない', async () => {
+    await asRoot({ accountId: 'act_live', tenantId: 'other-company' });
+    const q = new URL(upstreamCalls[0].url);
+    expect(q.searchParams.get('tenant_id')).toBe('naoru');     // actor 由来
+    expect(upstreamCalls[0].opts.headers['X-Tenant-Id']).toBe('naoru');
+  });
+});
+
+describe('(2) accountId は許可されたものだけ／応答の一致を確認する', () => {
+  const live = {
+    api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
+    account: { id: 'act_allowed', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] },
+    period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true },
+    totals: {}, rows: [], freshness: {},
+  };
+  beforeEach(() => {
+    process.env.META_READ_API_BASE = 'https://platform.test';
+    process.env.META_READ_API_KEY = 'k';
+    process.env.META_AD_ACCOUNT_IDS = 'act_allowed,act_other';
+    installFetchMock(live);
+  });
+  afterEach(() => { delete process.env.META_AD_ACCOUNT_IDS; });
+
+  it('🔴 許可されていないアカウントは 403', async () => {
+    const res = await asRoot({ accountId: 'act_not_allowed' });
+    expect(res.statusCode).toBe(403);
+    expect(res.body.code).toBe('account_not_allowed');
+  });
+  it('許可されたアカウントは通る', async () => {
+    expect((await asRoot({ accountId: 'act_allowed' })).statusCode).toBe(200);
+  });
+  it('未指定なら許可一覧の先頭を使う', async () => {
+    await asRoot({});
+    expect(new URL(upstreamCalls[0].url).searchParams.get('account_id')).toBe('act_allowed');
+  });
+  it('🔴 要求と違うアカウントが返ってきたら表示しない', async () => {
+    installFetchMock({ ...live, account: { ...live.account, id: 'act_SOMEONE_ELSE' } });
+    globalThis.fetch.mockImplementation(async (url, opts = {}) => {
+      const u = String(url);
+      if (u.startsWith(`${KV}/get/`)) { const k = decodeURIComponent(u.slice(`${KV}/get/`.length)); return { ok: true, status: 200, json: async () => ({ result: store.has(k) ? store.get(k) : null }) }; }
+      if (u.includes('/v1/meta/overview')) return { ok: true, status: 200, json: async () => ({ ...live, account: { ...live.account, id: 'act_SOMEONE_ELSE' } }) };
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+    const res = await asRoot({ accountId: 'act_allowed' });
+    expect(res.body.data.ok).toBe(false);
+    expect(res.body.data.error.code).toBe('RESPONSE_MISMATCH');
+    expect(res.body.data.totals).toBeUndefined();     // 数字を出さない
+  });
+});
+
+describe('(3) フラグ・停止フラグを API 側でも確認する', () => {
+  it('🔴 cc_meta_overview が OFF なら URL 直接呼び出しでも 403', async () => {
+    setFlag({ cc_meta_overview: false });
+    const res = await asRoot();
+    expect(res.statusCode).toBe(403);
+    expect(res.body.code).toBe('feature_disabled');
+  });
+  it('🔴 キルスイッチ（cc_all=false）でも 403', async () => {
+    setFlag({ cc_all: false });
+    expect((await asRoot()).statusCode).toBe(403);
+  });
+  it('🔴 OFF のときは上流へ取りに行かない', async () => {
+    process.env.META_READ_API_BASE = 'https://platform.test';
+    process.env.META_READ_API_KEY = 'k';
+    setFlag({ cc_meta_overview: false });
+    await asRoot({ accountId: 'x' });
+    expect(upstreamCalls).toHaveLength(0);
+  });
+});
+
+describe('(4) 接続先がモックを返したらサンプル表示を貫く', () => {
+  beforeEach(() => { process.env.META_READ_API_BASE = 'https://platform.test'; process.env.META_READ_API_KEY = 'k'; });
+  const base = {
+    api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
+    period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true },
+    totals: {}, rows: [], freshness: {},
+  };
+  it('🔴 上流が sample/mock を申告したら外側も sample:true', async () => {
+    installFetchMock({ ...base, mode: 'mock', account: { id: 'act_x', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] } });
+    const res = await asRoot({ accountId: 'act_x' });
+    expect(res.body.sample).toBe(true);
+    expect(res.body.data.isSample).toBe(true);
+  });
+  it('🔴 明らかに作り物のアカウントID（act_000…）もサンプル扱い', async () => {
+    installFetchMock({ ...base, account: { id: 'act_0000000000000', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] } });
+    const res = await asRoot({ accountId: 'act_0000000000000' });
+    expect(res.body.sample).toBe(true);
+  });
+  it('URLとキーが設定されているだけでは「実データ」と判断しない', async () => {
+    installFetchMock({ ...base, _fixture: true, account: { id: 'act_x', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] } });
+    const res = await asRoot({ accountId: 'act_x' });
+    expect(res.body.sample).toBe(true);
+  });
+});
+
+describe('(5) HTTPエラー・不正schema を昇格させない', () => {
+  beforeEach(() => { process.env.META_READ_API_BASE = 'https://platform.test'; process.env.META_READ_API_KEY = 'k'; });
+  const withStatus = (status, body) => {
+    installFetchMock({});
+    globalThis.fetch.mockImplementation(async (url) => {
+      const u = String(url);
+      if (u.startsWith(`${KV}/get/`)) { const k = decodeURIComponent(u.slice(`${KV}/get/`.length)); return { ok: true, status: 200, json: async () => ({ result: store.has(k) ? store.get(k) : null }) }; }
+      if (u.includes('/v1/meta/overview')) return { ok: false, status, json: async () => body };
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+  };
+  it('🔴 401 は AUTH_FAILED（接続成功にしない）', async () => {
+    withStatus(401, {});
+    const res = await asRoot({ accountId: 'x' });
+    expect(res.body.data.ok).toBe(false);
+    expect(res.body.data.error.code).toBe('AUTH_FAILED');
+  });
+  it('🔴 429 は RATE_LIMITED・再試行可', async () => {
+    withStatus(429, {});
+    const d = (await asRoot({ accountId: 'x' })).body.data;
+    expect(d.error.code).toBe('RATE_LIMITED');
+    expect(d.error.retryable).toBe(true);
+  });
+  it('🔴 500 でも数字を作らない', async () => {
+    withStatus(500, { api_version: 'meta-read-1', status: 'ok', totals: { spend: { value: 999999 } } });
+    const d = (await asRoot({ accountId: 'x' })).body.data;
+    expect(d.ok).toBe(false);
+    expect(d.totals).toBeUndefined();
+  });
+});
+
+describe('(6) タイムゾーン・通貨・行数上限', () => {
+  beforeEach(() => {
+    process.env.META_READ_API_BASE = 'https://platform.test';
+    process.env.META_READ_API_KEY = 'k';
+    installFetchMock({
+      api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
+      account: { id: 'act_x', name: 'x', currency: 'AUD', timezone: 'Australia/Sydney', store_mapping: [] },
+      period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true },
+      totals: {}, rows: [], freshness: {},
+    });
+  });
+  it('🔴 期間は広告アカウントのタイムゾーン基準で要求する', async () => {
+    await asRoot({ accountId: 'act_x', tz: 'Australia/Sydney' });
+    const q = new URL(upstreamCalls[0].url);
+    // シドニーは日本より先に日付が変わるため、UTC基準とずれる日がある
+    expect(q.searchParams.get('from')).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(q.searchParams.get('to')).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+  it('🔴 JPY以外の通貨を保持する（勝手に円にしない）', async () => {
+    const res = await asRoot({ accountId: 'act_x' });
+    expect(res.body.data.account.currency).toBe('AUD');
   });
 });

@@ -180,7 +180,24 @@ Dashboard も別欄に表示します。両者を同じ CPA として扱いま�
 
 | 版 | commit | 状態 |
 |---|---|---|
-| `meta-read-1` | 本ファイル初版 | ③の実装待ち |
+| `meta-read-1` | 初版 | ③の実装待ち（**破壊的変更なし**・下の追記は後方互換） |
+
+### meta-read-1 への追記（2026-09-18・後方互換）
+
+既存の形は変えていないため**版は上げません**。③は以下を満たしてください。
+
+| # | 追加要件 | 理由 |
+|---|---|---|
+| 1 | `tenant_id` は Dashboard が送った値と**必ず一致**させる。違えば `TENANT_MISMATCH` | Dashboard は不一致を検出したら表示しません |
+| 2 | `account.id` / `period.from` / `period.to` も**要求と一致**させる | 不一致は `RESPONSE_MISMATCH` として表示しません（他社・他アカウントの数字を出さないため） |
+| 3 | モック／サンプルを返すときは `mode: "mock"`（または `sample: true`）を**必ず付ける** | Dashboard は接続先がモックでも「サンプルデータ」と表示し続けます。**URLとキーが設定されていることを実データの根拠にしません** |
+| 4 | `quality` は `VERIFIED` / `ESTIMATED` / `MISSING` / `NOT_CONNECTED` のみ | 知らない値は Dashboard 側で `ESTIMATED` へ落とします（確定値として見せません） |
+| 5 | HTTP のステータスコードを正しく返す（401/403/429/5xx） | Dashboard は 2xx 以外を「接続成功」に昇格させません |
+| 6 | `period` は**広告アカウントのタイムゾーン**の日付で返す | UTC基準だと日本のアカウントで1日ずれます |
+| 7 | `account.currency` は JPY 以外もそのまま返す | Dashboard は勝手に円へ変換しません |
+| 8 | 行が多い場合は `paging: { has_more, next_cursor }` を返す | Dashboard は上限で切った旨を画面に表示します |
+
+**参照commit**: この契約の最新版は `META_READ_API_CONTRACT.md` の本コミットです（下の「双方の参照commit」を参照）。
 
 ---
 

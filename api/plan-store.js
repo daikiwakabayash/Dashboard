@@ -29,7 +29,7 @@ import { APPROVAL_KEY, APPROVAL_CAP, buildApproval, decide as decideApproval, re
 import { AGENTLOG_KEY, AGENTLOG_CAP, startRun, finishRun, listRuns, summarize as summarizeRuns, anomalies as runAnomalies } from '../lib/agentlog.js';
 import { check as authzCheck, can as authzCan, enforce as authzEnforce, decisionRecord, needsReverify, DEFAULT_TENANT, canViewRoom } from '../lib/authz.js';
 import { resolveActor } from '../lib/actor.js';
-import { normalizeOverview as normalizeMetaOverview, connectionState as metaConnectionState, lastCompleteDays, META_API_VERSION } from '../lib/meta-read.js';
+import { normalizeOverview as normalizeMetaOverview, connectionState as metaConnectionState, lastCompleteDays, looksLikeSample as metaLooksLikeSample, META_API_VERSION } from '../lib/meta-read.js';
 import META_FIXTURE from '../fixtures/meta-overview-sample.json' with { type: 'json' };
 import { verifySalonOneBearer } from '../lib/salonone-auth.js';
 import { hashOwnerToken, verifyOwnerToken, parseOwnerPasswords, parseOwnerShops } from '../lib/settlement.js';
@@ -330,18 +330,43 @@ export default async function handler(req, res) {
       return res.status(403).json({ ok: false, error: 'forbidden', code: 'admin_only',
         message: 'この画面は本部・管理者のみが利用できます' });
     }
+    const chatActorForMeta = actor;   // tenant はこの検証済み actor から決める（クエリでは切り替えない）
     if (req.method !== 'GET') {
       // 読取専用。書き込み系は存在しない（広告変更はここから行えない）。
       return res.status(405).json({ ok: false, error: 'read_only', message: 'Meta運用画面は読み取り専用です' });
     }
 
+    // (3) 機能フラグ＋キルスイッチをサーバー側でも確認する。
+    //     OFF のときは URL を直接叩いても上流へ取りに行かない（画面で隠すだけにしない）。
+    const metaFlags = normalizeFlags(await blobGet(ccKey(FLAGS_KEY), hasKV, hasSB, gas).catch(() => null));
+    if (metaFlags.cc_all === false || metaFlags.cc_meta_overview !== true) {
+      return res.status(403).json({ ok: false, error: 'forbidden', code: 'feature_disabled',
+        message: 'Meta運用画面は現在無効です' });
+    }
+
     const base = String(process.env.META_READ_API_BASE || '').trim().replace(/\/+$/, '');
     const key = String(process.env.META_READ_API_KEY || '').trim();
-    const tenantId = String(req.query.tenantId || 'naoru').slice(0, 64);
+
+    // (1) tenant は **検証済み actor から決める**。クエリで会社を切り替えられないようにする。
+    const tenantId = String((chatActorForMeta && chatActorForMeta.tenantId) || DEFAULT_TENANT).slice(0, 64);
+
+    // (2) accountId は **そのテナントに許可されたアカウントのみ**。
+    //     許可一覧は環境変数（META_AD_ACCOUNT_IDS: カンマ区切り）で人が設定する。
+    //     未設定なら META_AD_ACCOUNT_ID の1件のみを許可する。
+    const allowList = String(process.env.META_AD_ACCOUNT_IDS || process.env.META_AD_ACCOUNT_ID || '')
+      .split(',').map(x => x.trim()).filter(Boolean);
+    const requested = String(req.query.accountId || '').slice(0, 64);
+    const accountId = requested || allowList[0] || '';
+    if (requested && allowList.length && !allowList.includes(requested)) {
+      return res.status(403).json({ ok: false, error: 'forbidden', code: 'account_not_allowed',
+        message: 'この広告アカウントは許可されていません' });
+    }
+
+    // (6) 期間は**広告アカウントのタイムゾーン**基準。未設定なら環境変数、既定は Asia/Tokyo。
+    const acctTz = String(req.query.tz || process.env.META_AD_ACCOUNT_TZ || 'Asia/Tokyo').slice(0, 64);
     const period = (req.query.from && req.query.to)
-      ? { from: String(req.query.from).slice(0, 10), to: String(req.query.to).slice(0, 10) }
-      : lastCompleteDays(7);
-    const accountId = String(req.query.accountId || process.env.META_AD_ACCOUNT_ID || '').slice(0, 64);
+      ? { from: String(req.query.from).slice(0, 10), to: String(req.query.to).slice(0, 10), timeZone: acctTz }
+      : lastCompleteDays(7, new Date(), acctTz);
     // ※ 認証情報はヘッダ（X-CC-Owner / X-CC-Token / Authorization）から取る。クエリには載せない。
 
     // 接続先が無い＝③のAPIがまだ来ていない。**0円を返さず**サンプルで画面を出す。
@@ -371,12 +396,28 @@ export default async function handler(req, res) {
         });
       } finally { clearTimeout(t); }
       const raw = await up.json().catch(() => null);
-      const data = normalizeMetaOverview(raw, { fixture: false });
+      // (5) HTTP エラーを「接続成功」へ昇格させない。上流が 4xx/5xx なら数字を作らない。
+      if (!up.ok) {
+        const code = up.status === 401 || up.status === 403 ? 'AUTH_FAILED'
+          : up.status === 429 ? 'RATE_LIMITED' : 'UPSTREAM_ERROR';
+        const data = {
+          ok: false, connected: true, isSample: metaLooksLikeSample(raw),
+          error: { code, message: `接続先が ${up.status} を返しました`, retryable: up.status >= 500 || up.status === 429 },
+          freshness: { lastSuccessAt: null, lastAttemptAt: new Date().toISOString(), lagMinutes: null },
+        };
+        return res.status(200).json({ ok: true, connection: metaConnectionState(process.env, data), data, sample: data.isSample, apiVersion: META_API_VERSION });
+      }
+      // (2) 要求した tenant / account / 期間と一致しているかを確認する
+      const data = normalizeMetaOverview(raw, {
+        fixture: false,
+        expect: { tenantId, accountId: accountId || undefined, from: period.from, to: period.to },
+      });
+      // (4) 接続先がモックを返した場合も、外側の sample まで一貫してサンプル表示にする
       return res.status(200).json({
         ok: true,
         connection: metaConnectionState(process.env, data),
         data,
-        sample: false,
+        sample: data.isSample === true,
         apiVersion: META_API_VERSION,
       });
     } catch (e) {

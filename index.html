@@ -2369,6 +2369,7 @@
             const [acqSort, setAcqSort] = useState('new');    // 新規顧客一覧の並び順（'new'=新しい順 / 'old'=古い順）
             const [acqLinkFilter, setAcqLinkFilter] = useState(''); // 新規顧客一覧: 施策リンクのフィルタ（''=全て / '__none__'=リンクなし / それ以外=リンク名）
             const [acqLinkSort, setAcqLinkSort] = useState(null);   // 新規顧客一覧: 施策リンクの並び（null=受付日順のまま / 'asc' / 'desc'）
+            const [acqReservedSort, setAcqReservedSort] = useState(null); // 新規顧客一覧: 初回来店予定(reserved_at)の並び（null / 'asc' / 'desc'）
             const [acqPivotMetric, setAcqPivotMetric] = useState('booking'); // 媒体×店舗ピボットの指標（booking=新規予約/visit=来店/join=入会）
             const [acqMediaSel, setAcqMediaSel] = useState('');  // マーケ: 媒体フィルタ（''=全媒体 / visit_source_name）
             const [acqMediaSort, setAcqMediaSort] = useState({ key: 'booking', dir: 'desc' }); // 媒体別コホートの並び替え
@@ -19055,8 +19056,8 @@
                                                             );
                                                         })()}
                                                         <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
-                                                            <button onClick={() => { setAcqLinkSort(null); setAcqSort('new'); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${(!acqLinkSort && acqSort === 'new') ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>新しい順</button>
-                                                            <button onClick={() => { setAcqLinkSort(null); setAcqSort('old'); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${(!acqLinkSort && acqSort === 'old') ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>古い順(9/1〜)</button>
+                                                            <button onClick={() => { setAcqLinkSort(null); setAcqReservedSort(null); setAcqSort('new'); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${(!acqLinkSort && !acqReservedSort && acqSort === 'new') ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>新しい順</button>
+                                                            <button onClick={() => { setAcqLinkSort(null); setAcqReservedSort(null); setAcqSort('old'); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${(!acqLinkSort && !acqReservedSort && acqSort === 'old') ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>古い順(9/1〜)</button>
                                                         </div>
                                                     </div></div>
                                                 {acqCustLoading && !custRows.length ? (
@@ -19088,7 +19089,12 @@
                                                         const want = norm(acqLinkFilter);
                                                         rows = rows.filter(o => acqLinkFilter === '__none__' ? !o.link : (norm(o.link) === want));
                                                     }
-                                                    if (acqLinkSort) {
+                                                    // 初回来店予定(reserved_at)をUNIXミリ秒に。未設定は末尾へ。
+                                                    const rtms = (c) => { const t = Date.parse(String(c.reserved_at || '').replace(' ', 'T')); return isNaN(t) ? null : t; };
+                                                    if (acqReservedSort) {
+                                                        // 初回来店予定で昇順/降順（未設定は常に末尾）。同時刻は受付日で安定化。
+                                                        rows.sort((a, b) => { const ta = rtms(a.c), tb = rtms(b.c); if (ta === null && tb === null) return cmp(b.c, a.c); if (ta === null) return 1; if (tb === null) return -1; return (acqReservedSort === 'asc' ? (ta - tb) : (tb - ta)) || cmp(b.c, a.c); });
+                                                    } else if (acqLinkSort) {
                                                         // 施策リンク名で昇順/降順（リンクなしは末尾）。同名は受付日で安定化。
                                                         rows.sort((a, b) => { const r = (a.link || '￿').localeCompare(b.link || '￿', 'ja'); return (acqLinkSort === 'asc' ? r : -r) || cmp(b.c, a.c); });
                                                     } else {
@@ -19100,7 +19106,7 @@
                                                     <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
                                                         <table className="w-full text-[12px] whitespace-nowrap">
                                                             <thead><tr className="text-slate-400 font-black border-b border-slate-200">
-                                                                <th className="text-left pb-2 px-2">受付日時</th><th className="text-left pb-2 px-2">初回来店予定</th><th className="text-left pb-2 px-2">店舗</th><th className="text-left pb-2 px-2">顧客名</th><th className="text-left pb-2 px-2">担当</th><th className="text-left pb-2 px-2">媒体</th><th onClick={() => setAcqLinkSort(s => s === 'asc' ? 'desc' : s === 'desc' ? null : 'asc')} title="クリックで施策リンク名の昇順/降順に並び替え（もう一度で解除）" className={`text-left pb-2 px-2 cursor-pointer select-none whitespace-nowrap ${acqLinkSort ? 'text-emerald-600' : 'hover:text-slate-600'}`}>施策リンク{acqLinkSort === 'asc' ? ' ▲' : acqLinkSort === 'desc' ? ' ▼' : ''} <span onClick={e => e.stopPropagation()}><InfoTip side="bottom" text="獲得時に使った施策リンク（強制リンク）を、SalonOneのappointmentsを差分同期して顧客に紐づけて表示。『リンクなし』＝その媒体経由でも強制リンクを通っていない予約（例:広告は見たが店舗の通常予約フォームから予約）。ホットペッパーは常にリンクなし（HPB側の予約で自社リンクを通らないため）。直近（当日〜前日）の顧客は同期がまだ追いついておらず、後から自動でリンクが付くことがあります。クリックで昇順/降順に並び替え、上部の「施策リンク：全て」で絞り込みできます。" /></span></th><th className="text-center pb-2 px-2">状態</th><th className="text-center pb-2 px-2">購入</th><th className="text-right pb-2 px-2">LTV</th><th className="text-center pb-2 px-2">操作</th>
+                                                                <th onClick={() => { setAcqLinkSort(null); setAcqReservedSort(null); setAcqSort(s => s === 'new' ? 'old' : 'new'); }} title="クリックで受付日時の新しい順/古い順を切替" className={`text-left pb-2 px-2 cursor-pointer select-none whitespace-nowrap ${(!acqLinkSort && !acqReservedSort) ? 'text-emerald-600' : 'hover:text-slate-600'}`}>受付日時{(!acqLinkSort && !acqReservedSort) ? (acqSort === 'new' ? ' ▼' : ' ▲') : ''}</th><th onClick={() => setAcqReservedSort(s => { setAcqLinkSort(null); return s === 'asc' ? 'desc' : s === 'desc' ? null : 'asc'; })} title="クリックで初回来店予定の昇順/降順に並び替え（もう一度で解除＝受付日順に戻る）" className={`text-left pb-2 px-2 cursor-pointer select-none whitespace-nowrap ${acqReservedSort ? 'text-emerald-600' : 'hover:text-slate-600'}`}>初回来店予定{acqReservedSort === 'asc' ? ' ▲' : acqReservedSort === 'desc' ? ' ▼' : ''}</th><th className="text-left pb-2 px-2">店舗</th><th className="text-left pb-2 px-2">顧客名</th><th className="text-left pb-2 px-2">担当</th><th className="text-left pb-2 px-2">媒体</th><th onClick={() => setAcqLinkSort(s => { setAcqReservedSort(null); return s === 'asc' ? 'desc' : s === 'desc' ? null : 'asc'; })} title="クリックで施策リンク名の昇順/降順に並び替え（もう一度で解除）" className={`text-left pb-2 px-2 cursor-pointer select-none whitespace-nowrap ${acqLinkSort ? 'text-emerald-600' : 'hover:text-slate-600'}`}>施策リンク{acqLinkSort === 'asc' ? ' ▲' : acqLinkSort === 'desc' ? ' ▼' : ''} <span onClick={e => e.stopPropagation()}><InfoTip side="bottom" text="獲得時に使った施策リンク（強制リンク）を、SalonOneのappointmentsを差分同期して顧客に紐づけて表示。『リンクなし』＝その媒体経由でも強制リンクを通っていない予約（例:広告は見たが店舗の通常予約フォームから予約）。ホットペッパーは常にリンクなし（HPB側の予約で自社リンクを通らないため）。直近（当日〜前日）の顧客は同期がまだ追いついておらず、後から自動でリンクが付くことがあります。クリックで昇順/降順に並び替え、上部の「施策リンク：全て」で絞り込みできます。" /></span></th><th className="text-center pb-2 px-2">状態</th><th className="text-center pb-2 px-2">購入</th><th className="text-right pb-2 px-2">LTV</th><th className="text-center pb-2 px-2">操作</th>
                                                             </tr></thead>
                                                             <tbody>
                                                                 {list.map(({ c, ex, link }, i) => (

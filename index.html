@@ -1173,6 +1173,60 @@
             return (a.shops || []).some(t => mine.some(sx => sx.includes(t) || String(t).includes(sx)));
         };
 
+        // ── 新規顧客一覧（lib/acq-list.js と同じ）────────────────────
+        // ⚠️ 時間帯の指定が無い日時は**日本時間**として読む（UTCで読むと9時間ずれる）。
+        // ⚠️ 読めない日時は null（0にしない＝1970年として先頭に来ない）。
+        const acqParseAt = (v) => {
+            const t = String(v == null ? '' : v).trim();
+            if (!t) return null;
+            if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(t)) { const x = Date.parse(t.replace(' ', 'T')); return Number.isFinite(x) ? x : null; }
+            const m = t.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+            if (!m) { const x = Date.parse(t); return Number.isFinite(x) ? x : null; }
+            return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4] || 0) - 9, Number(m[5] || 0), Number(m[6] || 0));
+        };
+        const acqIdOf = (c) => String((c && c.customer_id) != null ? c.customer_id : ((c && c.customer_code) || ''));
+        // ⚠️ 同じ人を1件に（後から来たものを採用＝施策リンクや状態があとから付くため）
+        const acqDedupe = (rows) => {
+            const map = new Map(), noId = [];
+            for (const c of (Array.isArray(rows) ? rows : [])) {
+                if (!c || typeof c !== 'object') continue;
+                const id = acqIdOf(c);
+                if (!id) { noId.push(c); continue; }
+                map.set(id, c);
+            }
+            return [...map.values(), ...noId];
+        };
+        // ⚠️ 次のカーソルが前と同じ／空なら止める（同じページを読み続けない）
+        const acqNextCursor = (prev, meta) => {
+            const m = (meta && typeof meta === 'object') ? meta : {};
+            if (!m.has_more) return '';
+            const next = String(m.next_cursor || '');
+            return (!next || next === String(prev || '')) ? '' : next;
+        };
+        const acqSortRows = (rows, key, dir, linkOf) => {
+            const list = [...(Array.isArray(rows) ? rows : [])];
+            const asc = dir !== 'desc';
+            const getLink = typeof linkOf === 'function' ? linkOf : () => '';
+            const at = (c) => key === 'reserved' ? acqParseAt(c && c.reserved_at) : acqParseAt(c && c.received_at);
+            const tie = (a, b) => acqIdOf(a).localeCompare(acqIdOf(b));
+            if (key === 'link') {
+                return list.sort((a, b) => {
+                    const la = getLink(a), lb = getLink(b);
+                    if (!la !== !lb) return la ? -1 : 1;
+                    const r = String(la || '').localeCompare(String(lb || ''), 'ja');
+                    return (asc ? r : -r) || tie(a, b);
+                });
+            }
+            return list.sort((a, b) => {
+                const ta = at(a), tb = at(b);
+                if (ta === null && tb === null) return tie(a, b);
+                if (ta === null) return 1;
+                if (tb === null) return -1;
+                if (ta !== tb) return asc ? ta - tb : tb - ta;
+                return tie(a, b);
+            });
+        };
+
         // ── 経営ホーム（lib/home.js と同じ）──────────────────────────
         // ⚠️ ここで新しい指標を作らない。既にある値を並べるだけ。
         // ⚠️ 未取得を 0 で埋めない。取れていないものは null のまま「未取得」と出す。
@@ -6682,7 +6736,7 @@
                 if (acqCustLoading) return;
                 // 非root(owner/staff)は soShopsRegion が未確定のまま呼ばれると ids=空→空結果を掴んでしまう。揃うまで待つ（署名が変われば再取得）。
                 if (!authState.root && !(soShopSel && soShopSel.length) && !(soShopsRegion || []).length) return;
-                const cached = acqCacheGet('naoru_acqcust_v2', key); // v2: 受付日コホート取得の終端拡張で旧キャッシュを無効化
+                const cached = acqCacheGet('naoru_acqcust_v3', key); // v3: 重複が入った旧キャッシュを捨てる
                 if (cached && Array.isArray(cached.rows)) {
                     setAcqCust(cached.rows);                    // キャッシュを即表示（スピナー無し・体感高速）
                     if (!force && acqIsPastPeriod()) { acqLoadedKeyRef.current = key; return; } // 過去＝確定。再取得しない（「更新」時は無視）
@@ -6704,11 +6758,15 @@
                             for (let a = 0; a < 4; a++) { try { const r = await fetch(`${SALONONE_API_URL}?${p.toString()}`); if (r.status === 429 || r.status >= 500) { await new Promise(x => setTimeout(x, 800 * (a + 1))); continue; } j = await r.json().catch(() => null); break; } catch { await new Promise(x => setTimeout(x, 600 * (a + 1))); } }
                             if (!j || j.error) break;
                             all = all.concat(Array.isArray(j.data) ? j.data : []);
-                            cursor = (j.meta && j.meta.has_more) ? j.meta.next_cursor : '';
+                            // ⚠️ 次のカーソルが前と同じ／空なら**そこで止める**。
+                            //    同じページを読み続けて、同じ人が何度も入るのを防ぐ（並びが崩れる原因だった）。
+                            cursor = acqNextCursor(cursor, j.meta);
                             guard++;
                         } while (cursor && guard < 30 && all.length < 30000); // 終端拡張で最大3ヶ月ぶん返るため取得上限を引き上げ（取りこぼし防止）
                     }
-                    setAcqCust(all); acqCachePut('naoru_acqcust_v2', key, all, 4); // 最新4期間分をキャッシュ（v2＝終端拡張版）
+                    // ⚠️ 店舗をまたいでも同じ人が二重に入らないようにする（後から来たものを採用）。
+                    all = acqDedupe(all);
+                    setAcqCust(all); acqCachePut('naoru_acqcust_v3', key, all, 4); // 最新4期間分をキャッシュ（v2＝終端拡張版）
                 } catch { if (!(cached && cached.rows)) setAcqCust([]); acqLoadedKeyRef.current = ''; }
                 finally { setAcqCustLoading(false); }
             };
@@ -6763,10 +6821,13 @@
                     // 施策リンクは appointments を updated_at 昇順で差分同期して顧客へ紐付ける。当日の新しい予約は同期が到達するまで「リンクなし」になる。
                     // → 初回/「更新」時に同期をキックして前進させる。追いついていない(caughtUp=false)＝当日ぶんが埋まっていない時も前進させたいので caughtUp では止めない。
                     //   「更新」時は最大3回まで連続で前進（各回サーバー側45s上限）＝1回押すだけで当日の受付までなるべく追いつく。追いついたら早期終了。
-                    if (force || !acqSoflSyncedRef.current) {
+                    // ⚠️ 追いついていない間は、タブを開くたびに前進させる（1回だけにしない）。
+                    //    ホームページやMetaの新しい予約が「リンクなし」のまま残らないようにする。
+                    const behind = !(j && j.caughtUp);
+                    if (force || behind || !acqSoflSyncedRef.current) {
                         acqSoflSyncedRef.current = true;
                         (async () => {
-                            const iters = force ? 3 : 1;
+                            const iters = force ? 6 : 3;         // 1回開くだけで当日ぶんまで追いつきやすくする
                             for (let i = 0; i < iters; i++) {
                                 try {
                                     const s = await fetch('/api/plan-store?type=soflmap&action=sync');
@@ -21063,10 +21124,8 @@
                                                                 </select>
                                                             );
                                                         })()}
-                                                        <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
-                                                            <button onClick={() => { setAcqLinkSort(null); setAcqReservedSort(null); setAcqSort('new'); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${(!acqLinkSort && !acqReservedSort && acqSort === 'new') ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>新しい順</button>
-                                                            <button onClick={() => { setAcqLinkSort(null); setAcqReservedSort(null); setAcqSort('old'); }} className={`px-2.5 py-1 rounded-md text-[11px] font-black transition ${(!acqLinkSort && !acqReservedSort && acqSort === 'old') ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>古い順(9/1〜)</button>
-                                                        </div>
+                                                        {/* ⚠️ 「新しい順／古い順」ボタンは外した（オーナー指示）。
+                                                            受付日時・初回来店予定の見出しをクリックすれば昇順・降順にできる。 */}
                                                     </div></div>
                                                 {acqCustLoading && !custRows.length ? (
                                                     <div className="flex items-center justify-center py-10"><Loader2 size={28} className="animate-spin text-emerald-500" /></div>
@@ -21082,10 +21141,10 @@
                                                     const fmt = (s) => { s = String(s || ''); return s.length >= 16 ? s.slice(5, 16).replace('T', ' ') : '—'; };
                                                     const wd = (s) => { const t = Date.parse(String(s || '').replace(' ', 'T')); return isNaN(t) ? '' : WDAY[new Date(t).getDay()]; };
                                                     const fmtW = (s) => { const f = fmt(s); const w = wd(s); return w ? `${f}(${w})` : f; };
-                                                    // received_at は全行 同一形式のISO(+09:00)。文字列比較＝時系列比較で最も確実（Date.parseのブレを排除）。
-                                                    // 受付日時をUNIXミリ秒に変換して比較（文字列比較のブレを完全排除）。同時刻は customer_id で安定化。
-                                                    const tms = (c) => { const t = Date.parse(String(c.received_at || '')); return isNaN(t) ? 0 : t; };
-                                                    const cmp = (a, b) => { const ta = tms(a), tb = tms(b); if (ta !== tb) return ta - tb; return String(a.customer_id || '').localeCompare(String(b.customer_id || '')); };
+                                                    // ⚠️ 並べ替えは lib/acq-list.js と同じ手順で行う。
+                                                    //    受付日時は「+09:00 付き」と「時間帯なし」の2通りが来るので、
+                                                    //    時間帯なしは**日本時間**として読む（UTCで読むと9時間ずれて日付が前後する）。
+                                                    //    読めない日時は末尾へ回す（0にして1970年として先頭に出さない）。
                                                     // ★施策リンクは1行につき1回だけ解決し、表示・絞り込み・並び替えで同一値を共有（食い違い防止）。空白差も正規化。
                                                     const norm = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
                                                     let rows = [
@@ -21097,18 +21156,17 @@
                                                         const want = norm(acqLinkFilter);
                                                         rows = rows.filter(o => acqLinkFilter === '__none__' ? !o.link : (norm(o.link) === want));
                                                     }
-                                                    // 初回来店予定(reserved_at)をUNIXミリ秒に。未設定は末尾へ。
-                                                    const rtms = (c) => { const t = Date.parse(String(c.reserved_at || '').replace(' ', 'T')); return isNaN(t) ? null : t; };
-                                                    if (acqReservedSort) {
-                                                        // 初回来店予定で昇順/降順（未設定は常に末尾）。同時刻は受付日で安定化。
-                                                        rows.sort((a, b) => { const ta = rtms(a.c), tb = rtms(b.c); if (ta === null && tb === null) return cmp(b.c, a.c); if (ta === null) return 1; if (tb === null) return -1; return (acqReservedSort === 'asc' ? (ta - tb) : (tb - ta)) || cmp(b.c, a.c); });
-                                                    } else if (acqLinkSort) {
-                                                        // 施策リンク名で昇順/降順（リンクなしは末尾）。同名は受付日で安定化。
-                                                        rows.sort((a, b) => { const r = (a.link || '￿').localeCompare(b.link || '￿', 'ja'); return (acqLinkSort === 'asc' ? r : -r) || cmp(b.c, a.c); });
-                                                    } else {
-                                                        // 新しい順=受付が新しいものを上に（降順）／古い順=昇順。
-                                                        rows.sort((a, b) => acqSort === 'new' ? cmp(b.c, a.c) : cmp(a.c, b.c));
-                                                    }
+                                                    // ⚠️ 同じ人が二重に入っていると、行の対応付けが崩れて
+                                                    //    「並べ替えたのに表示が入れ替わらない」状態になる。先に1件へ畳む。
+                                                    const seen = new Set();
+                                                    rows = rows.filter(o => { const id = acqIdOf(o.c); if (!id) return true; if (seen.has(id)) return false; seen.add(id); return true; });
+                                                    const sortKey = acqReservedSort ? 'reserved' : (acqLinkSort ? 'link' : 'received');
+                                                    const sortDir = acqReservedSort || acqLinkSort || (acqSort === 'new' ? 'desc' : 'asc');
+                                                    const sorted = acqSortRows(rows.map(o => o.c), sortKey, sortDir, (c) => {
+                                                        const o = rows.find(x => x.c === c); return o ? o.link : '';
+                                                    });
+                                                    const byObj = new Map(rows.map(o => [o.c, o]));
+                                                    rows = sorted.map(c => byObj.get(c)).filter(Boolean);
                                                     const list = rows.slice(0, 3000);
                                                     return (
                                                     <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">

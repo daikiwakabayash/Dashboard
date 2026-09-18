@@ -1868,7 +1868,10 @@ export default async function handler(req, res) {
       let mode = 'sample';
       try {
         const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
-        const proto = String(req.headers['x-forwarded-proto'] || 'https');
+        // プロトコルは転送ヘッダを優先。無い場合、ローカル/検証環境は http、それ以外は https。
+        // （決め打ちで https にすると、検証環境で自分自身を呼べない）
+        const proto = String(req.headers['x-forwarded-proto']
+          || (/^(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(host) ? 'http' : 'https'));
         if (process.env.ANTHROPIC_API_KEY && host) {
           const r = await fetch(`${proto}://${host}/api/chat`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },

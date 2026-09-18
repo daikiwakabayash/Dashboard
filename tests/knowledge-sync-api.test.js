@@ -10,6 +10,8 @@ const KV = 'https://kv.test';
 const GAS = 'https://script.google.com/macros/s/testonly/exec';
 const KNOW = 'naoru:knowledge:v1';
 const SHEET = 'https://docs.google.com/spreadsheets/d/1AAAAAAAAAAAAAAAAAAAAAAAA/edit';
+// Apps Script と共有する認証値。32文字以上でないと Dashboard 側が GAS を呼ばない。
+const GAS_SECRET = 'test-knowledge-gas-secret-not-real-0123456789';
 const SLIDE = 'https://docs.google.com/presentation/d/1BBBBBBBBBBBBBBBBBBBBBBBB/edit';
 
 let store, gasCalls, gasReply;
@@ -44,13 +46,14 @@ let saved;
 beforeEach(() => {
   saved = { u: process.env.KV_REST_API_URL, t: process.env.KV_REST_API_TOKEN, e: process.env.VERCEL_ENV,
             d: process.env.DASHBOARD_PASSWORD, s: process.env.AUTH_SALT, g: process.env.PLAN_GAS_URL,
-            c: process.env.CRON_SECRET };
+            c: process.env.CRON_SECRET, k: process.env.KNOWLEDGE_GAS_SECRET };
   process.env.KV_REST_API_URL = KV;
   process.env.KV_REST_API_TOKEN = 'test-token-not-a-secret';
   process.env.VERCEL_ENV = 'preview';
   process.env.DASHBOARD_PASSWORD = 'pw-for-test';
   process.env.AUTH_SALT = 'salt-for-test';
   process.env.PLAN_GAS_URL = GAS;
+  process.env.KNOWLEDGE_GAS_SECRET = GAS_SECRET;
   delete process.env.CRON_SECRET;
   installFetchMock();
   _clearBearerCache();
@@ -64,7 +67,7 @@ beforeEach(() => {
 afterEach(() => {
   for (const [k, v] of [['KV_REST_API_URL', saved.u], ['KV_REST_API_TOKEN', saved.t], ['VERCEL_ENV', saved.e],
                         ['DASHBOARD_PASSWORD', saved.d], ['AUTH_SALT', saved.s], ['PLAN_GAS_URL', saved.g],
-                        ['CRON_SECRET', saved.c]]) {
+                        ['CRON_SECRET', saved.c], ['KNOWLEDGE_GAS_SECRET', saved.k]]) {
     if (v === undefined) delete process.env[k]; else process.env[k] = v;
   }
   vi.restoreAllMocks();
@@ -147,6 +150,33 @@ describe('手動「いま取り直す」（action=sync）', () => {
     expect(res.body.configured).toBe(false);
     expect(String(res.body.reason)).toContain('Apps Script');
     expect(byId('d_sheet').body).toBe('前の中身');
+  });
+
+  it('Apps Script へ共有の認証値を渡す（URLを知っているだけでは社内資料を読めない）', async () => {
+    await syncNow();
+    expect(gasCalls.length).toBeGreaterThan(0);
+    for (const c of gasCalls) expect(c.secret).toBe(GAS_SECRET);
+  });
+
+  it('認証値が未設定なら、GAS を呼ばずに止まる（設定漏れで開かない）', async () => {
+    delete process.env.KNOWLEDGE_GAS_SECRET;
+    const res = await syncNow();
+    expect(res.body.configured).toBe(false);
+    expect(String(res.body.reason)).toContain('KNOWLEDGE_GAS_SECRET');
+    expect(gasCalls).toHaveLength(0);
+    expect(byId('d_sheet').body).toBe('前の中身');
+  });
+
+  it('認証値が短すぎる（32文字未満）ときも呼ばない', async () => {
+    process.env.KNOWLEDGE_GAS_SECRET = 'too-short';
+    const res = await syncNow();
+    expect(res.body.configured).toBe(false);
+    expect(gasCalls).toHaveLength(0);
+  });
+
+  it('認証値は画面へ返す応答に入らない（秘密がログ・画面に出ない）', async () => {
+    const res = await syncNow();
+    expect(JSON.stringify(res.body)).not.toContain(GAS_SECRET);
   });
 });
 

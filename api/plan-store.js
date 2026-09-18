@@ -1762,12 +1762,15 @@ export default async function handler(req, res) {
 
   // ── ナレッジ資料の自動更新（Google シート/スライド/ドキュメント）──
   // 取得そのものは **既存の Apps Script（GAS）** に任せる。
-  // Dashboard 側に新しい認証情報を持たない（GAS は既に御社アカウントで動いている）。
+  // 専用の共有秘密値で認証し、未設定の場合は GAS を呼び出さない。
   const knowRunSync = async (docs) => {
     const gasUrl = GAS_URL();
+    const knowledgeSecret = process.env.KNOWLEDGE_GAS_SECRET || '';
     const targets = docs.filter(knowSyncable);
     if (!gasUrl) return { configured: false, checked: 0, updated: 0, failed: 0,
       reason: 'Apps Script の接続先（PLAN_GAS_URL / SETTLEMENT_GAS_URL）が未設定です', summary: knowSyncSummary(docs) };
+    if (knowledgeSecret.length < 32) return { configured: false, checked: 0, updated: 0, failed: 0,
+      reason: 'Apps Script との通信用認証（KNOWLEDGE_GAS_SECRET）が未設定または短すぎます', summary: knowSyncSummary(docs) };
     if (!targets.length) return { configured: true, checked: 0, updated: 0, failed: 0,
       reason: '出典に Google の URL が入っていて、自動更新がONの資料がありません', summary: knowSyncSummary(docs) };
     const started = Date.now(); const BUDGET_MS = 50000;   // 関数の上限60秒に収める
@@ -1781,7 +1784,7 @@ export default async function handler(req, res) {
       const src = knowParseSource(doc.source);
       let fetched;
       try {
-        const j = await gasCall(gasUrl, 'POST', { action: 'readKnowledgeDoc', kind: src.kind, fileId: src.fileId });
+        const j = await gasCall(gasUrl, 'POST', { action: 'readKnowledgeDoc', kind: src.kind, fileId: src.fileId, secret: knowledgeSecret });
         fetched = (j && j.ok) ? { ok: true, body: j.body, title: j.title }
           : { ok: false, error: String((j && (j.error || j.message)) || '取得できませんでした').slice(0, 300) };
       } catch (e) { fetched = { ok: false, error: String((e && e.message) || e).slice(0, 300) }; }

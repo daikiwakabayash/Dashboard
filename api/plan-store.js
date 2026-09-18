@@ -359,6 +359,7 @@ export default async function handler(req, res) {
     'ailog',        // AI質問ログ（氏名・店舗・質問文）
     'push',         // Webプッシュ購読（個人の端末・通知設定。未認証で他人のstaffIdを名乗れないようにする）
     'blobcheck',    // 添付保存先の設定状況（インフラ情報）
+    'setupstatus',  // 設定状況（どの環境変数が入っているか。⚠️ 値そのものは返さない）
   ];
   const reqType = (req.method === 'GET' ? req.query.type : (req.body || {}).type);
   let chatActor = null;
@@ -381,6 +382,43 @@ export default async function handler(req, res) {
   }
 
 
+
+  // ── 設定状況: ?type=setupstatus ────────────────────────────────
+  // 「どの設定が済んでいるか」を画面で確かめられるようにする。
+  // ⚠️ **値は返さない。** 設定されているかどうか（true/false）と、長さが足りているかだけ。
+  // ⚠️ 未認証には返さない（上の authnTypes ゲートを通ってからここへ来る）。
+  if (reqType === 'setupstatus') {
+    const has = (k) => !!String(process.env[k] || '').trim();
+    const len = (k) => String(process.env[k] || '').trim().length;
+    return res.status(200).json({
+      ok: true,
+      items: [
+        { key: 'KNOWLEDGE_GAS_SECRET', label: 'ナレッジ自動更新の合言葉', set: has('KNOWLEDGE_GAS_SECRET'),
+          ok: len('KNOWLEDGE_GAS_SECRET') >= 32, note: '32文字以上が必要です（Apps Script の setupKnowledgeSecret で作れます）',
+          enables: 'ナレッジ資料の1日1回の自動更新' },
+        { key: 'CRON_SECRET', label: '自動実行の合言葉', set: has('CRON_SECRET'),
+          ok: len('CRON_SECRET') >= 16, note: '16文字以上を推奨します', enables: '1日1回の自動実行' },
+        { key: 'SETTLEMENT_GAS_URL', label: 'GAS の接続先', set: has('SETTLEMENT_GAS_URL'),
+          ok: /^https:\/\/script\.google\.com\/macros\/s\//.test(String(process.env.SETTLEMENT_GAS_URL || '')),
+          note: 'Apps Script の「ウェブアプリのURL」を入れてください', enables: '返金明細書の保存・オーナー一覧' },
+        { key: 'CREATIVE_ASSET_KEY', label: '素材の保存鍵', set: has('CREATIVE_ASSET_KEY'),
+          ok: len('CREATIVE_ASSET_KEY') >= 32, note: '32文字以上が必要です（openssl rand -base64 48 などで作れます）',
+          enables: 'クリエイティブの素材登録', warn: '⚠️ 変更・削除すると、登録済みの素材が開けなくなります' },
+        { key: 'CREATIVE_GEN_API_BASE', label: '③生成APIの接続先', set: has('CREATIVE_GEN_API_BASE'),
+          ok: has('CREATIVE_GEN_API_BASE'), note: '③から受け取ったURLを入れてください', enables: '画像・動画の実生成' },
+        { key: 'CREATIVE_GEN_API_KEY', label: '③生成APIの認証キー', set: has('CREATIVE_GEN_API_KEY'),
+          ok: has('CREATIVE_GEN_API_KEY'), note: '③から受け取ったキーを入れてください', enables: '画像・動画の実生成' },
+        { key: 'META_READ_API_BASE', label: 'Meta読取APIの接続先', set: has('META_READ_API_BASE'),
+          ok: has('META_READ_API_BASE'), note: 'Meta の認証が済んでから設定します', enables: 'Meta の読み取り' },
+        { key: 'BLOB_READ_WRITE_TOKEN', label: '添付ファイルの保存先', set: has('BLOB_READ_WRITE_TOKEN'),
+          ok: has('BLOB_READ_WRITE_TOKEN'), note: 'Vercel の Blob を作ると自動で入ります', enables: '写真・動画・ファイルの添付' },
+        { key: 'VAPID_PUBLIC_KEY', label: '通知の鍵', set: has('VAPID_PUBLIC_KEY') && has('VAPID_PRIVATE_KEY'),
+          ok: has('VAPID_PUBLIC_KEY') && has('VAPID_PRIVATE_KEY'), note: '公開鍵と秘密鍵の両方が要ります', enables: 'スマホ・PCへの通知' },
+      ],
+      store: { kv: hasKV, supabase: hasSB, gas: !!gas },
+      env: String(process.env.VERCEL_ENV || 'development'),
+    });
+  }
 
   // Blob設定チェック（クライアントが動画/ファイル送信前に確認）
   // ⚠️ 上の認証ゲートを**通した後**に応答する（未認証には設定状況も返さない）。

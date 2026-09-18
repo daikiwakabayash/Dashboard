@@ -256,10 +256,6 @@ export default async function handler(req, res) {
   // クライアントの @vercel/blob upload() が handleUploadUrl として叩く。大容量ファイルは
   // サーバー(4.5MB上限)を経由せず Blob ストレージへ直接アップロードされる。
   // 有効化には Vercel の Storage で Blob を作成（BLOB_READ_WRITE_TOKEN が自動注入）すること。
-  // Blob設定チェック（クライアントが動画/ファイル送信前に確認）
-  if ((req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'blobcheck') {
-    return res.status(200).json({ ok: true, configured: !!process.env.BLOB_READ_WRITE_TOKEN });
-  }
   // ⚠️ @vercel/blob の client upload() はトークン発行POSTの body に独自の type
   //    ('blob.generate-client-token') を入れるため、body.type では判定できない。
   //    handleUploadUrl のクエリ ?type=blobupload で判定する（body.type は後方互換）。
@@ -286,7 +282,9 @@ export default async function handler(req, res) {
     },
   }).catch(() => null);
 
-  const chatTypes = ['chat', 'profile', 'chatai'];
+  // ⚠️ knowcand（ナレッジ候補）は**本部がチャットで送った回答の本文**をそのまま保持する。
+  //    実体はチャット本文なので、公開範囲もチャットと同じ（本部/root限定）に揃える。
+  const chatTypes = ['chat', 'profile', 'chatai', 'knowcand'];
   // ── 社内限定データ: **ログインしていること**を要求する（役割は問わない）────────
   // ⚠️ チャットの「本部/root限定」をここへ広げない。
   //    掲示板・イベント・サンクスギフト・手当・FAQ などは、スタッフ／オーナーが
@@ -309,6 +307,9 @@ export default async function handler(req, res) {
     'soflmap',      // 顧客→施策リンクの対応表
     'accountmeta',  // アカウントの役割・staffId 紐付け
     'zktherapist',
+    'ailog',        // AI質問ログ（氏名・店舗・質問文）
+    'push',         // Webプッシュ購読（個人の端末・通知設定。未認証で他人のstaffIdを名乗れないようにする）
+    'blobcheck',    // 添付保存先の設定状況（インフラ情報）
   ];
   const reqType = (req.method === 'GET' ? req.query.type : (req.body || {}).type);
   let chatActor = null;
@@ -331,6 +332,12 @@ export default async function handler(req, res) {
   }
 
 
+
+  // Blob設定チェック（クライアントが動画/ファイル送信前に確認）
+  // ⚠️ 上の認証ゲートを**通した後**に応答する（未認証には設定状況も返さない）。
+  if (reqType === 'blobcheck') {
+    return res.status(200).json({ ok: true, configured: !!process.env.BLOB_READ_WRITE_TOKEN });
+  }
 
   const isBlobUpload = req.query.type === 'blobupload' || (req.body || {}).type === 'blobupload';
   if (isBlobUpload) {

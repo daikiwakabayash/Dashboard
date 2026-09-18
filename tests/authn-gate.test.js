@@ -51,7 +51,8 @@ const call = async (req) => { const res = mockRes(); await handler({ headers: {}
 const rootHdr = () => ({ 'x-cc-owner': '__root__', 'x-cc-token': hashOwnerToken('__root__', 'pw-for-test', 'salt-for-test') });
 const ownerHdr = (name, pw) => ({ 'x-cc-owner': encodeURIComponent(name), 'x-cc-token': hashOwnerToken(name, pw, 'salt-for-test') });
 
-const INTERNAL = ['board', 'events', 'thanksgift', 'presence', 'allowance', 'adspend', 'faq', 'knowledge', 'meo', 'patrol'];
+const INTERNAL = ['board', 'events', 'thanksgift', 'presence', 'allowance', 'adspend', 'faq', 'knowledge', 'meo', 'patrol',
+                  'ailog', 'push', 'blobcheck'];
 
 describe('未ログインでは社内限定データを取れない', () => {
   for (const t of INTERNAL) {
@@ -148,5 +149,52 @@ describe('未知の type / action', () => {
     const res = await call({ method: 'POST', headers: rootHdr(), body: { type: 'chatai', action: 'unknown_action' } });
     expect(res.body.ok).toBe(false);
     expect(['invalid_request', 'rollout_disabled']).toContain(res.body.error.code);
+  });
+});
+
+// ── 残っていた未認証API（本番で実際に中身が取れていた）────────────────────
+// ailog … 氏名・店舗・質問文 / knowcand … **本部がチャットで送った回答の本文そのもの**
+// push  … 個人の端末購読と通知設定 / blobcheck … 添付保存先の設定状況
+describe('🔴 残りの未認証API（ailog / knowcand / push / blobcheck）', () => {
+  it('ailog は未ログインで取れない（氏名・質問文）', async () => {
+    store.set('naoru:ailog:v1', JSON.stringify({ logs: [{ staffName: '藤田', question: '社内の質問' }] }));
+    const res = await call({ method: 'GET', query: { type: 'ailog' } });
+    expect(res.statusCode).toBe(403);
+    expect(JSON.stringify(res.body)).not.toContain('藤田');
+  });
+  it('ailog への未認証書き込みも拒否する', async () => {
+    const res = await call({ method: 'POST', body: { type: 'ailog', action: 'add', entry: { question: 'x' } } });
+    expect(res.statusCode).toBe(403);
+  });
+  it('knowcand はチャット本文なので本部/root限定（スタッフでも不可）', async () => {
+    store.set('naoru:knowcand:v1', JSON.stringify({ cands: [{ a: 'チャット本文', fromName: '若林' }] }));
+    const anon = await call({ method: 'GET', query: { type: 'knowcand' } });
+    expect(anon.statusCode).toBe(403);
+    expect(anon.body.code).toBe('chat_admin_only');
+    expect(JSON.stringify(anon.body)).not.toContain('チャット本文');
+    const staff = await call({ method: 'GET', headers: ownerHdr('セラピスト花子', 'staff-pw'), query: { type: 'knowcand' } });
+    expect(staff.statusCode).toBe(403);
+  });
+  it('knowcand は root なら従来どおり読める（FAQ管理タブを壊さない）', async () => {
+    expect((await call({ method: 'GET', headers: rootHdr(), query: { type: 'knowcand' } })).statusCode).toBe(200);
+  });
+  it('push は未ログインでは公開鍵も通知設定も返さない', async () => {
+    const res = await call({ method: 'GET', query: { type: 'push', staffId: 'other-person' } });
+    expect(res.statusCode).toBe(403);
+  });
+  it('🔴 未ログインで他人の staffId の購読を登録できない', async () => {
+    const res = await call({ method: 'POST', body: { type: 'push', action: 'subscribe', staffId: '900003028', sub: { endpoint: 'https://example.test/x' } } });
+    expect(res.statusCode).toBe(403);
+  });
+  it('blobcheck は未ログインでは設定状況を返さない', async () => {
+    const res = await call({ method: 'GET', query: { type: 'blobcheck' } });
+    expect(res.statusCode).toBe(403);
+    expect(res.body).not.toHaveProperty('configured');
+  });
+  it('ログイン済みなら push / blobcheck / ailog は従来どおり使える', async () => {
+    for (const t of ['push', 'blobcheck', 'ailog']) {
+      const res = await call({ method: 'GET', headers: ownerHdr('セラピスト花子', 'staff-pw'), query: { type: t, staffId: 's1' } });
+      expect(res.statusCode, t).toBe(200);
+    }
   });
 });

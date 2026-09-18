@@ -3,30 +3,101 @@ import {
   STATUSES, CHANNELS, canTransition, normalizeFile, normalizeFiles,
   buildAsset, confirmRights, buildCreative, startJob, completeJob,
   requestRevision, approve, deliverables, compareSet, normalizeStore,
+  publicFile, publicAsset, publicCreative, buildGenerateRequest, pendingRevision,
+  jobProgress, DEFAULT_FORMATS,
 } from '../lib/creative.js';
 
 const CTX = { tenantId: 'naoru', actorId: '__root__', actorName: '本部' };
-const IMG = { url: 'https://blob.test/a.png', contentType: 'image/png', bytes: 1234 };
-const MOV = { url: 'https://blob.test/a.mp4', contentType: 'video/mp4', bytes: 9999 };
+// 保存先には**暗号文しか置かない**。記録は「保存先URL＋包んだ鍵」を持ち、画面へは渡さない。
+const STORE = 'https://abc123.public.blob.vercel-storage.com/creative/';
+const encOf = (n) => ({ alg: 'A256GCM-CHUNK1M', key: 'd3JhcHBlZC1rZXktYjY0', plainBytes: n });
+const IMG = { storageUrl: `${STORE}a.png`, contentType: 'image/png', bytes: 1234, enc: encOf(1234) };
+const MOV = { storageUrl: `${STORE}a.mp4`, contentType: 'video/mp4', bytes: 9999, enc: encOf(9999) };
 const asset = (over = {}) => buildAsset({ title: '春キャンペーン素材', files: [IMG], channel: 'meta', ...over }, CTX, 1000).asset;
 const confirmed = () => confirmRights(asset(), 'confirmed', CTX, 1000).asset;
 
-describe('ファイル: 実ファイルだけを受け取る', () => {
-  it('🔴 https 以外は受け取らない（data:/blob:/http で画面に出させない）', () => {
-    for (const u of ['http://x/a.png', 'data:image/png;base64,AAA', 'blob:http://x/1', 'javascript:alert(1)', '']) {
-      expect(normalizeFile({ url: u, contentType: 'image/png' }), u).toBe(null);
+describe('ファイル: 保存先を偽らせない・平文で置かせない', () => {
+  it('🔴 許可した保存先以外は受け取らない（任意URLを画面で開かせない）', () => {
+    for (const u of ['http://x/a.png', 'https://evil.example/a.png', 'data:image/png;base64,AAA',
+                     'blob:http://x/1', 'javascript:alert(1)', '']) {
+      expect(normalizeFile({ ...IMG, storageUrl: u }), u).toBe(null);
     }
   });
+  it('🔴 暗号化されていない保存物は受け取らない（URLを隠すだけの公開保存にしない）', () => {
+    expect(normalizeFile({ ...IMG, enc: undefined })).toBe(null);
+    expect(normalizeFile({ ...IMG, enc: { alg: 'none', key: 'k', plainBytes: 1 } })).toBe(null);
+    expect(normalizeFile({ ...IMG, enc: { alg: 'A256GCM-CHUNK1M', key: '', plainBytes: 1 } })).toBe(null);
+  });
   it('🔴 画像でも動画でもないものは案に載せない', () => {
-    expect(normalizeFile({ url: 'https://b/a.pdf', contentType: 'application/pdf' })).toBe(null);
-    expect(normalizeFile({ url: 'https://b/a.png', contentType: '' })).toBe(null);
+    expect(normalizeFile({ ...IMG, contentType: 'application/pdf' })).toBe(null);
+    expect(normalizeFile({ ...IMG, contentType: '' })).toBe(null);
   });
   it('contentType から種別を決める（申告任せにしない）', () => {
     expect(normalizeFile(IMG).kind).toBe('image');
     expect(normalizeFile(MOV).kind).toBe('video');
   });
+  it('③のジョブ成果物は jobId と番号で受け取る（URLは受け取らない）', () => {
+    const f = normalizeFile({ src: 'job', jobId: 'job_1', index: 0, contentType: 'video/mp4', bytes: 10 });
+    expect(f).toMatchObject({ src: 'job', jobId: 'job_1', index: 0, kind: 'video' });
+    expect(normalizeFile({ src: 'job', jobId: '', index: 0, contentType: 'video/mp4' })).toBe(null);
+  });
   it('壊れたファイルは落として、残りは通す', () => {
-    expect(normalizeFiles([IMG, { url: 'ftp://x' }, MOV])).toHaveLength(2);
+    expect(normalizeFiles([IMG, { storageUrl: 'ftp://x' }, MOV])).toHaveLength(2);
+  });
+  it('sha256 は64桁の16進だけ受け取る（偽の照合値を持たない）', () => {
+    expect(normalizeFile({ ...IMG, sha256: 'a'.repeat(64) }).sha256).toBe('a'.repeat(64));
+    expect(normalizeFile({ ...IMG, sha256: 'zz' }).sha256).toBe('');
+  });
+});
+
+describe('🔴 保存先URLと鍵を画面・③へ渡さない', () => {
+  const f = normalizeFile(IMG);
+  it('画面が受け取るのは①の認証付き配信口だけ', () => {
+    const p = publicFile(f, 'asset', 'as_1');
+    expect(p.src).toBe(`/api/plan-store?type=creative&action=file&owner=asset&ownerId=as_1&fileId=${f.fileId}`);
+    expect(JSON.stringify(p)).not.toContain('blob.vercel-storage.com');
+    expect(JSON.stringify(p)).not.toContain('d3JhcHBlZC1rZXktYjY0');
+    expect(p.storageUrl).toBeUndefined();
+    expect(p.enc).toBeUndefined();
+  });
+  it('素材・案を画面へ返すときも落ちている', () => {
+    const a = buildAsset({ title: 'x', files: [IMG] }, CTX, 1000).asset;
+    expect(JSON.stringify(publicAsset(a))).not.toContain('blob.vercel-storage.com');
+    const c = buildCreative(a, { origin: 'uploaded', files: [MOV] }, CTX, 1000).creative;
+    expect(JSON.stringify(publicCreative(c))).not.toContain('blob.vercel-storage.com');
+  });
+  it('修正履歴の中にも保存先を残さない', () => {
+    const c = buildCreative(buildAsset({ title: 'x', files: [IMG] }, CTX).asset,
+      { origin: 'uploaded', files: [IMG] }, CTX).creative;
+    const r = requestRevision(c, { text: '直して' }, CTX).creative;
+    expect(JSON.stringify(publicCreative(r))).not.toContain('blob.vercel-storage.com');
+    expect(r.revisions[0].snapshot.files[0]).toBe(c.files[0].fileId);
+  });
+  it('完成ファイル・比較でも配信口だけを渡す', () => {
+    const a = confirmRights(buildAsset({ title: 'x', files: [IMG] }, CTX).asset, 'confirmed', CTX).asset;
+    const up = approve(buildCreative(a, { origin: 'uploaded', files: [IMG] }, CTX).creative, a, CTX).creative;
+    expect(deliverables(up).files[0].src).toContain('action=file');
+    expect(JSON.stringify(deliverables(up))).not.toContain('blob.vercel-storage.com');
+    expect(JSON.stringify(compareSet([up], a.id))).not.toContain('blob.vercel-storage.com');
+  });
+});
+
+describe('🔴 IDを指定して既存レコードを上書きできない', () => {
+  it('素材のIDはサーバーが発番する（クライアントの申告を採用しない）', () => {
+    const a = buildAsset({ id: 'as_他社の素材', title: 'x', files: [IMG] }, CTX).asset;
+    expect(a.id).not.toBe('as_他社の素材');
+    expect(a.id.startsWith('as_')).toBe(true);
+  });
+  it('案のIDもサーバーが発番する', () => {
+    const a = buildAsset({ title: 'x', files: [IMG] }, CTX).asset;
+    const c = buildCreative(a, { id: 'cr_他社の案', origin: 'uploaded', files: [IMG] }, CTX).creative;
+    expect(c.id).not.toBe('cr_他社の案');
+    expect(c.id.startsWith('cr_')).toBe(true);
+  });
+  it('2回作っても同じIDにならない', () => {
+    const ids = new Set();
+    for (let i = 0; i < 50; i++) ids.add(buildAsset({ title: 'x', files: [IMG] }, CTX).asset.id);
+    expect(ids.size).toBe(50);
   });
 });
 
@@ -180,6 +251,7 @@ describe('完成ファイルの取得', () => {
     const d = deliverables(ap);
     expect(d.ok).toBe(true);
     expect(d.files).toHaveLength(2);
+    expect(d.files[0].src).toContain('action=file');
     expect(d.dataMode).toBe('live');
   });
 });
@@ -204,4 +276,112 @@ describe('保存形', () => {
     expect(normalizeStore(null)).toEqual({ assets: {}, creatives: {}, jobs: {} });
   });
   it('状態の一覧は5つ', () => { expect(STATUSES).toHaveLength(5); });
+});
+
+describe('🔴 修正依頼は「対象版・元素材・人の原文」とセットで③へ渡す', () => {
+  const a = () => buildAsset({ title: '春キャンペーン素材', files: [IMG], shopId: 'shop_鶴見' }, CTX, 1000).asset;
+  const reviewed = (as) => completeJob(startJob(buildCreative(as, { appeal: '産後ケア', headline: '元の見出し', body: '元の本文' }, CTX, 1000).creative, CTX, 1000).creative,
+    { ok: true, files: [IMG], mode: 'sample' }, 2000).creative;
+
+  it('初回の依頼には、元素材・対象版・形式・ブランド版が入る', () => {
+    const as = a();
+    const c = buildCreative(as, { appeal: '産後ケア' }, CTX).creative;
+    const r = buildGenerateRequest(c, as, { jobId: 'job_1' });
+    expect(r.ok).toBe(true);
+    expect(r.isRevision).toBe(false);
+    expect(r.request).toMatchObject({
+      job_id: 'job_1', creative_id: c.id, asset_id: as.id, tenant_id: 'naoru',
+      store_id: 'shop_鶴見', target_version: 1, mode: 'sample', brand_version: 'demo_brand_v1',
+    });
+    expect(r.request.source_asset_ids).toEqual([as.id]);
+    expect(r.request.formats).toEqual([...DEFAULT_FORMATS]);
+    expect(r.request.parent_creative_id).toBeUndefined();
+  });
+
+  it('修正版には parent / 直前の版 / 人の原文 / 明示の文言変更が入る', () => {
+    const as = a();
+    const v1 = reviewed(as);
+    const c = requestRevision(v1, { text: '文字をもっと大きく、価格は出さないで' }, CTX, 3000).creative;
+    const r = buildGenerateRequest(c, as, { jobId: 'job_2' });
+    expect(r.isRevision).toBe(true);
+    expect(r.request).toMatchObject({
+      parent_creative_id: c.id,
+      source_creative_version: 1,
+      target_version: 2,
+      revision_instructions: '文字をもっと大きく、価格は出さないで',
+    });
+    // ③は自由文だけだと 422 を返す契約。明示の文言も必ず添える。
+    expect(r.request.text_changes).toMatchObject({ headline: '元の見出し', body: '元の本文' });
+    expect(r.request.source_asset_ids).toContain(as.id);
+    expect(r.request.source_file_ids).toEqual([v1.files[0].fileId]);
+  });
+
+  it('見出し・本文を書き換えて依頼すると、その値が text_changes に入る', () => {
+    const as = a();
+    const c = requestRevision(reviewed(as), { text: '見出しを変えて',
+      textChanges: { headline: '新しい見出し', cta: '今すぐ予約' } }, CTX, 3000).creative;
+    const r = buildGenerateRequest(c, as, { jobId: 'job_3' });
+    expect(r.request.text_changes).toEqual({ headline: '新しい見出し', body: '元の本文', cta: '今すぐ予約' });
+    expect(c.headline).toBe('新しい見出し');
+  });
+
+  it('🔴 保存先URLを③へ送らない（参照は ID だけ）', () => {
+    const as = a();
+    const c = requestRevision(reviewed(as), { text: '直して' }, CTX).creative;
+    const r = buildGenerateRequest(c, as, { jobId: 'job_4' });
+    expect(JSON.stringify(r.request)).not.toContain('blob.vercel-storage.com');
+    expect(JSON.stringify(r.request)).not.toContain('https://');
+  });
+
+  it('いまの下書きを作った依頼だけを対象にする（古い依頼を混ぜない）', () => {
+    const as = a();
+    const v2 = requestRevision(reviewed(as), { text: '1回目' }, CTX, 3000).creative;
+    const back = completeJob(startJob(v2, CTX).creative, { ok: true, files: [IMG], mode: 'sample' }).creative;
+    const v3 = requestRevision(back, { text: '2回目' }, CTX, 4000).creative;
+    expect(pendingRevision(v3).text).toBe('2回目');
+    expect(buildGenerateRequest(v3, as, { jobId: 'j' }).request.source_creative_version).toBe(2);
+  });
+
+  it('job_id が無ければ依頼を組み立てない', () => {
+    const as = a();
+    expect(buildGenerateRequest(buildCreative(as, {}, CTX).creative, as, {}).error).toBe('job_id_required');
+    expect(buildGenerateRequest(null, as, { jobId: 'j' }).error).toBe('not_found');
+    expect(buildGenerateRequest(buildCreative(as, {}, CTX).creative, null, { jobId: 'j' }).error).toBe('asset_not_found');
+  });
+
+  it('🔴 ①が勝手に live を名乗らない', () => {
+    const as = a();
+    const c = buildCreative(as, {}, CTX).creative;
+    expect(buildGenerateRequest(c, as, { jobId: 'j' }).request.mode).toBe('sample');
+    expect(buildGenerateRequest(c, as, { jobId: 'j', mode: 'なんでも' }).request.mode).toBe('sample');
+  });
+});
+
+describe('生成ジョブの進み具合（非同期）', () => {
+  it('queued / running のあいだは終わったことにしない', () => {
+    expect(jobProgress({ status: 'queued', poll_after_ms: 1000 })).toMatchObject({ done: false, status: 'queued', pollAfterMs: 1000 });
+    expect(jobProgress({ status: 'running' }).done).toBe(false);
+  });
+  it('待ち時間は1〜10秒に収める（無制限に叩かない・急かさない）', () => {
+    expect(jobProgress({ status: 'running', poll_after_ms: 1 }).pollAfterMs).toBe(1000);
+    expect(jobProgress({ status: 'running', poll_after_ms: 999999 }).pollAfterMs).toBe(10000);
+  });
+  it('completed ならファイルと mode を持って返す', () => {
+    const p = jobProgress({ status: 'completed', files: [IMG], mode: 'sample', headline: 'H' });
+    expect(p.done).toBe(true);
+    expect(p.result).toMatchObject({ ok: true, mode: 'sample', headline: 'H' });
+  });
+  it('🔴 中断は「失敗」として人に見せる（勝手に再実行しない）', () => {
+    const p = jobProgress({ status: 'interrupted' });
+    expect(p.done).toBe(true);
+    expect(p.result.ok).toBe(false);
+    expect(p.result.reason).toContain('中断');
+  });
+  it('🔴 状態が分からないときに成功にも失敗にもしない', () => {
+    expect(jobProgress({})).toMatchObject({ done: false, unknown: true });
+    expect(jobProgress(null).done).toBe(false);
+  });
+  it('失敗は理由が残る', () => {
+    expect(jobProgress({ status: 'failed', error: { message: '素材が読めません' } }).result.reason).toBe('素材が読めません');
+  });
 });

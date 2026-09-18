@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { CATEGORIES, CATEGORY_KEYS, categoryLabel, normalizeAudience, normalizeDue, normalizeMeta,
-         canPublish, isForMe, audienceFor, dueState, coverOf, filterPosts, groupByMonth } from '../lib/news-post.js';
+         canPublish, isForMe, audienceFor, dueState, coverOf, filterPosts, groupByMonth, coverStyle, COVER_TONES,
+} from '../lib/news-post.js';
 
 const NOW = new Date('2026-09-18T10:00:00+09:00');
 
@@ -169,5 +170,38 @@ describe('過去記事の年月', () => {
   it('日本時間で判定する（月初・月末がずれない）', () => {
     // 2026-09-01T00:30 JST = 2026-08-31T15:30Z → 9月として扱う
     expect(groupByMonth([{ id: '1', createdAt: '2026-08-31T15:30:00Z' }])[0].month).toBe('2026-09');
+  });
+});
+
+describe('一覧カードの表紙', () => {
+  it('添付写真があればそれを使う（文字の表紙を作らない）', () => {
+    const c = coverStyle({ imgIds: ['i1'], category: 'event' });
+    expect(c.imgId).toBe('i1');
+    expect(c.line1).toBe('');
+  });
+  it('写真が無ければカテゴリーごとの文字の表紙になる', () => {
+    expect(coverStyle({ category: 'event' })).toMatchObject({ imgId: '', line1: 'LEARN', line2: 'TOGETHER.', tone: 'red' });
+    expect(coverStyle({ category: 'study' })).toMatchObject({ kicker: 'NOWL / STORIES', tone: 'dark' });
+  });
+  it('カテゴリー未設定の古い記事にも表紙が出る', () => {
+    const c = coverStyle({});
+    expect(c.line1).toBe('TEAM');
+    expect(COVER_TONES).toContain(c.tone);
+  });
+  it('🔴 生成画像や実在しない写真を使わない（文字だけ）', () => {
+    const c = coverStyle({ category: 'praise' });
+    expect(c.imgId).toBe('');
+    expect(JSON.stringify(c)).not.toMatch(/https?:|\.png|\.jpg/);
+  });
+  it('ピックアップは濃い色にして沈ませない', () => {
+    expect(coverStyle({ category: 'notice', featured: true }).tone).toBe('dark');
+  });
+  it('同じカテゴリーなら同じ見た目（記事ごとに変えない）', () => {
+    expect(coverStyle({ category: 'rule', title: 'A' })).toEqual(coverStyle({ category: 'rule', title: 'B' }));
+  });
+  it('決めた色以外を返さない', () => {
+    for (const k of ['notice', 'event', 'rule', 'study', 'case', 'praise', '', 'unknown']) {
+      expect(COVER_TONES, k).toContain(coverStyle({ category: k }).tone);
+    }
   });
 });

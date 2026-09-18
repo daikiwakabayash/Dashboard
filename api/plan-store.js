@@ -2611,6 +2611,27 @@ export default async function handler(req, res) {
         });
       }
 
+      // 一覧カードの「既読 N/M」: POST { action:'status_counts', ids:[], audience:[{id,name,shop}] }
+      // ⚠️ 1件ずつ問い合わせると記事の数だけ往復が増えるので、**1回のMGETでまとめて読む**。
+      // ⚠️ 返すのは**人数だけ**。氏名の一覧はここでは返さない（詳細は action:'status'）。
+      // ⚠️ 記録が無い記事は 0 ではなく **null**（まだ誰も開いていないのか、取れていないのかを混ぜない）。
+      if (req.method === 'POST' && action === 'status_counts') {
+        const ids = (Array.isArray(body.ids) ? body.ids : []).map(x => String(x).slice(0, 64)).filter(Boolean).slice(0, 120);
+        if (!ids.length) return res.status(200).json({ ok: true, counts: {} });
+        const cur0 = (await blobGet(BOARD_KEY, hasKV, hasSB, gas)) || {};
+        const allPosts = Array.isArray(cur0.posts) ? cur0.posts : [];
+        const people = Array.isArray(body.audience) ? body.audience.slice(0, 5000) : [];
+        const prs = await blobMGet(ids.map(boardPrKey), hasKV, hasSB, gas);
+        const counts = {};
+        ids.forEach((id, i) => {
+          const post = allPosts.find(x => x && String(x.id) === id);
+          if (!post) return;                                   // 消された記事は数えない
+          const st = boardPostStatus(post, newsAudienceFor(post, people), prs[i] || {});
+          counts[id] = { read: st.counts.read, acked: st.counts.acked, total: st.total };
+        });
+        return res.status(200).json({ ok: true, counts });
+      }
+
       // 投稿側。旧 blob の reads は**移行のためそのまま保持**する（旧コードへ戻しても既読が消えない）。
       const cur = (await blobGet(BOARD_KEY, hasKV, hasSB, gas)) || {};
       const posts = Array.isArray(cur.posts) ? cur.posts : [];

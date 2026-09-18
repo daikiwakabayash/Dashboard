@@ -7,6 +7,15 @@ const TYPES = { '.html':'text/html;charset=utf-8', '.js':'text/javascript', '.mj
 const ROOMS = { g_trial: '本部/root 検証ルーム（試用）', g_trial2: '本部 AI 検証ルーム2' };
 const FAQS  = { faq_family: '家族施術制度', faq_shift: 'シフト提出ルール' };
 const state = { answers: {}, order: [], seq: 0, byReq: {} };
+// 通常チャット用の最小データ（検証Room 1つ＋既存Room 1つ）
+const chat = {
+  rooms: [
+    { id: 'g_trial', kind: 'group', name: '本部/root 検証ルーム（試用）', members: ['__root__', 'hq1'], createdBy: '__root__' },
+    { id: 'g_other', kind: 'group', name: '検証対象ではないルーム', members: ['__root__', 'hq1'], createdBy: '__root__' },
+  ],
+  messages: { g_trial: [], g_other: [] },
+  reads: {}, dir: { shops: [], staff: [{ id: 'hq1', name: '本部 太郎' }] },
+};
 
 const json = (res, o) => { res.setHeader('Content-Type','application/json'); res.end(JSON.stringify(o)); };
 
@@ -31,6 +40,16 @@ export function start(port = 8961) {
         const action = req.method === 'GET' ? url.searchParams.get('action') : body.action;
         if (type === 'ccflags') return json(res, { ok: true, configured: true,
           flags: { cc_all: true, cc_ai_trial: true, cc_authz: 'on', env: 'preview', configured: true } });
+        if (type === 'chat') {
+          if (req.method === 'GET') return json(res, { ok: true, ...chat });
+          if (action === 'send') {
+            const rid = String(body.roomId || '');
+            const m = { id: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, roomId: rid, ...(body.msg || {}), createdAt: new Date().toISOString() };
+            chat.messages[rid] = [...(chat.messages[rid] || []), m];
+            return json(res, { ok: true, msg: m });
+          }
+          return json(res, { ok: true, ...chat });
+        }
         if (type === 'chatai') {
           if (action === 'config') {
             // ①の実装に合わせた形。許可されたルーム/資料の判定はサーバーが返し、
@@ -70,6 +89,12 @@ export function start(port = 8961) {
             if (state.byReq[rid]) return json(res, { ok: true, replay: true, answer_message_id: state.byReq[rid], room_id: body.room_id });
             const aid = `a_stub_${++state.seq}`;
             state.byReq[rid] = aid;
+            // 本番と同じく、回答は**質問と同じRoom**へ入る（通常チャットの表示を確かめるため）
+            const room = String(body.room_id || '');
+            if (chat.messages[room]) chat.messages[room] = [...chat.messages[room],
+              { id: aid, roomId: room, fromStaffId: '__ai__', fromName: '🤖 NAORUアシスタント',
+                text: `［サンプル回答］${body.question}`, createdAt: new Date().toISOString(),
+                ai: { mode: 'sample', verification: 'none', requestId: rid } }];
             state.answers[aid] = { body: `［サンプル回答］${body.question}`, mode: 'sample',
               sources: { verification: 'none', verified: [], candidates: [] },
               questionMessageId: `m_stub_${state.seq}`, corrections: [], hq_review: null };

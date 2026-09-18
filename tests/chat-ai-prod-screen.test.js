@@ -159,3 +159,56 @@ describe('本番画面: 再試行ボタン', () => {
     expect(screen()).toContain('この失敗は同じ送信のやり直しでは解消しません');
   });
 });
+
+// ── 通常チャット入力欄からの @AI（本部/root・フラグON・検証Roomのみ）──────
+// ②が index.html に足した接続。ライブラリだけでなく**画面から呼ばれているか**を固定する。
+describe('本番画面: 通常チャット入力欄からの @AI', () => {
+  const chatSrc = () => html.slice(html.indexOf('const chatSend = async'), html.indexOf('const chatSend = async') + 4000);
+  const askSrc = () => html.slice(html.indexOf('const chatAiAskVerified'), html.indexOf('const chatSend = async'));
+
+  it('検証Roomの一覧はサーバーの targets を使う（画面で判定を書き直さない）', () => {
+    expect(html).toContain("fetch('/api/plan-store?type=chatai&action=config'");
+    expect(html).toContain('(j.targets && j.targets.rooms)');
+    expect(html).toContain('const chatAiRoomOk = (roomId) =>');
+  });
+
+  it('root かつ cc_ai_trial ON のときだけ検証Roomを読む', () => {
+    const eff = html.slice(html.indexOf('const chatAiRoomOk') - 1200, html.indexOf('const chatAiRoomOk'));
+    expect(eff).toContain('chatIsRoot');
+    expect(eff).toContain("ccOn('cc_ai_trial')");
+  });
+
+  it('入力欄の @AI は、検証Roomでは出典つきの新しい経路を使う', () => {
+    expect(chatSrc()).toContain('chatAiRoomOk(roomId)');
+    expect(chatSrc()).toContain('chatAiAskVerified(roomId, t)');
+  });
+
+  it('検証Room以外は従来の動きを変えない', () => {
+    expect(chatSrc()).toContain('chatAiReply(roomId, t)');
+  });
+
+  it('新しい送信には新しい依頼ID、再試行だけ同じIDを使う', () => {
+    expect(askSrc()).toContain('retry && chatAiVerified.lastRequestId ? chatAiVerified.lastRequestId : chatAiNewRequestId()');
+    expect(askSrc()).not.toContain('question}|');        // 本文からIDを作らない
+  });
+
+  it('再試行は元の質問と Room を使う（入力欄の編集に引きずられない）', () => {
+    expect(askSrc()).toContain("const q = retry ? String(chatAiVerified.lastQuestion || '')");
+    expect(askSrc()).toContain("const rid = retry ? String(chatAiVerified.lastRoomId || '')");
+  });
+
+  it('再試行できない失敗は繰り返さない・自動再試行もしない', () => {
+    expect(askSrc()).toContain('if (retry && !chatAiVerified.canRetry) return;');
+    expect(askSrc()).toContain('canRetry: e.retryable === true');
+    expect(askSrc()).not.toMatch(/setTimeout\s*\([^)]*chatAiAskVerified/);
+  });
+
+  it('実行中は二重に走らない', () => {
+    expect(askSrc()).toContain('if (chatAiVerified.busy) return;');
+  });
+
+  it('「同じ送信を再試行」ボタンが入力欄に出る（定義だけで終わっていない）', () => {
+    expect(html).toContain('同じ送信を再試行');
+    expect(html).toContain("chatAiAskVerified(chatRoomId, '', { retry: true })");
+  });
+});

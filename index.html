@@ -2995,6 +2995,13 @@
             const [chatData, setChatData] = useState({ rooms: [], messages: {}, reads: {}, dir: { staff: [] }, notes: {}, configured: true, loaded: false });
             const [chatRoomId, setChatRoomId] = useState(null);       // 選択中ルーム（null=一覧表示・モバイル用）
             const [chatDraft, setChatDraft] = useState('');
+            // 通常チャットから @AI を使うときの状態（本部/root・フラグON・検証Roomのみ）。
+            // 管理タブの検証画面と同じサーバー経路（?type=chatai）を使い、出典つきで回答する。
+            const [chatAiVerified, setChatAiVerified] = useState({
+                rooms: [],            // 検証対象として①が許可したRoomのID
+                lastRequestId: '', lastQuestion: '', lastRoomId: '',
+                error: '', canRetry: false, busy: false,
+            });
             const [chatDropActive, setChatDropActive] = useState(false); // 入力欄への画像/ファイルのドラッグ&ドロップ中ハイライト
             const [chatSending, setChatSending] = useState(false);
             const [chatMention, setChatMention] = useState(null);      // @メンション候補 {query, list:[{id,name}], index} or null
@@ -3518,6 +3525,52 @@
                     return jj.ok ? { id: jj.id, dataUrl } : null;
                 } catch { return null; }
             };
+            // 検証Roomの一覧を取る（root＋cc_ai_trial ON のときだけ）。
+            // 判定はサーバーが返す targets をそのまま使う（画面で同じ判定を書き直さない）。
+            useEffect(() => {
+                if (!authState.authenticated || !chatIsRoot || !ccOn('cc_ai_trial')) { setChatAiVerified(p => ({ ...p, rooms: [] })); return; }
+                let alive = true;
+                fetch('/api/plan-store?type=chatai&action=config', { cache: 'no-store' })
+                    .then(r => r.json())
+                    .then(j => { if (alive && j && j.ok) setChatAiVerified(p => ({ ...p, rooms: ((j.targets && j.targets.rooms) || []).map(r => String(r.id)) })); })
+                    .catch(() => {});
+                return () => { alive = false; };
+            }, [authState.authenticated, chatIsRoot, ccFlags, currentPage]);
+
+            const chatAiRoomOk = (roomId) => chatAiVerified.rooms.includes(String(roomId));
+            const chatAiNewRequestId = () => `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+            // 通常チャットから @AI に聞く（検証Roomのみ）。
+            // 新しい送信には新しい依頼ID、**同じ送信の再試行だけ**同じIDを使い回す。
+            const chatAiAskVerified = async (roomId, question, opts) => {
+                const retry = !!(opts && opts.retry);
+                if (chatAiVerified.busy) return;
+                const q = retry ? String(chatAiVerified.lastQuestion || '') : String(question || '').trim();
+                const rid = retry ? String(chatAiVerified.lastRoomId || '') : String(roomId || '');
+                if (!q || !rid) return;
+                if (retry && !chatAiVerified.canRetry) return;          // 再試行できない失敗は繰り返さない
+                const requestId = retry && chatAiVerified.lastRequestId ? chatAiVerified.lastRequestId : chatAiNewRequestId();
+                setChatAiVerified(p => ({ ...p, busy: true, error: '', canRetry: false, lastRequestId: requestId, lastQuestion: q, lastRoomId: rid }));
+                try {
+                    const r = await fetch('/api/plan-store', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ type: 'chatai', action: 'ask', question: q, room_id: rid, request_id: requestId }),
+                    });
+                    const j = await r.json().catch(() => null);
+                    if (!j || j.ok !== true) {
+                        const e = (j && j.error) || {};
+                        setChatAiVerified(p => ({ ...p, busy: false,
+                            error: `${e.message || 'AIの回答を取得できませんでした'}${e.code ? `（${e.code}）` : ''}`,
+                            canRetry: e.retryable === true }));
+                        return;
+                    }
+                    setChatAiVerified(p => ({ ...p, busy: false, error: '', canRetry: false }));
+                    await chatLoad();           // サーバーが同じRoomへ回答を入れるので読み直す
+                } catch (err) {
+                    setChatAiVerified(p => ({ ...p, busy: false, error: '通信に失敗しました', canRetry: true }));
+                }
+            };
+
             const chatSend = async (opt) => {
                 const forceAi = opt === true;                          // 🤖ボタンからの呼び出しのみ true（onClick={chatSend} はeventが渡るので false 扱い）
                 if (chatSendingRef.current) return;                    // 二重送信ガード（連打・Enter重複を防止）
@@ -3546,7 +3599,10 @@
                     await chatLoad();
                     // ── @AI 起動: 文中に @AI があるか、🤖ボタン(forceAi)の場合、NAORUアシスタントが店舗データ＋FAQで返信 ──
                     const isAiTrigger = forceAi || /[@＠]\s*ai\b/i.test(t);
-                    if (t && isAiTrigger) { chatAiReply(roomId, t).catch(() => {}); }
+                    // 検証Room（本部/root・フラグON）では、出典つき・本部確認つきの新しい経路を使う。
+                    // それ以外は従来どおり（既存の動きを変えない）。
+                    if (t && isAiTrigger && chatAiRoomOk(roomId)) { chatAiAskVerified(roomId, t).catch(() => {}); }
+                    else if (t && isAiTrigger) { chatAiReply(roomId, t).catch(() => {}); }
                     // ── 本部(root/hq)の回答をナレッジ候補として自動蓄積（FAQ管理でワンタップ承認→FAQ化） ──
                     // 質問=返信元の本文（あれば）／回答=今回の本文。@AI起動や自分宛でない通常回答のみ対象。
                     else if (t && chatIsRoot) {
@@ -13237,6 +13293,21 @@
                                                                         ))}
                                                                         {chatVideoConv !== null && <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#F8F9FB] text-[12px] text-[#667085] font-semibold"><span className="w-3.5 h-3.5 border-2 border-[#CBD2DC] border-t-brand-500 rounded-full animate-spin" />動画を変換中… {chatVideoConv}%<span className="text-[11px] text-[#98A2B3] font-normal">（そのまま再生できる形式に変換中）</span></div>}
                                                                         {chatUploading && <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#F8F9FB] text-[12px] text-[#667085] font-semibold"><span className="w-3.5 h-3.5 border-2 border-[#CBD2DC] border-t-brand-500 rounded-full animate-spin" />アップロード中…</div>}
+                                                                    </div>
+                                                                )}
+                                                                {/* 検証Roomでの @AI：状態と「同じ送信を再試行」。
+                                                                    再試行は依頼IDを発行し直さないので回答が二重にならない。
+                                                                    サーバーが retryable と返した失敗のときだけ出す。 */}
+                                                                {chatAiRoomOk(chatRoomId) && (chatAiVerified.busy || chatAiVerified.error) && (
+                                                                    <div className="flex items-center flex-wrap gap-2 px-1 pb-1 text-[11px]">
+                                                                        {chatAiVerified.busy && <span className="text-indigo-600 font-bold">🤖 回答を作成中…</span>}
+                                                                        {chatAiVerified.error && <span className="text-red-700">{chatAiVerified.error}</span>}
+                                                                        {chatAiVerified.canRetry && (
+                                                                            <button onClick={() => chatAiAskVerified(chatRoomId, '', { retry: true })} disabled={chatAiVerified.busy}
+                                                                                className="px-2.5 py-1 rounded-lg text-[11px] font-bold border border-ink-300 text-ink-900 hover:bg-ink-50 disabled:opacity-40">
+                                                                                同じ送信を再試行
+                                                                            </button>
+                                                                        )}
                                                                     </div>
                                                                 )}
                                                                 <textarea ref={chatTaRef} value={chatDraft}

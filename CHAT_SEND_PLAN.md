@@ -73,11 +73,37 @@
 - 候補に同じ人が複数回入っていても **1通だけ**にします。
 - 実行直前に `recheckBeforeSend` と組み合わせ、所属・権限も確かめます。
 
+## 7. 確認した内容が送信時に変わらない（完了条件）
+
+人が「これで送る」と押したのは **その本文・その宛先** です。送信要求には確認内容の
+指紋（`digest`）を添え、**サーバー側で作り直した指紋**と突き合わせます。
+
+| 関数 | 役割 |
+|---|---|
+| `sealConfirmation(conf)` | 確認内容に封をする（`digest` ＋ 説明用の `bodyDigest` / `targetsDigest`） |
+| `requiresReconfirm(sealed, current)` | 本文・宛先・配信の形が変わったかを返す（並び順の違いでは再確認にしない） |
+| `verifySendRequest(request, ctx)` | **サーバー側の最終確認**。下記のとおり |
+
+`verifySendRequest` の決まり:
+
+1. **クライアントが送ってきた宛先リストを使いません。** サーバーが自分の名簿（`ctx.dir`）と
+   認可（`ctx.can`）で宛先を組み立て直し、その結果で指紋を作ります。
+   → 画面側で宛先を水増ししても増えません（テスト済み）。
+2. 指紋が一致しなければ `needs_reconfirm`。**本文を差し替えた送信要求は通りません。**
+   何が変わったか（`body` / `targets` / `mode`）を返します。
+3. 送信直前に所属・権限を再確認し、**落ちる宛先があれば勝手に減らして送らず**
+   `needs_reconfirm` で確認へ戻します。全員いなくなったら `empty`（0件送信を成功にしない）。
+4. 指紋が添えられていない送信要求は送りません。
+
+⚠️ この関数は②の純粋関数です。**実際にこれを呼ぶのはサーバー（①）**で、
+`ctx = { dir, can, principal, resolve }` を渡します（`can` は①の `lib/authz.js`、
+`resolve` は `resolveRecipients`）。画面だけの確認で送信を通さない設計です。
+
 ## テスト
 
 ```
 tests/chat-recipients.test.js  → 40 passed（Phase1 のものを再利用・変更なし）
-tests/chat-send-plan.test.js   → 25 passed
+tests/chat-send-plan.test.js   → 37 passed
 ```
 
 ## まだ行わないこと

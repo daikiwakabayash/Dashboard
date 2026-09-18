@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 import {
   splitInstruction, looksLikeInstruction, buildConfirmation, confirmationLine,
   deliveryModeFor, recheckBeforeSend, planRenotify, markSent, dedupeKey, DELIVERY,
+  confirmationDigest, sealConfirmation, requiresReconfirm, verifySendRequest,
 } from '../lib/chat-send-plan.js';
 import { resolveRecipients } from '../lib/chat-recipients.js';
 
@@ -216,5 +217,110 @@ describe('予約送信・未読者への再通知: 重複を防ぐ', () => {
     const after = recheckBeforeSend(conf, { dir: { ...DIR, staff: DIR.staff.filter(s => s.id !== 'p2') }, can: allow });
     expect(after.send.map(s => s.to)).toEqual(['p1']);
     expect(after.dropped.map(d => d.code)).toContain('left');
+  });
+});
+
+describe('確認した内容が送信時に勝手に変わらない', () => {
+  const spec = { shops: ['恵比寿', '渋谷'] };
+  const make = (body) => buildConfirmation({ resolved: resolveRecipients(spec, rootCtx), body, spec });
+
+  it('同じ本文・同じ宛先なら同じ指紋になる（表示順は影響しない）', () => {
+    const a = make('明日の朝礼は9時からです');
+    const b = { ...a, targets: [...a.targets].reverse() };
+    expect(confirmationDigest(a)).toBe(confirmationDigest(b));
+  });
+
+  it('本文が変わったら再確認が必要', () => {
+    const sealed = sealConfirmation(make('明日の朝礼は9時からです'));
+    const edited = { ...sealed, body: '明日の朝礼は10時からです' };
+    const r = requiresReconfirm(sealed, edited);
+    expect(r.required).toBe(true);
+    expect(r.changed).toContain('body');
+  });
+
+  it('宛先が変わったら再確認が必要', () => {
+    const sealed = sealConfirmation(make('お知らせ'));
+    const added = { ...sealed, targets: [...sealed.targets, { kind: 'room', to: 's3', label: 'NAORU新宿院' }] };
+    const r = requiresReconfirm(sealed, added);
+    expect(r.required).toBe(true);
+    expect(r.changed).toContain('targets');
+  });
+
+  it('個別DMへ配信の形が変われば再確認が必要', () => {
+    const sealed = sealConfirmation(make('お知らせ'));
+    const r = requiresReconfirm(sealed, { ...sealed, mode: DELIVERY.DM_EACH });
+    expect(r.required).toBe(true);
+    expect(r.changed).toContain('mode');
+  });
+});
+
+describe('サーバー側でも所属・権限を再確認する', () => {
+  const spec = { shops: ['恵比寿', '渋谷'] };
+  const server = { dir: DIR, can: allow, principal: { id: 'hq1', role: 'root' }, resolve: resolveRecipients };
+  const sealed = sealConfirmation(buildConfirmation({ resolved: resolveRecipients(spec, rootCtx), body: '朝礼は9時です', spec }));
+  const request = { digest: sealed.digest, bodyDigest: sealed.bodyDigest, targetsDigest: sealed.targetsDigest,
+    mode: sealed.mode, body: sealed.body, spec };
+
+  it('画面の内容とサーバーの再計算が一致すれば送れる', () => {
+    const r = verifySendRequest(request, server);
+    expect(r.ok).toBe(true);
+    expect(r.count).toBe(2);
+    expect(r.send.map(t => t.label)).toEqual(['NAORU恵比寿院', 'NAORU渋谷院']);
+  });
+
+  it('クライアントが宛先を水増ししてもサーバーが作り直すので効かない', () => {
+    const tampered = { ...request, targets: [{ kind: 'room', to: 's3', label: 'NAORU新宿院' }] };
+    const r = verifySendRequest(tampered, server);
+    expect(r.ok).toBe(true);
+    expect(r.send.map(t => t.to)).toEqual(['s1', 's2']);       // 申告した s3 は入らない
+  });
+
+  it('確認後に本文を差し替えた送信要求は拒否する', () => {
+    const r = verifySendRequest({ ...request, body: '朝礼は10時です' }, server);
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('needs_reconfirm');
+    expect(r.changed).toContain('body');
+  });
+
+  it('指紋が無ければ送らない', () => {
+    const r = verifySendRequest({ ...request, digest: '' }, server);
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('needs_reconfirm');
+  });
+
+  it('サーバー側の権限が無ければ送らない（画面の申告では通らない）', () => {
+    const r = verifySendRequest(request, { ...server, can: () => ({ allow: false, code: 'out_of_scope' }) });
+    expect(r.ok).toBe(false);
+    expect(['needs_reconfirm', 'empty', 'out_of_scope', 'denied']).toContain(r.code);
+  });
+
+  it('送信直前に宛先が減るときは、勝手に減らして送らず確認へ戻す', () => {
+    const dmSpec = { shops: ['恵比寿', '渋谷'], dm: true };      // p1（恵比寿）と p2（渋谷）
+    const conf = sealConfirmation(buildConfirmation({ resolved: resolveRecipients(dmSpec, rootCtx), body: 'シフト希望', spec: dmSpec }));
+    expect(conf.count).toBe(2);
+    const gone = { ...DIR, staff: DIR.staff.filter(s => s.id !== 'p1') };   // 1人だけ退職
+    const r = verifySendRequest({ digest: conf.digest, bodyDigest: conf.bodyDigest, targetsDigest: conf.targetsDigest,
+      mode: conf.mode, body: conf.body, spec: dmSpec },
+      { dir: gone, can: allow, principal: {}, resolve: resolveRecipients });
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('needs_reconfirm');      // 残り1人へ黙って送らない
+    expect(r.changed).toContain('targets');
+  });
+
+  it('宛先が全員いなくなったら空として止める（0件送信を成功にしない）', () => {
+    const dmSpec = { shops: ['恵比寿'], dm: true };
+    const conf = sealConfirmation(buildConfirmation({ resolved: resolveRecipients(dmSpec, rootCtx), body: 'シフト希望', spec: dmSpec }));
+    const gone = { ...DIR, staff: DIR.staff.filter(s => s.id !== 'p1') };
+    const r = verifySendRequest({ digest: conf.digest, bodyDigest: conf.bodyDigest, targetsDigest: conf.targetsDigest,
+      mode: conf.mode, body: conf.body, spec: dmSpec },
+      { dir: gone, can: allow, principal: {}, resolve: resolveRecipients });
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('empty');
+  });
+
+  it('本文が空の送信要求は拒否する', () => {
+    const r = verifySendRequest({ ...request, body: '  ' }, server);
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('not_sendable');
   });
 });

@@ -239,3 +239,38 @@ describe('同時更新で行が消えない', () => {
     expect(raw().sections.study).toHaveLength(2);        // 他の分類を巻き込まない
   });
 });
+
+describe('🔴 イベントのお知らせは、意味のあるときだけ1回', () => {
+  const metaRaw = (id) => JSON.parse(store.get(`naoru:events:meta:${id}`) || 'null');
+  it('公開された瞬間に1回だけ送る', async () => {
+    await post({ action: 'upsertRow', section: 'study', row: { id: 'n1', cells: { date: '2026-10-20', content: '新しい会' } } });
+    await post({ action: 'meta_set', id: 'n1', meta: { status: 'draft', title: '新しい会' } });
+    const pub = await post({ action: 'meta_set', id: 'n1', meta: { status: 'open', title: '新しい会' } });
+    expect(pub.body.notified).toBe('open');
+    expect(metaRaw('n1').notified.open).toBeGreaterThan(0);
+  });
+  it('🔴 下書きへ戻して公開し直しても、同じ知らせを重ねない', async () => {
+    await post({ action: 'upsertRow', section: 'study', row: { id: 'n2', cells: { date: '2026-10-20', content: 'x' } } });
+    await post({ action: 'meta_set', id: 'n2', meta: { status: 'draft', title: 'x' } });
+    expect((await post({ action: 'meta_set', id: 'n2', meta: { status: 'open', title: 'x' } })).body.notified).toBe('open');
+    await post({ action: 'meta_set', id: 'n2', meta: { status: 'draft', title: 'x' } });
+    expect((await post({ action: 'meta_set', id: 'n2', meta: { status: 'open', title: 'x' } })).body.notified).toBe('');
+  });
+  it('🔴 内容を直しただけでは送らない', async () => {
+    await post({ action: 'upsertRow', section: 'study', row: { id: 'n3', cells: { date: '2026-10-20', content: 'x' } } });
+    await post({ action: 'meta_set', id: 'n3', meta: { status: 'draft', title: 'x' } });
+    await post({ action: 'meta_set', id: 'n3', meta: { status: 'open', title: 'x' } });
+    expect((await post({ action: 'meta_set', id: 'n3', meta: { status: 'open', title: 'x', summary: '追記' } })).body.notified).toBe('');
+  });
+  it('中止になったときは知らせる（1回だけ）', async () => {
+    await post({ action: 'meta_set', id: 'r1', meta: { status: 'cancelled', title: 'ケースラボ', cancelReason: '講師都合' } });
+    expect(metaRaw('r1').notified.cancelled).toBeGreaterThan(0);
+    const again = await post({ action: 'meta_set', id: 'r1', meta: { status: 'cancelled', title: 'ケースラボ' } });
+    expect(again.body.notified).toBe('');
+  });
+  it('下書きのままなら何も送らない', async () => {
+    await post({ action: 'upsertRow', section: 'study', row: { id: 'n4', cells: { date: '2026-10-20', content: 'x' } } });
+    expect((await post({ action: 'meta_set', id: 'n4', meta: { status: 'draft' } })).body.notified).toBe('');
+    expect(metaRaw('n4').notified).toEqual({});
+  });
+});

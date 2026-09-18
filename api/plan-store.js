@@ -122,10 +122,18 @@ const VAPID_PRIVATE = () => process.env.VAPID_PRIVATE_KEY || '';
 const VAPID_SUBJECT = () => process.env.VAPID_SUBJECT || 'mailto:admin@naoru.example';
 // 対象購読へ通知を送る。web-push は動的import（未インストール環境でもハンドラは壊れない）。
 // filterStaffIds が配列なら、その staffId の購読のみへ送信（未指定＝全員）。
-// 購読者ごとの通知設定を正規化。board=掲示板/お知らせハブ, chat='all'|'mention'|'off'
+// 購読者ごとの通知設定を正規化。
+//   board  … ニュース（true/false）
+//   chat   … チャット 'all' | 'mention' | 'off'
+//   events … 勉強会・イベント 'push'（通知も受け取る） | 'badge'（赤丸と未読の数だけ） | 'off'
+// ⚠️ events の既定は 'badge'。**勝手に通知を送らない**（本人が選んだときだけ送る）。
 function normalizePrefs(p) {
   p = (p && typeof p === 'object') ? p : {};
-  return { board: p.board !== false, chat: ['all', 'mention', 'off'].includes(p.chat) ? p.chat : 'all' };
+  return {
+    board: p.board !== false,
+    chat: ['all', 'mention', 'off'].includes(p.chat) ? p.chat : 'all',
+    events: ['push', 'badge', 'off'].includes(p.events) ? p.events : 'badge',
+  };
 }
 async function sendPush(hasKV, hasSB, gas, payload, filterStaffIds, opts) {
   try {
@@ -145,6 +153,8 @@ async function sendPush(hasKV, hasSB, gas, payload, filterStaffIds, opts) {
     const allow = (s) => {
       const p = normalizePrefs(s && s.prefs);
       if (kind === 'board') return p.board;
+      // ⚠️ 「赤丸と未読の数だけ」を選んだ人には通知を送らない（画面のバッジだけで知らせる）。
+      if (kind === 'events') return p.events === 'push';
       if (kind === 'chat') {
         if (p.chat === 'off') return false;
         if (p.chat === 'mention') return mentionAll || mentionSet.has(String(s.staffId));
@@ -2652,8 +2662,29 @@ export default async function handler(req, res) {
           if (!pub.ok) return res.status(200).json({ ok: false, error: pub.reason,
             message: pub.reason === 'no_title' ? '題名を入れてください' : '開催日を入れてください' });
         }
-        await blobSet(evMetaKey(rowId), meta, hasKV, hasSB, gas);
-        return res.status(200).json({ ok: true, id: rowId, meta });
+        // ── お知らせ ──────────────────────────────────────────────
+        // ⚠️ **意味のあるときだけ1回**。公開された瞬間と、中止になった瞬間だけ送る。
+        //    すでに送った状態へ戻っても送り直さない（notified に記録して重ねない）。
+        const prevStatus = prev ? evNormalizeMeta(prev).status : 'open';
+        const notified = (prev && prev.notified && typeof prev.notified === 'object') ? prev.notified : {};
+        const nextEv = evReadEvent(found.row, found.section, meta);
+        let toNotify = '';
+        if (meta.status === 'open' && prevStatus !== 'open' && !notified.open) toNotify = 'open';
+        else if (meta.status === 'cancelled' && prevStatus !== 'cancelled' && !notified.cancelled) toNotify = 'cancelled';
+        const metaOut = toNotify ? { ...meta, notified: { ...notified, [toNotify]: Date.now() } } : { ...meta, notified };
+        await blobSet(evMetaKey(rowId), metaOut, hasKV, hasSB, gas);
+        if (toNotify) {
+          const when = [nextEv.dateRaw, nextEv.startTime].filter(Boolean).join(' ');
+          const label = { study: '勉強会', event: '交流イベント', bukatsu: '部活' }[found.section] || 'イベント';
+          sendPush(hasKV, hasSB, gas, {
+            kind: 'events', title: 'NAORU',
+            body: (toNotify === 'open'
+              ? `🗓 ${label}／${nextEv.title}${when ? `（${when}）` : ''}`
+              : `⚠️ 中止になりました／${nextEv.title}${when ? `（${when}）` : ''}`).slice(0, 150),
+            url: `/?tab=events&ev=${encodeURIComponent(rowId)}`,
+          });
+        }
+        return res.status(200).json({ ok: true, id: rowId, meta: metaOut, notified: toNotify || '' });
       }
 
       if (req.method === 'GET') {

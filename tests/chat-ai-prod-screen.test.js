@@ -12,8 +12,11 @@ let trialScreen = '';
 beforeAll(() => {
   html = fs.readFileSync(path.join(process.cwd(), 'index.html'), 'utf8');
   // 「@AI 検証」画面の描画部分だけを切り出す（他画面の文言に引っかからないように）
-  const from = html.indexOf('@AI 検証');
-  trialScreen = from >= 0 ? html.slice(Math.max(0, from - 2000), from + 20000) : '';
+  // ⚠️ 画面の並び順が変わっても壊れないよう、**その画面のJSXの入口**を目印にする。
+  const MARK = "{currentPage === 'aitrial' && ccOn('cc_ai_trial') && (() => {";
+  const from = html.indexOf(MARK);
+  const end = from >= 0 ? html.indexOf("{currentPage === '", from + MARK.length) : -1;
+  trialScreen = from >= 0 ? html.slice(from, end > from ? end : from + 40000) : '';
 });
 
 // index.html から関数の定義を1つ取り出して評価する（本番のコードそのものを動かす）
@@ -114,10 +117,9 @@ describe('本番画面: ルーム・資料の選び方', () => {
 
 describe('本番画面: 再試行ボタン', () => {
   const askSrc = () => html.slice(html.indexOf('const aiTrialAsk'), html.indexOf('const aiTrialReview'));
-  const screen = () => {
-    const i = html.indexOf('AIに質問する');
-    return html.slice(Math.max(0, i - 3000), i + 3000);
-  };
+  // ⚠️ 文言（「AIに質問する」）で切り出すと、他の画面が同じ言葉を使ったときに壊れる。
+  //    @AI 検証画面のJSXそのもの（trialScreen）を対象にする。
+  const screen = () => trialScreen;
 
   it('🔴 ボタンが画面に接続されている（定義だけで終わっていない）', () => {
     expect(html).toContain('const aiTrialRetry = () => aiTrialAsk({ retry: true });');

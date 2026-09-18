@@ -16,6 +16,12 @@
 import { getVotingState, validateVote, upsertVote, removeVote, isPeriodPublished, autoPublishLabel, listPeriods } from '../lib/thanksgift.js';
 import { ensureBaseRooms, extractLinks, toggleReaction, genId } from '../lib/chat.js';
 import { carryManaged, stripManaged, applyMemberChange } from '../lib/chat-room-fields.js';
+import {
+  CHATAI_STORE_KEY, CHATAI_CFG_KEY, AI_STAFF_ID, AI_NAME,
+  errorOf as aiError, normalizeAskInput, requestKey as aiRequestKey, classifyRequest, isStalePending,
+  makeRequestRecord, buildSources, needsHqReview, wrapDocsAsData, upsertReview, appendCorrection,
+  isTrialRoom, normalizeConfig as normalizeAiCfg, pickAllowedDocs,
+} from '../lib/chatai.js';
 import { videoEmbed } from '../lib/board.js';
 import { analyzeStore, couponReminderItems, buildStoreMessage } from '../lib/patrol.js';
 import { buildSearchRequest, parsePlacesResponse, reviewRequestUrl, buildLegacyReviewsRequest, parseLegacyReviews } from '../lib/places.js';
@@ -1723,7 +1729,7 @@ export default async function handler(req, res) {
     },
   }).catch(() => null);
 
-  const chatTypes = ['chat', 'profile'];
+  const chatTypes = ['chat', 'profile', 'chatai'];
   const reqType = (req.method === 'GET' ? req.query.type : (req.body || {}).type);
   let chatActor = null;
   if (chatTypes.includes(reqType)) {
@@ -1736,6 +1742,271 @@ export default async function handler(req, res) {
       return res.status(403).json({ ok: false, error: 'forbidden', code: 'chat_admin_only',
         message: 'チャットは本部・管理者のみが利用できます（再ログインが必要な場合があります）' });
     }
+  }
+
+  // ── @AI 実接続（検証用・本部/root限定）────────────────────────────────
+  // 契約: CHAT_AI_API_CONTRACT.md（②合意版 7a02420）。
+  // ⚠️ **実際のエンドポイントは POST /api/plan-store で、type は本文（クエリではない）**。
+  //    既存ルーターが POST のとき body.type を見るため、契約書の `?type=...&action=...` 例は使えない。
+  // ⚠️ 認証ヘッダは X-CC-Owner / X-CC-Token（または SSO の Authorization）に統一。
+  //    X-Chat-* は現行実装では**受け付けない**（自己申告の role も使わない）。
+  if (reqType === 'chatai') {
+    const body = req.body || {};
+    const action = String(body.action || req.query.action || '').slice(0, 40);
+    const tenantId = String(chatActor.tenantId || DEFAULT_TENANT).slice(0, 64);
+    const actorId = String(chatActor.id || '').slice(0, 64);
+
+    // フラグ: OFF ならAI呼び出しも投稿も行わない（画面で隠すだけにしない）
+    const aiFlags = normalizeFlags(await blobGet(ccKey(FLAGS_KEY), hasKV, hasSB, gas).catch(() => null));
+    const aiOn = aiFlags.cc_all !== false && aiFlags.cc_ai_trial === true;
+
+    const cfg = normalizeAiCfg(await blobGet(ccKey(CHATAI_CFG_KEY), hasKV, hasSB, gas).catch(() => null));
+    // メッセージの読み書き（チャット本体と同じルーム別キー。形式を変えない）
+    const getRoomMsgs = async (rid) => {
+      const a = await blobGet(CHAT_MSG_PREFIX + String(rid), hasKV, hasSB, gas);
+      return Array.isArray(a) ? a : [];
+    };
+    const saveRoomMsgs = (rid, arr) => blobSet(CHAT_MSG_PREFIX + String(rid), Array.isArray(arr) ? arr : [], hasKV, hasSB, gas);
+    // 監査は共通のものへ（新しいログは作らない）。失敗しても本処理は止めない。
+    const audit = async (input) => {
+      try {
+        const built = buildAuditEntry({ ...input, actor: chatActor, source: chatActor.source });
+        if (built.ok && hasKV) await kvAppendJson(ccKey(AUDIT_KEY), built.entry, AUDIT_CAP);
+      } catch (_) {}
+    };
+    const loadAi = async () => {
+      const cur = (await blobGet(ccKey(CHATAI_STORE_KEY), hasKV, hasSB, gas)) || {};
+      return {
+        requests: (cur.requests && typeof cur.requests === 'object') ? cur.requests : {},
+        answers: (cur.answers && typeof cur.answers === 'object') ? cur.answers : {},
+        reviews: (cur.reviews && typeof cur.reviews === 'object') ? cur.reviews : {},
+        corrections: (cur.corrections && typeof cur.corrections === 'object') ? cur.corrections : {},
+      };
+    };
+    const saveAi = (next) => blobSet(ccKey(CHATAI_STORE_KEY), next, hasKV, hasSB, gas);
+
+    // 設定の参照・更新（root/本部のみ。検証用Roomと許可FAQを人が決める）
+    if (action === 'config') {
+      if (req.method === 'GET') return res.status(200).json({ ok: true, config: cfg, enabled: aiOn });
+      const next = normalizeAiCfg({ ...cfg, ...(body.config || {}), updatedAt: new Date().toISOString(), updatedBy: actorId });
+      await blobSet(ccKey(CHATAI_CFG_KEY), next, hasKV, hasSB, gas);
+      await audit({ action: 'chatai_config', entity: 'chatai', entityId: 'config', after: next });
+      return res.status(200).json({ ok: true, config: next });
+    }
+
+    if (!aiOn) return res.status(200).json(aiError('rollout_disabled'));
+
+    // 現在のルーム一覧（可視判定に使う）
+    const roomsCur = (await blobGet(CHAT_KEY, hasKV, hasSB, gas)) || {};
+    const roomsAll = Array.isArray(roomsCur.rooms) ? roomsCur.rooms : [];
+    const roomOf = (rid) => roomsAll.find(r => r && String(r.id) === String(rid)) || null;
+
+    if (action === 'ask') {
+      const input = normalizeAskInput(body);
+      if (!input.question || !input.roomId || !input.requestId) return res.status(200).json(aiError('invalid_request'));
+
+      // 回答先のルームを確定する。**クライアントの申告ではなくサーバーが決める。**
+      const room = roomOf(input.roomId);
+      if (!room) return res.status(200).json(aiError('forbidden_room'));
+      if (room.tenantId && String(room.tenantId) !== tenantId) return res.status(200).json(aiError('tenant_mismatch'));
+      if (!canViewRoom(chatActor, room)) return res.status(200).json(aiError('forbidden_room'));
+      // 検証用Roomの許可リストに載っているものだけ（既定は空＝どこも許可しない）
+      if (!isTrialRoom(cfg, input.roomId)) return res.status(200).json(aiError('forbidden_room', 'このルームは検証対象ではありません'));
+
+      // 生成開始時の認可（AIがこのルームへ返信してよいか）
+      const aiActor = { id: AI_STAFF_ID, name: AI_NAME, role: 'root', source: 'agent', verified: true, shops: null, tenantId };
+      const pre = authzCan(aiActor, 'chat.ai_reply', { shop: room.shop || '', room });
+      if (!pre.allow) return res.status(200).json(aiError('forbidden_room', pre.reason));
+
+      const st = await loadAi();
+      const key = aiRequestKey(tenantId, actorId, input.requestId);
+      const prev = st.requests[key];
+      const kind = classifyRequest(prev, { roomId: input.roomId, qfp: makeRequestRecord(input, { tenantId, actorId }).qfp });
+      if (kind === 'conflict') return res.status(200).json(aiError('request_conflict'));
+      if (kind === 'replay') {
+        const ans = st.answers[prev.answerMessageId] || {};
+        return res.status(200).json({ ok: true, replay: true,
+          question_message_id: prev.questionMessageId, answer_message_id: prev.answerMessageId,
+          room_id: prev.roomId, body: ans.body || '', mode: ans.mode || 'sample',
+          sources: ans.sources || { verification: 'none', verified: [], candidates: [] },
+          hq_review: st.reviews[prev.questionMessageId] || { status: 'none', notified: false, channel: 'not_connected' } });
+      }
+      if (kind === 'pending' && !isStalePending(prev)) {
+        return res.status(200).json({ ok: true, status: 'pending',
+          question_message_id: prev.questionMessageId || '', answer_message_id: '', room_id: prev.roomId });
+      }
+
+      // 質問を先に確定させる（AIが失敗しても質問は失われない）。
+      // 既に投稿済みの質問IDが渡されていれば**新しく作らない**（2件にしない）。
+      const msgs = await getRoomMsgs(input.roomId);
+      let qMsgId = '';
+      const claimed = input.questionMessageId && msgs.find(m => m && String(m.id) === input.questionMessageId);
+      if (claimed) {
+        // 渡された質問IDが本当にこのルームの、AI以外の投稿かを確認する
+        if (String(claimed.fromStaffId) === AI_STAFF_ID) return res.status(200).json(aiError('ai_message_source'));
+        qMsgId = String(claimed.id);
+      } else {
+        const qm = { id: genId('m'), roomId: input.roomId, fromStaffId: actorId, fromName: String(chatActor.name || '本部'),
+          fromShop: '', text: input.question, imgIds: [], links: [], mentions: [], createdAt: new Date().toISOString() };
+        await saveRoomMsgs(input.roomId, msgs.concat(qm).slice(-CHAT_MSG_CAP));
+        qMsgId = qm.id;
+      }
+
+      const rec = makeRequestRecord(input, { tenantId, actorId });
+      rec.questionMessageId = qMsgId;
+      st.requests[key] = rec;
+      await saveAi(st);                           // pending を永続化（再起動・複数プロセスでも重複しない）
+
+      // 許可済みFAQだけを資料として渡す（許可リストが空なら資料なし）
+      const faqStore = (await blobGet(FAQ_KEY, hasKV, hasSB, gas).catch(() => null)) || {};
+      const docs = pickAllowedDocs(faqStore.faqs, cfg, input.hintDocIds);
+      const dataContext = wrapDocsAsData(docs);
+
+      // 既存のFAQ回答生成処理を再利用する（新しいAI経路は作らない）
+      const runStart = Date.now();
+      let answerText = '';
+      let mode = 'sample';
+      try {
+        const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
+        // プロトコルは転送ヘッダを優先。無い場合、ローカル/検証環境は http、それ以外は https。
+        // （決め打ちで https にすると、検証環境で自分自身を呼べない）
+        const proto = String(req.headers['x-forwarded-proto']
+          || (/^(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(host) ? 'http' : 'https'));
+        if (process.env.ANTHROPIC_API_KEY && host) {
+          const r = await fetch(`${proto}://${host}/api/chat`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent: 'faq', question: input.question, history: [], dataContext }),
+          });
+          const j = await r.json().catch(() => ({}));
+          if (r.ok && j && j.message) { answerText = String(j.message); mode = 'live'; }
+          else if (r.status === 429) { throw Object.assign(new Error('rate'), { code: 'rate_limited' }); }
+          else { throw new Error('upstream'); }
+        } else {
+          // 実AIが未設定の環境（検証用）。**サンプルであることを必ず申告する。**
+          answerText = `［サンプル回答］${input.question}\n\n（このDashboardでは ANTHROPIC_API_KEY が未設定のため、モック回答を返しています）`;
+          mode = 'sample';
+        }
+      } catch (e) {
+        rec.status = 'failed';
+        st.requests[key] = rec;
+        await saveAi(st);                          // 質問は残る。下書きも失わない
+        return res.status(200).json(aiError(e && e.code === 'rate_limited' ? 'rate_limited' : 'upstream_failed'));
+      }
+
+      const sources = buildSources(docs, docs.map(d => ({ id: d.id, title: d.title, reason: 'passed_to_model' })));
+      // mock は決して server_verified を名乗らない
+      if (mode !== 'live') sources.verification = sources.verified.length ? 'unverified' : 'none';
+
+      // 保存/配信直前にもう一度認可（生成中に権限が変わっていないか）
+      const roomNow = roomOf(input.roomId);
+      const post = roomNow ? authzCan(aiActor, 'chat.ai_reply', { shop: roomNow.shop || '', room: roomNow }) : { allow: false };
+      if (!roomNow || !post.allow || !isTrialRoom(normalizeAiCfg(await blobGet(ccKey(CHATAI_CFG_KEY), hasKV, hasSB, gas).catch(() => null)), input.roomId)) {
+        rec.status = 'failed'; st.requests[key] = rec; await saveAi(st);
+        return res.status(200).json(aiError('forbidden_room', '配信直前の確認で権限がありませんでした'));
+      }
+
+      const aMsg = { id: genId('a'), roomId: input.roomId, fromStaffId: AI_STAFF_ID, fromName: AI_NAME,
+        fromShop: '', text: answerText, imgIds: [], links: [], mentions: [], createdAt: new Date().toISOString(),
+        ai: { mode, verification: sources.verification, requestId: input.requestId } };
+      const cur2 = await getRoomMsgs(input.roomId);
+      await saveRoomMsgs(input.roomId, cur2.concat(aMsg).slice(-CHAT_MSG_CAP));
+
+      rec.status = 'done'; rec.answerMessageId = aMsg.id;
+      st.requests[key] = rec;
+      st.answers[aMsg.id] = { body: answerText, mode, sources, roomId: input.roomId, tenantId,
+        questionMessageId: qMsgId, createdAt: aMsg.createdAt };
+
+      // 根拠が無い／未検証なら本部確認へ回す（同じ質問につき1件）
+      let hq = { status: 'none', request_id: null, notified: false, channel: 'not_connected' };
+      if (needsHqReview(sources, answerText)) {
+        const up = upsertReview(st.reviews, { tenantId, roomId: input.roomId, questionMessageId: qMsgId,
+          answerMessageId: aMsg.id, requestedBy: actorId, notified: false, channel: 'not_connected' });
+        st.reviews = up.map;
+        hq = { status: up.review.status, request_id: up.review.id, notified: up.review.notified, channel: up.review.channel };
+      }
+      await saveAi(st);
+
+      // 共通の Agent Activity・監査へ接続（新しいログは作らない）
+      try {
+        const run = startRun({ agentName: 'NAORU Chat Assistant', action: 'draft', reason: 'チャットからの質問に回答',
+          source: 'chat', shop: roomNow.shop || '', approvalRequired: false });
+        if (run.ok) {
+          const fin = finishRun(run.run, { status: 'success', result: `mode=${mode} verification=${sources.verification}` });
+          if (fin.ok && hasKV) await kvAppendJson(ccKey(AGENTLOG_KEY), fin.run, AGENTLOG_CAP);
+        }
+      } catch (_) {}
+      await audit({ action: 'chatai_answer', entity: 'chatai', entityId: aMsg.id,
+        after: { roomId: input.roomId, mode, verification: sources.verification, ms: Date.now() - runStart } });
+
+      return res.status(200).json({ ok: true, question_message_id: qMsgId, answer_message_id: aMsg.id,
+        room_id: input.roomId, body: answerText, mode, sources, hq_review: hq });
+    }
+
+    // 本部確認の依頼（同じ質問につき1件。連打で増やさない）
+    if (action === 'hq_review') {
+      const qid = String(body.question_message_id || '').slice(0, 80);
+      const aid = String(body.answer_message_id || '').slice(0, 80);
+      if (!qid && !aid) return res.status(200).json(aiError('invalid_request'));
+      const st = await loadAi();
+      const ans = st.answers[aid];
+      // 参照権限を都度確認（保存済みでも、いま見てよいかを確かめる）
+      const rid = (ans && ans.roomId) || String(body.room_id || '');
+      const room = roomOf(rid);
+      if (!room || !canViewRoom(chatActor, room)) return res.status(200).json(aiError('forbidden_room'));
+      if (ans && ans.tenantId && ans.tenantId !== tenantId) return res.status(200).json(aiError('tenant_mismatch'));
+      const up = upsertReview(st.reviews, { tenantId, roomId: rid, questionMessageId: qid, answerMessageId: aid,
+        requestedBy: actorId, notified: false, channel: 'not_connected' });
+      st.reviews = up.map;
+      await saveAi(st);
+      await audit({ action: 'chatai_hq_review', entity: 'chatai', entityId: qid || aid, after: { created: up.created } });
+      return res.status(200).json({ ok: true, created: up.created,
+        hq_review: { status: up.review.status, request_id: up.review.id, notified: up.review.notified, channel: up.review.channel } });
+    }
+
+    // 本部による訂正（元回答は残して追記）
+    if (action === 'correct') {
+      const aid = String(body.answer_message_id || '').slice(0, 80);
+      const text = String(body.text || '').slice(0, 4000);
+      if (!aid || !text.trim()) return res.status(200).json(aiError('invalid_request'));
+      const st = await loadAi();
+      const ans = st.answers[aid];
+      if (!ans) return res.status(200).json(aiError('invalid_request'));
+      const room = roomOf(ans.roomId);
+      if (!room || !canViewRoom(chatActor, room)) return res.status(200).json(aiError('forbidden_room'));
+      if (ans.tenantId && ans.tenantId !== tenantId) return res.status(200).json(aiError('tenant_mismatch'));
+      const ap = appendCorrection(st.corrections, { answerMessageId: aid, text,
+        byId: actorId, byName: String(chatActor.name || '本部') });
+      if (!ap.added) return res.status(200).json(aiError('invalid_request'));
+      st.corrections = ap.map;
+      // 依頼が残っていれば解決済みにする
+      if (ans.questionMessageId && st.reviews[ans.questionMessageId]) {
+        st.reviews[ans.questionMessageId] = { ...st.reviews[ans.questionMessageId], status: 'resolved', resolvedAt: new Date().toISOString(), resolvedBy: actorId };
+      }
+      await saveAi(st);
+      await audit({ action: 'chatai_correction', entity: 'chatai', entityId: aid,
+        after: { byId: actorId, knowledgeStatus: ap.correction.knowledgeStatus } });
+      return res.status(200).json({ ok: true, correction: ap.correction,
+        // Knowledge へは自動反映しない。承認候補として渡すだけ。
+        knowledge: { auto_published: false, status: 'approval_candidate' } });
+    }
+
+    // 保存済みの回答・出典・依頼・訂正の再取得（**その都度いまの閲覧権限を確認**）
+    if (action === 'get' || req.method === 'GET') {
+      const st = await loadAi();
+      const rid = String(body.room_id || req.query.roomId || '').slice(0, 80);
+      const room = roomOf(rid);
+      if (!room || !canViewRoom(chatActor, room)) return res.status(200).json(aiError('forbidden_room'));
+      const answers = {};
+      for (const [id, a] of Object.entries(st.answers)) {
+        if (String(a.roomId) === rid && String(a.tenantId || tenantId) === tenantId) {
+          answers[id] = { body: a.body, mode: a.mode, sources: a.sources, questionMessageId: a.questionMessageId,
+            corrections: st.corrections[id] || [], hq_review: st.reviews[a.questionMessageId] || null };
+        }
+      }
+      return res.status(200).json({ ok: true, room_id: rid, answers });
+    }
+
+    return res.status(200).json(aiError('invalid_request'));
   }
 
   const isProfile = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'profile';

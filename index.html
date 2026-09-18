@@ -2475,12 +2475,78 @@
                 }
             };
 
+            // ── @AI 実接続の検証（本部/root限定・検証用Roomのみ）────────────────
+            // 契約: CHAT_AI_API_CONTRACT.md。役割・tenant・Room・資料の範囲はサーバーが決める。
+            // エンドポイントは POST /api/plan-store（type は**本文**）。
+            const [aiTrial, setAiTrial] = useState({
+                loading: false, cfg: null, roomId: '', q: '', answers: {}, order: [],
+                error: '', busy: false, correcting: '', correctText: '',
+            });
+            const aiPost = async (payload) => {
+                const r = await fetch('/api/plan-store', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ type: 'chatai', ...payload }),
+                });
+                if (r.status === 403) return { ok: false, error: { code: 'forbidden', message: 'この機能は利用できません', retryable: false } };
+                return await r.json().catch(() => ({ ok: false, error: { code: 'internal', message: '応答を読めませんでした', retryable: true } }));
+            };
+            const aiTrialLoadAnswers = async (rid) => {
+                if (!rid) return;
+                const j = await aiPost({ action: 'get', room_id: rid });
+                if (!j.ok) { setAiTrial(p => ({ ...p, error: (j.error && j.error.message) || '', answers: {}, order: [] })); return; }
+                const order = Object.keys(j.answers || {});
+                setAiTrial(p => ({ ...p, answers: j.answers || {}, order, error: '' }));
+            };
+            const aiTrialLoadCfg = async () => {
+                const j = await aiPost({ action: 'config' });
+                const cfg = j.config || null;
+                const rid = aiTrial.roomId || ((cfg && cfg.trialRooms[0]) || '');
+                setAiTrial(p => ({ ...p, cfg, roomId: p.roomId || rid }));
+                // 設定を読んだら、そのルームの保存済み質問・回答も読み直す
+                // （再読み込み後に画面が空にならないように）
+                if (rid) await aiTrialLoadAnswers(rid);
+            };
+            // request_id はタブをまたいでも同じ値になるよう、質問文とルームから作る。
+            // （同じ質問の再送・別タブからの再送で回答が二重にならない）
+            const aiMakeRequestId = (rid, q) => {
+                const src = `${rid}|${String(q).trim()}`;
+                let h = 0x811c9dc5;
+                for (let i = 0; i < src.length; i++) h = Math.imul(h ^ src.charCodeAt(i), 0x01000193) >>> 0;
+                return `req_${src.length.toString(36)}_${h.toString(16)}`;
+            };
+            const aiTrialAsk = async () => {
+                const q = aiTrial.q.trim(); const rid = aiTrial.roomId;
+                if (!q || !rid || aiTrial.busy) return;
+                setAiTrial(p => ({ ...p, busy: true, error: '' }));
+                const j = await aiPost({ action: 'ask', question: q, room_id: rid, request_id: aiMakeRequestId(rid, q) });
+                if (!j.ok) {
+                    setAiTrial(p => ({ ...p, busy: false, error: `${j.error.message}（${j.error.code}${j.error.retryable ? '・再試行できます' : ''}）` }));
+                    return;   // ⚠️ 質問の下書きは消さない
+                }
+                await aiTrialLoadAnswers(rid);
+                setAiTrial(p => ({ ...p, busy: false, q: j.replay ? p.q : '' }));
+            };
+            const aiTrialReview = async (aid) => {
+                const a = aiTrial.answers[aid]; if (!a) return;
+                const j = await aiPost({ action: 'hq_review', answer_message_id: aid, question_message_id: a.questionMessageId, room_id: aiTrial.roomId });
+                if (!j.ok) { setAiTrial(p => ({ ...p, error: j.error.message })); return; }
+                await aiTrialLoadAnswers(aiTrial.roomId);
+            };
+            const aiTrialCorrect = async (aid) => {
+                const text = aiTrial.correctText.trim(); if (!text) return;
+                const j = await aiPost({ action: 'correct', answer_message_id: aid, text });
+                if (!j.ok) { setAiTrial(p => ({ ...p, error: j.error.message })); return; }
+                setAiTrial(p => ({ ...p, correcting: '', correctText: '' }));
+                await aiTrialLoadAnswers(aiTrial.roomId);
+            };
+
             // 表示中のみポーリング（他タブでは負荷をかけない）
             useEffect(() => {
                 if (!authState.authenticated) return;
                 if (currentPage === 'approval' && ccOn('cc_approval')) { ccLoadApprovals(); const iv = setInterval(ccLoadApprovals, 20000); return () => clearInterval(iv); }
                 if (currentPage === 'agentlog' && ccOn('cc_agentlog')) { ccLoadRuns(); const iv = setInterval(ccLoadRuns, 20000); return () => clearInterval(iv); }
                 if (currentPage === 'metaov' && ccOn('cc_meta_overview')) { metaLoad(); }
+                if (currentPage === 'aitrial' && ccOn('cc_ai_trial')) { aiTrialLoadCfg(); }
             }, [currentPage, authState.authenticated, ccFlags]);
 
             // 判断（承認／却下／修正依頼）。seenHash と expectedUpdatedAt を送り、
@@ -2543,6 +2609,7 @@
                 if (currentPage === 'approval' && !ccOn('cc_approval')) setCurrentPage(authState.root ? 'chat' : 'salonone');
                 if (currentPage === 'agentlog' && !ccOn('cc_agentlog')) setCurrentPage(authState.root ? 'chat' : 'salonone');
                 if (currentPage === 'metaov' && !ccOn('cc_meta_overview')) setCurrentPage(authState.root ? 'chat' : 'salonone');
+                if (currentPage === 'aitrial' && !ccOn('cc_ai_trial')) setCurrentPage(authState.root ? 'chat' : 'salonone');
             }, [currentPage, ccFlags, authState.authenticated, authState.root]);
             const [acqShowExcluded, setAcqShowExcluded] = useState(false); // 新規顧客一覧: 除外済みも表示（戻す用）
             const acqLoadedKeyRef = useRef('');
@@ -21247,6 +21314,163 @@
                     })()}
 
                     {/* ══════════ AI Agent Activity（Phase 2・フラグ cc_agentlog がONのときだけ描画） ══════════ */}
+                    {currentPage === 'aitrial' && ccOn('cc_ai_trial') && (() => {
+                        const t = aiTrial;
+                        const rooms = (t.cfg && t.cfg.trialRooms) || [];
+                        const docs = (t.cfg && t.cfg.allowedDocIds) || [];
+                        const SRC = {
+                            server_verified: { cls: 'bg-emerald-50 text-emerald-800 border-emerald-200', label: '📚 検証済みの出典' },
+                            unverified: { cls: 'bg-amber-50 text-amber-900 border-amber-300', label: '⚠️ 参照候補として渡した資料（未検証）' },
+                            none: { cls: 'bg-red-50 text-red-800 border-red-200', label: '⚠️ 根拠不足・本部確認が必要です' },
+                        };
+                        return (
+                            <div className="p-4 md:p-6 space-y-4 max-w-[900px]">
+                                <header className="flex flex-wrap items-center gap-3">
+                                    <h1 className="text-[20px] font-black text-ink-900">@AI 検証</h1>
+                                    <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-slate-100 text-slate-700">本部・管理者のみ</span>
+                                    <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-blue-50 text-blue-700">検証用ルームのみ</span>
+                                </header>
+
+                                <div className="p-3 rounded-xl bg-blue-50 border border-blue-200 text-[12px] text-blue-900 leading-relaxed">
+                                    役割・テナント・回答先のルーム・参照できる資料は<b>すべてサーバーが決めます</b>。
+                                    AIは<b>質問と同じルームにだけ</b>返信します。訂正しても<b>Knowledgeへは自動反映しません</b>（承認候補として残ります）。
+                                </div>
+
+                                {rooms.length === 0 && (
+                                    <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-[12px] text-amber-900">
+                                        <b>検証用ルームが未設定です。</b>下の設定で、検証に使うルームIDと許可するFAQのIDを登録してください。
+                                        （未設定のあいだは、どのルームでもAIは動きません）
+                                    </div>
+                                )}
+
+                                <section className="p-4 rounded-2xl bg-white border border-ink-100 space-y-3">
+                                    <div className="flex flex-wrap items-center gap-2 text-[12px]">
+                                        <span className="font-bold text-ink-400">検証ルーム</span>
+                                        <select value={t.roomId} onChange={e => { const v = e.target.value; setAiTrial(p => ({ ...p, roomId: v })); aiTrialLoadAnswers(v); }}
+                                            className="px-2 py-1.5 rounded-lg border border-ink-200 text-[12px] font-bold">
+                                            <option value="">選択してください</option>
+                                            {rooms.map(r => <option key={r} value={r}>{r}</option>)}
+                                        </select>
+                                        <span className="text-ink-400">許可FAQ: {docs.length ? docs.join(', ') : <span className="text-amber-700">なし（根拠不足になります）</span>}</span>
+                                        <button onClick={() => aiTrialLoadAnswers(t.roomId)} disabled={!t.roomId}
+                                            className="ml-auto px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200 hover:bg-ink-50 disabled:opacity-40">再読み込み</button>
+                                    </div>
+                                    <textarea value={t.q} onChange={e => setAiTrial(p => ({ ...p, q: e.target.value }))}
+                                        placeholder="質問を入力（例: 家族施術のルールは？）" rows={3}
+                                        className="w-full px-3 py-2 rounded-xl border border-ink-200 text-[13px] resize-y" />
+                                    <div className="flex items-center gap-2">
+                                        <button onClick={aiTrialAsk} disabled={!t.q.trim() || !t.roomId || t.busy}
+                                            className="px-4 py-2 rounded-xl text-[13px] font-bold bg-ink-900 text-white disabled:opacity-40">
+                                            {t.busy ? '回答を作成中…' : 'AIに質問する'}
+                                        </button>
+                                        {t.error && <span className="text-[12px] text-red-700">{t.error}</span>}
+                                    </div>
+                                    {t.error && <div className="text-[11px] text-ink-400">※ 質問の下書きは消していません。そのまま再試行できます。</div>}
+                                </section>
+
+                                <section className="space-y-3">
+                                    {t.order.length === 0 && <div className="text-[13px] text-ink-400">まだ回答はありません。</div>}
+                                    {t.order.map(aid => {
+                                        const a = t.answers[aid];
+                                        const v = (a.sources && a.sources.verification) || 'none';
+                                        const meta = SRC[v] || SRC.none;
+                                        return (
+                                            <article key={aid} className="p-4 rounded-2xl bg-white border border-ink-100 space-y-3">
+                                                <div className="flex flex-wrap items-center gap-2">
+                                                    <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-slate-100 text-slate-700">🤖 AIの回答</span>
+                                                    {a.mode === 'sample'
+                                                        ? <span className="px-2 py-0.5 rounded-md text-[11px] font-black bg-amber-100 text-amber-900 border border-amber-300">サンプル回答</span>
+                                                        : <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-50 text-emerald-800">実AI</span>}
+                                                    <span className="text-[11px] text-ink-400">{aid}</span>
+                                                </div>
+                                                <p className="text-[13px] text-ink-900 whitespace-pre-wrap leading-relaxed">{a.body}</p>
+
+                                                <div className={`p-3 rounded-xl border text-[12px] ${meta.cls}`}>
+                                                    <div className="font-black mb-1">{meta.label}</div>
+                                                    {v === 'server_verified' && (
+                                                        <ul className="list-disc pl-5">
+                                                            {a.sources.verified.map(x => (
+                                                                <li key={x.doc_id}>{x.title}（{x.doc_id} / 版 {x.version || '—'}{x.updated_at ? ` / ${String(x.updated_at).slice(0, 10)} 更新` : ''}{x.locator ? ` / ${x.locator}` : ''}）</li>
+                                                            ))}
+                                                        </ul>
+                                                    )}
+                                                    {v === 'unverified' && <div>正式な社内規程としての回答ではありません。</div>}
+                                                    {v === 'none' && <div>根拠となる資料が確認できませんでした。</div>}
+                                                    {a.sources && a.sources.candidates && a.sources.candidates.length > 0 && v !== 'server_verified' && (
+                                                        <div className="mt-1 text-[11px]">渡した候補: {a.sources.candidates.map(c => c.doc_id).join(', ')}</div>
+                                                    )}
+                                                </div>
+
+                                                <div className="flex flex-wrap items-center gap-2">
+                                                    {a.hq_review && a.hq_review.status === 'pending' ? (
+                                                        <span className="px-2.5 py-1 rounded-lg text-[12px] font-bold bg-amber-50 text-amber-900 border border-amber-200">
+                                                            🙋 本部確認を依頼済み（通知: {a.hq_review.notified ? '送信済み' : '未接続'}）
+                                                        </span>
+                                                    ) : a.hq_review && a.hq_review.status === 'resolved' ? (
+                                                        <span className="px-2.5 py-1 rounded-lg text-[12px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">✅ 本部確認 済み</span>
+                                                    ) : (
+                                                        <button onClick={() => aiTrialReview(aid)}
+                                                            className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200 hover:bg-ink-50">🙋 本部に確認する</button>
+                                                    )}
+                                                    <button onClick={() => setAiTrial(p => ({ ...p, correcting: p.correcting === aid ? '' : aid, correctText: '' }))}
+                                                        className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200 hover:bg-ink-50">✏️ 訂正する</button>
+                                                </div>
+
+                                                {t.correcting === aid && (
+                                                    <div className="p-3 rounded-xl bg-ink-50 border border-ink-100 space-y-2">
+                                                        <textarea value={t.correctText} onChange={e => setAiTrial(p => ({ ...p, correctText: e.target.value }))}
+                                                            rows={3} placeholder="正しい内容を入力（元の回答は残ります）"
+                                                            className="w-full px-3 py-2 rounded-lg border border-ink-200 text-[13px]" />
+                                                        <div className="flex items-center gap-2">
+                                                            <button onClick={() => aiTrialCorrect(aid)} disabled={!t.correctText.trim()}
+                                                                className="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-ink-900 text-white disabled:opacity-40">訂正を保存</button>
+                                                            <span className="text-[11px] text-ink-400">Knowledgeへは自動反映せず、承認候補として残します。</span>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {Array.isArray(a.corrections) && a.corrections.length > 0 && (
+                                                    <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-[12px] space-y-1">
+                                                        <div className="font-black text-emerald-900">本部による訂正（元の回答は上に残しています）</div>
+                                                        {a.corrections.map(c => (
+                                                            <div key={c.id} className="text-emerald-900">
+                                                                <span className="whitespace-pre-wrap">{c.text}</span>
+                                                                <span className="text-[11px] text-emerald-700"> — {c.byName || c.byId} / {String(c.at).replace('T', ' ').slice(0, 16)} / Knowledge: {c.knowledgeStatus === 'approval_candidate' ? '承認候補（自動反映なし）' : c.knowledgeStatus}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </article>
+                                        );
+                                    })}
+                                </section>
+
+                                {/* 検証用の設定（root/本部のみ。サーバー側でも同じ条件を確認します） */}
+                                <details className="p-4 rounded-2xl bg-white border border-ink-100">
+                                    <summary className="text-[12px] font-black text-ink-700 cursor-pointer">検証の設定（ルームID・許可FAQ）</summary>
+                                    <div className="mt-3 space-y-2 text-[12px]">
+                                        <label className="block">
+                                            <span className="font-bold text-ink-400">検証用ルームID（カンマ区切り）</span>
+                                            <input defaultValue={rooms.join(',')} id="ai-cfg-rooms"
+                                                className="mt-1 w-full px-3 py-2 rounded-lg border border-ink-200" />
+                                        </label>
+                                        <label className="block">
+                                            <span className="font-bold text-ink-400">許可するFAQのID（カンマ区切り・少数のみ）</span>
+                                            <input defaultValue={docs.join(',')} id="ai-cfg-docs"
+                                                className="mt-1 w-full px-3 py-2 rounded-lg border border-ink-200" />
+                                        </label>
+                                        <button onClick={async () => {
+                                            const tr = String((document.getElementById('ai-cfg-rooms') || {}).value || '').split(',').map(x => x.trim()).filter(Boolean);
+                                            const dc = String((document.getElementById('ai-cfg-docs') || {}).value || '').split(',').map(x => x.trim()).filter(Boolean);
+                                            const j = await aiPost({ action: 'config', config: { trialRooms: tr, allowedDocIds: dc } });
+                                            if (j.ok) { setAiTrial(p => ({ ...p, cfg: j.config, roomId: p.roomId || j.config.trialRooms[0] || '' })); }
+                                        }} className="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-ink-900 text-white">設定を保存</button>
+                                    </div>
+                                </details>
+                            </div>
+                        );
+                    })()}
+
                     {currentPage === 'metaov' && ccOn('cc_meta_overview') && (() => {
                         const st = metaState;
                         const d = st.data;
@@ -25703,6 +25927,7 @@
                     { id: 'approval', label: '承認センター', icon: <CheckCircle size={18} />, mobileIcon: <CheckCircle size={18} />, rootOnly: true, flag: 'cc_approval', badge: approvalPending },
                     { id: 'agentlog', label: 'AI Agent Activity', icon: <Activity size={18} />, mobileIcon: <Activity size={18} />, rootOnly: true, flag: 'cc_agentlog' },
                     { id: 'metaov', label: 'Meta運用', icon: <span className="text-[17px] leading-none">📣</span>, mobileIcon: <span className="text-[17px] leading-none">📣</span>, rootOnly: true, flag: 'cc_meta_overview' },
+                    { id: 'aitrial', label: '@AI 検証', icon: <span className="text-[17px] leading-none">🤖</span>, mobileIcon: <span className="text-[17px] leading-none">🤖</span>, rootOnly: true, flag: 'cc_ai_trial' },
                 ] },
             ];
             const canShow = (it) => (authRoot || !it.rootOnly) && !(it.hideForStaff && authRole === 'staff') && (!it.thanksOnly || authRole === 'staff' || authRole === 'owner' || authRoot) && (!it.flag || ccFlagOn(it.flag));

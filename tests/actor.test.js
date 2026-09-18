@@ -216,3 +216,37 @@ describe('resolveActor - 秘密が未設定でも認証を無効にしない（f
     expect(a.verified).toBe(false);
   });
 });
+
+describe('resolveActor - ヘッダ経由の認証（日本語アカウント名）', () => {
+  it('🔴 日本語のアカウント名を percent-encode で受け取れる', async () => {
+    const d = {
+      rootToken: () => '',
+      verifyOwnerToken: (pw, owner, token) => owner === '本部 若林' && token === 'tok',
+      loadAccounts: async () => ({ passwords: { '本部 若林': 'x' }, shopsMap: {}, metaMap: { '本部 若林': { role: 'hq' } } }),
+    };
+    const req = { headers: { 'x-cc-owner': encodeURIComponent('本部 若林'), 'x-cc-token': 'tok' }, query: {}, body: {} };
+    const a = await resolveActor(req, d);
+    expect(a.verified).toBe(true);
+    expect(a.id).toBe('本部 若林');
+  });
+  it('encode されていない ASCII 名もそのまま通る（後方互換）', async () => {
+    const d = {
+      rootToken: () => '',
+      verifyOwnerToken: (pw, owner, token) => owner === 'owner1' && token === 'tok',
+      loadAccounts: async () => ({ passwords: { owner1: 'x' }, shopsMap: {}, metaMap: {} }),
+    };
+    const a = await resolveActor({ headers: { 'x-cc-owner': 'owner1', 'x-cc-token': 'tok' }, query: {}, body: {} }, d);
+    expect(a.verified).toBe(true);
+  });
+  it('壊れた percent-encode でも落ちない', async () => {
+    const d = { rootToken: () => '' };
+    const a = await resolveActor({ headers: { 'x-cc-owner': '%E3%81%82%', 'x-cc-token': 'x' }, query: {}, body: {} }, d);
+    expect(a.verified).toBe(false);
+  });
+  it('本文の owner/token はヘッダより優先される（既存のPOST経路を壊さない）', async () => {
+    const d = { rootToken: () => 'T' };
+    const a = await resolveActor({ headers: { 'x-cc-owner': 'x', 'x-cc-token': 'wrong' }, query: {}, body: { owner: 'o', token: 'T' } }, d);
+    expect(a.verified).toBe(true);
+    expect(a.role).toBe('root');
+  });
+});

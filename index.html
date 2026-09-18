@@ -5554,10 +5554,23 @@
                     const j = await r.json().catch(() => null);
                     if (j && j.cust && typeof j.cust === 'object') setAcqSoflMap(j.cust);
                     if (j && j.dismissed && typeof j.dismissed === 'object') setAcqDismissed(j.dismissed); // 予約取り消し（テスト予約）
-                    // 追いついている(caughtUp)なら末尾同期は軽い（1ページ）。セッション初回 or 更新時にだけキック。
-                    if ((force || !acqSoflSyncedRef.current) && j && j.caughtUp) {
+                    // 施策リンクは appointments を updated_at 昇順で差分同期して顧客へ紐付ける。当日の新しい予約は同期が到達するまで「リンクなし」になる。
+                    // → 初回/「更新」時に同期をキックして前進させる。追いついていない(caughtUp=false)＝当日ぶんが埋まっていない時も前進させたいので caughtUp では止めない。
+                    //   「更新」時は最大3回まで連続で前進（各回サーバー側45s上限）＝1回押すだけで当日の受付までなるべく追いつく。追いついたら早期終了。
+                    if (force || !acqSoflSyncedRef.current) {
                         acqSoflSyncedRef.current = true;
-                        fetch('/api/plan-store?type=soflmap&action=sync').then(() => fetch('/api/plan-store?type=soflmap')).then(x => x.json()).then(x => { if (x && x.cust) setAcqSoflMap(x.cust); if (x && x.dismissed) setAcqDismissed(x.dismissed); }).catch(() => {});
+                        (async () => {
+                            const iters = force ? 3 : 1;
+                            for (let i = 0; i < iters; i++) {
+                                try {
+                                    const s = await fetch('/api/plan-store?type=soflmap&action=sync');
+                                    const sj = await s.json().catch(() => null);
+                                    if (sj && sj.cust && typeof sj.cust === 'object') setAcqSoflMap(sj.cust);
+                                    if (sj && sj.dismissed && typeof sj.dismissed === 'object') setAcqDismissed(sj.dismissed);
+                                    if (!sj || sj.caughtUp) break; // 追いついたら終了
+                                } catch { break; }
+                            }
+                        })();
                     }
                 } catch {}
             };

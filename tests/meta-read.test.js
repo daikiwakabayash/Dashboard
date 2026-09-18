@@ -441,9 +441,38 @@ describe('unknown mode を実データとして表示しない', () => {
   it('🔴 unknown を live へ昇格させない', () => {
     expect(declaredMode({ mode: 'unknown' })).toBe('unconfirmed');
     expect(declaredMode({ data_mode: 'unknown' })).toBe('unconfirmed');
-    expect(declaredMode({ mode: 'live' })).toBe('live');
     expect(declaredMode({ _fixture: true })).toBe('sample');
-    expect(declaredMode({})).toBe('unstated');      // 旧形式は従来どおり
+  });
+
+  // ── ③受入で不合格になった3件（mode の独立検証）────────────────────────
+  it('🔴 mode / data_mode の両方が欠落していたら live にしない', () => {
+    expect(declaredMode({})).toBe('unconfirmed');
+    const r = normalizeOverview({ api_version: 'meta-read-1', status: 'ok', totals: { spend: { value: 100 } } });
+    expect(r.ok).toBe(false);
+    expect(r.error.code).toBe('MODE_UNCONFIRMED');
+    expect(r.totals).toBeUndefined();
+  });
+  it('🔴 片方だけの申告では live にしない（両方 live を要求する）', () => {
+    expect(declaredMode({ mode: 'live' })).toBe('unconfirmed');
+    expect(declaredMode({ data_mode: 'live' })).toBe('unconfirmed');
+    expect(declaredMode({ mode: 'live', data_mode: 'live' })).toBe('live');
+  });
+  it('🔴 mode=live でも data_mode=unknown なら数値を出さない', () => {
+    expect(declaredMode({ mode: 'live', data_mode: 'unknown' })).toBe('unconfirmed');
+    const r = normalizeOverview({ api_version: 'meta-read-1', status: 'ok',
+      mode: 'live', data_mode: 'unknown', totals: { spend: { value: 100 } } });
+    expect(r.ok).toBe(false);
+    expect(r.error.code).toBe('MODE_UNCONFIRMED');
+    expect(r.totals).toBeUndefined();
+  });
+  it('🔴 mode=live でも data_mode=sample ならサンプル扱い（live と偽らない）', () => {
+    expect(declaredMode({ mode: 'live', data_mode: 'sample' })).toBe('sample');
+    expect(looksLikeSample({ mode: 'live', data_mode: 'sample' })).toBe(true);
+    const r = normalizeOverview({ api_version: 'meta-read-1', status: 'ok',
+      mode: 'live', data_mode: 'sample', account: { id: 'act_1', currency: 'JPY' },
+      period: {}, totals: { spend: { value: 100, unit: 'JPY' } }, rows: [] });
+    expect(r.isSample).toBe(true);            // サンプル表示は維持する（数値は出す）
+    expect(r.ok).toBe(true);
   });
   it('エラー応答は従来どおり理由を出す（MODE_UNCONFIRMED に吸い込まない）', () => {
     const r = normalizeOverview({ api_version: 'meta-read-1', status: 'error', data_mode: 'unknown',
@@ -487,5 +516,45 @@ describe('金額の単位と広告アカウント通貨の一致', () => {
   });
   it('2引数の従来呼び出しは挙動を変えない（外貨をcountに潰さない）', () => {
     expect(normalizeMetric({ value: 1234, unit: 'AUD', quality: 'VERIFIED' }, 'spend').unit).toBe('AUD');
+  });
+});
+
+// ── ③受入で不合格になった2件（金額指標の型を metric 名で固定）──────────────
+describe('🔴 金額指標（spend/cpc/cpm）は count / ratio を受け付けない', () => {
+  it('spend の unit=count は数値を出さない', () => {
+    const m = normalizeMetric({ value: 100, unit: 'count', quality: 'VERIFIED' }, 'spend', 'JPY');
+    expect(m.value).toBeNull();
+    expect(m.missingReason).toContain('count/ratio');
+  });
+  it('cpc の unit=ratio は数値を出さない', () => {
+    const m = normalizeMetric({ value: 5, unit: 'ratio', quality: 'VERIFIED' }, 'cpc', 'JPY');
+    expect(m.value).toBeNull();
+  });
+  it('cpm も同じ扱い', () => {
+    expect(normalizeMetric({ value: 5, unit: 'count' }, 'cpm', 'JPY').value).toBeNull();
+  });
+  it('アカウント通貨と一致していれば通る', () => {
+    expect(normalizeMetric({ value: 100, unit: 'JPY', quality: 'VERIFIED' }, 'spend', 'JPY').value).toBe(100);
+    expect(normalizeMetric({ value: 100, unit: 'AUD', quality: 'VERIFIED' }, 'spend', 'AUD').value).toBe(100);
+  });
+  it('🔴 アカウント通貨が不明なら金額は出さない', () => {
+    expect(normalizeMetric({ value: 100, unit: 'JPY' }, 'spend', '').value).toBeNull();
+  });
+  it('金額以外の指標は従来どおり（clicks の count は通る）', () => {
+    expect(normalizeMetric({ value: 20, unit: 'count', quality: 'VERIFIED' }, 'clicks', 'JPY').value).toBe(20);
+    expect(normalizeMetric({ value: 0.02, unit: 'ratio', quality: 'VERIFIED' }, 'ctr', 'JPY').value).toBe(0.02);
+  });
+  it('🔴 単位が照合できないとき金額指標の unit を count へ寄せない', () => {
+    expect(normalizeMetric({ value: 100, unit: 'count' }, 'spend', '').unit).not.toBe('count');
+  });
+  it('overview 経由でも spend.unit=count は数値が出ない', () => {
+    const r = normalizeOverview({
+      api_version: 'meta-read-1', status: 'ok', mode: 'live', data_mode: 'live',
+      account: { id: 'act_1', currency: 'JPY' }, period: {},
+      totals: { spend: { value: 100, unit: 'count' }, cpc: { value: 5, unit: 'ratio' } }, rows: [],
+    });
+    expect(r.ok).toBe(true);
+    expect(r.totals.spend.value).toBeNull();
+    expect(r.totals.cpc.value).toBeNull();
   });
 });

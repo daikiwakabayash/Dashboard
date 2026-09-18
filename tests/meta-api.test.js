@@ -147,7 +147,7 @@ describe('?type=meta - 未接続のとき', () => {
 
 describe('?type=meta - 接続できているとき', () => {
   const live = {
-    api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
+    api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru', mode: 'live', data_mode: 'live',
     account: { id: 'act_700000001', name: '本番アカウント', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] },
     period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true, excluded_today: true },
     totals: { spend: { value: 1000, unit: 'JPY', display: '¥1,000', quality: 'VERIFIED', source: 'Meta' } },
@@ -244,7 +244,7 @@ describe('(1) tenant は検証済み actor から決める', () => {
     process.env.META_READ_API_KEY = 'service-key-not-a-real-secret';
     process.env.META_AD_ACCOUNT_IDS = 'act_700000001';
     installFetchMock({
-      api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
+      api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru', mode: 'live', data_mode: 'live',
       account: { id: 'act_700000001', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] },
       period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true },
       totals: {}, rows: [], freshness: {},
@@ -260,7 +260,7 @@ describe('(1) tenant は検証済み actor から決める', () => {
 
 describe('(2) accountId は許可されたものだけ／応答の一致を確認する', () => {
   const live = {
-    api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
+    api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru', mode: 'live', data_mode: 'live',
     account: { id: 'act_111111111', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] },
     period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true },
     totals: {}, rows: [], freshness: {},
@@ -323,7 +323,7 @@ describe('(3) フラグ・停止フラグを API 側でも確認する', () => {
 describe('(4) 接続先がモックを返したらサンプル表示を貫く', () => {
   beforeEach(() => { process.env.META_READ_API_BASE = 'https://platform.test'; process.env.META_READ_API_KEY = 'k'; process.env.META_AD_ACCOUNT_IDS = 'act_700000002,act_0000000000000,act_123'; });
   const base = {
-    api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
+    api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru', mode: 'live', data_mode: 'live',
     period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true },
     totals: {}, rows: [], freshness: {},
   };
@@ -404,7 +404,7 @@ describe('(6) タイムゾーン・通貨・行数上限', () => {
     process.env.META_READ_API_KEY = 'k';
     process.env.META_AD_ACCOUNT_IDS = 'act_700000002';
     installFetchMock({
-      api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
+      api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru', mode: 'live', data_mode: 'live',
       account: { id: 'act_700000002', name: 'x', currency: 'AUD', timezone: 'Australia/Sydney', store_mapping: [] },
       period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true },
       totals: {}, rows: [], freshness: {},
@@ -427,7 +427,7 @@ describe('🔴 実Credentialがあっても、許可リストが空/不正なら
   beforeEach(() => {
     process.env.META_READ_API_BASE = 'https://platform.test';
     process.env.META_READ_API_KEY = 'service-key-not-a-real-secret';
-    installFetchMock({ api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
+    installFetchMock({ api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru', mode: 'live', data_mode: 'live',
       account: { id: 'act_123', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] },
       period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true }, totals: {}, rows: [], freshness: {} });
   });

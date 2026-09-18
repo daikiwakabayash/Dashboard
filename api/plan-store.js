@@ -36,6 +36,7 @@ import { mergeAppointments, mergeDismissed, flatten as soflFlatten } from '../li
 import { ALLOWANCE_LOG_KEY, ALLOWANCE_PROD_KEY, ALLOWANCE_LOG_CAP, makeEntry as makeAllowanceEntry, mergeSubmissions, isDuplicateSubmit, mergeProductivity, bumpProductivity } from '../lib/allowance-store.js';
 import { BOARD_READS_KEY, normalizeReads, mergeReads, bumpRead, versionOf, isStale, upsertPost, upsertComment } from '../lib/board-store.js';
 import { normalizeIntro, canEditProfile } from '../lib/profile-fields.js';
+import { normalizeMeta as newsMeta, audienceFor as newsAudienceFor } from '../lib/news-post.js';
 import { prKey as boardPrKey, normalizePr, markRead as boardMarkRead, markAck as boardMarkAck,
          postStatus as boardPostStatus, canSeeDetail as boardCanSeeDetail, outOfAudience as boardOutOfAudience } from '../lib/board-status.js';
 // ── Command Center（Phase 0〜2）。既存の type= には一切触れない追加のみ ──
@@ -2162,7 +2163,8 @@ export default async function handler(req, res) {
         const post = (Array.isArray(cur0.posts) ? cur0.posts : []).find(x => x && String(x.id) === pid);
         if (!post) return res.status(404).json({ ok: false, error: 'not_found' });
         const pr = (await blobGet(boardPrKey(pid), hasKV, hasSB, gas)) || {};
-        const audience = Array.isArray(body.audience) ? body.audience.slice(0, 5000) : [];
+        // ⚠️ 分母は**その投稿の公開対象**。全員向けでなければ、対象の店舗の人だけを数える。
+        const audience = newsAudienceFor(post, Array.isArray(body.audience) ? body.audience.slice(0, 5000) : []);
         const st = boardPostStatus(post, audience, pr);
         const detail = boardCanSeeDetail(chatActor, post);
         return res.status(200).json({
@@ -2255,6 +2257,9 @@ export default async function handler(req, res) {
           files: (Array.isArray(p.files) ? p.files : []).slice(0, 8).map(f => ({ id: String(f.id || ''), name: String(f.name || 'file').slice(0, 120), type: String(f.type || ''), size: Number(f.size) || 0 })),
           videoUrl: (() => { const v = videoEmbed(p.videoUrl); return v ? String(p.videoUrl).slice(0, 500) : ''; })(),
           pinned: false,
+          // ニュースの項目（カテゴリー／公開対象／確認要否／期限／ピックアップ／表紙）。
+          // ⚠️ 既存の投稿は項目が無いままでよい。ここで既定値を過去の投稿に書き込まない。
+          ...newsMeta(p),
           createdAt: new Date().toISOString(),
         };
         if (!upsertPost(posts, rec, BOARD_POST_CAP).added) {  // 再送＝既にある。通知も送り直さない
@@ -2292,6 +2297,14 @@ export default async function handler(req, res) {
       }
       if (action === 'pin' && body.id) {
         await savePosts(posts.map(p => p && p.id === String(body.id) ? { ...p, pinned: !!body.pinned } : p));
+        return res.status(200).json({ ok: true });
+      }
+      // ピックアップの切り替え（本部の管理者・投稿者）。記事の内容には触れない。
+      if (action === 'feature' && body.id) {
+        const target = posts.find(x => x && String(x.id) === String(body.id));
+        if (!target) return res.status(404).json({ ok: false, error: 'not_found' });
+        if (!boardCanSeeDetail(chatActor, target)) return res.status(403).json({ ok: false, error: 'forbidden', code: 'hq_or_author' });
+        await savePosts(posts.map(x => x && x.id === String(body.id) ? { ...x, featured: !!body.featured } : x));
         return res.status(200).json({ ok: true });
       }
       if (action === 'react' && body.id && body.emoji && body.staffId) {

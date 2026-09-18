@@ -154,3 +154,57 @@ describe('状況一覧', () => {
     expect(res.body.people.read[0].at).toBeGreaterThan(0);
   });
 });
+
+describe('ニュースの新しい項目（カテゴリー・公開対象・確認要否・期限・ピックアップ・表紙）', () => {
+  const post = (over = {}) => call({ method: 'POST', headers: ROOT(), body: { type: 'board', action: 'post',
+    post: { clientId: `c${Math.random()}`, authorId: 'hq1', authorName: '本部', title: 'T', text: '本文', ...over } } });
+  const posts = () => { try { return JSON.parse(store.get(BOARD) || '{}').posts || []; } catch { return []; } };
+
+  it('項目が保存される', async () => {
+    const r = await post({ category: 'event', needsAck: true, dueDate: '2026-10-01', featured: true,
+      imgIds: ['i1', 'i2'], coverImgId: 'i2', audience: { kind: 'shops', shops: ['NAORU 鶴見院'] } });
+    expect(r.body.ok).toBe(true);
+    const p = posts().find(x => x.title === 'T');
+    expect(p).toMatchObject({ category: 'event', needsAck: true, dueDate: '2026-10-01', featured: true, coverImgId: 'i2' });
+    expect(p.audience).toEqual({ kind: 'shops', shops: ['NAORU 鶴見院'] });
+  });
+
+  it('⚠️ 既存の投稿には既定値を書き込まない', async () => {
+    const before = posts().find(x => x.id === 'p1');
+    expect(before.category).toBeUndefined();
+    await post({ category: 'rule' });
+    expect(posts().find(x => x.id === 'p1').category).toBeUndefined();
+  });
+
+  it('知らないカテゴリー・不正な期限・添付に無い表紙は落とす', async () => {
+    await post({ title: 'T2', category: 'zzz', dueDate: 'あした', imgIds: ['i1'], coverImgId: 'nope' });
+    const p = posts().find(x => x.title === 'T2');
+    expect(p).toMatchObject({ category: '', dueDate: '', coverImgId: '' });
+  });
+
+  it('⚠️ 状況一覧の分母は公開対象に合わせる', async () => {
+    await post({ title: 'T3', audience: { kind: 'shops', shops: ['NAORU 鶴見院'] } });
+    const id = posts().find(x => x.title === 'T3').id;
+    const res = await call({ method: 'POST', headers: ROOT(), body: { type: 'board', action: 'status', id,
+      audience: [{ id: 'a', name: '青木', shop: 'NAORU 鶴見院' }, { id: 'b', name: '石田', shop: 'NAORU 仙台院' }] } });
+    expect(res.body.total).toBe(1);                       // 鶴見の1人だけ
+    expect(res.body.people.unread.map(p => p.name)).toEqual(['青木']);
+  });
+
+  it('全員向けの記事は全員が分母', async () => {
+    const res = await call({ method: 'POST', headers: ROOT(), body: { type: 'board', action: 'status', id: 'p1',
+      audience: [{ id: 'a', name: '青木', shop: 'X' }, { id: 'b', name: '石田', shop: 'Y' }] } });
+    expect(res.body.total).toBe(2);
+  });
+
+  it('ピックアップを後から切り替えられる（本部・投稿者のみ）', async () => {
+    const ok = await call({ method: 'POST', headers: ROOT(), body: { type: 'board', action: 'feature', id: 'p1', featured: true } });
+    expect(ok.body.ok).toBe(true);
+    expect(posts().find(x => x.id === 'p1').featured).toBe(true);
+  });
+
+  it('⚠️ 権限がなければピックアップを変えられない', async () => {
+    const res = await call({ method: 'POST', headers: { host: 'test.local' }, body: { type: 'board', action: 'feature', id: 'p1', featured: true } });
+    expect([403]).toContain(res.statusCode);
+  });
+});

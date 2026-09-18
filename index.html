@@ -3408,6 +3408,11 @@
                     ((chatData.dir && chatData.dir.staff) || []).forEach(s => add(s.id, s.name));
                 }
                 if (room.kind !== 'dm') out.unshift({ id: '__all__', name: '全員' });
+                // 🤖 AI を候補の先頭へ。**挿入されるのは `@AI`** で、これは
+                // 既存の起動条件 /[@＠]\s*ai\b/i と同じ。動きは「AIに質問」ボタンと同一で、
+                // 出せる範囲が広がるわけではない（同じ経路・同じ資料）。
+                out.unshift({ id: '__ai__', name: 'AI', label: '🤖 AI（NAORUアシスタント）',
+                    hint: 'この内容をAIに質問' });
                 return out;
             };
             const CHAT_STAMPS = ['👍', '🎉', '🔥', '❤️‍🔥', '❤️', '☺️', '😊', '🥺', '😭', '😂', '🤩', '👏', '✨', '🙌', '💪', '🙇‍♂️'];
@@ -13050,7 +13055,9 @@
                                 const q = chatParseMention(v.slice(0, caret));
                                 if (q == null) { setChatMention(null); return; }
                                 const ql = q.toLowerCase();
-                                const list = chatMentionCandidates(activeRoom).filter(c => !q || String(c.name).toLowerCase().includes(ql)).slice(0, 8);
+                                // 表示名（label）でも絞り込めるようにする。「アシ」「NAORU」でもAIに辿り着ける。
+                                const list = chatMentionCandidates(activeRoom)
+                                    .filter(c => !q || `${c.name} ${c.label || ''}`.toLowerCase().includes(ql)).slice(0, 8);
                                 setChatMention(list.length ? { query: q, list, index: 0 } : null);
                             };
                             // 候補を選んで @名前 を挿入
@@ -13198,10 +13205,13 @@
                                                                     <div className="px-3 py-1.5 text-[11px] font-bold text-[#98A2B3] border-b border-[#F2F4F7]">メンションする相手</div>
                                                                     {chatMention.list.map((c, i) => (
                                                                         <button key={c.id} onMouseDown={e => { e.preventDefault(); chatPickMention(c.name); }} className={`w-full flex items-center gap-2.5 px-3 py-2 text-left transition ${i === chatMention.index ? 'bg-brand-50' : 'hover:bg-[#F8F9FB]'}`}>
-                                                                            {c.id === '__all__'
+                                                                            {c.id === '__ai__'
+                                                                                ? <span className="w-7 h-7 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center text-[14px] shrink-0">🤖</span>
+                                                                                : c.id === '__all__'
                                                                                 ? <span className="w-7 h-7 rounded-full bg-brand-100 text-brand-600 flex items-center justify-center text-[13px] font-bold shrink-0">@</span>
                                                                                 : <span className={`w-7 h-7 rounded-full flex items-center justify-center text-[12px] font-semibold shrink-0 ${chatAvatarColor(c.name)}`}>{(c.name || '？').trim().charAt(0)}</span>}
-                                                                            <span className="text-[14px] text-[#111827] font-medium truncate">{c.name}</span>
+                                                                            <span className="text-[14px] text-[#111827] font-medium truncate">{c.label || c.name}</span>
+                                                                            {c.hint && <span className="ml-auto text-[11px] text-indigo-500 shrink-0">{c.hint}</span>}
                                                                             {c.id === '__all__' && <span className="ml-auto text-[11px] text-[#98A2B3]">このルーム全員</span>}
                                                                         </button>
                                                                     ))}

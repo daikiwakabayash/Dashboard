@@ -100,6 +100,23 @@ npx vitest run tests/chat-rooms.test.js    # 40 passed
 
 ---
 
+## 4.5 追加確認（A〜E・2026-09-18 反映）
+
+①からの指摘5点を反映し、**「実行してよい項目」と「保留」を plan 上で必ず区別**するようにしました。
+
+| # | 指摘 | 対応 |
+|---|---|---|
+| A | 権限の空配列 | `staffStoreScope()` を追加。`accounts[id].storeIds` が**配列として存在し `complete!==false`** なら空配列でも確定情報として扱い、名簿（`shop_ids`/`shop_id`）へ戻さない。項目欠落・`complete:false` のときだけ名簿へフォールバックし、`member_scope_unknown` として要確認に出す |
+| B | イベント名簿が空・不完全 | 名簿で**在籍を確認できた人だけ**追加。確認できない参加者は `event_member_held` として保留。1人も確認できない新規 Room は**作成そのものを保留** |
+| C | 完全性フラグ欠落 | `shopsComplete` / `staffsComplete` が **未指定なら「全件取得済み」と推定しない**。削除・アーカイブを保留（`no_destructive` / `no_remove`）。追加・紐付けは従来どおり実行候補 |
+| D | 要確認と実行候補の混在 | 全項目に `apply: 'ready' \| 'hold'` を付与。同名店舗などの要確認対象は `hold`。`readyItems()` / `heldItems()` で分離し、`applyPlanForTest()` は **ready のみ**適用。要確認になった Room のメンバー計算もしない |
+| E | tenant とスコープ | `tenantId` で rooms/shops/staffs/events を分離（未設定は対象テナント扱い＝既存データ互換）。`scope.storeIds` を渡すと**取得対象外の店舗を閉店と解釈しない**（`out_of_scope` で保留） |
+
+`applyPlanForTest()` は**テスト/プレビュー専用**で、本番の適用エンジンとして使わない旨をコードコメントにも明記しました
+（競合制御・権限確認・監査・承認を行わないため。適用は既存の `ensureRooms` / `setMembers` / `setRoom` ＋①の承認・監査を通す）。
+
+追加シナリオ（CLI / 画面で確認可）: `noaccess`（A）／`unknownflags`（C）／`partialscope`（E）／`tenants`（E）
+
 ## 5. ①（共通基盤担当）への引継ぎ事項
 
 ### A. 基準 commit

@@ -92,7 +92,7 @@
 </div>
 
 <script type="module">
-import { planChatSync, summarizePlan, isNoop } from './lib/chat-rooms.js';
+import { planChatSync, summarizePlan, isNoop, readyItems, heldItems } from './lib/chat-rooms.js';
 import { SCENARIOS } from './scripts/chat-sync-demo.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -111,6 +111,8 @@ function section(title, items, render) {
 function render(input) {
   const plan = planChatSync(input);
   const s = summarizePlan(plan);
+  const R = readyItems(plan);
+  const H = heldItems(plan);
   const problems = plan.problems.length
     ? `<div class="sec"><h3>入力の問題</h3>${list(plan.problems, p =>
         `<li class="row"><span class="t ${p.level === 'abort' ? 'del' : 'rev'}">${p.level === 'abort' ? '中止' : '保留'}</span>
@@ -133,22 +135,25 @@ function render(input) {
       <span class="stat">アーカイブ候補<b>${s.archives}</b></span>
       <span class="stat">追加予定メンバー<b>${s.addPeople}</b></span>
       <span class="stat">除外予定メンバー<b>${s.removePeople}</b></span>
+      <span class="stat">保留<b>${s.heldItems}</b></span>
       <span class="stat">要確認<b>${s.reviews}</b></span>
     </div>
-    ${isNoop(plan) ? '<p class="sub">✅ 変更はありません（同じ同期を繰り返しても増えません）</p>' : ''}
+    ${isNoop(plan) ? '<p class="sub">✅ 実行予定はありません（同じ同期を繰り返しても増えません）</p>' : ''}
     ${problems}
-    ${section('作成予定 Room', plan.create, c => `<li class="row"><span class="t add">作成</span>
+    ${section('作成予定 Room', R.create, c => `<li class="row"><span class="t add">作成</span>
       <span class="who">${esc(c.roomId)}</span> <span class="why">kind=${esc(c.kind)} / 名前=${esc(c.name)}${c.storeId ? ` / storeId=${esc(c.storeId)}` : ''}${c.eventId ? ` / eventId=${esc(c.eventId)}` : ''} — ${esc(c.reason)}</span></li>`)}
-    ${section('ID 紐付け予定（既存 Room の ID は変えません）', plan.bind, b => `<li class="row"><span class="t bind">紐付け</span>
+    ${section('ID 紐付け予定（既存 Room の ID は変えません）', R.bind, b => `<li class="row"><span class="t bind">紐付け</span>
       <span class="who">${esc(b.roomId)}</span> <span class="why">→ ${b.storeId ? `storeId=${esc(b.storeId)}（${esc(b.shopName || '')}）` : `eventId=${esc(b.eventId)}`} / 根拠=${esc(b.matchedBy)}</span></li>`)}
-    ${section('表示名の更新（Room は維持）', plan.rename, r => `<li class="row"><span class="t bind">改名</span>
+    ${section('表示名の更新（Room は維持）', R.rename, r => `<li class="row"><span class="t bind">改名</span>
       <span class="who">${esc(r.roomId)}</span> <span class="why">「${esc(r.from)}」→「${esc(r.to)}」</span></li>`)}
-    ${section('アーカイブ候補（削除はしません）', plan.archive, a => `<li class="row"><span class="t arc">保管</span>
+    ${section('アーカイブ候補（削除はしません）', R.archive, a => `<li class="row"><span class="t arc">保管</span>
       <span class="who">${esc(a.roomId)}</span> <span class="why">${esc(a.reason)}</span></li>`)}
-    ${section('追加予定メンバー', plan.memberAdd, m => `<li class="row"><span class="t add">追加</span>
+    ${section('追加予定メンバー', R.memberAdd, m => `<li class="row"><span class="t add">追加</span>
       <span class="who">${esc(m.roomId)}</span> <span class="why">${esc(m.staffIds.join('、'))}（${esc(m.reason)}）</span></li>`)}
-    ${section('除外予定メンバー', plan.memberRemove, m => `<li class="row"><span class="t del">除外</span>
+    ${section('除外予定メンバー', R.memberRemove, m => `<li class="row"><span class="t del">除外</span>
       <span class="who">${esc(m.roomId)}</span> <span class="why">${esc(m.staffIds.join('、'))}（${esc(m.reason)}）</span></li>`)}
+    ${section('保留（実行しません・人の確認が要る）', H, h => `<li class="row"><span class="t rev">保留</span>
+      <span class="who">[${esc(h.kind)}] ${esc(h.roomId || '')}</span> <span class="why">${esc(h.holdReason || h.reason)}${h.staffIds ? ` → ${esc(h.staffIds.join('、'))}` : ''}</span></li>`)}
     ${section('判断できない項目（自動では触りません）', plan.review, r => `<li class="row"><span class="t rev">要確認</span>
       <span class="who">${esc(r.subject)}</span> <span class="why">${esc(r.reason)}${r.staffIds ? ` → ${esc(r.staffIds.join('、'))}` : ''}${r.candidates && r.candidates.length ? `（候補: ${r.candidates.map(c => `${esc(c.name)}#${esc(c.id)}`).join(' / ')}）` : ''}</span></li>`)}
     ${section('アクセス権限について（メンバー表示の更新とは別処理）', plan.accessNotes, n => `<li class="row"><span class="t rev">権限</span>

@@ -190,3 +190,32 @@ npm test → 48 files / 1116 passed（このブランチ）
 2. `index.html` への組み込みは①と担当箇所を合わせてから（`CHAT_SHARED_FILE_PLAN.md` の S-1 / S-2）。差分は入力欄まわりと AI 回答の描画に限定します。
 3. 本番で試すときも **本部/root のみが参加する検証ルーム**に限定し、スタッフが入っている既存ルームへは投稿・通知しません。
 4. owner / manager / staff への公開は行いません（`naoru:chat:rollout` / `cc_*` フラグは OFF のまま）。
+
+## 画面レベルの検証（`scripts/chat-ai-screen-check.mjs`）
+
+本物の `index.html` を headless Chromium で操作し、画面が送るリクエストをネットワーク越しに観測します。
+ローカルのスタブAPI（`scripts/chat-ai-screen-stub.mjs`）に対してのみ動かし、**本番には接続しません**。
+playwright はリポジトリの依存に入れていないので `npm test` には影響しません。
+
+```
+CDN_DIR=<react/react-dom/babel の置き場> OUT_DIR=<出力先> \
+PLAYWRIGHT_PATH=<...>/node_modules/playwright/index.mjs \
+node scripts/chat-ai-screen-check.mjs
+```
+
+`6361665`（同時実行の4件を修正）→ `385a42a`（再試行ボタン接続）の判定:
+
+| # | 確認 | `6361665` | **`385a42a`** |
+|---|---|---|---|
+| 1 | 失敗後に「同じ送信を再試行」が表示される | ❌ ボタンなし | ✅ |
+| 2 | クリックしても `request_id` が変わらない | ❌ 別ID | ✅ 同じID |
+| 3 | 元の質問と Room が維持される | ✅ | ✅ |
+| 4 | サーバー保存後の応答消失でも回答が増えない | ❌ +2件 | ✅ +1件 |
+| 5 | 新規送信では新しいIDになる | ✅ | ✅ |
+| 6 | 権限エラー等を再試行し続けない | ✅ | ✅ 自動再送0回・ボタンも出ない |
+| 7 | 二重クリックで送信が増えない | ✅ | ✅ 送信1回 |
+| A/B/C | ルーム名・資料タイトル・2件目の回答 | ✅ | ✅ |
+| | **合計** | 7/10 | **10/10** |
+
+スタブは質問文で失敗のしかたを切り替えます（1回だけ失敗 / 保存済みなのに応答だけ消える / 権限エラー`retryable:false`）。
+

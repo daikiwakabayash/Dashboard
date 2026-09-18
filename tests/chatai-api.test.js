@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import handler from '../api/plan-store.js';
 import { _clearBearerCache } from '../lib/actor.js';
 import { hashOwnerToken } from '../lib/settlement.js';
+import { kvEvalFake } from './helpers/kv-fake.js';
 
 // @AI 実接続。本部/root限定・検証用Roomのみ・重複防止・出典・本部確認・訂正。
 const KV = 'https://kv.test';
@@ -24,7 +25,8 @@ function installFetchMock(aiReply = { ok: true, message: '回答本文です' })
     if (u === KV) {
       const cmd = JSON.parse(opts.body);
       if (cmd[0] === 'MGET') return ok({ result: cmd.slice(1).map(k => (store.has(k) ? store.get(k) : null)) });
-      if (cmd[0] === 'EVAL') return ok({ result: 1 });
+      const fake = kvEvalFake(store, cmd);
+      if (fake) return ok(fake);
     }
     if (u.includes('/api/chat')) {
       aiCalls.push(JSON.parse(String(opts.body)));
@@ -378,5 +380,128 @@ describe('設定（検証用Room・許可FAQ）', () => {
   it('🔴 未認証は設定を変えられない', async () => {
     const res = await call({ method: 'POST', body: { type: 'chatai', action: 'config', config: { trialRooms: ['x'] } } });
     expect(res.statusCode).toBe(403);
+  });
+});
+
+// ── 同時実行で壊れないこと（②が再現した4件）──────────────────────────
+// ⚠️ ここは **擬似KV**（tests/helpers/kv-fake.js）で、本番と同じ意味の
+//    compare-and-set / 原子的追記を再現している。実Redis・本番KVでの確認は別。
+describe('同時実行：4件の既知不具合', () => {
+  // AI生成の最中に任意の処理を割り込ませるためのフック。
+  // 生成に時間がかかる現実（数秒）を、テストでは「待たせて割り込む」で再現する。
+  const withSlowAi = (duringGeneration) => {
+    const base = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url, opts = {}) => {
+      if (String(url).includes('/api/chat')) {
+        const r = base(url, opts);
+        await duringGeneration();            // ← 生成中に割り込む
+        return r;
+      }
+      return base(url, opts);
+    });
+  };
+
+  it('🔴 (1) 同じ request_id を同時に送っても、回答は1件しかできない', async () => {
+    const [a, b] = await Promise.all([ask({ request_id: 'same' }), ask({ request_id: 'same' })]);
+    const msgs = roomMsgs('g_trial');
+    const answers = msgs.filter(m => m.fromStaffId === '__ai__');
+    expect(answers).toHaveLength(1);                       // 回答の重複なし
+    expect(msgs.filter(m => m.text === '家族施術のルールは？')).toHaveLength(1);  // 質問も1件
+    expect(Object.keys(aiStore().answers || {})).toHaveLength(1);
+    // 片方は pending / replay として返り、両方が「新規に生成した」とは言わない
+    const created = [a, b].filter(r => r.body.ok && r.body.answer_message_id && !r.body.replay);
+    expect(created.length).toBe(1);
+  });
+
+  it('🔴 (2) 別々の質問を同時に送っても、どちらの回答も消えない', async () => {
+    const [a, b] = await Promise.all([
+      ask({ request_id: 'q1', question: '家族施術のルールは？' }),
+      ask({ request_id: 'q2', question: '遅刻の扱いは？' }),
+    ]);
+    expect(a.body.ok).toBe(true);
+    expect(b.body.ok).toBe(true);
+    const st = aiStore();
+    expect(Object.keys(st.answers)).toHaveLength(2);       // 片方が消えない
+    expect(Object.keys(st.requests)).toHaveLength(2);
+    const msgs = roomMsgs('g_trial');
+    expect(msgs.filter(m => m.fromStaffId === '__ai__')).toHaveLength(2);
+    expect(msgs.filter(m => m.text === '家族施術のルールは？')).toHaveLength(1);
+    expect(msgs.filter(m => m.text === '遅刻の扱いは？')).toHaveLength(1);
+  });
+
+  it('🔴 (3) AI生成中に本部が訂正しても、回答保存で訂正が消えない', async () => {
+    // 先に1件回答を作り、その回答への訂正を「次の生成の最中」に行う
+    const first = await ask({ request_id: 'base' });
+    const aid = first.body.answer_message_id;
+    expect(aid).toBeTruthy();
+    let correctRes = null;
+    withSlowAi(async () => {
+      correctRes = await call({ method: 'POST', headers: ROOT(),
+        body: { type: 'chatai', action: 'correct', answer_message_id: aid, text: '正しくは事前申請は不要です' } });
+    });
+    const second = await ask({ request_id: 'during', question: '遅刻の扱いは？' });
+    expect(second.body.ok).toBe(true);
+    expect(correctRes.body.ok).toBe(true);
+    const st = aiStore();
+    expect((st.corrections[aid] || []).map(c => c.text)).toContain('正しくは事前申請は不要です');  // 訂正が残る
+    expect(Object.keys(st.answers)).toHaveLength(2);                                             // 回答も残る
+  });
+
+  it('🔴 (4) 生成中に cc_ai_trial を OFF にしたら、回答は投稿されない', async () => {
+    withSlowAi(async () => {
+      store.set(FLAGS, JSON.stringify({ cc_all: true, cc_ai_trial: false, cc_authz: 'off' }));
+    });
+    const res = await ask({ request_id: 'stop' });
+    expect(res.body.ok).toBe(false);
+    expect(res.body.error.code).toBe('rollout_disabled');
+    expect(roomMsgs('g_trial').filter(m => m.fromStaffId === '__ai__')).toHaveLength(0);
+    expect(Object.keys(aiStore().answers || {})).toHaveLength(0);
+    expect(aiStore().requests[Object.keys(aiStore().requests)[0]].status).toBe('failed');
+  });
+
+  it('🔴 (4) キルスイッチ（cc_all=false）でも同じく投稿されない', async () => {
+    withSlowAi(async () => {
+      store.set(FLAGS, JSON.stringify({ cc_all: false, cc_ai_trial: true, cc_authz: 'off' }));
+    });
+    const res = await ask({ request_id: 'kill' });
+    expect(res.body.error.code).toBe('rollout_disabled');
+    expect(roomMsgs('g_trial').filter(m => m.fromStaffId === '__ai__')).toHaveLength(0);
+  });
+
+  it('🔴 生成中に検証対象Roomから外されたら投稿されない', async () => {
+    withSlowAi(async () => { store.set(CFG, JSON.stringify({ trialRooms: [], allowedDocIds: ['faq1'] })); });
+    const res = await ask({ request_id: 'unroom' });
+    expect(res.body.error.code).toBe('forbidden_room');
+    expect(roomMsgs('g_trial').filter(m => m.fromStaffId === '__ai__')).toHaveLength(0);
+  });
+
+  it('🔴 期限切れで引き継がれた古い処理は、後から戻っても投稿しない', async () => {
+    // 生成中に、別の実行がこの依頼を引き継いだ（runId が変わった）状態を作る
+    withSlowAi(async () => {
+      const st = aiStore();
+      const k = Object.keys(st.requests)[0];
+      st.requests[k] = { ...st.requests[k], runId: 'someone_else' };
+      store.set(AI, JSON.stringify(st));
+    });
+    const res = await ask({ request_id: 'stale' });
+    expect(res.body.ok).toBe(false);
+    expect(res.body.error.code).toBe('superseded');
+    expect(roomMsgs('g_trial').filter(m => m.fromStaffId === '__ai__')).toHaveLength(0);
+  });
+
+  it('同じ本文でも request_id が違えば、別の新規質問として扱う', async () => {
+    await ask({ request_id: 'n1' });
+    const second = await ask({ request_id: 'n2' });
+    expect(second.body.ok).toBe(true);
+    expect(second.body.replay).toBeFalsy();
+    expect(Object.keys(aiStore().answers)).toHaveLength(2);
+  });
+
+  it('同じ request_id の再試行は、回答を増やさず同じ回答を返す（replay）', async () => {
+    const first = await ask({ request_id: 'same2' });
+    const again = await ask({ request_id: 'same2' });
+    expect(again.body.replay).toBe(true);
+    expect(again.body.answer_message_id).toBe(first.body.answer_message_id);
+    expect(Object.keys(aiStore().answers)).toHaveLength(1);
   });
 });

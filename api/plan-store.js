@@ -22,6 +22,9 @@ import {
   makeRequestRecord, buildSources, needsHqReview, wrapDocsAsData, upsertReview, appendCorrection,
   isTrialRoom, normalizeConfig as normalizeAiCfg, pickAllowedDocs,
 } from '../lib/chatai.js';
+// ②が作った「名前で選ぶ」ための組み立て。画面側で同じ判定を書き直さないよう、
+// サーバーがここで組み立てて返す（どのルーム・どの資料が対象かはサーバーが決める）。
+import { buildTrialTargets } from '../lib/chat-ai-adapter.js';
 import { videoEmbed } from '../lib/board.js';
 import { analyzeStore, couponReminderItems, buildStoreMessage } from '../lib/patrol.js';
 import { buildSearchRequest, parsePlacesResponse, reviewRequestUrl, buildLegacyReviewsRequest, parseLegacyReviews } from '../lib/places.js';
@@ -405,6 +408,13 @@ export default async function handler(req, res) {
       return Array.isArray(a) ? a : [];
     };
     const saveRoomMsgs = (rid, arr) => blobSet(CHAT_MSG_PREFIX + String(rid), Array.isArray(arr) ? arr : [], hasKV, hasSB, gas);
+    // 1件追記は **配列の差し替えをしない**。通常チャットと同じ原子的追記を使う
+    // （差し替えだと、同時に届いた別の発言を巻き込んで消す）。
+    const appendRoomMsg = async (rid, msg) => {
+      if (hasKV) { await kvAppendJson(CHAT_MSG_PREFIX + String(rid), msg, CHAT_MSG_CAP); return; }
+      const base = await getRoomMsgs(rid);
+      await saveRoomMsgs(rid, base.concat(msg).slice(-CHAT_MSG_CAP));
+    };
     // 監査は共通のものへ（新しいログは作らない）。失敗しても本処理は止めない。
     const audit = async (input) => {
       try {
@@ -412,20 +422,69 @@ export default async function handler(req, res) {
         if (built.ok && hasKV) await kvAppendJson(ccKey(AUDIT_KEY), built.entry, AUDIT_CAP);
       } catch (_) {}
     };
-    const loadAi = async () => {
-      const cur = (await blobGet(ccKey(CHATAI_STORE_KEY), hasKV, hasSB, gas)) || {};
-      return {
-        requests: (cur.requests && typeof cur.requests === 'object') ? cur.requests : {},
-        answers: (cur.answers && typeof cur.answers === 'object') ? cur.answers : {},
-        reviews: (cur.reviews && typeof cur.reviews === 'object') ? cur.reviews : {},
-        corrections: (cur.corrections && typeof cur.corrections === 'object') ? cur.corrections : {},
-      };
+    const shapeAi = (cur) => ({
+      requests: (cur && cur.requests && typeof cur.requests === 'object') ? cur.requests : {},
+      answers: (cur && cur.answers && typeof cur.answers === 'object') ? cur.answers : {},
+      reviews: (cur && cur.reviews && typeof cur.reviews === 'object') ? cur.reviews : {},
+      corrections: (cur && cur.corrections && typeof cur.corrections === 'object') ? cur.corrections : {},
+    });
+    const loadAi = async () => shapeAi(await blobGet(ccKey(CHATAI_STORE_KEY), hasKV, hasSB, gas));
+
+    // ⚠️ **スナップショットを丸ごと書き戻さない。**
+    //    読んでからAIの生成（数秒かかる）を挟んで書き戻すと、その間に入った
+    //    本部の訂正・別の質問の回答を、古い写しで上書きして消してしまう。
+    //    そこで「今のストアを読み → 差分だけ適用し → 版を照合して書く」を
+    //    掲示板と同じ compare-and-set（kvCasSet）で行う。既存の原子的処理を使い、
+    //    保存基盤は増やさない。
+    //    apply(st) は st を直接書き換えてよい。null を返せば中止（書かない）。
+    const CHATAI_CAS_TRIES = 6;
+    const mutateAi = async (apply) => {
+      for (let attempt = 0; attempt < CHATAI_CAS_TRIES; attempt++) {
+        const cur = (await blobGet(ccKey(CHATAI_STORE_KEY), hasKV, hasSB, gas)) || {};
+        const st = shapeAi(cur);
+        const outcome = apply(st);
+        if (outcome === null || outcome === undefined) return { ok: false, aborted: true };
+        if (!hasKV) {
+          // KV以外（Supabase/GAS）は版照合の手段が無い。従来どおり書くが、
+          // 直前に読み直しているぶん窓は狭い。**KVでの保証と同じとは扱わない。**
+          await blobSet(ccKey(CHATAI_STORE_KEY), st, hasKV, hasSB, gas);
+          return { ok: true, atomic: false, state: st, result: outcome };
+        }
+        const base = Number(cur._v) || 0;
+        if (await kvCasSet(ccKey(CHATAI_STORE_KEY), base, { ...st, _v: base + 1 })) {
+          return { ok: true, atomic: true, state: st, result: outcome };
+        }
+        // 誰かが先に書いた → ばらつかせて待ってから読み直す（全員同時の再試行を散らす）
+        await new Promise(r => setTimeout(r, Math.round((10 + Math.random() * 40) * (attempt + 1))));
+      }
+      return { ok: false, reason: 'conflict' };
     };
-    const saveAi = (next) => blobSet(ccKey(CHATAI_STORE_KEY), next, hasKV, hasSB, gas);
 
     // 設定の参照・更新（root/本部のみ。検証用Roomと許可FAQを人が決める）
     if (action === 'config') {
-      if (req.method === 'GET') return res.status(200).json({ ok: true, config: cfg, enabled: aiOn });
+      if (req.method === 'GET') {
+        // 画面が **IDではなく名前で選べる** よう、対象ルーム・許可資料を名前付きで返す。
+        // 対象の判定はサーバーが持つ（画面の申告を信用しない）。
+        const [roomsSrc, faqSrc] = await Promise.all([
+          blobGet(CHAT_KEY, hasKV, hasSB, gas).catch(() => null),
+          blobGet(FAQ_KEY, hasKV, hasSB, gas).catch(() => null),
+        ]);
+        const allRooms = (Array.isArray(roomsSrc && roomsSrc.rooms) ? roomsSrc.rooms : [])
+          .filter(r => canViewRoom(chatActor, r));      // 見えないルームは選択肢にも出さない
+        const names = {};
+        for (const m of (Array.isArray(roomsSrc && roomsSrc.dir && roomsSrc.dir.staff) ? roomsSrc.dir.staff : [])) {
+          if (m && m.id) names[String(m.id)] = String(m.name || '');
+        }
+        const targets = buildTrialTargets({ config: cfg, rooms: allRooms,
+          docs: Array.isArray(faqSrc && faqSrc.faqs) ? faqSrc.faqs : [], names });
+        // 設定欄で名前から選べるよう、候補も返す（登録済みのIDだけを送らせる）
+        const choices = {
+          rooms: allRooms.map(r => ({ id: String(r.id), name: String(r.name || r.id), kind: String(r.kind || '') })),
+          docs: (Array.isArray(faqSrc && faqSrc.faqs) ? faqSrc.faqs : [])
+            .map(d => ({ id: String(d.id), title: String(d.title || d.q || d.id) })),
+        };
+        return res.status(200).json({ ok: true, config: cfg, enabled: aiOn, targets, choices });
+      }
       const next = normalizeAiCfg({ ...cfg, ...(body.config || {}), updatedAt: new Date().toISOString(), updatedBy: actorId });
       await blobSet(ccKey(CHATAI_CFG_KEY), next, hasKV, hasSB, gas);
       await audit({ action: 'chatai_config', entity: 'chatai', entityId: 'config', after: next });
@@ -456,44 +515,67 @@ export default async function handler(req, res) {
       const pre = authzCan(aiActor, 'chat.ai_reply', { shop: room.shop || '', room });
       if (!pre.allow) return res.status(200).json(aiError('forbidden_room', pre.reason));
 
-      const st = await loadAi();
       const key = aiRequestKey(tenantId, actorId, input.requestId);
-      const prev = st.requests[key];
-      const kind = classifyRequest(prev, { roomId: input.roomId, qfp: makeRequestRecord(input, { tenantId, actorId }).qfp });
-      if (kind === 'conflict') return res.status(200).json(aiError('request_conflict'));
-      if (kind === 'replay') {
-        const ans = st.answers[prev.answerMessageId] || {};
-        return res.status(200).json({ ok: true, replay: true,
-          question_message_id: prev.questionMessageId, answer_message_id: prev.answerMessageId,
-          room_id: prev.roomId, body: ans.body || '', mode: ans.mode || 'sample',
-          sources: ans.sources || { verification: 'none', verified: [], candidates: [] },
-          hq_review: st.reviews[prev.questionMessageId] || { status: 'none', notified: false, channel: 'not_connected' } });
-      }
-      if (kind === 'pending' && !isStalePending(prev)) {
-        return res.status(200).json({ ok: true, status: 'pending',
-          question_message_id: prev.questionMessageId || '', answer_message_id: '', room_id: prev.roomId });
-      }
+      const qfp = makeRequestRecord(input, { tenantId, actorId }).qfp;
 
       // 質問を先に確定させる（AIが失敗しても質問は失われない）。
       // 既に投稿済みの質問IDが渡されていれば**新しく作らない**（2件にしない）。
+      // ⚠️ 追記は配列の丸ごと差し替えではなく kvAppendJson（既存の原子的追記）で行う。
+      //    差し替えだと、同時に投稿された別の発言を巻き込んで消す。
       const msgs = await getRoomMsgs(input.roomId);
       let qMsgId = '';
+      let pendingQuestion = null;
       const claimed = input.questionMessageId && msgs.find(m => m && String(m.id) === input.questionMessageId);
       if (claimed) {
         // 渡された質問IDが本当にこのルームの、AI以外の投稿かを確認する
         if (String(claimed.fromStaffId) === AI_STAFF_ID) return res.status(200).json(aiError('ai_message_source'));
         qMsgId = String(claimed.id);
       } else {
-        const qm = { id: genId('m'), roomId: input.roomId, fromStaffId: actorId, fromName: String(chatActor.name || '本部'),
+        pendingQuestion = { id: genId('m'), roomId: input.roomId, fromStaffId: actorId, fromName: String(chatActor.name || '本部'),
           fromShop: '', text: input.question, imgIds: [], links: [], mentions: [], createdAt: new Date().toISOString() };
-        await saveRoomMsgs(input.roomId, msgs.concat(qm).slice(-CHAT_MSG_CAP));
-        qMsgId = qm.id;
+        qMsgId = pendingQuestion.id;
       }
 
-      const rec = makeRequestRecord(input, { tenantId, actorId });
-      rec.questionMessageId = qMsgId;
-      st.requests[key] = rec;
-      await saveAi(st);                           // pending を永続化（再起動・複数プロセスでも重複しない）
+      // 🔴 受付は **読んで判定してから書く** のではなく、版を照合して1手で確定させる。
+      //    そうしないと、同じ request_id の2本が両方「まだ無い」と判定してから
+      //    両方書き込み、回答が2件できてしまう（判定と書き込みの間の窓）。
+      //    runId は「この実行が最新の担当か」を後で確かめるための印。
+      const runId = genId('run');
+      let decided = null;
+      const claim = await mutateAi((st) => {
+        const prev = st.requests[key];
+        const kind = classifyRequest(prev, { roomId: input.roomId, qfp });
+        if (kind === 'conflict') { decided = { type: 'conflict' }; return null; }
+        if (kind === 'replay') {
+          const ans = st.answers[prev.answerMessageId] || {};
+          decided = { type: 'replay', prev, ans, review: st.reviews[prev.questionMessageId] };
+          return null;
+        }
+        if (kind === 'pending' && !isStalePending(prev)) { decided = { type: 'pending', prev }; return null; }
+        const rec = makeRequestRecord(input, { tenantId, actorId });
+        rec.questionMessageId = qMsgId;
+        rec.runId = runId;
+        st.requests[key] = rec;
+        decided = { type: 'claimed', rec };
+        return rec;
+      });
+      if (decided && decided.type === 'conflict') return res.status(200).json(aiError('request_conflict'));
+      if (decided && decided.type === 'replay') {
+        const { prev, ans } = decided;
+        return res.status(200).json({ ok: true, replay: true,
+          question_message_id: prev.questionMessageId, answer_message_id: prev.answerMessageId,
+          room_id: prev.roomId, body: ans.body || '', mode: ans.mode || 'sample',
+          sources: ans.sources || { verification: 'none', verified: [], candidates: [] },
+          hq_review: decided.review || { status: 'none', notified: false, channel: 'not_connected' } });
+      }
+      if (decided && decided.type === 'pending') {
+        return res.status(200).json({ ok: true, status: 'pending',
+          question_message_id: decided.prev.questionMessageId || '', answer_message_id: '', room_id: decided.prev.roomId });
+      }
+      if (!claim.ok) return res.status(200).json(aiError('busy_retry'));
+
+      // 受付が取れてから質問を投稿する（取れなかった実行が質問だけ増やさない）
+      if (pendingQuestion) await appendRoomMsg(input.roomId, pendingQuestion);
 
       // 許可済みFAQだけを資料として渡す（許可リストが空なら資料なし）
       const faqStore = (await blobGet(FAQ_KEY, hasKV, hasSB, gas).catch(() => null)) || {};
@@ -525,9 +607,13 @@ export default async function handler(req, res) {
           mode = 'sample';
         }
       } catch (e) {
-        rec.status = 'failed';
-        st.requests[key] = rec;
-        await saveAi(st);                          // 質問は残る。下書きも失わない
+        // 質問は残る。下書きも失わない。**自分が担当のときだけ** 失敗として記録する。
+        await mutateAi((st) => {
+          const cur = st.requests[key];
+          if (!cur || cur.runId !== runId) return null;
+          st.requests[key] = { ...cur, status: 'failed' };
+          return true;
+        });
         return res.status(200).json(aiError(e && e.code === 'rate_limited' ? 'rate_limited' : 'upstream_failed'));
       }
 
@@ -535,34 +621,75 @@ export default async function handler(req, res) {
       // mock は決して server_verified を名乗らない
       if (mode !== 'live') sources.verification = sources.verified.length ? 'unverified' : 'none';
 
-      // 保存/配信直前にもう一度認可（生成中に権限が変わっていないか）
-      const roomNow = roomOf(input.roomId);
+      // 🔴 配信直前に **停止状態・対象Room・依頼者権限を取り直す**。
+      //    生成には数秒かかる。その間にキルスイッチやフラグを OFF にした、
+      //    ルームを検証対象から外した、依頼者の権限が変わった――どれも
+      //    「もう出してはいけない」状態であり、生成開始時の判断では守れない。
+      //    フラグは生成開始時の aiOn を使い回さず、必ず読み直す。
+      const [flagsNow, cfgNow, roomsNow] = await Promise.all([
+        blobGet(ccKey(FLAGS_KEY), hasKV, hasSB, gas).catch(() => null),
+        blobGet(ccKey(CHATAI_CFG_KEY), hasKV, hasSB, gas).catch(() => null),
+        blobGet(CHAT_KEY, hasKV, hasSB, gas).catch(() => null),
+      ]);
+      const onNow = (() => { const f = normalizeFlags(flagsNow); return f.cc_all !== false && f.cc_ai_trial === true; })();
+      const roomNow = (Array.isArray(roomsNow && roomsNow.rooms) ? roomsNow.rooms : roomsAll)
+        .find(r => r && String(r.id) === String(input.roomId)) || null;
       const post = roomNow ? authzCan(aiActor, 'chat.ai_reply', { shop: roomNow.shop || '', room: roomNow }) : { allow: false };
-      if (!roomNow || !post.allow || !isTrialRoom(normalizeAiCfg(await blobGet(ccKey(CHATAI_CFG_KEY), hasKV, hasSB, gas).catch(() => null)), input.roomId)) {
-        rec.status = 'failed'; st.requests[key] = rec; await saveAi(st);
-        return res.status(200).json(aiError('forbidden_room', '配信直前の確認で権限がありませんでした'));
+      // 依頼者自身がまだそのルームを見られるか（依頼後に外された人の代わりに投稿しない）
+      const askerStillAllowed = !!roomNow && canViewRoom(chatActor, roomNow);
+      const stopped = !onNow ? 'rollout_disabled' : null;
+      const blocked = stopped
+        || (!roomNow || !post.allow || !isTrialRoom(normalizeAiCfg(cfgNow), input.roomId) || !askerStillAllowed
+            ? 'forbidden_room' : null);
+      if (blocked) {
+        await mutateAi((st) => {
+          const cur = st.requests[key];
+          if (!cur || cur.runId !== runId) return null;      // 既に別の実行が確定させている
+          st.requests[key] = { ...cur, status: 'failed', stoppedReason: blocked };
+          return true;
+        });
+        return res.status(200).json(blocked === 'rollout_disabled'
+          ? aiError('rollout_disabled', '配信直前の確認で停止中だったため、回答を投稿していません')
+          : aiError('forbidden_room', '配信直前の確認で権限がありませんでした'));
       }
 
       const aMsg = { id: genId('a'), roomId: input.roomId, fromStaffId: AI_STAFF_ID, fromName: AI_NAME,
         fromShop: '', text: answerText, imgIds: [], links: [], mentions: [], createdAt: new Date().toISOString(),
         ai: { mode, verification: sources.verification, requestId: input.requestId } };
-      const cur2 = await getRoomMsgs(input.roomId);
-      await saveRoomMsgs(input.roomId, cur2.concat(aMsg).slice(-CHAT_MSG_CAP));
 
-      rec.status = 'done'; rec.answerMessageId = aMsg.id;
-      st.requests[key] = rec;
-      st.answers[aMsg.id] = { body: answerText, mode, sources, roomId: input.roomId, tenantId,
-        questionMessageId: qMsgId, createdAt: aMsg.createdAt };
+      // 🔴 先に「この実行がまだ担当か」を版照合つきで確定させ、**その後で**投稿する。
+      //    期限切れ（TTL超過）で別の実行に引き継がれた古い処理が、後から戻ってきて
+      //    投稿してしまうのを防ぐ。確定できなければ何も投稿しない。
+      let answerState = null;
+      const commit = await mutateAi((st) => {
+        const cur = st.requests[key];
+        if (!cur || cur.runId !== runId || cur.status !== 'pending') return null;   // 引き継がれた/停止済み
+        st.requests[key] = { ...cur, status: 'done', answerMessageId: aMsg.id };
+        st.answers[aMsg.id] = { body: answerText, mode, sources, roomId: input.roomId, tenantId,
+          questionMessageId: qMsgId, createdAt: aMsg.createdAt };
+        answerState = st;
+        return true;
+      });
+      if (!commit.ok) {
+        return res.status(200).json(commit.aborted
+          ? aiError('superseded', 'この依頼は別の処理が引き継いだため、回答を投稿していません')
+          : aiError('busy_retry'));
+      }
+      await appendRoomMsg(input.roomId, aMsg);
+      const rec = answerState.requests[key];
+      const st = answerState;
 
       // 根拠が無い／未検証なら本部確認へ回す（同じ質問につき1件）
       let hq = { status: 'none', request_id: null, notified: false, channel: 'not_connected' };
       if (needsHqReview(sources, answerText)) {
-        const up = upsertReview(st.reviews, { tenantId, roomId: input.roomId, questionMessageId: qMsgId,
-          answerMessageId: aMsg.id, requestedBy: actorId, notified: false, channel: 'not_connected' });
-        st.reviews = up.map;
-        hq = { status: up.review.status, request_id: up.review.id, notified: up.review.notified, channel: up.review.channel };
+        await mutateAi((st) => {
+          const up = upsertReview(st.reviews, { tenantId, roomId: input.roomId, questionMessageId: qMsgId,
+            answerMessageId: aMsg.id, requestedBy: actorId, notified: false, channel: 'not_connected' });
+          st.reviews = up.map;
+          hq = { status: up.review.status, request_id: up.review.id, notified: up.review.notified, channel: up.review.channel };
+          return true;
+        });
       }
-      await saveAi(st);
 
       // 共通の Agent Activity・監査へ接続（新しいログは作らない）
       try {
@@ -585,20 +712,25 @@ export default async function handler(req, res) {
       const qid = String(body.question_message_id || '').slice(0, 80);
       const aid = String(body.answer_message_id || '').slice(0, 80);
       if (!qid && !aid) return res.status(200).json(aiError('invalid_request'));
-      const st = await loadAi();
-      const ans = st.answers[aid];
+      const pre = await loadAi();
+      const preAns = pre.answers[aid];
       // 参照権限を都度確認（保存済みでも、いま見てよいかを確かめる）
-      const rid = (ans && ans.roomId) || String(body.room_id || '');
+      const rid = (preAns && preAns.roomId) || String(body.room_id || '');
       const room = roomOf(rid);
       if (!room || !canViewRoom(chatActor, room)) return res.status(200).json(aiError('forbidden_room'));
-      if (ans && ans.tenantId && ans.tenantId !== tenantId) return res.status(200).json(aiError('tenant_mismatch'));
-      const up = upsertReview(st.reviews, { tenantId, roomId: rid, questionMessageId: qid, answerMessageId: aid,
-        requestedBy: actorId, notified: false, channel: 'not_connected' });
-      st.reviews = up.map;
-      await saveAi(st);
-      await audit({ action: 'chatai_hq_review', entity: 'chatai', entityId: qid || aid, after: { created: up.created } });
-      return res.status(200).json({ ok: true, created: up.created,
-        hq_review: { status: up.review.status, request_id: up.review.id, notified: up.review.notified, channel: up.review.channel } });
+      if (preAns && preAns.tenantId && preAns.tenantId !== tenantId) return res.status(200).json(aiError('tenant_mismatch'));
+      // 依頼の作成は版照合つきで行う（生成中の回答保存と踏み合わない）
+      let review = null, created = false;
+      const done = await mutateAi((st) => {
+        const up = upsertReview(st.reviews, { tenantId, roomId: rid, questionMessageId: qid, answerMessageId: aid,
+          requestedBy: actorId, notified: false, channel: 'not_connected' });
+        st.reviews = up.map; review = up.review; created = up.created;
+        return true;
+      });
+      if (!done.ok) return res.status(200).json(aiError('busy_retry'));
+      await audit({ action: 'chatai_hq_review', entity: 'chatai', entityId: qid || aid, after: { created } });
+      return res.status(200).json({ ok: true, created,
+        hq_review: { status: review.status, request_id: review.id, notified: review.notified, channel: review.channel } });
     }
 
     // 本部による訂正（元回答は残して追記）
@@ -606,21 +738,31 @@ export default async function handler(req, res) {
       const aid = String(body.answer_message_id || '').slice(0, 80);
       const text = String(body.text || '').slice(0, 4000);
       if (!aid || !text.trim()) return res.status(200).json(aiError('invalid_request'));
-      const st = await loadAi();
-      const ans = st.answers[aid];
-      if (!ans) return res.status(200).json(aiError('invalid_request'));
-      const room = roomOf(ans.roomId);
+      const pre = await loadAi();
+      const preAns = pre.answers[aid];
+      if (!preAns) return res.status(200).json(aiError('invalid_request'));
+      const room = roomOf(preAns.roomId);
       if (!room || !canViewRoom(chatActor, room)) return res.status(200).json(aiError('forbidden_room'));
-      if (ans.tenantId && ans.tenantId !== tenantId) return res.status(200).json(aiError('tenant_mismatch'));
-      const ap = appendCorrection(st.corrections, { answerMessageId: aid, text,
-        byId: actorId, byName: String(chatActor.name || '本部') });
-      if (!ap.added) return res.status(200).json(aiError('invalid_request'));
-      st.corrections = ap.map;
-      // 依頼が残っていれば解決済みにする
-      if (ans.questionMessageId && st.reviews[ans.questionMessageId]) {
-        st.reviews[ans.questionMessageId] = { ...st.reviews[ans.questionMessageId], status: 'resolved', resolvedAt: new Date().toISOString(), resolvedBy: actorId };
-      }
-      await saveAi(st);
+      if (preAns.tenantId && preAns.tenantId !== tenantId) return res.status(200).json(aiError('tenant_mismatch'));
+      // 🔴 訂正は **版照合つきで追記**する。丸ごと書き戻すと、生成中だった回答の
+      //    保存とぶつかって、どちらかが黙って消える。
+      let correction = null, invalid = false;
+      const done = await mutateAi((st) => {
+        const ans = st.answers[aid];
+        if (!ans) { invalid = true; return null; }
+        const ap = appendCorrection(st.corrections, { answerMessageId: aid, text,
+          byId: actorId, byName: String(chatActor.name || '本部') });
+        if (!ap.added) { invalid = true; return null; }
+        st.corrections = ap.map; correction = ap.correction;
+        // 依頼が残っていれば解決済みにする
+        if (ans.questionMessageId && st.reviews[ans.questionMessageId]) {
+          st.reviews[ans.questionMessageId] = { ...st.reviews[ans.questionMessageId], status: 'resolved', resolvedAt: new Date().toISOString(), resolvedBy: actorId };
+        }
+        return true;
+      });
+      if (invalid) return res.status(200).json(aiError('invalid_request'));
+      if (!done.ok) return res.status(200).json(aiError('busy_retry'));
+      const ap = { correction };
       await audit({ action: 'chatai_correction', entity: 'chatai', entityId: aid,
         after: { byId: actorId, knowledgeStatus: ap.correction.knowledgeStatus } });
       return res.status(200).json({ ok: true, correction: ap.correction,

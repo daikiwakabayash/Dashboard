@@ -3,6 +3,7 @@ import {
   createSession, setMode, toggleMode, setDraft, decideIntent, submit,
   applyAnswer, failAnswer, retry, requestHqReview, applyCorrection,
   setFeedback, feedbackCount, questionStatus, isAiMessage, CHAT_AI_SESSION_VERSION,
+  newRequestId,
 } from '../lib/chat-ai-session.js';
 
 const S = (over = {}) => createSession({ roomId: 'store_A', roomName: 'A院', viewerId: 's1', viewerName: '佐藤', viewerRole: 'staff', ...over });
@@ -176,5 +177,67 @@ describe('chat-ai-session: 参考になった / ならなかった', () => {
     expect(feedbackCount(st, a.answer.id)).toEqual({ up: 0, down: 0, mine: '' });
     st = setFeedback(st, { answerId: a.answer.id, verdict: 'down', by: 'other' }).state;
     expect(feedbackCount(st, a.answer.id).down).toBe(1);
+  });
+});
+
+// ── 依頼ID（request_id）の発行 ────────────────────────────────────────────
+// 決まり:
+//   ・送信のたびに新しい request_id を発行する（質問本文＋ルームから固定IDを作らない）。
+//   ・**同じ送信の再試行**だけ同じ request_id を維持する。
+//   ・別々に新規質問した場合は、本文が同じでも別の依頼として扱う（別タブでも同じ）。
+// 責任分界: 同じ request_id の重複実行防止はサーバー（①）。回答カードの重複表示防止はここ（②）。
+describe('chat-ai-session: 依頼ID（request_id）', () => {
+  const ask = (st, text) => submit(setMode(st, 'ai'), { text });
+
+  it('AI送信ごとに新しい依頼IDを発行する', () => {
+    const r = ask(S(), '家族施術のルールは？');
+    expect(r.aiRequest.requestId).toBeTruthy();
+    expect(r.posted.requestId).toBe(r.aiRequest.requestId);
+  });
+
+  it('同じ本文を別々に新規送信すると、別の依頼IDになる', () => {
+    const r1 = ask(S(), '家族施術のルールは？');
+    const r2 = ask(r1.state, '家族施術のルールは？');
+    expect(r2.aiRequest.requestId).not.toBe(r1.aiRequest.requestId);
+  });
+
+  it('同じ本文・同じルームでも依頼IDは本文から作られていない', () => {
+    const a = ask(S(), '同じ本文').aiRequest;
+    const b = ask(S(), '同じ本文').aiRequest;
+    expect(a.roomId).toBe(b.roomId);
+    expect(a.requestId).not.toBe(b.requestId);
+    expect(a.requestId).not.toContain('同じ本文');
+  });
+
+  it('同じ送信の再試行は同じ依頼IDを維持する', () => {
+    const r = ask(S(), '再試行の確認');
+    const failed = failAnswer(r.state, { questionId: r.posted.id, error: 'timeout' }).state;
+    const again = retry(failed, r.posted.id);
+    expect(again.aiRequest.requestId).toBe(r.aiRequest.requestId);
+    // 何度再試行しても変わらない
+    const failed2 = failAnswer(again.state, { questionId: r.posted.id, error: 'timeout' }).state;
+    expect(retry(failed2, r.posted.id).aiRequest.requestId).toBe(r.aiRequest.requestId);
+  });
+
+  it('別タブが同じ送信レコードを共有して再試行しても同じ依頼ID（新規質問とは区別する）', () => {
+    const r = ask(S(), '共有された同じ送信');
+    // 別タブ = 同じ質問メッセージを持つ別セッション
+    const otherTab = failAnswer({ ...S(), messages: [r.posted] }, { questionId: r.posted.id, error: 'timeout' }).state;
+    expect(retry(otherTab, r.posted.id).aiRequest.requestId).toBe(r.aiRequest.requestId);
+    // 別タブが「自分で新しく質問した」場合は別の依頼
+    expect(ask(S(), '共有された同じ送信').aiRequest.requestId).not.toBe(r.aiRequest.requestId);
+  });
+
+  it('依頼IDが欠けた質問を再試行するときは1回だけ発行して固定する', () => {
+    const q = { id: 'm_old', roomId: 'store_A', fromStaffId: 's1', text: '古い状態', askedAi: true };
+    let st = { ...S(), messages: [q] };
+    const first = retry(st, 'm_old');
+    expect(first.aiRequest.requestId).toBeTruthy();
+    const failed = failAnswer(first.state, { questionId: 'm_old', error: 'timeout' }).state;
+    expect(retry(failed, 'm_old').aiRequest.requestId).toBe(first.aiRequest.requestId);
+  });
+
+  it('newRequestId は毎回異なる', () => {
+    expect(new Set([newRequestId(), newRequestId(), newRequestId()]).size).toBe(3);
   });
 });

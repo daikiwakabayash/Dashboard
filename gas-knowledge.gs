@@ -2,18 +2,20 @@
  * ナレッジ資料の自動更新（Dashboard から1日1回呼ばれます）
  *
  * ■ 置き場所
- *   既に使っている Apps Script プロジェクト（gas-code.gs と同じもの）へ、
+ *   既に使っている Apps Script プロジェクト（PLAN_GAS_URL / SETTLEMENT_GAS_URL の接続先）へ、
  *   このファイルの中身を追加してください。新しいプロジェクトは作らなくて大丈夫です。
  *
  * ■ 入れたあとにすること
  *   「デプロイ」→「デプロイを管理」→ 既存のウェブアプリを「編集（鉛筆）」→
  *   バージョンを「新バージョン」にして「デプロイ」。
- *   ⚠️ URL は変わりません。Dashboard 側の設定変更は不要です。
+ *   ⚠️ URL は変わりません。秘密値の設定後に Dashboard も再デプロイしてください。
  *
  * ■ できること
  *   スプレッドシート・スライド・ドキュメントの「中身の文字」を返します。
  *   このスクリプトを動かしている Google アカウントが開けるファイルだけが対象です。
- *   （＝新しい認証情報や共有設定は要りません）
+ *   Apps Script のスクリプトプロパティと Vercel の Production 環境変数に、
+ *   同じ KNOWLEDGE_GAS_SECRET（32文字以上のランダム値）を設定してください。
+ *   秘密値はコードに書かず、CRON_SECRET とは別の値を使います。
  *
  * ■ しないこと
  *   ファイルを書き換えたり、消したりはしません。読むだけです。
@@ -46,12 +48,25 @@
 //   2) 関数を選んで「実行」。実行ログに中身の先頭が出れば成功。
 function testReadKnowledgeDoc_() {
   var FILE_ID = 'ここにファイルIDを貼る';
-  var r = readKnowledgeDoc_({ action: 'readKnowledgeDoc', kind: 'spreadsheet', fileId: FILE_ID });
+  var r = readKnowledgeDoc_({ action: 'readKnowledgeDoc', kind: 'spreadsheet', fileId: FILE_ID,
+    secret: PropertiesService.getScriptProperties().getProperty('KNOWLEDGE_GAS_SECRET') || '' });
   Logger.log(r.ok ? (r.title + ' / ' + String(r.body).slice(0, 300)) : ('NG: ' + r.error));
 }
 
 // Dashboard からの呼び出し口（本体）
 function readKnowledgeDoc_(body) {
+  body = body || {};
+  var expected = PropertiesService.getScriptProperties().getProperty('KNOWLEDGE_GAS_SECRET') || '';
+  var supplied = typeof body.secret === 'string' ? body.secret : '';
+  // Fail closed before opening any file. Keep the secret out of logs and responses.
+  if (expected.length < 32 || supplied.length !== expected.length) {
+    return { ok: false, error: 'unauthorized' };
+  }
+  var difference = 0;
+  for (var i = 0; i < expected.length; i++) {
+    difference |= expected.charCodeAt(i) ^ supplied.charCodeAt(i);
+  }
+  if (difference !== 0) return { ok: false, error: 'unauthorized' };
   var kind = String(body.kind || '');
   var fileId = String(body.fileId || '');
   if (!/^[A-Za-z0-9_-]{20,}$/.test(fileId)) {

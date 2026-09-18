@@ -35,6 +35,8 @@ import { recordSnapshot, computeDeltas, meoFlags, meoScore, alertWeight, jstYmd,
 import { mergeAppointments, mergeDismissed, flatten as soflFlatten } from '../lib/soflmap.js';
 import { ALLOWANCE_LOG_KEY, ALLOWANCE_PROD_KEY, ALLOWANCE_LOG_CAP, makeEntry as makeAllowanceEntry, mergeSubmissions, isDuplicateSubmit, mergeProductivity, bumpProductivity } from '../lib/allowance-store.js';
 import { BOARD_READS_KEY, normalizeReads, mergeReads, bumpRead, versionOf, isStale, upsertPost, upsertComment } from '../lib/board-store.js';
+import { prKey as boardPrKey, normalizePr, markRead as boardMarkRead, markAck as boardMarkAck,
+         postStatus as boardPostStatus, canSeeDetail as boardCanSeeDetail, outOfAudience as boardOutOfAudience } from '../lib/board-status.js';
 // ── Command Center（Phase 0〜2）。既存の type= には一切触れない追加のみ ──
 import { FLAGS_KEY, DEFAULT_FLAGS, normalizeFlags, applyFlagChange, killAll } from '../lib/ccflags.js';
 import { AUDIT_KEY, AUDIT_CAP, buildEntry as buildAuditEntry, listEntries as listAuditEntries } from '../lib/audit.js';
@@ -2120,6 +2122,54 @@ export default async function handler(req, res) {
           await blobSet(BOARD_READS_KEY, bumpRead(cur, staffId, ts), hasKV, hasSB, gas).catch(() => {});
         }
         return res.status(200).json({ ok: true });
+      }
+
+      // ══ 投稿ごとの既読・「確認しました」（閲覧・リアクション状況一覧）══
+      // 既存の未読バッジ（BOARD_READS_KEY の「最後に見た時刻」）とは**別のデータ**。
+      // 投稿1件につき小さなキー1つ（naoru:board:pr:<postId>）に持つ。
+      // ⚠️ 同時に何人も読むので、読み→書きの間に他の人の記録を消さないよう CAS で書く。
+      const BOARD_PR_TRIES = 6;
+      const boardPrMutate = async (postId, apply) => {
+        const key = boardPrKey(postId);
+        for (let i = 0; i < BOARD_PR_TRIES; i++) {
+          const cur = (await blobGet(key, hasKV, hasSB, gas)) || {};
+          const next = apply(normalizePr(cur));
+          if (!hasKV) { await blobSet(key, next, hasKV, hasSB, gas); return true; }
+          const base = Number(cur._v) || 0;
+          if (await kvCasSet(key, base, { ...next, _v: base + 1 })) return true;
+          await new Promise(r => setTimeout(r, Math.round((10 + Math.random() * 40) * (i + 1))));
+        }
+        return false;
+      };
+
+      // 記事を表示できたときだけ呼ぶ（一覧を開いただけで全件既読にしない）
+      if (req.method === 'POST' && (action === 'readpost' || action === 'ack') && body.id && body.staffId) {
+        const staffId = String(body.staffId).slice(0, 64);
+        const ts = Number(body.ts) || Date.now();
+        const ok = await boardPrMutate(String(body.id),
+          (pr) => (action === 'ack' ? boardMarkAck(pr, staffId, ts) : boardMarkRead(pr, staffId, ts)));
+        return res.status(200).json({ ok, ...(ok ? {} : { error: 'conflict' }) });
+      }
+
+      // 状況一覧: POST { action:'status', id, audience:[{id,name,shop}] }
+      // ⚠️ 人数は対象者なら見てよいが、**氏名の一覧は本部の管理者と投稿者だけ**。
+      //    ここでサーバー側でも確かめる（画面で隠すだけにしない）。
+      // ⚠️ 対象者の名簿はURLに載せずPOSTで渡す（人数が増えても切れない）。
+      if (req.method === 'POST' && action === 'status' && body.id) {
+        const pid = String(body.id).slice(0, 64);
+        const cur0 = (await blobGet(BOARD_KEY, hasKV, hasSB, gas)) || {};
+        const post = (Array.isArray(cur0.posts) ? cur0.posts : []).find(x => x && String(x.id) === pid);
+        if (!post) return res.status(404).json({ ok: false, error: 'not_found' });
+        const pr = (await blobGet(boardPrKey(pid), hasKV, hasSB, gas)) || {};
+        const audience = Array.isArray(body.audience) ? body.audience.slice(0, 5000) : [];
+        const st = boardPostStatus(post, audience, pr);
+        const detail = boardCanSeeDetail(chatActor, post);
+        return res.status(200).json({
+          ok: true, postId: pid, total: st.total, counts: st.counts, note: st.note,
+          outOfAudience: boardOutOfAudience(audience, pr).count,
+          people: detail ? st.people : undefined,   // 氏名の一覧は権限がある人にだけ
+          detail,
+        });
       }
 
       // 投稿側。旧 blob の reads は**移行のためそのまま保持**する（旧コードへ戻しても既読が消えない）。

@@ -117,10 +117,18 @@ describe('エリアの言葉も使える', () => {
   });
 });
 
-describe('やりたいこと（グループか個別か）を読み取る', () => {
-  it('「グループを組んで」でグループ', () => {
-    expect(parseRecipientText('若林と八代でグループを組んで').intent).toBe('group');
-    expect(resolveRecipients('鶴見と関内でグループを作って', CTX).intent).toBe('group');
+describe('やりたいこと（どう送るか）を読み取る', () => {
+  it('「グループを組んで／作って」＝新しくグループを作る', () => {
+    expect(parseRecipientText('若林と八代でグループを組んで').intent).toBe('new_group');
+    expect(resolveRecipients('鶴見と関内でグループを作って', CTX).intent).toBe('new_group');
+    expect(parseRecipientText('その人たちのグループを作ってほしい').intent).toBe('new_group');
+  });
+  it('「グループに送って」＝既存の店舗グループへ送る（新しく作らない）', () => {
+    expect(parseRecipientText('神奈川の店舗すべてのグループに以下の文章を送ってください').intent).toBe('store_rooms');
+    expect(parseRecipientText('鶴見院と関内院と仙台院の、この3つのグループにこれを送ってください').intent).toBe('store_rooms');
+  });
+  it('「それぞれに」＝一人ずつ個別に送る', () => {
+    expect(parseRecipientText('山田孝之、藤川球児、宮崎育美のそれぞれに以下の文を送ってほしい').intent).toBe('dm');
   });
   it('「一人ずつ」「DM」で個別', () => {
     expect(parseRecipientText('若林と八代に一人ずつ送って').intent).toBe('dm');
@@ -174,5 +182,56 @@ describe('壊れた入力でも落ちない', () => {
   });
   it('idの無い行は数えない', () => {
     expect(resolveRecipients('若林', { staff: [{ name: '若林大樹', shop: '本部' }] }).people).toEqual([]);
+  });
+});
+
+// ── オーナーから提示された、実際に使いたい4つの言い方 ──────────────────
+describe('実際に使いたい言い方', () => {
+  const S = [
+    ...STAFF,
+    { id: 'z1', name: '山田孝之', shop: 'NAORU 仙台院' },
+    { id: 'z2', name: '藤川球児', shop: 'NAORU 仙台院' },
+    { id: 'z3', name: '宮崎育美', shop: 'NAORU 博多院' },
+  ];
+  const C = { staff: S, shops: [...SHOPS, 'NAORU 仙台院'] };
+
+  it('「神奈川の店舗すべてのグループに以下の文章を送ってください」', () => {
+    const r = resolveRecipients('神奈川の店舗すべてのグループに以下の文章を送ってください', C);
+    expect(r.intent).toBe('store_rooms');                       // 新しく作らず、既存の店舗ルームへ
+    expect(r.rooms.map(x => x.name).sort()).toEqual(['NAORU 関内院', 'NAORU 鶴見院']);
+    expect(r.unknown).toEqual([]);
+    expect(canSend(r).ok).toBe(true);
+  });
+
+  it('「鶴見院と関内院と仙台院の、この3つのグループにこれを送ってください」', () => {
+    const r = resolveRecipients('鶴見院と関内院と仙台院の、この3つのグループにこれを送ってください', C);
+    expect(r.intent).toBe('store_rooms');
+    expect(r.rooms.map(x => x.name)).toEqual(['NAORU 鶴見院', 'NAORU 関内院', 'NAORU 仙台院']);
+    expect(r.unknown).toEqual([]);                              // 「この3つの」「これ」を宛先にしない
+  });
+
+  it('「山田孝之、藤川球児、宮崎育美のそれぞれに以下の文を送ってほしい」', () => {
+    const r = resolveRecipients('山田孝之、藤川球児、宮崎育美のそれぞれに以下の文を送ってほしい', C);
+    expect(r.intent).toBe('dm');                                // 一人ずつDM
+    expect(r.people.map(p => p.id).sort()).toEqual(['z1', 'z2', 'z3']);
+    expect(r.unknown).toEqual([]);                              // 「のそれぞれに」「以下の文」を拾わない
+    expect(canSend(r).ok).toBe(true);
+  });
+
+  it('「その人たちのグループを作ってほしい」＝直前の宛先で新しくグループ', () => {
+    const r = resolveRecipients('その人たちのグループを作ってほしい', C);
+    expect(r.intent).toBe('new_group');
+    expect(r.people).toEqual([]);      // 宛先は書かれていない＝画面が直前の相手を引き継ぐ
+    expect(r.unknown).toEqual([]);     // 「その人たち」を名前扱いしない
+  });
+
+  it('店舗ルームのIDは既存の付け方と同じ（新しい部屋を作らない）', () => {
+    const r = resolveRecipients('鶴見院のグループに送って', C);
+    expect(r.rooms[0].id).toBe('store_NAORU 鶴見院');
+  });
+
+  it('店舗ルーム宛でも、曖昧な言葉が残っていれば送らせない', () => {
+    const r = resolveRecipients('鶴見院と、どこかのグループに送って', C);
+    expect(canSend(r).ok).toBe(false);
   });
 });

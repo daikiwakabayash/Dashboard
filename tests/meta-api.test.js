@@ -147,8 +147,8 @@ describe('?type=meta - 未接続のとき', () => {
 
 describe('?type=meta - 接続できているとき', () => {
   const live = {
-    api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
-    account: { id: 'act_live', name: '本番アカウント', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] },
+    api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru', mode: 'live', data_mode: 'live',
+    account: { id: 'act_700000001', name: '本番アカウント', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] },
     period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true, excluded_today: true },
     totals: { spend: { value: 1000, unit: 'JPY', display: '¥1,000', quality: 'VERIFIED', source: 'Meta' } },
     rows: [], freshness: { last_success_at: '2026-09-18T03:00:00+09:00' },
@@ -156,27 +156,27 @@ describe('?type=meta - 接続できているとき', () => {
   beforeEach(() => {
     process.env.META_READ_API_BASE = 'https://platform.test';
     process.env.META_READ_API_KEY = 'service-key-not-a-real-secret';
-    process.env.META_AD_ACCOUNT_IDS = 'act_live,act_x,act_123';   // 許可リスト（空だと上流を呼ばない仕様）
+    process.env.META_AD_ACCOUNT_IDS = 'act_700000001,act_700000002,act_123';   // 許可リスト（空だと上流を呼ばない仕様）
     installFetchMock(live);
   });
 
   it('実データを返し、sample:false になる', async () => {
-    const res = await asRoot({ accountId: 'act_live' });
+    const res = await asRoot({ accountId: 'act_700000001' });
     expect(res.body.sample).toBe(false);
-    expect(res.body.data.account.id).toBe('act_live');
+    expect(res.body.data.account.id).toBe('act_700000001');
     expect(res.body.data.totals.spend.value).toBe(1000);
   });
   it('🔴 Metaのトークンではなくサービスキーを上流へ送る（トークンはDashboardに無い）', async () => {
-    await asRoot({ accountId: 'act_live' });
+    await asRoot({ accountId: 'act_700000001' });
     expect(upstreamCalls).toHaveLength(1);
     expect(upstreamCalls[0].opts.headers.Authorization).toBe('Bearer service-key-not-a-real-secret');
   });
   it('🔴 応答にサービスキーを含めない（ブラウザへ漏らさない）', async () => {
-    const res = await asRoot({ accountId: 'act_live' });
+    const res = await asRoot({ accountId: 'act_700000001' });
     expect(JSON.stringify(res.body)).not.toContain('service-key-not-a-real-secret');
   });
   it('既定では直近の完了済み7日を要求する（当日を含めない）', async () => {
-    await asRoot({ accountId: 'act_live' });
+    await asRoot({ accountId: 'act_700000001' });
     const u = new URL(upstreamCalls[0].url);
     const from = u.searchParams.get('from'), to = u.searchParams.get('to');
     // ⚠️ 「当日」はアカウントの時間帯（Asia/Tokyo）で数える。
@@ -186,13 +186,13 @@ describe('?type=meta - 接続できているとき', () => {
     expect(Math.round((Date.parse(to) - Date.parse(from)) / 86400000)).toBe(6);   // 7日分
   });
   it('期間を指定できる', async () => {
-    await asRoot({ accountId: 'act_live', from: '2026-08-01', to: '2026-08-07' });
+    await asRoot({ accountId: 'act_700000001', from: '2026-08-01', to: '2026-08-07' });
     const u = new URL(upstreamCalls[0].url);
     expect(u.searchParams.get('from')).toBe('2026-08-01');
   });
   it('🔴 上流が知らない版を返したら表示しない', async () => {
     installFetchMock({ ...live, api_version: 'meta-read-99' });
-    const res = await asRoot({ accountId: 'act_live' });
+    const res = await asRoot({ accountId: 'act_700000001' });
     expect(res.body.data.ok).toBe(false);
     expect(res.body.data.error.code).toBe('UNSUPPORTED_VERSION');
   });
@@ -206,7 +206,7 @@ describe('?type=meta - 接続できているとき', () => {
       if (u.includes('/v1/meta/overview')) throw new Error('network down');
       return { ok: true, status: 200, json: async () => ({}) };
     });
-    const res = await asRoot({ accountId: 'act_live' });
+    const res = await asRoot({ accountId: 'act_700000001' });
     expect(res.statusCode).toBe(200);
     expect(res.body.data.ok).toBe(false);
     expect(res.body.data.error.code).toBe('UPSTREAM_ERROR');
@@ -215,7 +215,7 @@ describe('?type=meta - 接続できているとき', () => {
   it('上流が未接続を返したら、その理由を出す', async () => {
     installFetchMock({ api_version: 'meta-read-1', status: 'error',
       error: { code: 'NOT_CONNECTED', message: 'まだ接続されていません', retryable: false } });
-    const res = await asRoot({ accountId: 'act_live' });
+    const res = await asRoot({ accountId: 'act_700000001' });
     expect(res.body.data.connected).toBe(false);
     expect(res.body.connection.code).toBe('NOT_CONNECTED');
   });
@@ -244,16 +244,16 @@ describe('(1) tenant は検証済み actor から決める', () => {
   beforeEach(() => {
     process.env.META_READ_API_BASE = 'https://platform.test';
     process.env.META_READ_API_KEY = 'service-key-not-a-real-secret';
-    process.env.META_AD_ACCOUNT_IDS = 'act_live';
+    process.env.META_AD_ACCOUNT_IDS = 'act_700000001';
     installFetchMock({
-      api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
-      account: { id: 'act_live', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] },
+      api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru', mode: 'live', data_mode: 'live',
+      account: { id: 'act_700000001', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] },
       period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true },
       totals: {}, rows: [], freshness: {},
     });
   });
   it('🔴 クエリの tenantId で会社を切り替えられない', async () => {
-    await asRoot({ accountId: 'act_live', tenantId: 'other-company' });
+    await asRoot({ accountId: 'act_700000001', tenantId: 'other-company' });
     const q = new URL(upstreamCalls[0].url);
     expect(q.searchParams.get('tenant_id')).toBe('naoru');     // actor 由来
     expect(upstreamCalls[0].opts.headers['X-Tenant-Id']).toBe('naoru');
@@ -262,40 +262,40 @@ describe('(1) tenant は検証済み actor から決める', () => {
 
 describe('(2) accountId は許可されたものだけ／応答の一致を確認する', () => {
   const live = {
-    api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
-    account: { id: 'act_allowed', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] },
+    api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru', mode: 'live', data_mode: 'live',
+    account: { id: 'act_111111111', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] },
     period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true },
     totals: {}, rows: [], freshness: {},
   };
   beforeEach(() => {
     process.env.META_READ_API_BASE = 'https://platform.test';
     process.env.META_READ_API_KEY = 'k';
-    process.env.META_AD_ACCOUNT_IDS = 'act_allowed,act_other';
+    process.env.META_AD_ACCOUNT_IDS = 'act_111111111,act_222222222';
     installFetchMock(live);
   });
   afterEach(() => { delete process.env.META_AD_ACCOUNT_IDS; });
 
   it('🔴 許可されていないアカウントは 403', async () => {
-    const res = await asRoot({ accountId: 'act_not_allowed' });
+    const res = await asRoot({ accountId: 'act_999999999' });
     expect(res.statusCode).toBe(403);
     expect(res.body.code).toBe('account_not_allowed');
   });
   it('許可されたアカウントは通る', async () => {
-    expect((await asRoot({ accountId: 'act_allowed' })).statusCode).toBe(200);
+    expect((await asRoot({ accountId: 'act_111111111' })).statusCode).toBe(200);
   });
   it('未指定なら許可一覧の先頭を使う', async () => {
     await asRoot({});
-    expect(new URL(upstreamCalls[0].url).searchParams.get('account_id')).toBe('act_allowed');
+    expect(new URL(upstreamCalls[0].url).searchParams.get('account_id')).toBe('act_111111111');
   });
   it('🔴 要求と違うアカウントが返ってきたら表示しない', async () => {
-    installFetchMock({ ...live, account: { ...live.account, id: 'act_SOMEONE_ELSE' } });
+    installFetchMock({ ...live, account: { ...live.account, id: 'act_888888888' } });
     globalThis.fetch.mockImplementation(async (url, opts = {}) => {
       const u = String(url);
       if (u.startsWith(`${KV}/get/`)) { const k = decodeURIComponent(u.slice(`${KV}/get/`.length)); return { ok: true, status: 200, json: async () => ({ result: store.has(k) ? store.get(k) : null }) }; }
-      if (u.includes('/v1/meta/overview')) return { ok: true, status: 200, json: async () => ({ ...live, account: { ...live.account, id: 'act_SOMEONE_ELSE' } }) };
+      if (u.includes('/v1/meta/overview')) return { ok: true, status: 200, json: async () => ({ ...live, account: { ...live.account, id: 'act_888888888' } }) };
       return { ok: true, status: 200, json: async () => ({}) };
     });
-    const res = await asRoot({ accountId: 'act_allowed' });
+    const res = await asRoot({ accountId: 'act_111111111' });
     expect(res.body.data.ok).toBe(false);
     expect(res.body.data.error.code).toBe('RESPONSE_MISMATCH');
     expect(res.body.data.totals).toBeUndefined();     // 数字を出さない
@@ -323,15 +323,15 @@ describe('(3) フラグ・停止フラグを API 側でも確認する', () => {
 });
 
 describe('(4) 接続先がモックを返したらサンプル表示を貫く', () => {
-  beforeEach(() => { process.env.META_READ_API_BASE = 'https://platform.test'; process.env.META_READ_API_KEY = 'k'; process.env.META_AD_ACCOUNT_IDS = 'act_x,act_0000000000000,act_123'; });
+  beforeEach(() => { process.env.META_READ_API_BASE = 'https://platform.test'; process.env.META_READ_API_KEY = 'k'; process.env.META_AD_ACCOUNT_IDS = 'act_700000002,act_0000000000000,act_123'; });
   const base = {
-    api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
+    api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru', mode: 'live', data_mode: 'live',
     period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true },
     totals: {}, rows: [], freshness: {},
   };
   it('🔴 上流が sample/mock を申告したら外側も sample:true', async () => {
-    installFetchMock({ ...base, mode: 'mock', account: { id: 'act_x', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] } });
-    const res = await asRoot({ accountId: 'act_x' });
+    installFetchMock({ ...base, mode: 'mock', account: { id: 'act_700000002', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] } });
+    const res = await asRoot({ accountId: 'act_700000002' });
     expect(res.body.sample).toBe(true);
     expect(res.body.data.isSample).toBe(true);
   });
@@ -341,14 +341,14 @@ describe('(4) 接続先がモックを返したらサンプル表示を貫く', 
     expect(res.body.sample).toBe(true);
   });
   it('URLとキーが設定されているだけでは「実データ」と判断しない', async () => {
-    installFetchMock({ ...base, _fixture: true, account: { id: 'act_x', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] } });
-    const res = await asRoot({ accountId: 'act_x' });
+    installFetchMock({ ...base, _fixture: true, account: { id: 'act_700000002', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] } });
+    const res = await asRoot({ accountId: 'act_700000002' });
     expect(res.body.sample).toBe(true);
   });
 });
 
 describe('(5) HTTPエラー・不正schema を昇格させない', () => {
-  beforeEach(() => { process.env.META_READ_API_BASE = 'https://platform.test'; process.env.META_READ_API_KEY = 'k'; process.env.META_AD_ACCOUNT_IDS = 'act_x,act_0000000000000,act_123'; });
+  beforeEach(() => { process.env.META_READ_API_BASE = 'https://platform.test'; process.env.META_READ_API_KEY = 'k'; process.env.META_AD_ACCOUNT_IDS = 'act_700000002,act_0000000000000,act_123'; });
   const withStatus = (status, body) => {
     installFetchMock({});
     globalThis.fetch.mockImplementation(async (url) => {
@@ -360,21 +360,43 @@ describe('(5) HTTPエラー・不正schema を昇格させない', () => {
   };
   it('🔴 401 は AUTH_FAILED（接続成功にしない）', async () => {
     withStatus(401, {});
-    const res = await asRoot({ accountId: 'act_x' });
+    const res = await asRoot({ accountId: 'act_700000002' });
     expect(res.body.data.ok).toBe(false);
     expect(res.body.data.error.code).toBe('AUTH_FAILED');
   });
   it('🔴 429 は RATE_LIMITED・再試行可', async () => {
     withStatus(429, {});
-    const d = (await asRoot({ accountId: 'act_x' })).body.data;
+    const d = (await asRoot({ accountId: 'act_700000002' })).body.data;
     expect(d.error.code).toBe('RATE_LIMITED');
     expect(d.error.retryable).toBe(true);
   });
   it('🔴 500 でも数字を作らない', async () => {
     withStatus(500, { api_version: 'meta-read-1', status: 'ok', totals: { spend: { value: 999999 } } });
-    const d = (await asRoot({ accountId: 'act_x' })).body.data;
+    const d = (await asRoot({ accountId: 'act_700000002' })).body.data;
     expect(d.ok).toBe(false);
     expect(d.totals).toBeUndefined();
+  });
+
+  // ③からの指摘(2): 非2xx で raw.freshness を捨てており、最終成功日時が常に null になっていた。
+  // 「一度も取れていない」と「復旧待ち」を画面が区別できなくなるため保持する。
+  it('🔴 HTTPエラーでも最終成功日時を捨てない', async () => {
+    withStatus(502, { freshness: { last_success_at: '2026-09-18T03:00:00+09:00', lag_minutes: 45 } });
+    const d = (await asRoot({ accountId: 'act_700000002' })).body.data;
+    expect(d.ok).toBe(false);
+    expect(d.freshness.lastSuccessAt).toBe('2026-09-18T03:00:00+09:00');
+    expect(d.freshness.lagMinutes).toBe(45);
+    expect(d.totals).toBeUndefined();          // 数字は作らないまま
+  });
+  it('上流が freshness を返さない場合は最終試行だけ埋める', async () => {
+    withStatus(502, {});
+    const d = (await asRoot({ accountId: 'act_700000002' })).body.data;
+    expect(d.freshness.lastSuccessAt).toBeNull();
+    expect(typeof d.freshness.lastAttemptAt).toBe('string');
+  });
+  it('上流が last_attempt_at を返せばそれを優先する', async () => {
+    withStatus(502, { freshness: { last_attempt_at: '2026-09-18T04:00:00+09:00' } });
+    const d = (await asRoot({ accountId: 'act_700000002' })).body.data;
+    expect(d.freshness.lastAttemptAt).toBe('2026-09-18T04:00:00+09:00');
   });
 });
 
@@ -382,23 +404,23 @@ describe('(6) タイムゾーン・通貨・行数上限', () => {
   beforeEach(() => {
     process.env.META_READ_API_BASE = 'https://platform.test';
     process.env.META_READ_API_KEY = 'k';
-    process.env.META_AD_ACCOUNT_IDS = 'act_x';
+    process.env.META_AD_ACCOUNT_IDS = 'act_700000002';
     installFetchMock({
-      api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
-      account: { id: 'act_x', name: 'x', currency: 'AUD', timezone: 'Australia/Sydney', store_mapping: [] },
+      api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru', mode: 'live', data_mode: 'live',
+      account: { id: 'act_700000002', name: 'x', currency: 'AUD', timezone: 'Australia/Sydney', store_mapping: [] },
       period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true },
       totals: {}, rows: [], freshness: {},
     });
   });
   it('🔴 期間は広告アカウントのタイムゾーン基準で要求する', async () => {
-    await asRoot({ accountId: 'act_x', tz: 'Australia/Sydney' });
+    await asRoot({ accountId: 'act_700000002', tz: 'Australia/Sydney' });
     const q = new URL(upstreamCalls[0].url);
     // シドニーは日本より先に日付が変わるため、UTC基準とずれる日がある
     expect(q.searchParams.get('from')).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(q.searchParams.get('to')).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
   it('🔴 JPY以外の通貨を保持する（勝手に円にしない）', async () => {
-    const res = await asRoot({ accountId: 'act_x' });
+    const res = await asRoot({ accountId: 'act_700000002' });
     expect(res.body.data.account.currency).toBe('AUD');
   });
 });
@@ -407,7 +429,7 @@ describe('🔴 実Credentialがあっても、許可リストが空/不正なら
   beforeEach(() => {
     process.env.META_READ_API_BASE = 'https://platform.test';
     process.env.META_READ_API_KEY = 'service-key-not-a-real-secret';
-    installFetchMock({ api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru',
+    installFetchMock({ api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru', mode: 'live', data_mode: 'live',
       account: { id: 'act_123', name: 'x', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] },
       period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true }, totals: {}, rows: [], freshness: {} });
   });
@@ -446,5 +468,62 @@ describe('🔴 実Credentialがあっても、許可リストが空/不正なら
     const res = await asRoot();
     expect(res.body.sample).toBe(true);                    // ← こちらはサンプル
     expect(res.body.connection.mode).toBe('sample');
+  });
+});
+
+// ── 実データ接続の受入ゲート（API経路）────────────────────────────────
+describe('(7) 実データ接続の受入ゲート', () => {
+  const live = {
+    api_version: 'meta-read-1', status: 'ok', tenant_id: 'naoru', mode: 'live', data_mode: 'live',
+    account: { id: 'act_1335477837049931', name: '本番', currency: 'JPY', timezone: 'Asia/Tokyo', store_mapping: [] },
+    period: { from: '2026-09-10', to: '2026-09-16', complete_days_only: true },
+    totals: { spend: { value: 1000, unit: 'JPY', quality: 'VERIFIED' } }, rows: [], freshness: {},
+  };
+  beforeEach(() => {
+    process.env.META_READ_API_BASE = 'https://platform.test';
+    process.env.META_READ_API_KEY = 'k';
+    installFetchMock(live);
+  });
+  afterEach(() => { delete process.env.META_AD_ACCOUNT_IDS; delete process.env.META_AD_ACCOUNT_ID; });
+
+  it('🔴 許可リストに1件でも不正があれば、上流を呼ばず拒否する（部分採用しない）', async () => {
+    process.env.META_AD_ACCOUNT_IDS = 'act_1335477837049931,invalid';
+    const res = await asRoot({ accountId: 'act_1335477837049931' });
+    expect(res.body.data.ok).toBe(false);
+    expect(res.body.data.error.code).toBe('ACCOUNT_NOT_ALLOWED');
+    expect(res.body.connection.mode).toBe('misconfigured');
+    expect(upstreamCalls.length).toBe(0);            // 実データを取りに行かない
+    expect(res.body.sample).toBe(false);             // サンプル表示でも「ない」
+  });
+  it('🔴 旧 META_AD_ACCOUNT_ID（単数）だけでは上流を呼ばない。理由に移行先を出す', async () => {
+    process.env.META_AD_ACCOUNT_ID = 'act_1335477837049931';
+    const res = await asRoot({ accountId: 'act_1335477837049931' });
+    expect(res.body.data.error.code).toBe('ACCOUNT_NOT_ALLOWED');
+    expect(res.body.connection.reason).toContain('META_AD_ACCOUNT_IDS');
+    expect(upstreamCalls.length).toBe(0);
+  });
+  it('正しい許可リストなら実データを取りに行く', async () => {
+    process.env.META_AD_ACCOUNT_IDS = 'act_1335477837049931';
+    const res = await asRoot({ accountId: 'act_1335477837049931' });
+    expect(upstreamCalls.length).toBe(1);
+    expect(res.body.data.ok).toBe(true);
+    expect(res.body.sample).toBe(false);
+    expect(res.body.data.totals.spend.value).toBe(1000);
+  });
+  it('🔴 上流が unknown を返したら実績として表示しない', async () => {
+    process.env.META_AD_ACCOUNT_IDS = 'act_1335477837049931';
+    installFetchMock({ ...live, mode: 'unknown', data_mode: 'unknown' });
+    const res = await asRoot({ accountId: 'act_1335477837049931' });
+    expect(res.body.data.ok).toBe(false);
+    expect(res.body.data.error.code).toBe('MODE_UNCONFIRMED');
+    expect(res.body.data.totals).toBeUndefined();
+    expect(res.body.sample).toBe(false);
+  });
+  it('🔴 金額の単位がアカウント通貨と違えば、その数字を出さない', async () => {
+    process.env.META_AD_ACCOUNT_IDS = 'act_1335477837049931';
+    installFetchMock({ ...live, account: { ...live.account, currency: 'AUD' } });
+    const res = await asRoot({ accountId: 'act_1335477837049931' });
+    expect(res.body.data.totals.spend.value).toBe(null);
+    expect(res.body.data.totals.spend.missingReason).toContain('通貨');
   });
 });

@@ -3,8 +3,8 @@ import fs from 'fs';
 import {
   normalizeMetric, normalizeMetrics, normalizeOverview, normalizeFreshness,
   buildTree, lastCompleteDays, connectionState, META_API_VERSION,
-  looksLikeSample, currencySymbol,
-} from '../lib/meta-read.js';
+  looksLikeSample, currencySymbol, normalizeUnit, isCurrencyUnit,
+  parseAccountAllowList, declaredMode, modeConflictOf} from '../lib/meta-read.js';
 
 const FIXTURE = JSON.parse(fs.readFileSync(new URL('../fixtures/meta-overview-sample.json', import.meta.url), 'utf8'));
 
@@ -364,5 +364,258 @@ describe('(6) 行数上限は黙って切らない', () => {
   it('上流のページング情報を引き継ぐ', () => {
     const r = normalizeOverview({ ...FIXTURE, paging: { has_more: true, next_cursor: 'abc' } });
     expect(r.paging).toEqual({ hasMore: true, nextCursor: 'abc' });
+  });
+});
+
+// ── ③からの指摘（固定参照 3396a18 時点の差分）──────────────────────────
+// (3) 外貨の単位が count（件数）へ潰れていた
+describe('🔴 金額の単位は広告アカウントの通貨を保持する', () => {
+  it('AUD / MYR / USD をそのまま通貨単位として残す', () => {
+    for (const c of ['AUD', 'MYR', 'USD', 'SGD']) {
+      expect(normalizeUnit(c)).toBe(c);
+      expect(isCurrencyUnit(normalizeUnit(c))).toBe(true);
+    }
+  });
+  it('小文字の通貨コードも大文字で保持する', () => {
+    expect(normalizeUnit('aud')).toBe('AUD');
+  });
+  it('JPY も従来どおり保持する（回帰）', () => {
+    expect(normalizeUnit('JPY')).toBe('JPY');
+  });
+  it('count / ratio はそのまま', () => {
+    expect(normalizeUnit('count')).toBe('count');
+    expect(normalizeUnit('ratio')).toBe('ratio');
+    expect(isCurrencyUnit('count')).toBe(false);
+    expect(isCurrencyUnit('ratio')).toBe(false);
+  });
+  it('通貨コードでない未知の値は count（従来どおり控えめ）', () => {
+    for (const v of ['', null, undefined, 'dollars', '¥', 'JP']) expect(normalizeUnit(v)).toBe('count');
+  });
+  it('🔴 豪州アカウントの消化額が「件数」にならない', () => {
+    const m = normalizeMetric({ value: 1234, unit: 'AUD', quality: 'VERIFIED' }, 'spend');
+    expect(m.unit).toBe('AUD');
+    expect(m.unit).not.toBe('count');
+  });
+});
+
+// ── 実データ接続の受入ゲート（③ naoru-ai-platform と揃える）─────────────
+describe('parseAccountAllowList - 部分採用しない', () => {
+  it('🔴 1件でも不正なら、リスト全体を無効にする（残りだけ採用しない）', () => {
+    const r = parseAccountAllowList({ META_AD_ACCOUNT_IDS: 'act_1335477837049931,invalid' });
+    expect(r.valid).toBe(false);
+    expect(r.ids).toEqual([]);
+    expect(r.reason).toContain('リスト全体を無効');
+  });
+  it('🔴 act_ + 数字以外は不正（③が受け付けない形式を通さない）', () => {
+    for (const v of ['act_live', 'act_ABC', '1335477837049931', 'act_', 'act_12a']) {
+      expect(parseAccountAllowList({ META_AD_ACCOUNT_IDS: v }).valid, v).toBe(false);
+    }
+  });
+  it('🔴 重複はリスト全体を無効にする', () => {
+    expect(parseAccountAllowList({ META_AD_ACCOUNT_IDS: 'act_123,act_123' }).valid).toBe(false);
+  });
+  it('🔴 旧 META_AD_ACCOUNT_ID（単数）は許可リストに使わない。黙って無視せず移行を伝える', () => {
+    const r = parseAccountAllowList({ META_AD_ACCOUNT_ID: 'act_1335477837049931' });
+    expect(r.valid).toBe(false);
+    expect(r.ids).toEqual([]);
+    expect(r.reason).toContain('META_AD_ACCOUNT_IDS');
+  });
+  it('正しいリストは採用する（空白は許す）', () => {
+    const r = parseAccountAllowList({ META_AD_ACCOUNT_IDS: ' act_1335477837049931 , act_222 ' });
+    expect(r.valid).toBe(true);
+    expect(r.ids).toEqual(['act_1335477837049931', 'act_222']);
+  });
+});
+
+describe('unknown mode を実データとして表示しない', () => {
+  // FIXTURE は act_0000000000000 で「明らかな作り物」と判定されるため、実アカウント形のIDで組む
+  const ok = { ...FIXTURE, api_version: 'meta-read-1',
+    account: { ...FIXTURE.account, id: 'act_1335477837049931' } };
+  it('🔴 mode/data_mode が unknown なら数値を出さない', () => {
+    const r = normalizeOverview({ ...ok, mode: 'unknown', data_mode: 'unknown', sample: false, _fixture: false });
+    expect(r.ok).toBe(false);
+    expect(r.error.code).toBe('MODE_UNCONFIRMED');
+    expect(r.totals).toBeUndefined();
+    expect(r.isSample).toBe(false);          // サンプルとも偽らない
+  });
+  it('🔴 unknown を live へ昇格させない', () => {
+    expect(declaredMode({ mode: 'unknown' })).toBe('unconfirmed');
+    expect(declaredMode({ data_mode: 'unknown' })).toBe('unconfirmed');
+    expect(declaredMode({ _fixture: true })).toBe('sample');
+  });
+
+  // ── ③受入で不合格になった3件（mode の独立検証）────────────────────────
+  it('🔴 mode / data_mode の両方が欠落していたら live にしない', () => {
+    expect(declaredMode({})).toBe('unconfirmed');
+    const r = normalizeOverview({ api_version: 'meta-read-1', status: 'ok', totals: { spend: { value: 100 } } });
+    expect(r.ok).toBe(false);
+    expect(r.error.code).toBe('MODE_UNCONFIRMED');
+    expect(r.totals).toBeUndefined();
+  });
+  it('🔴 片方だけの申告では live にしない（両方 live を要求する）', () => {
+    expect(declaredMode({ mode: 'live' })).toBe('unconfirmed');
+    expect(declaredMode({ data_mode: 'live' })).toBe('unconfirmed');
+    expect(declaredMode({ mode: 'live', data_mode: 'live' })).toBe('live');
+  });
+  it('🔴 mode=live でも data_mode=unknown なら数値を出さない', () => {
+    expect(declaredMode({ mode: 'live', data_mode: 'unknown' })).toBe('unconfirmed');
+    const r = normalizeOverview({ api_version: 'meta-read-1', status: 'ok',
+      mode: 'live', data_mode: 'unknown', totals: { spend: { value: 100 } } });
+    expect(r.ok).toBe(false);
+    expect(r.error.code).toBe('MODE_UNCONFIRMED');
+    expect(r.totals).toBeUndefined();
+  });
+  it('🔴 mode=live でも data_mode=sample ならサンプル扱い（live と偽らない）', () => {
+    expect(declaredMode({ mode: 'live', data_mode: 'sample' })).toBe('sample');
+    expect(looksLikeSample({ mode: 'live', data_mode: 'sample' })).toBe(true);
+    const r = normalizeOverview({ api_version: 'meta-read-1', status: 'ok',
+      mode: 'live', data_mode: 'sample', account: { id: 'act_1', currency: 'JPY' },
+      period: {}, totals: { spend: { value: 100, unit: 'JPY' } }, rows: [] });
+    expect(r.isSample).toBe(true);            // サンプル表示は維持する（数値は出す）
+    expect(r.ok).toBe(true);
+  });
+  it('エラー応答は従来どおり理由を出す（MODE_UNCONFIRMED に吸い込まない）', () => {
+    const r = normalizeOverview({ api_version: 'meta-read-1', status: 'error', data_mode: 'unknown',
+      error: { code: 'RATE_LIMITED', retryable: true }, freshness: { last_success_at: '2026-09-17T00:00:00Z' } });
+    expect(r.error.code).toBe('RATE_LIMITED');
+    expect(r.freshness.lastSuccessAt).toBe('2026-09-17T00:00:00Z');
+  });
+});
+
+describe('金額の単位と広告アカウント通貨の一致', () => {
+  it('🔴 通貨が一致しない金額は数字を出さない（桁も意味も違う値を実績にしない）', () => {
+    expect(normalizeMetric({ value: 1234, unit: 'JPY', quality: 'VERIFIED' }, 'spend', 'AUD').value).toBe(null);
+    expect(normalizeMetric({ value: 1234, unit: 'JPY', quality: 'VERIFIED' }, 'spend', 'AUD').missingReason)
+      .toContain('通貨');
+  });
+  it('一致していれば保持する（円へ寄せない）', () => {
+    for (const c of ['JPY', 'USD', 'AUD', 'MYR']) {
+      const m = normalizeMetric({ value: 100, unit: c, quality: 'VERIFIED' }, 'spend', c);
+      expect(m.unit, c).toBe(c);
+      expect(m.value, c).toBe(100);
+    }
+  });
+  it('🔴 3文字ならなんでも通貨と判断しない', () => {
+    expect(normalizeUnit('xyz', 'JPY')).toBe(null);
+    expect(normalizeUnit('JPY', 'JPY')).toBe('JPY');
+  });
+  it('🔴 アカウント通貨が不明なら金額は表示しない', () => {
+    expect(normalizeMetric({ value: 1234, unit: 'JPY' }, 'spend', '').value).toBe(null);
+  });
+  it('count / ratio は通貨に関係なくそのまま（表示回数やCTRまで消さない）', () => {
+    expect(normalizeMetric({ value: 5, unit: 'count' }, 'clicks', 'AUD').value).toBe(5);
+    expect(normalizeMetric({ value: 0.02, unit: 'ratio' }, 'ctr', 'AUD').value).toBe(0.02);
+  });
+  it('normalizeOverview は account.currency を使って totals を検証する', () => {
+    const r = normalizeOverview({ api_version: 'meta-read-1', status: 'ok', _fixture: true,
+      account: { id: 'act_1', currency: 'AUD' }, period: { from: 'a', to: 'b' },
+      totals: { spend: { value: 100, unit: 'JPY', quality: 'VERIFIED' }, clicks: { value: 3, unit: 'count' } },
+      rows: [], freshness: {} });
+    expect(r.totals.spend.value).toBe(null);
+    expect(r.totals.clicks.value).toBe(3);
+  });
+  it('2引数の従来呼び出しは挙動を変えない（外貨をcountに潰さない）', () => {
+    expect(normalizeMetric({ value: 1234, unit: 'AUD', quality: 'VERIFIED' }, 'spend').unit).toBe('AUD');
+  });
+});
+
+// ── ③受入で不合格になった2件（金額指標の型を metric 名で固定）──────────────
+describe('🔴 金額指標（spend/cpc/cpm）は count / ratio を受け付けない', () => {
+  it('spend の unit=count は数値を出さない', () => {
+    const m = normalizeMetric({ value: 100, unit: 'count', quality: 'VERIFIED' }, 'spend', 'JPY');
+    expect(m.value).toBeNull();
+    expect(m.missingReason).toContain('count/ratio');
+  });
+  it('cpc の unit=ratio は数値を出さない', () => {
+    const m = normalizeMetric({ value: 5, unit: 'ratio', quality: 'VERIFIED' }, 'cpc', 'JPY');
+    expect(m.value).toBeNull();
+  });
+  it('cpm も同じ扱い', () => {
+    expect(normalizeMetric({ value: 5, unit: 'count' }, 'cpm', 'JPY').value).toBeNull();
+  });
+  it('アカウント通貨と一致していれば通る', () => {
+    expect(normalizeMetric({ value: 100, unit: 'JPY', quality: 'VERIFIED' }, 'spend', 'JPY').value).toBe(100);
+    expect(normalizeMetric({ value: 100, unit: 'AUD', quality: 'VERIFIED' }, 'spend', 'AUD').value).toBe(100);
+  });
+  it('🔴 アカウント通貨が不明なら金額は出さない', () => {
+    expect(normalizeMetric({ value: 100, unit: 'JPY' }, 'spend', '').value).toBeNull();
+  });
+  it('金額以外の指標は従来どおり（clicks の count は通る）', () => {
+    expect(normalizeMetric({ value: 20, unit: 'count', quality: 'VERIFIED' }, 'clicks', 'JPY').value).toBe(20);
+    expect(normalizeMetric({ value: 0.02, unit: 'ratio', quality: 'VERIFIED' }, 'ctr', 'JPY').value).toBe(0.02);
+  });
+  it('🔴 単位が照合できないとき金額指標の unit を count へ寄せない', () => {
+    expect(normalizeMetric({ value: 100, unit: 'count' }, 'spend', '').unit).not.toBe('count');
+  });
+  it('overview 経由でも spend.unit=count は数値が出ない', () => {
+    const r = normalizeOverview({
+      api_version: 'meta-read-1', status: 'ok', mode: 'live', data_mode: 'live',
+      account: { id: 'act_1', currency: 'JPY' }, period: {},
+      totals: { spend: { value: 100, unit: 'count' }, cpc: { value: 5, unit: 'ratio' } }, rows: [],
+    });
+    expect(r.ok).toBe(true);
+    expect(r.totals.spend.value).toBeNull();
+    expect(r.totals.cpc.value).toBeNull();
+  });
+});
+
+// ── ③受入(第2回)で残った2件 ─────────────────────────────────────────
+// 1) 矛盾（mode=live / data_mode=sample）が warning なしで sample 扱いになっていた
+// 2) connectionState がサンプルでも mode:'live' を返していた（矛盾ケースに限らない）
+describe('🔴 申告の食い違いを明示し、接続表示を実データへ昇格させない', () => {
+  const ENV = { META_READ_API_BASE: 'https://platform.test', META_READ_API_KEY: 'k' };
+  const mk = (ov) => normalizeOverview({
+    api_version: 'meta-read-1', status: 'ok',
+    account: { id: 'act_1', currency: 'JPY' }, period: {},
+    totals: { spend: { value: 100, unit: 'JPY' } }, rows: [], ...ov,
+  });
+
+  it('modeConflictOf は live×sample の食い違いだけを拾う', () => {
+    expect(modeConflictOf({ mode: 'live', data_mode: 'sample' })).toBeTruthy();
+    expect(modeConflictOf({ mode: 'sample', data_mode: 'live' })).toBeTruthy();
+    expect(modeConflictOf({ mode: 'live', data_mode: 'live' })).toBeNull();
+    expect(modeConflictOf({ mode: 'live', data_mode: 'unknown' })).toBeNull();   // これは MODE_UNCONFIRMED 側
+    expect(modeConflictOf({ mode: 'live' })).toBeNull();
+  });
+
+  it('🔴 矛盾したときは notices に MODE_CONFLICT を出す（黙ってsample扱いにしない）', () => {
+    const r = mk({ mode: 'live', data_mode: 'sample' });
+    expect(r.isSample).toBe(true);
+    expect(r.modeConflict).toBeTruthy();
+    expect(r.notices.map(n => n.code)).toContain('MODE_CONFLICT');
+    expect(r.notices[0].severity).toBe('warning');
+    expect(r.notices[0].message).toContain('data_mode=sample');
+  });
+
+  it('矛盾が無ければ notices は空（余計な警告を出さない）', () => {
+    expect(mk({ mode: 'live', data_mode: 'live' }).notices).toEqual([]);
+    expect(mk({ _fixture: true, mode: 'live', data_mode: 'live' }).notices).toEqual([]);
+  });
+
+  it('🔴 矛盾した応答の接続表示を live にしない', () => {
+    const c = connectionState(ENV, mk({ mode: 'live', data_mode: 'sample' }));
+    expect(c.mode).not.toBe('live');
+    expect(c.mode).toBe('sample');
+    expect(c.code).toBe('MODE_CONFLICT');
+    expect(c.reason).toContain('食い違');
+  });
+
+  it('🔴 矛盾でなくても、サンプル応答の接続表示は live にしない', () => {
+    const c = connectionState(ENV, mk({ _fixture: true, mode: 'live', data_mode: 'live' }));
+    expect(c.mode).toBe('sample');
+    expect(c.code).toBe('SAMPLE_DATA');
+    expect(c.connected).toBe(true);        // 到達はできている（未接続とは区別する）
+  });
+
+  it('実データのときだけ live', () => {
+    expect(connectionState(ENV, mk({ mode: 'live', data_mode: 'live' })).mode).toBe('live');
+  });
+
+  it('未接続・エラーの判定は従来どおり（回帰）', () => {
+    expect(connectionState({}, null).mode).toBe('sample');
+    expect(connectionState({ META_READ_API_BASE: 'https://x' }, null).mode).toBe('sample');
+    const err = normalizeOverview({ api_version: 'meta-read-1', status: 'error', mode: 'live', data_mode: 'live',
+      error: { code: 'RATE_LIMITED', retryable: true } });
+    expect(connectionState(ENV, err).mode).toBe('error');
   });
 });

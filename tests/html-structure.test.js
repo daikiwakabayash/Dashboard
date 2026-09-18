@@ -135,16 +135,22 @@ describe('index.html - セキュリティ', () => {
 // 画面タイトルとメニュー名を「ニュース」に統一する（オーナー指示・UI試作V3）。
 // ⚠️ 内部ID（board / type=board / naoru:board:v1）は変えない。既存データを失わないため。
 describe('index.html - ニュースの名称', () => {
-  it('画面名としての「掲示板」「お知らせ」が残っていない', () => {
+  it('画面名としての「掲示板」が残っていない', () => {
     expect(html).not.toContain('掲示板');
-    // 「お知らせ」はニュースの**カテゴリー名**としてだけ残す（画面名ではない）
-    const hits = html.match(/お知らせ/g) || [];
-    expect(hits).toHaveLength(1);
-    expect(html).toContain("{ key: 'notice', label: 'お知らせ'");
   });
-  it('メニューと画面タイトルが「ニュース」', () => {
+  it('メニュー名は「ニュース」', () => {
     expect(html).toContain("label: 'ニュース'");
-    expect(html).toMatch(/>ニュース<\/h1>/);
+    expect(html).toContain("{ id: 'board'");
+  });
+  it('大見出しは試作V3の言葉（「チームの今を、もっと近くに.」）', () => {
+    expect(html).toContain('チームの今を、');
+    expect(html).toContain('もっと近くに');
+    expect(html).toContain('INSIDE NOWL');
+  });
+  it('「お知らせ」は一覧の見出しとカテゴリー名として使う（画面名ではない）', () => {
+    expect(html).toContain("{ key: 'notice', label: 'お知らせ'");
+    expect(html).toContain('お知らせ <span>UPDATES</span>');
+    expect(html).toContain('ピックアップ <span>PICKUP</span>');
   });
   it('内部IDは board のまま（保存先を変えない）', () => {
     expect(html).toContain("{ id: 'board'");

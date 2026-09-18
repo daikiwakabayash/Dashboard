@@ -141,6 +141,24 @@ npx vitest run tests/chat-server-integration.test.js → 35 passed
   （うち it.fails ＝ ①の既知の不具合の記録が 4件。直ると失敗して気づけます）
 ```
 
+**本番画面（`index.html`「@AI 検証」）の画面レベル検証**
+```
+tests/chat-ai-prod-screen.test.js                → 10 passed（index.html のコードを読んで確認）
+node scripts/chat-ai-screen-check.mjs            → 本物の index.html を headless Chromium で操作し、
+                                                    画面が送る request_id をネットワーク越しに観測
+```
+`scripts/chat-ai-screen-check.mjs` ＋ `scripts/chat-ai-screen-stub.mjs` は、**ローカルのスタブAPIに対して本物の画面を動かす**検証用です（本番には一切つながりません）。playwright はリポジトリの依存に入れていないので `npm test` には影響しません。
+
+現在の結果（main `1cbc314`）:
+
+| 観測 | 結果 |
+|---|---|
+| 「@AI 検証」画面が root＋`cc_ai_trial` ON で開く | ✅ |
+| 検証ルームを**名前**で選べる | ❌ 内部IDがそのまま選択肢（`g_trial`） |
+| 許可資料を**タイトル**で表示 | ❌ IDの羅列（`faq_family, faq_shift`） |
+| 同じ質問を**別々に新規送信**したとき新しい `request_id` | ❌ 同じIDを再送（`req_i_d9504b00` が2回） |
+| その結果、2件目の回答 | ❌ 作られない（回答カードは1枚のまま） |
+
 **リポジトリ全体**
 ```
 npm test → 48 files / 1116 passed（このブランチ）

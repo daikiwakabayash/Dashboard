@@ -13,9 +13,11 @@
  * ■ できること
  *   スプレッドシート・スライド・ドキュメントの「中身の文字」を返します。
  *   このスクリプトを動かしている Google アカウントが開けるファイルだけが対象です。
- *   Apps Script のスクリプトプロパティと Vercel の Production 環境変数に、
- *   同じ KNOWLEDGE_GAS_SECRET（32文字以上のランダム値）を設定してください。
- *   秘密値はコードに書かず、CRON_SECRET とは別の値を使います。
+ *   URL を知っているだけで社内資料が読めてしまわないよう、Dashboard と
+ *   この スクリプトで「合言葉」を共有します。合言葉は setupKnowledgeSecret を
+ *   1回実行すれば自動で作られ、このプロジェクトに保存されます。表示された値を
+ *   Vercel の環境変数 KNOWLEDGE_GAS_SECRET（Production）へ貼り付けてください。
+ *   合言葉はコードに書きません。CRON_SECRET とは別の値です。
  *
  * ■ しないこと
  *   ファイルを書き換えたり、消したりはしません。読むだけです。
@@ -42,15 +44,57 @@
 //     .setMimeType(ContentService.MimeType.JSON);
 // }
 
-// ■ 入れたあとの動作確認（Apps Script の画面で実行できます）
-//   1) 下の testReadKnowledgeDoc_ の FILE_ID に、読ませたいスプレッドシートのIDを入れる
-//      （URL の /d/ と /edit のあいだの文字列）
-//   2) 関数を選んで「実行」。実行ログに中身の先頭が出れば成功。
-function testReadKnowledgeDoc_() {
+// ── ここから下の3つは、Apps Script の「実行する関数」から選んで実行できます ──
+//    （⚠️ 関数名の末尾に _ を付けると実行メニューに出ないため、この3つは _ なしにしています）
+
+/**
+ * 【1回だけ実行】合言葉（KNOWLEDGE_GAS_SECRET）を作って、この プロジェクトに保存します。
+ *
+ *   手順: 上の「実行する関数」で setupKnowledgeSecret を選ぶ → 「実行」
+ *         → 下の「実行ログ」に 48文字の文字列が出ます
+ *         → その文字列をコピーして、Vercel の環境変数 KNOWLEDGE_GAS_SECRET に貼り付け
+ *
+ *   ⚠️ すでに保存済みの場合は作り直しません（Dashboard 側とズレないように）。
+ *      作り直したいときは、下の resetKnowledgeSecret を実行してください。
+ */
+function setupKnowledgeSecret() {
+  var props = PropertiesService.getScriptProperties();
+  var cur = props.getProperty('KNOWLEDGE_GAS_SECRET') || '';
+  if (cur.length >= 32) {
+    Logger.log('すでに設定済みです。Vercel にはこの値を貼り付けてください:\n' + cur);
+    return;
+  }
+  var v = makeKnowledgeSecret_();
+  props.setProperty('KNOWLEDGE_GAS_SECRET', v);
+  Logger.log('合言葉を保存しました。この値を Vercel の KNOWLEDGE_GAS_SECRET に貼り付けてください:\n' + v);
+}
+
+/** 【作り直したいときだけ】合言葉を作り直します。Vercel 側も同じ値に更新が必要です。 */
+function resetKnowledgeSecret() {
+  var v = makeKnowledgeSecret_();
+  PropertiesService.getScriptProperties().setProperty('KNOWLEDGE_GAS_SECRET', v);
+  Logger.log('作り直しました。⚠️ Vercel の KNOWLEDGE_GAS_SECRET も必ずこの値に更新してください:\n' + v);
+}
+
+/**
+ * 【動作確認】1つのファイルを実際に読んでみます。
+ *   下の FILE_ID に、読ませたいスプレッドシートのID（URL の /d/ と /edit のあいだ）を貼ってから実行。
+ *   実行ログに中身の先頭が出れば成功です。
+ */
+function testReadKnowledgeDoc() {
   var FILE_ID = 'ここにファイルIDを貼る';
-  var r = readKnowledgeDoc_({ action: 'readKnowledgeDoc', kind: 'spreadsheet', fileId: FILE_ID,
-    secret: PropertiesService.getScriptProperties().getProperty('KNOWLEDGE_GAS_SECRET') || '' });
-  Logger.log(r.ok ? (r.title + ' / ' + String(r.body).slice(0, 300)) : ('NG: ' + r.error));
+  var secret = PropertiesService.getScriptProperties().getProperty('KNOWLEDGE_GAS_SECRET') || '';
+  if (secret.length < 32) { Logger.log('NG: 先に setupKnowledgeSecret を実行してください'); return; }
+  var r = readKnowledgeDoc_({ action: 'readKnowledgeDoc', kind: 'spreadsheet', fileId: FILE_ID, secret: secret });
+  Logger.log(r.ok ? ('OK: ' + r.title + ' / ' + String(r.body).slice(0, 300)) : ('NG: ' + r.error));
+}
+
+/** 英数字48文字のランダム値を作る（推測されにくい長さにする） */
+function makeKnowledgeSecret_() {
+  var CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  var out = '';
+  for (var i = 0; i < 48; i++) out += CHARS.charAt(Math.floor(Math.random() * CHARS.length));
+  return out;
 }
 
 // Dashboard からの呼び出し口（本体）

@@ -843,6 +843,41 @@
         const ORG_KW_KEYS = Object.keys(ORG_KW).sort((a, b) => b.length - a.length);
         const orgGeoRank = (name) => { const s = String(name || '').replace(/NAORU/gi, '').replace(/院/g, '').trim(); for (const k of ORG_KW_KEYS) { if (s.includes(k)) return ORG_KW[k]; } return 950; };
         const orgRegionOf = (r) => r === 1 ? '北海道' : (r >= 2 && r <= 7) ? '東北' : (r >= 8 && r <= 14) ? '関東' : (r >= 15 && r <= 23) ? '中部' : (r >= 24 && r <= 30) ? '近畿' : (r >= 31 && r <= 35) ? '中国' : (r >= 36 && r <= 39) ? '四国' : (r >= 40 && r <= 46) ? '九州' : r === 47 ? '沖縄' : r >= 1000 ? '海外' : 'その他';
+        // ── ニュース: 記事の項目（lib/news-post.js と同じ）────────────────
+        const NEWS_CATEGORIES = [
+            { key: 'notice', label: 'お知らせ', cls: 'bg-slate-100 text-slate-700' },
+            { key: 'event',  label: 'イベント', cls: 'bg-rose-100 text-rose-700' },
+            { key: 'rule',   label: 'ルール・手順', cls: 'bg-indigo-100 text-indigo-700' },
+            { key: 'study',  label: '勉強会・教育', cls: 'bg-teal-100 text-teal-700' },
+            { key: 'case',   label: '症例・事例', cls: 'bg-amber-100 text-amber-700' },
+            { key: 'praise', label: '表彰・お祝い', cls: 'bg-pink-100 text-pink-700' },
+        ];
+        const newsCatOf = (k) => NEWS_CATEGORIES.find(c => c.key === String(k || '')) || null;
+        // 期限: 'none' / 'ok' / 'soon'（3日以内） / 'over'
+        const newsDueState = (d, now) => {
+            const v = String(d || '').trim();
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return 'none';
+            const end = Date.parse(`${v}T23:59:59+09:00`);
+            if (!Number.isFinite(end)) return 'none';
+            const t = (now instanceof Date ? now : new Date()).getTime();
+            if (t > end) return 'over';
+            return (end - t) <= 3 * 24 * 3600 * 1000 ? 'soon' : 'ok';
+        };
+        // 表紙にする画像（未指定なら1枚目。添付から消えた指定は使わない）
+        const newsCoverOf = (p) => {
+            const ids = (Array.isArray(p && p.imgIds) ? p.imgIds : []).map(String).filter(Boolean);
+            const c = String((p && p.coverImgId) || '');
+            return (c && ids.includes(c)) ? c : (ids[0] || '');
+        };
+        // この記事が自分に向けられているか（公開対象）
+        const newsForMe = (p, me) => {
+            const a = (p && p.audience && typeof p.audience === 'object') ? p.audience : { kind: 'all' };
+            if (a.kind !== 'shops') return true;
+            const mine = [...((me && me.shops) || []), (me && me.shop) || ''].map(String).filter(Boolean);
+            if (!mine.length) return false;
+            return (a.shops || []).some(t => mine.some(sx => sx.includes(t) || String(t).includes(sx)));
+        };
+
         // ── 組織図: 自己紹介の入力候補（lib/profile-fields.js と同じ）────────
         const PROF_TAGS = {
             goodAt: ['骨盤矯正','猫背・姿勢','産後ケア','肩こり','腰痛','スポーツ障害','自律神経','問診・カウンセリング','新人教育','予約管理','SNS発信','店販提案'],
@@ -4562,10 +4597,19 @@
             const [boardFiles, setBoardFiles] = useState([]);    // [{id,name,type,size}]
             const [boardVideo, setBoardVideo] = useState('');
             const [boardPosting, setBoardPosting] = useState(false);
-            const [boardFilter, setBoardFilter] = useState('all'); // all | hq | staff | important
+            const [boardFilter, setBoardFilter] = useState('all'); // all | unread | featured | hq | staff | important
+            const [boardCatFilter, setBoardCatFilter] = useState('');  // カテゴリーで絞る（'' = 絞らない）
             const [boardTitle, setBoardTitle] = useState('');
             const [boardLink, setBoardLink] = useState('');
             const [boardImportant, setBoardImportant] = useState(false);
+            // ニュースの項目（カテゴリー／公開対象／確認要否／期限／ピックアップ／表紙）
+            const [boardCat, setBoardCat] = useState('');
+            const [boardAudKind, setBoardAudKind] = useState('all');
+            const [boardAudShops, setBoardAudShops] = useState([]);
+            const [boardNeedsAck, setBoardNeedsAck] = useState(false);
+            const [boardDue, setBoardDue] = useState('');
+            const [boardFeatured, setBoardFeatured] = useState(false);
+            const [boardCover, setBoardCover] = useState('');
             const [boardSort, setBoardSort] = useState('new');    // new | old
             const [boardView, setBoardView] = useState('list');   // list | grid
             const [boardMenuId, setBoardMenuId] = useState('');   // 「…」メニュー展開中の投稿id
@@ -4694,11 +4738,16 @@
             const boardPost = async () => {
                 const t = boardText.trim(); const ti = boardTitle.trim();
                 if (!t && !ti && boardImgs.length === 0 && boardFiles.length === 0 && !boardVideo.trim() && !boardLink.trim()) return;
+                // ⚠️ 曖昧な宛先・期限のまま出さない
+                if (boardAudKind === 'shops' && !boardAudShops.length) return;
+                if (boardNeedsAck && !/^\d{4}-\d{2}-\d{2}$/.test(boardDue)) return;
                 setBoardPosting(true);
                 try {
                     // clientId は1回の送信で固定。再送・409リトライでも同じ値を使うため二重投稿にならない。
-                    await boardMutate({ action: 'post', post: { clientId: boardClientId(), authorId: chatMyId, authorName: chatMyName, authorShop: chatMyShop, authorRoot: chatIsRoot, title: ti, important: boardImportant, text: t, link: boardLink.trim(), imgIds: boardImgs.map(i => i.id), files: boardFiles, videoUrl: boardVideo.trim() } });
+                    await boardMutate({ action: 'post', post: { clientId: boardClientId(), authorId: chatMyId, authorName: chatMyName, authorShop: chatMyShop, authorRoot: chatIsRoot, title: ti, important: boardImportant, text: t, link: boardLink.trim(), imgIds: boardImgs.map(i => i.id), files: boardFiles, videoUrl: boardVideo.trim(),
+                        category: boardCat, audience: { kind: boardAudKind, shops: boardAudShops }, needsAck: boardNeedsAck, dueDate: boardDue, featured: boardFeatured, coverImgId: boardCover } });
                     setBoardText(''); setBoardTitle(''); setBoardLink(''); setBoardImportant(false); setBoardImgs([]); setBoardFiles([]); setBoardVideo('');
+                    setBoardCat(''); setBoardAudKind('all'); setBoardAudShops([]); setBoardNeedsAck(false); setBoardDue(''); setBoardFeatured(false); setBoardCover('');
                     setBoardComposerOpen(false);
                     await boardLoad();
                 } catch {} finally { setBoardPosting(false); }
@@ -14182,8 +14231,15 @@
                             const WD = ['日', '月', '火', '水', '木', '金', '土'];
                             const bq = boardSearch.trim();
                             const filtered = (boardData.posts || []).filter(p => {
-                                const catOk = boardFilter === 'all' ? true : boardFilter === 'hq' ? p.authorRoot : boardFilter === 'staff' ? !p.authorRoot : p.important;
+                                const catOk = boardFilter === 'all' ? true : boardFilter === 'hq' ? p.authorRoot : boardFilter === 'staff' ? !p.authorRoot
+                                    : boardFilter === 'important' ? p.important
+                                    : boardFilter === 'featured' ? p.featured
+                                    : boardFilter === 'unread' ? boardIsUnread(p)
+                                    : true;
                                 if (!catOk) return false;
+                                if (boardCatFilter && String(p.category || '') !== boardCatFilter) return false;
+                                // ⚠️ 公開対象が店舗指定の記事は、対象の人にだけ出す（本部は全部見える）
+                                if (!chatIsRoot && !newsForMe(p, { shop: chatMyShop, shops: authState.shops })) return false;
                                 if (!bq) return true;
                                 const hay = `${p.title || ''} ${p.text || ''} ${p.link || ''} ${chatResolveName(p.authorId, p.authorName || '')} ${p.authorShop || ''}`;
                                 return hay.includes(bq);
@@ -14232,6 +14288,35 @@
                                                 {rel(p.createdAt) && <div className="text-[11px] text-[#B0B7C3]">{rel(p.createdAt)}</div>}
                                             </div>
                                         </div>
+                                        {/* 表紙写真（一覧のファーストビュー用）。画像が無ければ代替表紙。 */}
+                                        {(() => {
+                                            const cover = newsCoverOf(p);
+                                            const cat = newsCatOf(p.category);
+                                            if (full) return null;
+                                            return cover
+                                                ? <div data-news-cover className="mt-2 rounded-xl overflow-hidden bg-[#F2F4F7] cursor-pointer" style={{ aspectRatio: '16 / 9' }} onClick={e => { e.stopPropagation(); openBoardPost(p); }}><ChatImage imgId={cover} className="w-full h-full object-cover" /></div>
+                                                : (p.featured ? <div data-news-cover-alt className="mt-2 rounded-xl bg-gradient-to-br from-[#F6F7F9] to-[#EEF0F3] border border-[#EAECF0] flex items-center justify-center" style={{ aspectRatio: '16 / 5' }}><span className="text-[13px] font-black text-[#98A2B3]">{cat ? cat.label : 'ニュース'}</span></div> : null);
+                                        })()}
+                                        {/* カテゴリー・ピックアップ・期限 */}
+                                        {(() => {
+                                            const cat = newsCatOf(p.category);
+                                            const due = newsDueState(p.dueDate);
+                                            if (!cat && !p.featured && due === 'none') return null;
+                                            return (
+                                                <div data-news-badges className="flex items-center gap-1.5 flex-wrap mt-2">
+                                                    {cat && <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${cat.cls}`}>{cat.label}</span>}
+                                                    {p.featured && <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-[#111827] text-white">ピックアップ</span>}
+                                                    {due !== 'none' && (
+                                                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${due === 'over' ? 'bg-rose-100 text-rose-700' : due === 'soon' ? 'bg-amber-100 text-amber-800' : 'bg-[#F2F4F7] text-[#667085]'}`}>
+                                                            {due === 'over' ? `期限切れ（${p.dueDate}）` : `${p.dueDate} まで`}
+                                                        </span>
+                                                    )}
+                                                    {p.audience && p.audience.kind === 'shops' && (
+                                                        <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-violet-50 text-violet-700">{(p.audience.shops || []).length}店舗限定</span>
+                                                    )}
+                                                </div>
+                                            );
+                                        })()}
                                         {p.title && <div onClick={full ? undefined : e => { e.stopPropagation(); openBoardPost(p); }} className={`text-[16px] font-bold text-[#111827] mt-2 leading-snug break-words ${full ? '' : 'cursor-pointer'}`} style={{ wordBreak: 'break-word' }}>{p.title}</div>}
                                         {p.text && <div className={`${p.title ? 'mt-1' : 'mt-2'}`}>
                                             <div className={`text-[14px] text-[#475467] leading-[1.5] whitespace-pre-wrap break-words ${longText ? 'line-clamp-6' : ''}`} style={{ wordBreak: 'break-word' }}>{chatLinkify((p.text || '').replace(/\n{3,}/g, '\n\n'))}</div>
@@ -14430,6 +14515,50 @@
                                                     <input value={boardTitle} onChange={e => setBoardTitle(e.target.value)} placeholder="例）9月の運営連絡" className={inputCls} />
                                                     <Label>本文</Label>
                                                     <textarea value={boardText} onChange={e => setBoardText(e.target.value)} rows={4} placeholder="ニュースの内容を入力してください…" className="w-full resize-none rounded-lg border border-[#EAECF0] bg-white px-3.5 py-2.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
+                                                    {/* ── ニュースの項目 ── */}
+                                                    <Label opt="（任意）">カテゴリー</Label>
+                                                    <div data-news-cat className="flex flex-wrap gap-1.5">
+                                                        {NEWS_CATEGORIES.map(c => (
+                                                            <button key={c.key} type="button" data-news-cat-btn={c.key} onClick={() => setBoardCat(boardCat === c.key ? '' : c.key)}
+                                                                className={`px-3 py-1.5 rounded-full text-[12px] font-bold border transition ${boardCat === c.key ? 'bg-[#111827] border-[#111827] text-white' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{c.label}</button>
+                                                        ))}
+                                                    </div>
+                                                    <Label>公開対象</Label>
+                                                    <div className="flex gap-1.5">
+                                                        {[['all', '全員'], ['shops', '店舗を指定']].map(([k, lab]) => (
+                                                            <button key={k} type="button" data-news-aud={k} onClick={() => setBoardAudKind(k)}
+                                                                className={`px-3 py-1.5 rounded-lg text-[12px] font-bold border transition ${boardAudKind === k ? 'bg-brand-500 border-brand-500 text-white' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{lab}</button>
+                                                        ))}
+                                                    </div>
+                                                    {boardAudKind === 'shops' && (
+                                                        <div className="mt-2">
+                                                            <div className="flex flex-wrap gap-1 max-h-32 overflow-y-auto border border-[#EAECF0] rounded-lg p-2">
+                                                                {(soShopsRaw || []).map((sh, i) => {
+                                                                    const nm = String(sh.name || '');
+                                                                    const on = boardAudShops.includes(nm);
+                                                                    if (!nm) return null;
+                                                                    return <button key={i} type="button" data-news-aud-shop={nm} onClick={() => setBoardAudShops(x => on ? x.filter(y => y !== nm) : [...x, nm])}
+                                                                        className={`px-2 py-1 rounded-full text-[11px] font-bold border transition ${on ? 'bg-brand-50 border-brand-200 text-brand-700' : 'bg-white border-[#EAECF0] text-[#667085]'}`}>{nm.replace(/^NAORU\s*/, '')}</button>;
+                                                                })}
+                                                            </div>
+                                                            {!boardAudShops.length && <div className="text-[11px] font-bold text-rose-600 mt-1">送る店舗を選んでください（選ぶまで投稿できません）</div>}
+                                                        </div>
+                                                    )}
+                                                    <Label opt="（任意）">確認・期限</Label>
+                                                    <div className="flex items-center gap-2 flex-wrap">
+                                                        <label className="inline-flex items-center gap-1.5 text-[12px] font-bold text-[#344054]">
+                                                            <input type="checkbox" data-news-needsack checked={boardNeedsAck} onChange={e => setBoardNeedsAck(e.target.checked)} />
+                                                            「確認しました」を求める
+                                                        </label>
+                                                        <input type="date" data-news-due value={boardDue} onChange={e => setBoardDue(e.target.value)}
+                                                            className="h-9 px-3 rounded-lg border border-[#EAECF0] text-[13px] text-[#111827]" />
+                                                    </div>
+                                                    {boardNeedsAck && !boardDue && <div className="text-[11px] font-bold text-rose-600 mt-1">期限を入れてください（いつまでに確認してほしいか）</div>}
+                                                    <Label opt="（任意）">ピックアップ</Label>
+                                                    <label className="inline-flex items-center gap-1.5 text-[12px] font-bold text-[#344054]">
+                                                        <input type="checkbox" data-news-featured checked={boardFeatured} onChange={e => setBoardFeatured(e.target.checked)} />
+                                                        ニュースの上部に大きく出す
+                                                    </label>
                                                     <Label opt="（任意）">関連リンク</Label>
                                                     <div className="relative"><span className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]">🔗</span><input value={boardLink} onChange={e => setBoardLink(e.target.value)} placeholder="例）https://example.com" className={inputCls + ' pl-9'} /></div>
                                                     <Label opt="（任意）">動画URL</Label>
@@ -14469,9 +14598,17 @@
                                                     {/* キーワード検索（タイトル・本文・発信者・リンクを対象） */}
                                                     <div className="relative mb-2.5"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]" /><input value={boardSearch} onChange={e => setBoardSearch(e.target.value)} placeholder="キーワードで過去のニュースを検索" className="w-full h-9 pl-9 pr-8 rounded-lg bg-[#F8F9FB] border border-[#EAECF0] text-[13px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />{boardSearch && <button onClick={() => setBoardSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center justify-center rounded-full text-[#98A2B3] hover:bg-[#EAECF0]"><X size={13} /></button>}</div>
                                                     <div className="flex items-center gap-1.5 flex-wrap">
-                                                        {[['all', 'すべて'], ['hq', '本部'], ['staff', '店舗'], ['important', '⭐ 重要']].map(([k, label]) => (
-                                                            <button key={k} onClick={() => setBoardFilter(k)} className={`px-2.5 py-1.5 rounded-full text-[12px] font-semibold border transition ${boardFilter === k ? 'bg-brand-500 border-brand-500 text-white' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{label}</button>
+                                                        {[['all', 'すべて'], ['unread', '未読'], ['featured', 'ピックアップ'], ['hq', '本部'], ['staff', '店舗'], ['important', '⭐ 重要']].map(([k, label]) => (
+                                                            <button key={k} data-news-filter={k} onClick={() => setBoardFilter(k)} className={`px-2.5 py-1.5 rounded-full text-[12px] font-semibold border transition ${boardFilter === k ? 'bg-brand-500 border-brand-500 text-white' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{label}</button>
                                                         ))}
+                                                    </div>
+                                                    {/* カテゴリーで絞る */}
+                                                    <div data-news-catfilter className="flex items-center gap-1.5 flex-wrap mt-2">
+                                                        {NEWS_CATEGORIES.map(c => (
+                                                            <button key={c.key} data-news-catfilter-btn={c.key} onClick={() => setBoardCatFilter(boardCatFilter === c.key ? '' : c.key)}
+                                                                className={`px-2.5 py-1 rounded-full text-[11px] font-bold border transition ${boardCatFilter === c.key ? 'bg-[#111827] border-[#111827] text-white' : `border-transparent ${c.cls} hover:opacity-80`}`}>{c.label}</button>
+                                                        ))}
+                                                        {boardCatFilter && <button onClick={() => setBoardCatFilter('')} className="px-2 py-1 rounded-full text-[11px] font-bold text-[#98A2B3] hover:bg-[#F2F4F7]">解除</button>}
                                                     </div>
                                                 </div>
 

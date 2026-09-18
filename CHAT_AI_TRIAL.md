@@ -2,7 +2,7 @@
 
 チャット担当（②）の @AI 試用版。**質問 → @AIモードで送信 → 同じルームにAI回答 → 出典確認 → 本部に確認 → 本部が訂正**までを画面で通しで試せます。
 
-- **基準 commit: `main` = `20f80dc`**（#390 チャットのアクセス制御 / #387 Meta / #388 #385取り込み まで反映。ブランチは rebase 済み）
+- **基準 commit: `main` = `1e51b66`**（#392「@AI 実接続」まで反映。ブランチは rebase 済み）
 - **共有ファイルは無変更**（`index.html` / `api/plan-store.js` / `lib/authz.js` / `lib/actor.js` / `lib/chat.js` / `scripts/precompile.mjs`）
 - 追加は新規ファイルのみ: `chat-ai-trial.html` / `lib/chat-ai-session.js` / `lib/chat-ai-adapter.js` / テスト2本 / 本書
 
@@ -57,25 +57,41 @@ npx serve .     # もしくは python3 -m http.server 8931
 
 ⚠️ **フロントの絞り込みは UX であり、セキュリティ境界ではありません。** 参照権限・回答先 room_id・投稿権限の最終判定はサーバー側（①の authz）で行う前提です。
 
-## 3.5 ①の実サーバーに対する結合テスト
+## 3.5 検証のレベル（混同しないこと）
 
-`tests/chat-server-integration.test.js` は **①のハンドラ（`api/plan-store.js`）そのもの**を呼び、
-保存層だけ Upstash REST 互換の擬似KVをローカルに立てて動かします（本番へは書き込みません）。
+| レベル | 何を動かすか | 状態 |
+|---|---|---|
+| A. 単体・契約準拠 | ②のロジックと、契約どおりに振る舞う参照実装 | ✅ 実施済み |
+| **B. ローカル結合** | **①の実ハンドラ `api/plan-store.js` ＋ 擬似KV**（このリポジトリ内） | ✅ 実施済み（下表） |
+| C. デプロイ済みAPI・実KV | 実際にデプロイされた Preview / 本番の API と実KV | ⏳ **未実施**（①の環境・認証情報が必要） |
 
-| 確認したこと | 結果 |
+### B. ローカル結合テスト（`tests/chat-server-integration.test.js`・27件 green）
+
+保存層だけ Upstash REST 互換の擬似KVをローカルに立て、**認証・認可・保存・AI経路は①の実コード**を通します（本番へは書き込みません）。
+
+**入口の認可**
+| 確認 | 結果 |
 |---|---|
-| 未認証の `?type=chat` 取得 | 403 `chat_admin_only` ✅ |
-| `body.root` / `staffId` の申告だけ | 403（申告は認可の材料にならない）✅ |
-| オーナー（未公開ロール） | 403 ✅ |
-| 本部・管理者（`X-CC-Owner`/`X-CC-Token`） | 200・ルーム取得 ✅ |
-| ルーム作成 → 同じIDで作り直し | 重複しない ✅ |
-| 送信 → 再取得（再読み込み相当） | 本文が残る ✅ |
-| 同じ本文を2回送信 | サーバーは2件になる（＝**重複防止はクライアント側の責任**）✅ 記録 |
-| 非参加のDM | root でも返らない ✅ |
-| 既読の更新 | 保存される ✅ |
-| ①のエラー形 → ②の `normalizeError` | `chat_admin_only` / `retryable:false` に正規化 ✅ |
-| `createLiveAdapter` を①のハンドラへ | 権限拒否として扱い、自動再試行しない ✅ |
-| @AI 用エンドポイント | **まだ存在しない**（①の実装待ち）⏳ |
+| 未認証 / `body.root` の申告のみ / オーナー（未公開ロール） | 403 `chat_admin_only` ✅ |
+| root トークン（`X-CC-Owner`/`X-CC-Token`） | 200 ✅ |
+| **本部アカウント**（オーナートークン＋`accountmeta` の `role:'hq'` → `admin`） | 200 ✅ |
+| **SalonOne SSO**（`brand_admin`） | 200 ✅ ／ `shop_staff` は 403 ✅ |
+
+**@AI 実接続（`?type=chatai`）**
+| 確認 | 結果 |
+|---|---|
+| フラグ `cc_ai_trial` OFF | `rollout_disabled` ✅（既定は閉じている） |
+| 検証用Room以外 | `forbidden_room` ✅ |
+| 質問 → 同じRoomに回答 → 再読み込みで残る | ✅ |
+| 同じ `request_id` の再送（応答消失後の再送を含む） | `replay` で同じ `answer_message_id`・回答は増えない ✅ |
+| **同じ `request_id` の同時送信** | ❌ **回答が複数作られる（既知の不具合・①へ報告）** |
+| 別本文で同じ `request_id` を使い回す | `request_conflict`（`retryable:false`）✅ |
+| 新しい送信に新しい `request_id` | 別の回答が作られる ✅ |
+| AI の投稿を質問に指定 | `ai_message_source` ✅（無限返信の防止） |
+| 本部確認 | 根拠不足なら ask 時点で自動作成。連打しても1件のまま ✅ 通知は `notified:false` / `channel:'not_connected'` ✅ |
+| 本部の訂正 | 元回答は書き換わらない ✅ |
+| **権限剥奪後の再取得** | 検証用Roomの許可を外すと `forbidden_room`、未認証は 403 ✅ |
+| ②の `createLiveAdapter` ↔ ①の実ハンドラ | ask → hqReview → correct → getConfig が往復 ✅ |
 
 ## 4. テスト
 

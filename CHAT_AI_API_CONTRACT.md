@@ -4,8 +4,9 @@
 ②はこの形に合わせて **クライアント側だけ**実装済み（`lib/chat-ai-adapter.js`）。
 サーバー実装・認可・保存・本番反映は①の担当です。
 
-- **基準 commit: `main` = `20f80dc`**（#388「#385取り込み: Room付加フィールドの保存対応＋認可の追加確認4点」まで反映）
-  ②のブランチはこの commit へ rebase 済みです。①が別の基準を指定する場合はそちらへ追従します。
+- **基準 commit: `main` = `1e51b66`**（#392「@AI 実接続（本部/root限定・検証用Roomのみ・フラグ既定OFF）」まで反映）
+  ②のブランチはこの commit へ rebase 済みです。
+- **①が本契約を実装済み**（`lib/chatai.js` / `?type=chatai`）。以下は①の実装に合わせて更新しています。
 - 以下は**①の実装済みの仕様に合わせて更新**しました（`lib/actor.js` / `api/plan-store.js` の実コードを確認）。
 
 ---
@@ -125,12 +126,21 @@ X-CC-Token: <settlement-auth のトークン>
 - `retryable:false` のときは②は**自動再試行しません**（人が「本部に確認」を選べる状態にします）。
 - どの場合でも、質問と入力中の下書きは消しません。
 
-## 4. 冪等性・重複防止（①へのお願い）
+## 4. 冪等性・重複防止（責任分界）
 
-- `request_id` は**クライアントが生成**し、再試行・別タブでも同じ値を送ります。
-- サーバーは `request_id` 単位で結果を保持し、**2回目以降は同じ `answer_message_id` を返す**（新規生成しない）。
-- 未完了のまま再送された場合は、`202` 相当（`ok:true, status:"pending"`）か、完了まで待つかを①が選択。
-  ②は `answer_message_id` が同じであれば、**回答カードを1つしか作りません**。
+| 誰が | 何を |
+|---|---|
+| ②（クライアント） | **同じ送信の再試行では同じ `request_id` を維持する**／**新しい送信には新しい `request_id` を採る**／**回答カードの重複表示を防ぐ**（同じ `answer_message_id` は1枚しか描かない） |
+| ①（サーバー） | **同じ `request_id` の重複実行を防ぐ**（`replay` / `pending` / `conflict` の判定と、回答の単一生成） |
+
+- 「同じ本文を人が意図的に2回送る」のは**正常な操作**です。送信IDが別なので、2件になるのが正しい挙動です。
+- ①の実装（`lib/chatai.js`）: 冪等キー = `tenant | actor | request_id`。
+  `classifyRequest()` が `new` / `pending` / `replay` / `conflict` を返し、
+  `conflict`（同じIDで本文やRoomが違う）は `request_conflict`（`retryable:false`）で拒否されます。
+- ⚠️ **未解決**: 同じ `request_id` を**同時に**送ると、pending の記録が read-modify-write のため
+  取り合いになり、回答が複数作られます（②のローカル結合テストで再現・`it.fails` で記録）。
+  KV の CAS／SETNX 等で「pending を先に立てた1つだけが生成する」形にすれば解決します。
+  逐次の再送（`replay`）は正しく1件に収束することを確認済みです。
 
 ## 5. 本部確認（HQ review）
 

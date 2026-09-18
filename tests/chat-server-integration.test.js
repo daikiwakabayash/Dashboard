@@ -1,7 +1,8 @@
-// ── 結合テスト: ①の実サーバー実装（api/plan-store.js）に対して実行する ──────
-// ⚠️ 参照実装（tests/chat-ai-contract.test.js）とは別物。ここで動かすのは **①のハンドラそのもの**。
-//    保存層だけ Upstash REST 互換の擬似KVをローカルに立て、認証・認可・保存は本物のコードを通す。
-//    ②は本番サーバーへ書き込まないため、この方式で「サーバー仕様に合っているか」を確かめる。
+// ── ローカル結合テスト: ①の実ハンドラ（api/plan-store.js）＋ 擬似KV ──────────
+// ⚠️ 位置づけを混同しないこと。
+//    これは **「①の実ハンドラ＋擬似KV」をこのリポジトリ内で動かすローカル結合テスト** であり、
+//    **デプロイ済みAPI・実KV（本番/Preview）での確認ではない**。
+//    デプロイ済み環境での確認は、①の環境と認証情報が要るため別途行う（未実施）。
 //
 // 確認する項目（画面で確かめたいことのサーバー側の裏付け）:
 //   ・未認証／申告だけ／未公開ロールは拒否される
@@ -9,6 +10,12 @@
 //   ・非参加のDMは root でも返らない
 //   ・同じルームIDで作り直しても重複しない
 //   ・①のエラー形（{ok:false,error,code,message}）が②のAdapterで正しく解釈される
+//
+// 重複防止の責任分界（①と合意）:
+//   ・同じ送信の**再試行**は同じ request_id を維持する（②）
+//   ・**新しい送信**には新しい request_id を採る（②）
+//   ・同じ request_id の**重複実行防止**はサーバーが担当（①: replay / pending / conflict）
+//   ・**回答カードの重複表示防止**は②が担当
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
@@ -51,6 +58,13 @@ function startFakeKv() {
     req.on('end', () => {
       res.setHeader('Content-Type', 'application/json');
       const url = new URL(req.url, 'http://x');
+      // SalonOne の /me を模す（SSO 経路を①の実コードで通すため）
+      if (url.pathname.endsWith('/salonone/me')) {
+        const bearer = String(req.headers.authorization || '');
+        const role = /shop-staff/.test(bearer) ? 'shop_staff' : 'brand_admin';
+        return res.end(JSON.stringify({ data: { user_id: '7', staff_id: '9', login_id: 'sso_user', role,
+          accessible_shops: [{ id: '100', name: 'A院' }] } }));
+      }
       const m = /^\/get\/(.+)$/.exec(url.pathname);
       if (m) return res.end(JSON.stringify({ result: store.get(decodeURIComponent(m[1])) ?? null }));
       const s = /^\/set\/(.+)$/.exec(url.pathname);
@@ -82,6 +96,7 @@ beforeAll(async () => {
   process.env.AUTH_SALT = SALT;
   process.env.SETTLEMENT_OWNER_PASSWORDS = JSON.stringify({ 'オーナーA': 'owner-pw' });
   process.env.SETTLEMENT_OWNER_SHOPS = JSON.stringify({ 'オーナーA': ['A院'] });
+  process.env.CC_ENV = 'test';          // ①は Command Center 系のキーを環境ごとに分ける（ccKey）
   delete process.env.SUPABASE_URL; delete process.env.PLAN_GAS_URL; delete process.env.SETTLEMENT_GAS_URL;
   handler = (await import('../api/plan-store.js')).default;    // ①の実ハンドラ
 });
@@ -98,9 +113,11 @@ async function call({ method = 'GET', query = {}, body = null, headers = {} }) {
   return { status: statusCode, body: payload };
 }
 const rootHeaders = { 'x-cc-owner': encodeURIComponent('__root__'), 'x-cc-token': rootToken() };
+// Command Center 系のキーは環境サフィックスが付く（本番のみ素のキー）
+const ccK = (base) => `${base}:test`;
 const ownerHeaders = { 'x-cc-owner': encodeURIComponent('オーナーA'), 'x-cc-token': ownerToken('オーナーA', 'owner-pw') };
 
-describe('実サーバー結合: チャットの入口（①の認可）', () => {
+describe('ローカル結合（実ハンドラ+擬似KV）: チャットの入口（①の認可）', () => {
   it('未認証の取得は 403 chat_admin_only', async () => {
     const r = await call({ query: { type: 'chat' } });
     expect(r.status).toBe(403);
@@ -148,7 +165,7 @@ describe('実サーバー結合: チャットの入口（①の認可）', () =>
   });
 });
 
-describe('実サーバー結合: 投稿と履歴', () => {
+describe('ローカル結合（実ハンドラ+擬似KV）: 投稿と履歴', () => {
   const room = { id: 'room_it_1', kind: 'group', name: '検証用ルーム', members: ['__root__'], createdBy: '__root__' };
 
   it('ルームを作成し、同じIDで作り直しても重複しない', async () => {
@@ -169,14 +186,16 @@ describe('実サーバー結合: 投稿と履歴', () => {
     expect((g1.body.messages[room.id] || []).length).toBe((g2.body.messages[room.id] || []).length);
   });
 
-  it('同じ本文を2回送るとサーバー側は2件になる（＝重複防止はクライアント側の責任）', async () => {
+  it('別々の送信（送信IDなしの2リクエスト）は2件になるのが正しい', async () => {
+    // ⚠️ これは「重複」ではない。人が同じ本文を意図的に2回送ることは正常な操作であり、
+    //    サーバーが勝手にまとめてはいけない。
+    //    再試行の重複実行防止は request_id を持つ @AI の経路（?type=chatai）で①が担当する。
     const before = (await call({ query: { type: 'chat' }, headers: rootHeaders })).body.messages[room.id].length;
-    const msg = { fromStaffId: '__root__', fromName: '管理者', text: '二重送信の確認' };
+    const msg = { fromStaffId: '__root__', fromName: '管理者', text: '同じ本文を意図的に2回' };
     await call({ method: 'POST', body: { type: 'chat', action: 'send', roomId: room.id, msg }, headers: rootHeaders });
     await call({ method: 'POST', body: { type: 'chat', action: 'send', roomId: room.id, msg }, headers: rootHeaders });
     const after = (await call({ query: { type: 'chat' }, headers: rootHeaders })).body.messages[room.id].length;
     expect(after - before).toBe(2);
-    // → ②の画面は clientId と answer_message_id で重複を防いでいる（tests/chat-ai-contract.test.js）
   });
 
   it('非参加のDMは root でも返らない', async () => {
@@ -194,10 +213,208 @@ describe('実サーバー結合: 投稿と履歴', () => {
   });
 });
 
-describe('実サーバー結合: @AI エンドポイントの有無', () => {
-  it('現時点では AI 用のエンドポイントが無い（①の実装待ち）', async () => {
-    const r = await call({ method: 'POST', query: { type: 'chatai', action: 'ask' }, body: { type: 'chatai', action: 'ask', question: 'q', room_id: 'room_it_1', request_id: 'req_1' }, headers: rootHeaders });
-    // チャット用の認可ゲート（type==='chat'）にも掛からず、AI の応答も返らないことを記録しておく。
-    expect(r.body && r.body.answer_message_id).toBeUndefined();
+
+
+// ── 公開対象となる認証経路（rootトークンの成功だけで代用しない）─────────────
+describe('ローカル結合（実ハンドラ+擬似KV）: 実際に公開する認証経路', () => {
+  it('本部アカウント（オーナートークン＋accountmeta の role=hq → admin）で利用できる', async () => {
+    // ①の resolveActor はオーナートークンの meta.role を見る。'hq' は authz で 'admin'（本部）に写像される。
+    process.env.SETTLEMENT_OWNER_PASSWORDS = JSON.stringify({ 'オーナーA': 'owner-pw', '本部 花子': 'hq-pw' });
+    kv.store.set('naoru:accountmeta:v1', JSON.stringify({ '本部 花子': { role: 'hq', staffName: '本部 花子' } }));
+    const hqHeaders = { 'x-cc-owner': encodeURIComponent('本部 花子'), 'x-cc-token': ownerToken('本部 花子', 'hq-pw') };
+    const r = await call({ query: { type: 'chat' }, headers: hqHeaders });
+    expect(r.status).toBe(200);
+    expect(Array.isArray(r.body.rooms)).toBe(true);
+  });
+
+  it('SalonOne SSO（brand_admin）で利用できる', async () => {
+    // 上流 /me を擬似サーバーに向ける（①の verifySalonOneBearer をそのまま通す）
+    process.env.SALONONE_API_KEY = 'test-key';
+    process.env.SALONONE_API_BASE = `http://127.0.0.1:${kv.port}/salonone`;
+    const r = await call({ query: { type: 'chat' }, headers: { authorization: 'Bearer sso-brand-admin' } });
+    expect(r.status).toBe(200);
+    delete process.env.SALONONE_API_BASE; delete process.env.SALONONE_API_KEY;
+  });
+
+  it('SalonOne SSO でも shop_staff（未公開ロール）は拒否される', async () => {
+    process.env.SALONONE_API_KEY = 'test-key';
+    process.env.SALONONE_API_BASE = `http://127.0.0.1:${kv.port}/salonone`;
+    const r = await call({ query: { type: 'chat' }, headers: { authorization: 'Bearer sso-shop-staff' } });
+    expect(r.status).toBe(403);
+    expect(r.body.code).toBe('chat_admin_only');
+    delete process.env.SALONONE_API_BASE; delete process.env.SALONONE_API_KEY;
+  });
+});
+
+// ── @AI 実接続（①の ?type=chatai）──────────────────────────────────────
+describe('ローカル結合（実ハンドラ+擬似KV）: @AI 実接続', () => {
+  const ROOM = 'room_ai_trial';
+  const ask = (over = {}) => call({
+    method: 'POST', headers: rootHeaders,
+    body: { type: 'chatai', action: 'ask', question: '家族施術のルールは？', room_id: ROOM, request_id: 'req_ai_1', client_id: 'tab_1', ...over },
+  });
+
+  beforeAll(async () => {
+    // 検証用Roomを用意し、フラグと許可リストを本部操作で有効化する（既定はどちらもOFF）
+    await call({ method: 'POST', headers: rootHeaders, body: { type: 'chat', action: 'createRoom',
+      room: { id: ROOM, kind: 'group', name: '本部/root 検証用ルーム', members: ['__root__'], createdBy: '__root__' } } });
+    kv.store.set(ccK('naoru:cc:flags:v1'), JSON.stringify({ cc_all: true, cc_ai_trial: true }));
+    await call({ method: 'POST', headers: rootHeaders, body: { type: 'chatai', action: 'config', config: { trialRooms: [ROOM] } } });
+  });
+
+  it('フラグ OFF・未許可Roomでは動かない（既定は閉じている）', async () => {
+    kv.store.set(ccK('naoru:cc:flags:v1'), JSON.stringify({ cc_all: true, cc_ai_trial: false }));
+    expect((await ask({ request_id: 'req_off' })).body.error.code).toBe('rollout_disabled');
+    kv.store.set(ccK('naoru:cc:flags:v1'), JSON.stringify({ cc_all: true, cc_ai_trial: true }));
+    const other = await ask({ room_id: 'room_it_1', request_id: 'req_other_room' });
+    expect(other.body.error).toMatchObject({ code: 'forbidden_room', retryable: false });
+  });
+
+  it('質問 → 同じRoomに回答が入り、再読み込みでも残る', async () => {
+    const r = await ask();
+    expect(r.body.ok).toBe(true);
+    expect(r.body.room_id).toBe(ROOM);
+    expect(r.body.question_message_id).toBeTruthy();
+    expect(r.body.answer_message_id).toBeTruthy();
+    expect(r.body.mode).toBe('sample');                       // ANTHROPIC_API_KEY 未設定＝サンプル
+    expect(r.body.sources.verification).not.toBe('server_verified');
+    const g = await call({ query: { type: 'chat' }, headers: rootHeaders });   // 再読み込み相当
+    const texts = (g.body.messages[ROOM] || []).map(m => m.text);
+    expect(texts).toContain('家族施術のルールは？');
+    expect((g.body.messages[ROOM] || []).some(m => m.id === r.body.answer_message_id)).toBe(true);
+  });
+
+  it('同じ request_id の再送は replay で、回答が増えない', async () => {
+    const before = (await call({ query: { type: 'chat' }, headers: rootHeaders })).body.messages[ROOM].length;
+    const again = await ask();                                 // 同じ送信の再試行
+    expect(again.body.ok).toBe(true);
+    expect(again.body.replay).toBe(true);
+    const after = (await call({ query: { type: 'chat' }, headers: rootHeaders })).body.messages[ROOM].length;
+    expect(after).toBe(before);
+  });
+
+  // ⚠️ 既知の不具合（①へ報告済み）:
+  //    同じ request_id を**同時に**送ると、pending の記録（loadAi → saveAi）が
+  //    read-modify-write のため取り合いになり、回答が複数作られる。
+  //    逐次の再送（replay）は正しく1件に収まる。KV の CAS / SETNX などで
+  //    「pending を先に立てた1つだけが生成する」形にすれば解決する。
+  //    直ったらこのテストが失敗して気づけるよう it.fails で置いている。
+  it.fails('【既知の不具合】同じ request_id の同時送信でも回答は1つだけであるべき', async () => {
+    const [a, b, c] = await Promise.all([
+      ask({ request_id: 'req_parallel', question: '同時送信の確認' }),
+      ask({ request_id: 'req_parallel', question: '同時送信の確認' }),
+      ask({ request_id: 'req_parallel', question: '同時送信の確認' }),
+    ]);
+    const uniq = [...new Set([a, b, c].map(x => x.body.answer_message_id).filter(Boolean))];
+    expect(uniq.length).toBe(1);
+  });
+
+  it('同時送信で作られた回答も、以後の再送は1つに収束する（replay）', async () => {
+    const again = await ask({ request_id: 'req_parallel', question: '同時送信の確認' });
+    expect(again.body.ok).toBe(true);
+    expect(again.body.replay).toBe(true);
+    const once = await ask({ request_id: 'req_parallel', question: '同時送信の確認' });
+    expect(once.body.answer_message_id).toBe(again.body.answer_message_id);
+  });
+
+  it('応答が消えた後の再送（同じ request_id）は同じ回答を返す', async () => {
+    const first = await ask({ request_id: 'req_lost', question: '応答消失の確認' });
+    expect(first.body.ok).toBe(true);
+    const resend = await ask({ request_id: 'req_lost', question: '応答消失の確認' });   // 応答を受け取れなかった想定
+    expect(resend.body.answer_message_id).toBe(first.body.answer_message_id);
+    expect(resend.body.replay).toBe(true);
+  });
+
+  it('別の本文で同じ request_id を使い回すと競合として拒否される', async () => {
+    const r = await ask({ request_id: 'req_lost', question: '別の質問に差し替えた' });
+    expect(r.body.ok).toBe(false);
+    expect(r.body.error).toMatchObject({ code: 'request_conflict', retryable: false });
+  });
+
+  it('新しい送信には新しい request_id ＝ 新しい回答が作られる', async () => {
+    const a = await ask({ request_id: 'req_new_1', question: '1件目の質問' });
+    const b = await ask({ request_id: 'req_new_2', question: '2件目の質問' });
+    expect(a.body.answer_message_id).not.toBe(b.body.answer_message_id);
+  });
+
+  it('AI の投稿を質問として指定すると拒否される（無限返信の防止）', async () => {
+    const g = await call({ query: { type: 'chat' }, headers: rootHeaders });
+    const aiMsg = (g.body.messages[ROOM] || []).find(m => m.fromStaffId === '__ai__');
+    const r = await ask({ request_id: 'req_ai_src', question: 'AIの投稿を質問にする', question_message_id: aiMsg.id });
+    expect(r.body.error).toMatchObject({ code: 'ai_message_source', retryable: false });
+  });
+
+  it('本部確認は何度依頼しても1件（created は初回だけ true）', async () => {
+    const a = await ask({ request_id: 'req_hq', question: '本部確認の確認' });
+    // 根拠不足の回答は、サーバーが ask の時点で本部確認を自動作成する（hq_review.status='pending'）
+    expect(a.body.hq_review.status).toBe('pending');
+    const first = await call({ method: 'POST', headers: rootHeaders, body: { type: 'chatai', action: 'hq_review',
+      question_message_id: a.body.question_message_id, answer_message_id: a.body.answer_message_id, room_id: ROOM } });
+    const second = await call({ method: 'POST', headers: rootHeaders, body: { type: 'chatai', action: 'hq_review',
+      question_message_id: a.body.question_message_id, answer_message_id: a.body.answer_message_id, room_id: ROOM } });
+    // 連打しても増えない（既にあるので created は false のまま・同じ依頼IDが返る）
+    expect(first.body.created).toBe(false);
+    expect(second.body.created).toBe(false);
+    expect(first.body.hq_review.request_id).toBe(second.body.hq_review.request_id);
+    expect(second.body.hq_review).toMatchObject({ status: 'pending', notified: false, channel: 'not_connected' });
+  });
+
+  it('本部の訂正は元回答を残して追記される', async () => {
+    const a = await ask({ request_id: 'req_fix', question: '訂正の確認' });
+    const before = (await call({ query: { type: 'chat' }, headers: rootHeaders })).body.messages[ROOM]
+      .find(m => m.id === a.body.answer_message_id).text;
+    const c = await call({ method: 'POST', headers: rootHeaders, body: { type: 'chatai', action: 'correct',
+      answer_message_id: a.body.answer_message_id, text: '正しくは2親等以内＋配偶者です。' } });
+    expect(c.body.ok).toBe(true);
+    const after = (await call({ query: { type: 'chat' }, headers: rootHeaders })).body.messages[ROOM]
+      .find(m => m.id === a.body.answer_message_id).text;
+    expect(after).toBe(before);                                // 元回答は書き換わらない
+  });
+
+  it('権限を失った後の再取得は拒否される（保存済みでも見せない）', async () => {
+    const a = await ask({ request_id: 'req_revoke', question: '権限剥奪の確認' });
+    expect(a.body.ok).toBe(true);
+    // 検証用Roomの許可を外す → 同じ request_id の再送も拒否される
+    await call({ method: 'POST', headers: rootHeaders, body: { type: 'chatai', action: 'config', config: { trialRooms: [] } } });
+    const replay = await ask({ request_id: 'req_revoke', question: '権限剥奪の確認' });
+    expect(replay.body.error).toMatchObject({ code: 'forbidden_room', retryable: false });
+    // チャット本体も、権限が無くなれば取得できない
+    const noAuth = await call({ query: { type: 'chat' } });
+    expect(noAuth.status).toBe(403);
+    await call({ method: 'POST', headers: rootHeaders, body: { type: 'chatai', action: 'config', config: { trialRooms: [ROOM] } } });
+  });
+
+  it('②の createLiveAdapter が①の実ハンドラと往復できる（ask → hqReview → correct）', async () => {
+    const { createLiveAdapter } = await import('../lib/chat-ai-adapter.js');
+    const adapter = createLiveAdapter({
+      endpoint: '/api/plan-store',
+      headers: () => rootHeaders,
+      fetch: async (url, init) => {
+        const r = init.method === 'GET'
+          ? await call({ query: { type: 'chatai', action: 'config' }, headers: rootHeaders })
+          : await call({ method: 'POST', body: JSON.parse(init.body), headers: init.headers });
+        return { status: r.status, json: async () => r.body };
+      },
+    });
+    const out = await adapter.ask({ question: 'Adapter からの質問', roomId: ROOM, requestId: 'req_adapter', clientId: 'tab_x' });
+    expect(out.ok).toBe(true);
+    expect(out.roomId).toBe(ROOM);
+    expect(out.answerMessageId).toBeTruthy();
+    expect(out.mode).toBe('sample');
+
+    const replay = await adapter.ask({ question: 'Adapter からの質問', roomId: ROOM, requestId: 'req_adapter' });
+    expect(replay.answerMessageId).toBe(out.answerMessageId);   // 再試行で増えない
+    expect(replay.replay).toBe(true);
+
+    const hq = await adapter.hqReview({ questionMessageId: out.questionMessageId, answerMessageId: out.answerMessageId, roomId: ROOM });
+    expect(hq.ok).toBe(true);
+    expect(hq.hq_review).toMatchObject({ notified: false, channel: 'not_connected' });
+
+    const fix = await adapter.correct({ answerMessageId: out.answerMessageId, text: 'Adapter からの訂正' });
+    expect(fix.ok).toBe(true);
+
+    const cfg = await adapter.getConfig();
+    expect(cfg.ok).toBe(true);
+    expect(cfg.config.trialRooms).toContain(ROOM);
   });
 });

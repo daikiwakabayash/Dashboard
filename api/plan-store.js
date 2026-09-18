@@ -27,7 +27,7 @@ import { FLAGS_KEY, DEFAULT_FLAGS, normalizeFlags, applyFlagChange, killAll } fr
 import { AUDIT_KEY, AUDIT_CAP, buildEntry as buildAuditEntry, listEntries as listAuditEntries } from '../lib/audit.js';
 import { APPROVAL_KEY, APPROVAL_CAP, buildApproval, decide as decideApproval, repropose as reproposeApproval, recordExecution, listApprovals, pendingCount } from '../lib/approvals.js';
 import { AGENTLOG_KEY, AGENTLOG_CAP, startRun, finishRun, listRuns, summarize as summarizeRuns, anomalies as runAnomalies } from '../lib/agentlog.js';
-import { check as authzCheck, can as authzCan, enforce as authzEnforce, decisionRecord, needsReverify, DEFAULT_TENANT } from '../lib/authz.js';
+import { check as authzCheck, can as authzCan, enforce as authzEnforce, decisionRecord, needsReverify, DEFAULT_TENANT, canViewRoom } from '../lib/authz.js';
 import { resolveActor } from '../lib/actor.js';
 import { normalizeOverview as normalizeMetaOverview, connectionState as metaConnectionState, lastCompleteDays, META_API_VERSION } from '../lib/meta-read.js';
 import META_FIXTURE from '../fixtures/meta-overview-sample.json' with { type: 'json' };
@@ -1657,6 +1657,45 @@ export default async function handler(req, res) {
   // ── プロフィールストア: ?type=profile ──
   // 各スタッフ/オーナーが自分のプロフィール（写真・名前・自己紹介・SNS・担当店舗）を編集。
   // 組織図でホバー表示し、店舗割当はSalonOneをベースにしつつ本人の設定を優先する。
+  // ── チャット系のアクセス制御（本人確認した root / 本部のみ）────────────────
+  // ⚠️ 既存の認証（lib/actor.js）をそのまま使う。チャット専用の認証系は作らない。
+  //    対象: ?type=chat（ルーム一覧・本文・名簿・ノート・画像・添付・書込）と
+  //          ?type=profile（同じ画像ストアを読む迂回経路・スタッフ名簿）。
+  //    owner / manager / staff への公開はまだ行わない（サーバー側で拒否する）。
+  const chatSalt = () => process.env.AUTH_SALT || 'naoru-settlement-2026';
+  const chatResolveActor = () => resolveActor(req, {
+    env: process.env,
+    verifySalonOneBearer,
+    // 秘密が未設定なら root 経路を閉じる（環境変数の欠落で認証が外れない）
+    rootToken: () => (process.env.DASHBOARD_PASSWORD ? hashOwnerToken('__root__', process.env.DASHBOARD_PASSWORD, chatSalt()) : ''),
+    verifyOwnerToken: (pw, owner, token) => verifyOwnerToken(pw, owner, token, chatSalt()),
+    loadAccounts: async () => {
+      const passwords = parseOwnerPasswords(process.env.SETTLEMENT_OWNER_PASSWORDS);
+      const shopsMap = parseOwnerShops(process.env.SETTLEMENT_OWNER_SHOPS);
+      if (kvConfigured()) {
+        const kvPass = await kvBlobGet(ACCT_PASS_KEY).catch(() => null);
+        if (kvPass && typeof kvPass === 'object') for (const [o, pw] of Object.entries(kvPass)) if (pw) passwords[o] = String(pw);
+      }
+      const metaMap = (await blobGet(ACCTMETA_KEY, hasKV, hasSB, gas).catch(() => null)) || {};
+      return { passwords, shopsMap, metaMap };
+    },
+  }).catch(() => null);
+
+  const chatTypes = ['chat', 'profile'];
+  const reqType = (req.method === 'GET' ? req.query.type : (req.body || {}).type);
+  let chatActor = null;
+  if (chatTypes.includes(reqType)) {
+    chatActor = await chatResolveActor();
+    // 本人確認できない／root・本部でなければ拒否。
+    // ⚠️ body.root / body.staffId / 申告 role は本人確認の代わりにしない。
+    // ⚠️ cc_authz の log / shadow はあくまで計測用で、この拒否を無効化しない。
+    const ok = !!chatActor && chatActor.verified === true && ['root', 'admin'].includes(chatActor.role);
+    if (!ok) {
+      return res.status(403).json({ ok: false, error: 'forbidden', code: 'chat_admin_only',
+        message: 'チャットは本部・管理者のみが利用できます（再ログインが必要な場合があります）' });
+    }
+  }
+
   const isProfile = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'profile';
   if (isProfile) {
     if (!hasKV && !hasSB && !gas) return res.status(200).json({ profiles: {}, configured: false });
@@ -1804,7 +1843,8 @@ export default async function handler(req, res) {
           const m = /^data:([^;]+);base64,(.*)$/s.exec(String(dataUrl));
           if (m) {
             res.setHeader('Content-Type', m[1]);
-            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable'); // 画像はid固定=不変
+            // ⚠️ 私用のチャット画像。CDN や共有キャッシュに載せない（認証必須のため）
+            res.setHeader('Cache-Control', 'private, no-store');
             return res.status(200).send(Buffer.from(m[2], 'base64'));
           }
         }
@@ -1842,14 +1882,22 @@ export default async function handler(req, res) {
       const save = (patch) => blobSet(CHAT_KEY, { rooms, dir, notes, ...patch }, hasKV, hasSB, gas);
 
       if (req.method === 'GET') {
-        // rooms 一覧の per-room キーをMGETでまとめて取得。空のルームは旧集約で補完。
-        const keys = rooms.map(r => CHAT_MSG_PREFIX + String(r.id));
+        // 見えるルームだけを返す（本文もサーバー側で出さない）。
+        // ⚠️ **root / 本部でも、参加していないDMは返さない**（lib/authz.js の canViewRoom）。
+        //    ここでフィルタしないと、DMの本文が一覧と一緒に全部返ってしまう。
+        const visible = rooms.filter(r => canViewRoom(chatActor, r));
+        const keys = visible.map(r => CHAT_MSG_PREFIX + String(r.id));
         const arrs = await blobMGet(keys, hasKV, hasSB, gas);
         const messages = {};
         const missing = [];
-        rooms.forEach((r, i) => { const a = arrs[i]; if (Array.isArray(a) && a.length) messages[String(r.id)] = a; else missing.push(String(r.id)); });
+        visible.forEach((r, i) => { const a = arrs[i]; if (Array.isArray(a) && a.length) messages[String(r.id)] = a; else missing.push(String(r.id)); });
         if (missing.length) { const agg = await loadAgg(); for (const rid of missing) { const m = agg[rid]; if (Array.isArray(m) && m.length) messages[rid] = m; } }
-        return res.status(200).json({ rooms, messages, reads, dir, notes, configured: true });
+        // ノートも見えるルームぶんだけ
+        const visibleIds = new Set(visible.map(r => String(r.id)));
+        const scopedNotes = {};
+        for (const [rid, arr] of Object.entries(notes || {})) if (visibleIds.has(String(rid))) scopedNotes[rid] = arr;
+        return res.status(200).json({ rooms: visible, messages, reads, dir, notes: scopedNotes, configured: true,
+          filtered: visible.length !== rooms.length });
       }
 
       const body = req.body || {};

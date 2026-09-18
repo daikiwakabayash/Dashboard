@@ -197,9 +197,14 @@ describe('?type=meta - 接続できているとき', () => {
 
 describe('?type=meta - 既存機能を壊さない', () => {
   it('他の type= は従来どおり（metaブロックに吸い込まれない）', async () => {
-    for (const t of ['board', 'allowance', 'chat', 'events']) {
+    for (const t of ['board', 'allowance', 'events']) {
       const res = await call({ method: 'GET', query: { type: t } });
       expect(res.statusCode, t).toBe(200);
+    }
+    // chat / profile は別PR(#390)で本人確認必須になった＝未認証は403が正しい
+    for (const t of ['chat', 'profile']) {
+      const res = await call({ method: 'GET', query: { type: t } });
+      expect(res.statusCode, t).toBe(403);
     }
   });
   it('type 未指定も従来どおり', async () => {

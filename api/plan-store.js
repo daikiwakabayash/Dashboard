@@ -28,8 +28,10 @@ import { FLAGS_KEY, DEFAULT_FLAGS, normalizeFlags, applyFlagChange, killAll } fr
 import { AUDIT_KEY, AUDIT_CAP, buildEntry as buildAuditEntry, listEntries as listAuditEntries } from '../lib/audit.js';
 import { APPROVAL_KEY, APPROVAL_CAP, buildApproval, decide as decideApproval, repropose as reproposeApproval, recordExecution, listApprovals, pendingCount } from '../lib/approvals.js';
 import { AGENTLOG_KEY, AGENTLOG_CAP, startRun, finishRun, listRuns, summarize as summarizeRuns, anomalies as runAnomalies } from '../lib/agentlog.js';
-import { check as authzCheck, can as authzCan, enforce as authzEnforce, decisionRecord, needsReverify, DEFAULT_TENANT } from '../lib/authz.js';
+import { check as authzCheck, can as authzCan, enforce as authzEnforce, decisionRecord, needsReverify, DEFAULT_TENANT, canViewRoom } from '../lib/authz.js';
 import { resolveActor } from '../lib/actor.js';
+import { normalizeOverview as normalizeMetaOverview, connectionState as metaConnectionState, lastCompleteDays, looksLikeSample as metaLooksLikeSample, META_API_VERSION } from '../lib/meta-read.js';
+import META_FIXTURE from '../fixtures/meta-overview-sample.json' with { type: 'json' };
 import { verifySalonOneBearer } from '../lib/salonone-auth.js';
 import { hashOwnerToken, verifyOwnerToken, parseOwnerPasswords, parseOwnerShops } from '../lib/settlement.js';
 import { kvConfigured, kvBlobGet, ACCT_PASS_KEY } from '../lib/kvblob.js';
@@ -299,6 +301,137 @@ export default async function handler(req, res) {
   const ccKey = (base) => (CC_ENV === 'production' ? base : `${base}:${CC_ENV}`);
 
   const ccType = (req.method === 'GET' ? req.query.type : (req.body || {}).type);
+
+  // ── Meta運用画面の読み取り: ?type=meta（読取専用）────────────────────────
+  // ⚠️ Meta のアクセストークンは **Dashboard には存在しません**。③ naoru-ai-platform が
+  //    保持し、Dashboard はサーバー側からそのAPIを呼ぶだけ。ブラウザには結果しか返しません。
+  //    契約は META_READ_API_CONTRACT.md（api_version='meta-read-1'）。
+  //    広告の変更・予算変更・自動運用はこのエンドポイントに含めません（GETのみ）。
+  if (ccType === 'meta') {
+    // 本部/root 限定は **UIだけでなくここでも強制**する。名乗りは信用しない。
+    const salt = process.env.AUTH_SALT || 'naoru-settlement-2026';
+    const actor = await resolveActor(req, {
+      env: process.env,
+      verifySalonOneBearer,
+      rootToken: () => (process.env.DASHBOARD_PASSWORD ? hashOwnerToken('__root__', process.env.DASHBOARD_PASSWORD, salt) : ''),
+      verifyOwnerToken: (pw, owner, token) => verifyOwnerToken(pw, owner, token, salt),
+      loadAccounts: async () => {
+        const passwords = parseOwnerPasswords(process.env.SETTLEMENT_OWNER_PASSWORDS);
+        const shopsMap = parseOwnerShops(process.env.SETTLEMENT_OWNER_SHOPS);
+        if (kvConfigured()) {
+          const kvPass = await kvBlobGet(ACCT_PASS_KEY).catch(() => null);
+          if (kvPass && typeof kvPass === 'object') for (const [o, pw] of Object.entries(kvPass)) if (pw) passwords[o] = String(pw);
+        }
+        const metaMap = (await blobGet(ACCTMETA_KEY, hasKV, hasSB, gas).catch(() => null)) || {};
+        return { passwords, shopsMap, metaMap };
+      },
+    }).catch(() => null);
+    const isAdmin = !!actor && actor.verified === true && ['root', 'admin'].includes(actor.role);
+    if (!isAdmin) {
+      return res.status(403).json({ ok: false, error: 'forbidden', code: 'admin_only',
+        message: 'この画面は本部・管理者のみが利用できます' });
+    }
+    const chatActorForMeta = actor;   // tenant はこの検証済み actor から決める（クエリでは切り替えない）
+    if (req.method !== 'GET') {
+      // 読取専用。書き込み系は存在しない（広告変更はここから行えない）。
+      return res.status(405).json({ ok: false, error: 'read_only', message: 'Meta運用画面は読み取り専用です' });
+    }
+
+    // (3) 機能フラグ＋キルスイッチをサーバー側でも確認する。
+    //     OFF のときは URL を直接叩いても上流へ取りに行かない（画面で隠すだけにしない）。
+    const metaFlags = normalizeFlags(await blobGet(ccKey(FLAGS_KEY), hasKV, hasSB, gas).catch(() => null));
+    if (metaFlags.cc_all === false || metaFlags.cc_meta_overview !== true) {
+      return res.status(403).json({ ok: false, error: 'forbidden', code: 'feature_disabled',
+        message: 'Meta運用画面は現在無効です' });
+    }
+
+    const base = String(process.env.META_READ_API_BASE || '').trim().replace(/\/+$/, '');
+    const key = String(process.env.META_READ_API_KEY || '').trim();
+
+    // (1) tenant は **検証済み actor から決める**。クエリで会社を切り替えられないようにする。
+    const tenantId = String((chatActorForMeta && chatActorForMeta.tenantId) || DEFAULT_TENANT).slice(0, 64);
+
+    // (2) accountId は **そのテナントに許可されたアカウントのみ**。
+    //     許可一覧は環境変数（META_AD_ACCOUNT_IDS: カンマ区切り）で人が設定する。
+    //     未設定なら META_AD_ACCOUNT_ID の1件のみを許可する。
+    const allowList = String(process.env.META_AD_ACCOUNT_IDS || process.env.META_AD_ACCOUNT_ID || '')
+      .split(',').map(x => x.trim()).filter(Boolean);
+    const requested = String(req.query.accountId || '').slice(0, 64);
+    const accountId = requested || allowList[0] || '';
+    if (requested && allowList.length && !allowList.includes(requested)) {
+      return res.status(403).json({ ok: false, error: 'forbidden', code: 'account_not_allowed',
+        message: 'この広告アカウントは許可されていません' });
+    }
+
+    // (6) 期間は**広告アカウントのタイムゾーン**基準。未設定なら環境変数、既定は Asia/Tokyo。
+    const acctTz = String(req.query.tz || process.env.META_AD_ACCOUNT_TZ || 'Asia/Tokyo').slice(0, 64);
+    const period = (req.query.from && req.query.to)
+      ? { from: String(req.query.from).slice(0, 10), to: String(req.query.to).slice(0, 10), timeZone: acctTz }
+      : lastCompleteDays(7, new Date(), acctTz);
+    // ※ 認証情報はヘッダ（X-CC-Owner / X-CC-Token / Authorization）から取る。クエリには載せない。
+
+    // 接続先が無い＝③のAPIがまだ来ていない。**0円を返さず**サンプルで画面を出す。
+    if (!base || !key) {
+      const state = metaConnectionState(process.env);
+      return res.status(200).json({
+        ok: true,
+        connection: state,
+        data: normalizeMetaOverview(META_FIXTURE, { fixture: true }),
+        // 画面は必ず「サンプルデータ」と出す
+        sample: true,
+        apiVersion: META_API_VERSION,
+      });
+    }
+
+    try {
+      const url = `${base}/v1/meta/overview?account_id=${encodeURIComponent(accountId)}`
+        + `&from=${encodeURIComponent(period.from)}&to=${encodeURIComponent(period.to)}`
+        + `&tenant_id=${encodeURIComponent(tenantId)}`;
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 20000);
+      let up;
+      try {
+        up = await fetch(url, {
+          headers: { Authorization: `Bearer ${key}`, 'X-Tenant-Id': tenantId, Accept: 'application/json' },
+          signal: ctrl.signal,
+        });
+      } finally { clearTimeout(t); }
+      const raw = await up.json().catch(() => null);
+      // (5) HTTP エラーを「接続成功」へ昇格させない。上流が 4xx/5xx なら数字を作らない。
+      if (!up.ok) {
+        const code = up.status === 401 || up.status === 403 ? 'AUTH_FAILED'
+          : up.status === 429 ? 'RATE_LIMITED' : 'UPSTREAM_ERROR';
+        const data = {
+          ok: false, connected: true, isSample: metaLooksLikeSample(raw),
+          error: { code, message: `接続先が ${up.status} を返しました`, retryable: up.status >= 500 || up.status === 429 },
+          freshness: { lastSuccessAt: null, lastAttemptAt: new Date().toISOString(), lagMinutes: null },
+        };
+        return res.status(200).json({ ok: true, connection: metaConnectionState(process.env, data), data, sample: data.isSample, apiVersion: META_API_VERSION });
+      }
+      // (2) 要求した tenant / account / 期間と一致しているかを確認する
+      const data = normalizeMetaOverview(raw, {
+        fixture: false,
+        expect: { tenantId, accountId: accountId || undefined, from: period.from, to: period.to },
+      });
+      // (4) 接続先がモックを返した場合も、外側の sample まで一貫してサンプル表示にする
+      return res.status(200).json({
+        ok: true,
+        connection: metaConnectionState(process.env, data),
+        data,
+        sample: data.isSample === true,
+        apiVersion: META_API_VERSION,
+      });
+    } catch (e) {
+      // 取得できなかった。**数字を作らない**。理由だけ返す。
+      const data = {
+        ok: false, connected: true, isSample: false,
+        error: { code: 'UPSTREAM_ERROR', message: '接続先から取得できませんでした', retryable: true },
+        freshness: { lastSuccessAt: null, lastAttemptAt: new Date().toISOString(), lagMinutes: null },
+      };
+      return res.status(200).json({ ok: true, connection: metaConnectionState(process.env, data), data, sample: false, apiVersion: META_API_VERSION });
+    }
+  }
+
   const isCC = ['ccflags', 'approval', 'agentlog', 'audit'].includes(ccType);
   if (isCC) {
     const hasStore = !!(hasKV || hasSB || gas);
@@ -1566,6 +1699,45 @@ export default async function handler(req, res) {
   // ── プロフィールストア: ?type=profile ──
   // 各スタッフ/オーナーが自分のプロフィール（写真・名前・自己紹介・SNS・担当店舗）を編集。
   // 組織図でホバー表示し、店舗割当はSalonOneをベースにしつつ本人の設定を優先する。
+  // ── チャット系のアクセス制御（本人確認した root / 本部のみ）────────────────
+  // ⚠️ 既存の認証（lib/actor.js）をそのまま使う。チャット専用の認証系は作らない。
+  //    対象: ?type=chat（ルーム一覧・本文・名簿・ノート・画像・添付・書込）と
+  //          ?type=profile（同じ画像ストアを読む迂回経路・スタッフ名簿）。
+  //    owner / manager / staff への公開はまだ行わない（サーバー側で拒否する）。
+  const chatSalt = () => process.env.AUTH_SALT || 'naoru-settlement-2026';
+  const chatResolveActor = () => resolveActor(req, {
+    env: process.env,
+    verifySalonOneBearer,
+    // 秘密が未設定なら root 経路を閉じる（環境変数の欠落で認証が外れない）
+    rootToken: () => (process.env.DASHBOARD_PASSWORD ? hashOwnerToken('__root__', process.env.DASHBOARD_PASSWORD, chatSalt()) : ''),
+    verifyOwnerToken: (pw, owner, token) => verifyOwnerToken(pw, owner, token, chatSalt()),
+    loadAccounts: async () => {
+      const passwords = parseOwnerPasswords(process.env.SETTLEMENT_OWNER_PASSWORDS);
+      const shopsMap = parseOwnerShops(process.env.SETTLEMENT_OWNER_SHOPS);
+      if (kvConfigured()) {
+        const kvPass = await kvBlobGet(ACCT_PASS_KEY).catch(() => null);
+        if (kvPass && typeof kvPass === 'object') for (const [o, pw] of Object.entries(kvPass)) if (pw) passwords[o] = String(pw);
+      }
+      const metaMap = (await blobGet(ACCTMETA_KEY, hasKV, hasSB, gas).catch(() => null)) || {};
+      return { passwords, shopsMap, metaMap };
+    },
+  }).catch(() => null);
+
+  const chatTypes = ['chat', 'profile'];
+  const reqType = (req.method === 'GET' ? req.query.type : (req.body || {}).type);
+  let chatActor = null;
+  if (chatTypes.includes(reqType)) {
+    chatActor = await chatResolveActor();
+    // 本人確認できない／root・本部でなければ拒否。
+    // ⚠️ body.root / body.staffId / 申告 role は本人確認の代わりにしない。
+    // ⚠️ cc_authz の log / shadow はあくまで計測用で、この拒否を無効化しない。
+    const ok = !!chatActor && chatActor.verified === true && ['root', 'admin'].includes(chatActor.role);
+    if (!ok) {
+      return res.status(403).json({ ok: false, error: 'forbidden', code: 'chat_admin_only',
+        message: 'チャットは本部・管理者のみが利用できます（再ログインが必要な場合があります）' });
+    }
+  }
+
   const isProfile = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'profile';
   if (isProfile) {
     if (!hasKV && !hasSB && !gas) return res.status(200).json({ profiles: {}, configured: false });
@@ -1713,7 +1885,8 @@ export default async function handler(req, res) {
           const m = /^data:([^;]+);base64,(.*)$/s.exec(String(dataUrl));
           if (m) {
             res.setHeader('Content-Type', m[1]);
-            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable'); // 画像はid固定=不変
+            // ⚠️ 私用のチャット画像。CDN や共有キャッシュに載せない（認証必須のため）
+            res.setHeader('Cache-Control', 'private, no-store');
             return res.status(200).send(Buffer.from(m[2], 'base64'));
           }
         }
@@ -1751,14 +1924,22 @@ export default async function handler(req, res) {
       const save = (patch) => blobSet(CHAT_KEY, { rooms, dir, notes, ...patch }, hasKV, hasSB, gas);
 
       if (req.method === 'GET') {
-        // rooms 一覧の per-room キーをMGETでまとめて取得。空のルームは旧集約で補完。
-        const keys = rooms.map(r => CHAT_MSG_PREFIX + String(r.id));
+        // 見えるルームだけを返す（本文もサーバー側で出さない）。
+        // ⚠️ **root / 本部でも、参加していないDMは返さない**（lib/authz.js の canViewRoom）。
+        //    ここでフィルタしないと、DMの本文が一覧と一緒に全部返ってしまう。
+        const visible = rooms.filter(r => canViewRoom(chatActor, r));
+        const keys = visible.map(r => CHAT_MSG_PREFIX + String(r.id));
         const arrs = await blobMGet(keys, hasKV, hasSB, gas);
         const messages = {};
         const missing = [];
-        rooms.forEach((r, i) => { const a = arrs[i]; if (Array.isArray(a) && a.length) messages[String(r.id)] = a; else missing.push(String(r.id)); });
+        visible.forEach((r, i) => { const a = arrs[i]; if (Array.isArray(a) && a.length) messages[String(r.id)] = a; else missing.push(String(r.id)); });
         if (missing.length) { const agg = await loadAgg(); for (const rid of missing) { const m = agg[rid]; if (Array.isArray(m) && m.length) messages[rid] = m; } }
-        return res.status(200).json({ rooms, messages, reads, dir, notes, configured: true });
+        // ノートも見えるルームぶんだけ
+        const visibleIds = new Set(visible.map(r => String(r.id)));
+        const scopedNotes = {};
+        for (const [rid, arr] of Object.entries(notes || {})) if (visibleIds.has(String(rid))) scopedNotes[rid] = arr;
+        return res.status(200).json({ rooms: visible, messages, reads, dir, notes: scopedNotes, configured: true,
+          filtered: visible.length !== rooms.length });
       }
 
       const body = req.body || {};
@@ -1798,6 +1979,12 @@ export default async function handler(req, res) {
           createdAt: new Date().toISOString(),
         };
         const prevRoom = rooms.find(x => x && String(x.id) === String(room.id)) || null;
+        // ⚠️ 既存IDを指定した createRoom で、**見えないRoomを作り直せない**ようにする。
+        //    （他人のDMや別店舗のルームのIDを当てて、名前やメンバーを書き換える経路を塞ぐ）
+        if (prevRoom && !canViewRoom(chatActor, prevRoom)) {
+          return res.status(403).json({ ok: false, error: 'forbidden', code: 'room_not_visible',
+            message: 'このルームを操作する権限がありません' });
+        }
         const merged = carryManaged(prevRoom, room);      // 付加情報を消さない
         const nextRooms = rooms.filter(x => x && x.id !== merged.id).concat(merged);
         await save({ rooms: nextRooms });
@@ -1809,14 +1996,23 @@ export default async function handler(req, res) {
         const rid = String(body.roomId);
         const room = rooms.find(r => r && r.id === rid);
         if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
-        const isMember = (room.members || []).map(String).includes(String(body.staffId));
-        if (!(body.root || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        // ⚠️ メンバー変更も認可する。body.root / body.staffId の申告ではなく、
+        //    検証済み actor がそのルームを見られることを条件にする。
+        if (!canViewRoom(chatActor, room)) {
+          return res.status(403).json({ ok: false, error: 'forbidden', code: 'room_not_visible' });
+        }
         const oldM = (room.members || []).map(String);
         const members = [...new Set(body.members.map(String))].slice(0, 500);
         // 付加フィールドを保ったままメンバーを差し替える。
         // 人が新しく入れた人は autoMembers から外れる＝手動参加に昇格し、以後は同期が外せない。
+        // ⚠️ 一般のリクエストが「システム同期」を名乗れないようにする。
+        //    bySync を認めるのは、サーバー間のエージェントトークン（source='agent'）または
+        //    cron で本人確認できた場合だけ。クライアントの申告だけでは human 扱いにする。
+        //    （sync 扱いだと、人が入れた人を自動削除の対象にできてしまう）
+        const syncAllowed = body.bySync === true && !!chatActor && chatActor.verified === true
+          && (chatActor.source === 'agent' || chatActor.source === 'cron');
         const nextRooms = rooms.map(r => (r && r.id === rid)
-          ? applyMemberChange(r, members, { by: body.bySync === true ? 'sync' : 'human' })
+          ? applyMemberChange(r, members, { by: syncAllowed ? 'sync' : 'human' })
           : r);
         // システムメッセージ（追加/退出させた）＝ actorName + names が渡された時のみ生成（events等の内部更新では出さない）
         let sysArr = null;

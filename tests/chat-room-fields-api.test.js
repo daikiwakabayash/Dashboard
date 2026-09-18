@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import handler from '../api/plan-store.js';
+import { hashOwnerToken } from '../lib/settlement.js';
 
 // 実際の API を通したときに、付加フィールドが消えないこと・クライアントから書けないこと。
 const KV = 'https://kv.test';
@@ -25,9 +26,11 @@ function installFetchMock() {
 }
 let saved;
 beforeEach(() => {
-  saved = { u: process.env.KV_REST_API_URL, t: process.env.KV_REST_API_TOKEN };
+  saved = { u: process.env.KV_REST_API_URL, t: process.env.KV_REST_API_TOKEN, d: process.env.DASHBOARD_PASSWORD, s: process.env.AUTH_SALT };
   process.env.KV_REST_API_URL = KV;
   process.env.KV_REST_API_TOKEN = 'test-token-not-a-secret';
+  process.env.DASHBOARD_PASSWORD = 'pw-for-test';
+  process.env.AUTH_SALT = 'salt-for-test';
   installFetchMock();
   store.set(CHAT, JSON.stringify({
     rooms: [
@@ -38,7 +41,7 @@ beforeEach(() => {
   }));
 });
 afterEach(() => {
-  for (const [k, v] of [['KV_REST_API_URL', saved.u], ['KV_REST_API_TOKEN', saved.t]]) {
+  for (const [k, v] of [['KV_REST_API_URL', saved.u], ['KV_REST_API_TOKEN', saved.t], ['DASHBOARD_PASSWORD', saved.d], ['AUTH_SALT', saved.s]]) {
     if (v === undefined) delete process.env[k]; else process.env[k] = v;
   }
   vi.restoreAllMocks();
@@ -52,7 +55,9 @@ function mockRes() {
   return r;
 }
 const call = async (req) => { const res = mockRes(); await handler({ headers: {}, query: {}, body: {}, ...req }, res); return res; };
-const post = (body) => call({ method: 'POST', body: { type: 'chat', ...body } });
+// チャットは本人確認が必須（#390）。root の資格情報をヘッダで送る。
+const ROOT_HDR = () => ({ 'x-cc-owner': '__root__', 'x-cc-token': hashOwnerToken('__root__', 'pw-for-test', 'salt-for-test') });
+const post = (body) => call({ method: 'POST', headers: ROOT_HDR(), body: { type: 'chat', ...body } });
 const roomsNow = () => { try { return JSON.parse(store.get(CHAT)).rooms; } catch { return []; } };
 const room = (id) => roomsNow().find(r => r.id === id);
 
@@ -132,7 +137,7 @@ describe('API経由: 人が入れた人は自動所属にならない', () => {
 
 describe('既存のチャット機能を壊していない', () => {
   it('GET は従来どおりルームを返す', async () => {
-    const res = await call({ method: 'GET', query: { type: 'chat' } });
+    const res = await call({ method: 'GET', headers: ROOT_HDR(), query: { type: 'chat' } });
     expect(res.statusCode).toBe(200);
     expect(res.body.rooms).toHaveLength(2);
   });
@@ -145,5 +150,71 @@ describe('既存のチャット機能を壊していない', () => {
     const res = await post({ action: 'setMembers', roomId: 'g1', members: ['s1'], staffId: 's1' });
     expect(res.statusCode).toBe(200);
     expect(room('g1').members).toEqual(['s1']);
+  });
+});
+
+// ── ①への追加確認（本人確認の代わりに申告値を使わない）──────────────
+describe('申告値を本人確認の代わりにしない', () => {
+  it('🔴 body.root では通らない', async () => {
+    const res = await call({ method: 'POST', body: { type: 'chat', action: 'setMembers', roomId: 'g1', members: ['x'], root: true, staffId: '__root__' } });
+    expect(res.statusCode).toBe(403);
+  });
+  it('🔴 body.staffId でメンバーを名乗っても通らない', async () => {
+    const res = await call({ method: 'POST', body: { type: 'chat', action: 'setMembers', roomId: 'g1', members: ['x'], staffId: 's1' } });
+    expect(res.statusCode).toBe(403);
+  });
+});
+
+describe('🔴 body.bySync で「システム同期」を名乗れない', () => {
+  it('一般のリクエストが bySync を送っても human 扱い＝手動へ昇格する', async () => {
+    // g1 は autoMembers:['s1']。bySync を名乗って s1 を外し、再び入れる。
+    await post({ action: 'setMembers', roomId: 'g1', members: ['s2'], bySync: true });
+    await post({ action: 'setMembers', roomId: 'g1', members: ['s2', 's1'], bySync: true });
+    // sync 扱いなら s1 は autoMembers に戻り得るが、human 扱いなので戻らない
+    expect(room('g1').autoMembers).toEqual([]);
+  });
+  it('bySync を名乗っても自動削除の対象を増やせない', async () => {
+    await post({ action: 'setMembers', roomId: 'g1', members: ['s1', 's2', 'newbie'], bySync: true });
+    expect(room('g1').autoMembers).toEqual(['s1']);   // newbie は自動所属にならない
+  });
+});
+
+describe('🔴 既存Room IDを指定した createRoom で、権限のないRoomを作り直せない', () => {
+  beforeEach(() => {
+    const cur = JSON.parse(store.get(CHAT));
+    cur.rooms.push({ id: 'dm_others', kind: 'dm', members: ['s1', 's2'], storeId: 'x' });
+    store.set(CHAT, JSON.stringify(cur));
+  });
+  it('他人のDMのIDを指定しても書き換えられない', async () => {
+    const res = await post({ action: 'createRoom', room: { id: 'dm_others', kind: 'group', name: '乗っ取り', members: ['attacker'] } });
+    expect(res.statusCode).toBe(403);
+    expect(res.body.code).toBe('room_not_visible');
+    const r = room('dm_others');
+    expect(r.kind).toBe('dm');
+    expect(r.members).toEqual(['s1', 's2']);   // 元のまま
+  });
+  it('見えるRoomなら従来どおり更新できる', async () => {
+    const res = await post({ action: 'createRoom', room: { id: 'g1', kind: 'group', name: '改名OK', members: ['s1'] } });
+    expect(res.statusCode).toBe(200);
+    expect(room('g1').name).toBe('改名OK');
+  });
+});
+
+describe('🔴 members 変更も認可する', () => {
+  beforeEach(() => {
+    const cur = JSON.parse(store.get(CHAT));
+    cur.rooms.push({ id: 'g_secret', kind: 'group', name: '非公開', members: ['s1'] });
+    store.set(CHAT, JSON.stringify(cur));
+  });
+  it('root は運営上グループを見られるので変更できる', async () => {
+    const res = await post({ action: 'setMembers', roomId: 'g_secret', members: ['s1', 's2'] });
+    expect(res.statusCode).toBe(200);
+  });
+  it('DMのメンバーは変更経路自体が無い（group 限定）', async () => {
+    const cur = JSON.parse(store.get(CHAT));
+    cur.rooms.push({ id: 'dm_x', kind: 'dm', members: ['a', 'b'] });
+    store.set(CHAT, JSON.stringify(cur));
+    const res = await post({ action: 'setMembers', roomId: 'dm_x', members: ['a', 'b', 'c'] });
+    expect(res.statusCode).toBe(400);
   });
 });

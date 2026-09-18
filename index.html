@@ -896,6 +896,110 @@
                 return (Number((r[id] || {})[rid]) || 0) < since;
             });
         };
+        // ── 宛先をテキストで指定する（lib/recipients.js の画面側ミラー）────────
+        // 「鶴見院と関内院のグループに送って」「山田、藤川のそれぞれに」「その人たちのグループを作って」
+        // ⚠️ 勝手に送らない。曖昧なものは候補として出し、当たらなかった言葉は必ず表示する。
+        const RCP_STOPWORDS = new Set(['これ','それ','あれ','こちら','そちら','あちら','文','文章','文面','メッセージ','内容','件','話','以下','下記','上記','次','みんな','皆','皆さん','全員','各位','こと','もの','ため']);
+        const RCP_ACTIONS = [
+            /(で|に|へ|を)?グループ(を)?(組|作|つく)[んりっるってら]*(で|て)?(ほし[いく]|下さい|ください)?/g,
+            /(に|へ)?(以下|下記|この|次|上記)の?(文章|文面|文|メッセージ|内容|件|話)?(を)?/g,
+            /(それぞれ|各自|各々|おのおの)(に|へ)?/g,
+            /(を)?(送|おく|連絡|通知|共有|流)[っりるってらしじ]*(て)?(おいて)?(ほし[いく]|下さい|ください)?/g,
+            /(に|へ)?(DM|dm|ダイレクト)(を)?(送|出)?[っりるってら]*(て)?/g,
+            /(の)?(グループ|部屋|ルーム)(すべて|全部|全て)?(に|へ)?/g,
+            /(の)?(店舗|お店|院)(すべて|全部|全て|全店)?(の)?(に|へ)?/g,
+            /(この|その|あの)?\s*\d+\s*つ(の)?/g,
+            /(その|この|あの)(人|方)(たち)?(の)?(に|へ)?/g,
+            /(の)?(人|方|みんな|全員|メンバー|スタッフ)(たち)?(に|へ)?/g,
+            /(すべて|全て|全部|全店)(の)?(に|へ)?/g,
+            /(お願いします|おねがいします|よろしく)[。、!！]?/g,
+        ];
+        const rcpNorm = (v) => String(v == null ? '' : v)
+            .replace(/[Ａ-Ｚａ-ｚ０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+            .replace(/[　\t]/g, ' ').replace(/ +/g, ' ').trim();
+        const rcpKey = (v) => rcpNorm(v).replace(/NAORU/gi, '').replace(/院$/, '')
+            .replace(/(さん|くん|ちゃん|様|さま|氏)$/, '').replace(/ /g, '').toLowerCase();
+        const rcpSplitSoft = (v) => String(v == null ? '' : v)
+            .split(/(?:と|や|あと|および|ならびに|プラス)/).map(x => x.trim()).filter(Boolean);
+        const rcpParse = (text) => {
+            const src = rcpNorm(text);
+            let intent = null;
+            if (/グループ(を)?(組|作|つく)/.test(src) || /まとめて(1|一)つ/.test(src)) intent = 'new_group';
+            else if (/(グループ|部屋|ルーム)(に|へ)/.test(src)) intent = 'store_rooms';
+            else if (/個別|一人ずつ|ひとりずつ|それぞれ|DM|dm|ダイレクト/.test(src)) intent = 'dm';
+            const hints = [];
+            let work = src.replace(/[（(]([^）)]{1,20})[）)]/g, (_m, inner) => { hints.push(inner); return `@@h${hints.length - 1}h@@`; });
+            for (const re of RCP_ACTIONS) work = work.replace(re, ' ');
+            const pieces = work.split(/[、,，・･/／＆&\n]+/).flatMap(x => x.split(/ +/)).map(x => x.trim()).filter(Boolean);
+            const tokens = [];
+            for (const piece of pieces) {
+                const m = piece.match(/^(.*?)@@h(\d+)h@@(.*)$/);
+                if (m) {
+                    const name = (m[1] + m[3]).replace(/^(と|や|あと)/, '').trim();
+                    const hintRaw = hints[Number(m[2])] || '';
+                    const hint = (hintRaw.match(/^(.+?)の(.+)$/) || [])[1] || hintRaw;
+                    if (name) tokens.push({ raw: `${name}（${hintRaw}）`, name, hint: String(hint).trim() });
+                    continue;
+                }
+                const plain = piece.replace(/@@h\d+h@@/g, '').replace(/^(と|や|あと|および|ならびに|プラス)/, '').trim();
+                if (!plain || RCP_STOPWORDS.has(plain)) continue;
+                const wh = plain.match(/^(.{1,12}?)の(.{1,12})$/);
+                if (wh) { tokens.push({ raw: plain, name: wh[2], hint: wh[1] }); continue; }
+                tokens.push({ raw: plain, name: plain, hint: '' });
+            }
+            return { intent, tokens };
+        };
+        const RCP_REGIONS = ['北海道','東北','関東','中部','近畿','中国','四国','九州','沖縄','海外'];
+        const rcpResolveToken = (token, idx) => {
+            const key = rcpKey(token.name); if (!key) return null;
+            const hintKey = rcpKey(token.hint);
+            const byHint = (p) => !hintKey || rcpKey(p.shop).includes(hintKey) || rcpKey(p.name).includes(hintKey);
+            const exact = idx.people.filter(p => rcpKey(p.name) === key && byHint(p));
+            if (exact.length === 1) return { kind: 'staff', people: exact, label: exact[0].name };
+            if (exact.length > 1) return { kind: 'ambiguous', people: exact, label: token.name };
+            const shopHit = idx.shopNames.filter(n => rcpKey(n).includes(key));
+            if (shopHit.length) return { kind: 'shop', shops: shopHit,
+                people: idx.people.filter(p => shopHit.some(n => rcpKey(p.shop) === rcpKey(n))),
+                label: shopHit.length === 1 ? shopHit[0] : `${shopHit[0]} ほか${shopHit.length - 1}店` };
+            const prefName = Object.values(AUD_PREF_NAMES).find(n => rcpKey(n) === key || rcpKey(n).replace(/(都|府|県)$/, '') === key);
+            if (prefName) return { kind: 'area', label: prefName, people: idx.people.filter(p => audAreaOf(p.shop).pref === prefName) };
+            const region = RCP_REGIONS.find(r => rcpKey(r) === key);
+            if (region) return { kind: 'area', label: region, people: idx.people.filter(p => orgRegionOf(orgGeoRank(p.shop)) === region) };
+            const partial = idx.people.filter(p => rcpKey(p.name).includes(key) && byHint(p));
+            if (partial.length === 1) return { kind: 'staff', people: partial, label: partial[0].name };
+            if (partial.length > 1) return { kind: 'ambiguous', people: partial, label: token.name };
+            return null;
+        };
+        const rcpResolve = (text, ctx) => {
+            const { intent, tokens } = rcpParse(text);
+            const people0 = ((ctx || {}).staff || []).filter(p => p && String(p.id || ''));
+            const shopSet = new Set(((ctx || {}).shops || []).map(x => String((x && x.name) || x || '')).filter(Boolean));
+            for (const p of people0) if (p.shop) shopSet.add(String(p.shop));
+            const idx = { people: people0, shopNames: [...shopSet] };
+            const seen = new Map(), rooms = new Map(), groups = [], ambiguous = [], unknown = [];
+            const expand = (t) => {
+                const r = rcpResolveToken(t, idx); if (r) return [{ token: t, res: r }];
+                const trimmed = t.name.replace(/(の|に|へ|を|は|も|が)$/, '');
+                if (trimmed && trimmed !== t.name) {
+                    const sub = { raw: trimmed, name: trimmed, hint: t.hint };
+                    const r2 = rcpResolveToken(sub, idx); if (r2) return [{ token: sub, res: r2 }];
+                }
+                const parts = rcpSplitSoft(t.name);
+                if (!parts.length || (parts.length === 1 && parts[0] === t.name)) return [{ token: t, res: null }];
+                return parts.map(name => { const sub = { raw: name, name, hint: t.hint }; return { token: sub, res: rcpResolveToken(sub, idx) }; });
+            };
+            for (const t of tokens) for (const { token, res } of expand(t)) {
+                if (!res) { unknown.push(token.raw); continue; }
+                if (res.kind === 'ambiguous') { ambiguous.push({ token: token.raw, candidates: res.people }); continue; }
+                if (!res.people.length) { unknown.push(token.raw); continue; }
+                for (const p of res.people) if (!seen.has(String(p.id))) seen.set(String(p.id), p);
+                const shopNames = res.kind === 'shop' ? (res.shops || [])
+                    : (res.kind === 'area' ? [...new Set(res.people.map(p => String(p.shop)).filter(Boolean))] : []);
+                for (const name of shopNames) { const id = `store_${name}`; if (!rooms.has(id)) rooms.set(id, { id, name, kind: 'store' }); }
+                groups.push({ token: token.raw, kind: res.kind, label: res.label, count: res.people.length, shops: shopNames, people: res.people });
+            }
+            return { intent, people: [...seen.values()], rooms: [...rooms.values()], groups, ambiguous, unknown, total: seen.size };
+        };
         const ORG_REGION_RANK = { '北海道':1,'東北':2,'関東':8,'中部':15,'近畿':24,'中国':31,'四国':36,'九州':40,'沖縄':47,'その他':950,'海外':1000 };
         const ORG_REGION_EMOJI = { '北海道':'🗻','東北':'🍎','関東':'🗼','中部':'🗻','近畿':'🏯','中国':'⛩️','四国':'🌉','九州':'🌋','沖縄':'🏝️','海外':'🌏','その他':'📍' };
 
@@ -3660,6 +3764,119 @@
                     setChatData(d => ({ ...d, messages: { ...d.messages, [roomId]: (d.messages[roomId] || []).filter(x => x.id !== tmpId) } }));
                     setChatDraft(prev => prev ? prev : t);
                 } finally { chatSendingRef.current = false; setChatSending(false); }
+            };
+
+            // ── テキストで宛先を指定して送る ──────────────────────────────
+            // 「鶴見院と関内院のグループに送って」「山田、藤川のそれぞれに」「その人たちのグループを作って」
+            // ⚠️ 送る前に必ず宛先を画面へ出す。曖昧・未一致が残っているあいだは送信させない。
+            // 宛先候補（dirStaff と同じ顔ぶれ。あちらはチャット画面の中でしか使えないため、
+            // ここでも同じ作り方で用意する。自分自身とAI・システムIDは入れない）
+            const rcpStaff = React.useMemo(() => {
+                const map = new Map();
+                const add = (id, name, shop) => {
+                    id = String(id || '');
+                    if (!id || id === chatMyId || id === '__root__' || id === '__ai__' || !name) return;
+                    if (!map.has(id)) map.set(id, { id, name: String(name), shop: shop || '' });
+                };
+                ((chatData.dir && chatData.dir.staff) || []).forEach(s => add(s.id, s.name, s.shop));
+                (soStaffs || []).forEach(s => {
+                    if (s.deleted) return;
+                    const sh = (soShopsRaw || []).find(x => String(x.id) === String(s.shop_id));
+                    add(s.id, s.name, sh ? sh.name : '');
+                });
+                (orgHq || []).forEach(m => {
+                    const id = (m.staffId && /^\d+$/.test(m.staffId)) ? String(m.staffId) : String(m.owner);
+                    add(id, m.name || id, '本部');
+                });
+                return [...map.values()];
+            }, [chatData.dir, soStaffs, soShopsRaw, orgHq, chatMyId]);
+            const rcpShops = React.useMemo(() => (soShopsRaw || []).map(x => String(x.name || '')).filter(Boolean), [soShopsRaw]);
+
+            const [rcpOpen, setRcpOpen] = useState(false);
+            const [rcpTo, setRcpTo] = useState('');           // 宛先の文章
+            const [rcpBody, setRcpBody] = useState('');       // 本文（宛先とは必ず分ける）
+            const [rcpMode, setRcpMode] = useState('');       // '' = 文章から自動判定
+            const [rcpPicked, setRcpPicked] = useState({});   // 曖昧だったものを人が選んだ結果 {token: staffId}
+            const [rcpLast, setRcpLast] = useState([]);       // 直前の宛先（「その人たち」用）
+            const [rcpBusy, setRcpBusy] = useState(false);
+            const [rcpMsg, setRcpMsg] = useState('');
+
+            const rcpResult = React.useMemo(() => {
+                const base = rcpResolve(rcpTo, { staff: rcpStaff, shops: rcpShops });
+                // 曖昧だったものは、人が選んだぶんだけ宛先へ入れる
+                const picked = [], stillAmb = [];
+                for (const a of base.ambiguous) {
+                    const id = rcpPicked[a.token];
+                    const hit = id && a.candidates.find(c => String(c.id) === String(id));
+                    if (hit) picked.push(hit); else stillAmb.push(a);
+                }
+                const map = new Map(base.people.map(p => [String(p.id), p]));
+                for (const p of picked) map.set(String(p.id), p);
+                // 「その人たちのグループを作って」＝宛先が書かれていなければ直前の相手を引き継ぐ
+                let people = [...map.values()];
+                let inherited = false;
+                if (!people.length && !stillAmb.length && !base.unknown.length && (rcpLast || []).length) {
+                    people = rcpLast; inherited = true;
+                }
+                return { ...base, people, ambiguous: stillAmb, total: people.length, inherited };
+            }, [rcpTo, rcpPicked, rcpStaff, rcpShops, rcpLast]);
+
+            // 送り方: 画面の選択 > 文章からの判定 > 既定（店舗が出ていれば店舗グループ、なければ個別）
+            const rcpMode2 = rcpMode || rcpResult.intent
+                || (rcpResult.rooms.length ? 'store_rooms' : 'dm');
+            // 店舗ルームは**既にあるものだけ**に送る（部屋を勝手に増やさない）
+            const rcpRooms = React.useMemo(() => {
+                const have = new Map((chatData.rooms || []).filter(r => r && r.kind === 'store').map(r => [String(r.id), r]));
+                return (rcpResult.rooms || []).map(x => ({ ...x, exists: have.has(x.id) }));
+            }, [rcpResult, chatData.rooms]);
+            const rcpMissingRooms = rcpRooms.filter(r => !r.exists);
+            const rcpBlocked = rcpResult.ambiguous.length ? 'ambiguous'
+                : rcpResult.unknown.length ? 'unknown'
+                : (rcpMode2 === 'store_rooms' ? (rcpRooms.filter(r => r.exists).length ? '' : 'no_rooms')
+                                              : (rcpResult.people.length ? '' : 'no_recipients'));
+
+            const rcpSend = async () => {
+                const text = rcpBody.trim();
+                if (!text || rcpBlocked || rcpBusy) return;
+                const targets = rcpMode2 === 'store_rooms' ? rcpRooms.filter(r => r.exists) : rcpResult.people;
+                const label = rcpMode2 === 'store_rooms' ? `店舗グループ ${targets.length}件`
+                    : rcpMode2 === 'new_group' ? `新しいグループ（${targets.length}名）` : `${targets.length}名へ個別に`;
+                if (!window.confirm(`${label}に送ります。よろしいですか？\n\n宛先: ${targets.map(t => t.name).slice(0, 12).join('、')}${targets.length > 12 ? ` ほか${targets.length - 12}` : ''}`)) return;
+                setRcpBusy(true); setRcpMsg('');
+                const msg = { fromStaffId: chatMyId, fromName: chatMyName, fromShop: chatMyShop, text, imgIds: [], media: [], mentions: [] };
+                let done = 0, failed = 0;
+                try {
+                    if (rcpMode2 === 'new_group') {
+                        const name = `${(rcpResult.groups.map(g => g.label)[0] || 'グループ')}${targets.length > 1 ? ` ほか（${targets.length}名）` : ''}`.slice(0, 60);
+                        const r = await chatPost({ action: 'createRoom', room: { kind: 'group', name,
+                            members: [...new Set([chatMyId, ...targets.map(p => String(p.id))])], createdBy: chatMyId } });
+                        const j = await r.json().catch(() => ({}));
+                        if (j && j.ok && j.room) { await chatPost({ action: 'send', roomId: j.room.id, msg }); done = 1; setChatRoomId(j.room.id); }
+                        else failed = 1;
+                    } else if (rcpMode2 === 'store_rooms') {
+                        for (const room of targets) {
+                            try { await chatPost({ action: 'send', roomId: room.id, msg }); done++; } catch { failed++; }
+                        }
+                    } else {
+                        for (const p of targets) {
+                            const other = String(p.id);
+                            try {
+                                let room = (chatData.rooms || []).find(r => r.kind === 'dm' && (r.members || []).map(String).sort().join(',') === [chatMyId, other].sort().join(','));
+                                if (!room) {
+                                    const r = await chatPost({ action: 'createRoom', room: { kind: 'dm', name: '', members: [chatMyId, other], createdBy: chatMyId } });
+                                    const j = await r.json().catch(() => ({}));
+                                    room = j && j.room;
+                                }
+                                if (room) { await chatPost({ action: 'send', roomId: room.id, msg }); done++; } else failed++;
+                            } catch { failed++; }
+                        }
+                    }
+                    setRcpLast(rcpResult.people);           // 「その人たちのグループを作って」に引き継ぐ
+                    setRcpMsg(`${done}件に送りました${failed ? `（${failed}件は失敗）` : ''}`);
+                    if (!failed) { setRcpBody(''); }
+                    await chatLoad();
+                } catch { setRcpMsg('送れませんでした'); }
+                finally { setRcpBusy(false); }
             };
 
             // ── まだ既読がついていない人にもう一度送る ──────────────────────
@@ -13252,6 +13469,7 @@
                                             </div>
                                             <div className="flex items-center gap-1.5 shrink-0">
                                                 <button onClick={chatMarkAllRead} className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-[#667085] font-medium text-[13px] hover:bg-[#EFF1F5] transition"><CheckCircle size={15} />すべて既読</button>
+                                                <button data-rcp-open onClick={() => { setRcpOpen(true); setRcpMsg(''); }} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[#EAECF0] bg-white hover:bg-[#F8F9FB] text-[#344054] font-semibold text-[13px] whitespace-nowrap transition" title="宛先を文章で書いて送る"><span className="text-[15px] leading-none">✍️</span><span className="hidden md:inline">文章で送る</span></button>
                                                 <button onClick={() => setChatNewRoom({ kind: 'group', name: '', members: [], q: '' })} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-brand-500 hover:bg-brand-600 text-white font-semibold text-[13px] whitespace-nowrap transition shadow-sm shadow-brand-200/50"><Plus size={16} /><span>新規<span className="hidden md:inline">ルーム</span></span></button>
                                             </div>
                                         </div>
@@ -13504,6 +13722,96 @@
                                     })()}
 
                                     {/* 新しいルーム モーダル */}
+                                    {/* ── 文章で宛先を書いて送る ───────────────────────────────── */}
+                                    {rcpOpen && (
+                                        <div className="fixed inset-0 z-[90] bg-[#111827]/40 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setRcpOpen(false)}>
+                                            <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[88vh] flex flex-col overflow-hidden border border-[#EAECF0]" onClick={e => e.stopPropagation()}>
+                                                <div className="px-5 py-3.5 border-b border-[#EAECF0] flex items-center justify-between">
+                                                    <h3 className="font-semibold text-[15px] text-[#111827]">✍️ 文章で宛先を書いて送る</h3>
+                                                    <button onClick={() => setRcpOpen(false)} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3]"><X size={18} /></button>
+                                                </div>
+                                                <div className="px-5 py-4 space-y-3 overflow-y-auto">
+                                                    <div>
+                                                        <div className="text-[12px] font-semibold text-[#667085] mb-1.5">誰に送りますか（文章でどうぞ）</div>
+                                                        <textarea data-rcp-to value={rcpTo} onChange={e => { setRcpTo(e.target.value); setRcpMode(''); }} rows={2}
+                                                            placeholder={'例）鶴見院と関内院と仙台院のグループに送って\n例）神奈川の店舗すべてのグループに\n例）山田、藤川、宮崎のそれぞれに'}
+                                                            className="w-full px-3 py-2 rounded-lg bg-[#F8F9FB] border border-[#EAECF0] text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 resize-y" />
+                                                    </div>
+
+                                                    {/* 送り方。文章から自動で決まるが、手でも変えられる */}
+                                                    <div className="flex gap-1.5 flex-wrap">
+                                                        {[['store_rooms', '店舗グループへ'], ['dm', '一人ずつDM'], ['new_group', '新しくグループ']].map(([k, label]) => (
+                                                            <button key={k} data-rcp-mode={k} onClick={() => setRcpMode(k)}
+                                                                className={`px-2.5 py-1.5 rounded-lg text-[12px] font-bold border transition ${rcpMode2 === k ? 'bg-brand-500 border-brand-500 text-white' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{label}</button>
+                                                        ))}
+                                                        {!rcpMode && rcpTo.trim() && <span className="self-center text-[10px] font-bold text-[#98A2B3]">文章から判断しました</span>}
+                                                    </div>
+
+                                                    {/* 宛先の確認。送る前に必ず出す */}
+                                                    {rcpTo.trim() && (
+                                                        <div data-rcp-preview className="rounded-lg border border-[#EAECF0] bg-[#F8F9FB]/60 p-2.5 space-y-1.5">
+                                                            {rcpMode2 === 'store_rooms' ? (
+                                                                <div className="text-[12px] font-bold text-[#344054]">
+                                                                    既存の店舗グループ {rcpRooms.filter(r => r.exists).length}件へ送ります：
+                                                                    <span className="font-medium text-[#667085]">{rcpRooms.filter(r => r.exists).map(r => r.name).join('、') || '—'}</span>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="text-[12px] font-bold text-[#344054]">
+                                                                    {rcpMode2 === 'new_group' ? '新しいグループに入れる' : '一人ずつ送る'} {rcpResult.total}名：
+                                                                    <span className="font-medium text-[#667085]">{rcpResult.people.slice(0, 12).map(p => p.name).join('、')}{rcpResult.total > 12 ? ` ほか${rcpResult.total - 12}名` : ''}</span>
+                                                                    {rcpResult.inherited && <span className="ml-1 text-[10px] text-brand-600">（直前の宛先を引き継ぎました）</span>}
+                                                                </div>
+                                                            )}
+                                                            {rcpMissingRooms.length > 0 && (
+                                                                <div className="text-[11px] font-bold text-amber-700">⚠️ グループが未作成のため送れない店舗：{rcpMissingRooms.map(r => r.name).join('、')}</div>
+                                                            )}
+                                                            {/* 曖昧: 候補から選んでもらう */}
+                                                            {rcpResult.ambiguous.map(a => (
+                                                                <div key={a.token} data-rcp-ambiguous className="text-[11px] font-bold text-rose-700">
+                                                                    「{a.token}」は{a.candidates.length}人います。選んでください：
+                                                                    <span className="inline-flex gap-1 flex-wrap ml-1">
+                                                                        {a.candidates.map(c => (
+                                                                            <button key={c.id} onClick={() => setRcpPicked(x => ({ ...x, [a.token]: String(c.id) }))}
+                                                                                className="px-2 py-0.5 rounded-md bg-white border border-rose-200 text-rose-700 hover:bg-rose-50">{c.name}{c.shop ? `（${String(c.shop).replace(/^NAORU\s*/, '')}）` : ''}</button>
+                                                                        ))}
+                                                                    </span>
+                                                                </div>
+                                                            ))}
+                                                            {rcpResult.unknown.length > 0 && (
+                                                                <div data-rcp-unknown className="text-[11px] font-bold text-rose-700">
+                                                                    見つかりませんでした：{rcpResult.unknown.join('、')}（書き方を変えてみてください）
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
+
+                                                    <div>
+                                                        <div className="text-[12px] font-semibold text-[#667085] mb-1.5">送る本文</div>
+                                                        <textarea data-rcp-body value={rcpBody} onChange={e => setRcpBody(e.target.value)} rows={6}
+                                                            placeholder="ここに送る内容を書いてください。"
+                                                            className="w-full px-3 py-2 rounded-lg bg-[#F8F9FB] border border-[#EAECF0] text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 resize-y" />
+                                                        <div className="text-[10px] font-bold text-[#98A2B3] mt-1">宛先と本文は別の欄です（本文が宛先として読まれないようにしています）</div>
+                                                    </div>
+                                                    {rcpMsg && <div data-rcp-msg className="px-3 py-2 rounded-lg bg-[#F8F9FB] border border-[#EAECF0] text-[12px] font-bold text-[#344054]">{rcpMsg}</div>}
+                                                </div>
+                                                <div className="px-5 py-3.5 border-t border-[#EAECF0]">
+                                                    <button data-rcp-send onClick={rcpSend} disabled={!!rcpBlocked || !rcpBody.trim() || rcpBusy}
+                                                        className="w-full py-2.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white font-semibold text-[14px] disabled:bg-[#EAECF0] disabled:text-[#98A2B3] transition">
+                                                        {rcpBusy ? '送っています…'
+                                                            : rcpBlocked === 'ambiguous' ? '同じ名前の人がいます。選んでください'
+                                                            : rcpBlocked === 'unknown' ? '見つからない宛先があります'
+                                                            : rcpBlocked === 'no_rooms' ? '送り先の店舗グループがありません'
+                                                            : rcpBlocked ? '宛先を入れてください'
+                                                            : !rcpBody.trim() ? '本文を入れてください'
+                                                            : rcpMode2 === 'store_rooms' ? `店舗グループ ${rcpRooms.filter(r => r.exists).length}件に送る`
+                                                            : rcpMode2 === 'new_group' ? `${rcpResult.total}名でグループを作って送る`
+                                                            : `${rcpResult.total}名に一人ずつ送る`}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
                                     {chatNewRoom && (
                                         <div className="fixed inset-0 z-[90] bg-[#111827]/40 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setChatNewRoom(null)}>
                                             <div className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[85vh] flex flex-col overflow-hidden border border-[#EAECF0]" onClick={e => e.stopPropagation()}>

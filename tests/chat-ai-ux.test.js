@@ -109,7 +109,9 @@ describe('chat-ai-ux: AI 回答メッセージの組み立て', () => {
     const m = buildAiAnswerMessage({ ...base, sources: [], hqMentions: [{ id: 'hq1', name: '本部 太郎' }] });
     expect(m.ai.escalated).toBe(true);
     expect(m.ai.escalateReasons).toContain('no_source');
-    expect(m.text).toMatch(/本部確認が必要です/);
+    expect(m.text).toMatch(/本部の確認が必要です/);
+    // 実際にはまだ依頼していないので「依頼しました」とは書かない
+    expect(m.text).not.toMatch(/依頼しました/);
     expect(m.mentions).toEqual([{ id: 'hq1', name: '本部 太郎' }]);
   });
   it('NEEDS_HQ 付きの生回答でもエスカレ扱いになる', () => {

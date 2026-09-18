@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>@AI 試用版（合成データ）</title>
+<style>
+  :root{--bg:#F8F9FB;--card:#fff;--line:#EAECF0;--ink:#111827;--sub:#667085;--mute:#98A2B3;
+    --brand:#E5670A;--brand-bg:#FFF4EC;--ai:#4F46E5;--ai-bg:#EEF2FF;--ai-line:#C7D2FE;
+    --ok:#0E9F6E;--ok-bg:#ECFDF5;--warn:#B45309;--warn-bg:#FFFBEB;--dan:#B42318;--dan-bg:#FEF3F2;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.6;
+    font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif}
+  .wrap{max-width:900px;margin:0 auto;padding:20px 16px 56px}
+  h1{font-size:19px;margin:0 0 4px;font-weight:800}
+  .lead{color:var(--sub);font-size:13px;margin:0 0 16px}
+  .banner{border-radius:12px;padding:10px 14px;font-size:12.5px;font-weight:700;margin-bottom:14px}
+  .banner.mock{background:var(--warn-bg);border:1px solid #FDE68A;color:#92400E}
+  .banner.live{background:var(--ok-bg);border:1px solid #A7F3D0;color:#065F46}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;margin-bottom:14px}
+  .card .hd{padding:11px 14px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .card .hd b{font-size:14px}
+  .card .bd{padding:14px}
+  .pill{border:1px solid var(--line);background:#fff;border-radius:999px;padding:5px 11px;font-size:12px;font-weight:700;cursor:pointer}
+  .pill[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:#fff}
+  .muted{color:var(--sub);font-size:12px}
+  .stream{display:flex;flex-direction:column;gap:12px;min-height:180px}
+  .msg{display:flex;gap:9px}
+  .av{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    font-size:12px;font-weight:800;background:#F2F4F7;color:var(--sub);flex:0 0 auto}
+  .msg .body{min-width:0;flex:1}
+  .msg .who{font-size:12px;font-weight:800}
+  .msg .time{font-size:11px;color:var(--mute);margin-left:6px;font-weight:500}
+  .bubble{background:#F6F7F9;border-radius:12px;padding:8px 11px;margin-top:3px;white-space:pre-wrap;word-break:break-word}
+  .chip{display:inline-block;background:var(--ai-bg);color:var(--ai);border-radius:6px;padding:0 6px;font-size:11px;font-weight:800;margin-left:6px}
+  /* AI 回答カード */
+  .ai-card{border:1px solid var(--ai-line);background:var(--ai-bg);border-radius:12px;padding:11px 12px;margin-top:3px}
+  .ai-card .lbl{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:800;color:var(--ai)}
+  .ai-card .q{background:#fff;border:1px solid var(--ai-line);border-radius:8px;padding:6px 9px;margin:7px 0;font-size:12px;color:var(--sub)}
+  .ai-card .ans{background:#fff;border-radius:8px;padding:9px 11px;white-space:pre-wrap;word-break:break-word}
+  .src{margin-top:8px;font-size:12px}
+  .src ul{margin:4px 0 0;padding-left:18px}
+  .nosrc{margin-top:8px;background:var(--dan-bg);border:1px solid #FECDCA;color:var(--dan);
+    border-radius:8px;padding:7px 10px;font-size:12px;font-weight:700}
+  .acts{display:flex;gap:7px;flex-wrap:wrap;margin-top:9px}
+  .btn{border:1px solid var(--line);background:#fff;border-radius:8px;padding:6px 11px;font-size:12px;font-weight:700;cursor:pointer}
+  .btn:hover{background:#F8F9FB}
+  .btn.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+  .btn.on{background:var(--ok-bg);border-color:#A7F3D0;color:var(--ok)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .hq{margin-top:8px;background:var(--warn-bg);border:1px solid #FDE68A;color:#92400E;border-radius:8px;padding:7px 10px;font-size:12px;font-weight:700}
+  .fix{margin-top:8px;border-left:3px solid var(--ok);background:#fff;border-radius:0 8px 8px 0;padding:7px 10px;font-size:12.5px}
+  .fix .meta{font-size:11px;color:var(--sub);font-weight:700}
+  .err{margin-top:6px;background:var(--dan-bg);border:1px solid #FECDCA;color:var(--dan);border-radius:8px;padding:7px 10px;font-size:12px;font-weight:700}
+  /* コンポーザー */
+  .mode{display:flex;align-items:center;gap:8px;padding:7px 11px;border-radius:10px 10px 0 0;font-size:12px;font-weight:700}
+  .mode.normal{background:#F2F4F7;color:var(--sub)}
+  .mode.ai{background:var(--ai);color:#fff}
+  .composer{border:1px solid var(--line);border-radius:0 0 12px 12px;border-top:0;background:#fff;padding:9px}
+  .composer.ai{border-color:var(--ai-line)}
+  textarea{width:100%;border:0;outline:0;resize:vertical;min-height:54px;font:inherit;background:transparent}
+  .crow{display:flex;align-items:center;gap:7px;margin-top:5px}
+  .crow .spacer{flex:1}
+  .mention{border:1px solid var(--line);border-radius:10px;background:#fff;margin-bottom:6px;overflow:hidden}
+  .mention button{display:block;width:100%;text-align:left;border:0;background:#fff;padding:7px 11px;font-size:12.5px;cursor:pointer}
+  .mention button:hover{background:#F6F7F9}
+  dialog{border:0;border-radius:14px;padding:0;max-width:520px;width:92%}
+  dialog .bd{padding:16px}
+  dialog h3{margin:0 0 4px;font-size:15px}
+  dialog textarea{border:1px solid var(--line);border-radius:10px;padding:9px;min-height:96px}
+  .steps{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 14px;padding:0;list-style:none}
+  .steps li{font-size:11.5px;font-weight:700;color:var(--sub);background:#fff;border:1px solid var(--line);border-radius:999px;padding:4px 10px}
+  .steps li.done{background:var(--ok-bg);border-color:#A7F3D0;color:var(--ok)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>@AI 試用版</h1>
+  <p class="lead">質問 → @AIモードで送信 → 同じルームにAI回答 → 出典を確認 → 本部に確認 → 本部が訂正、までを通しで試せます。</p>
+  <div class="banner mock" id="adapterBanner"></div>
+
+  <ol class="steps" id="steps"></ol>
+
+  <div class="card">
+    <div class="hd">
+      <b id="roomName">店舗グループ</b>
+      <span class="muted" id="roomMeta"></span>
+      <span style="flex:1"></span>
+      <span class="muted">あなた:</span>
+      <button class="pill" id="roleStaff" aria-pressed="true">佐藤（スタッフ）</button>
+      <button class="pill" id="roleHq" aria-pressed="false">本部 太郎（本部）</button>
+    </div>
+    <div class="bd">
+      <div class="stream" id="stream"></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="mode normal" id="modeBar"></div>
+    <div class="composer" id="composer">
+      <div class="mention" id="mention" hidden></div>
+      <textarea id="input" placeholder="メッセージを入力"></textarea>
+      <div class="crow">
+        <button class="btn" id="aiToggle" title="@AIモードに切り替え">🤖 AIに質問</button>
+        <span class="muted" id="hint">@ を入力すると宛先を選べます（外部アプリの音声文字起こしを貼り付けてもそのまま使えます）</span>
+        <span class="spacer"></span>
+        <button class="btn primary" id="send">送信</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="hd"><b>この画面について</b></div>
+    <div class="bd muted" id="notes"></div>
+  </div>
+</div>
+
+<dialog id="fixDlg"><div class="bd">
+  <h3>回答を訂正</h3>
+  <p class="muted" style="margin:0 0 8px">元の回答は残したまま、訂正として追記します（訂正者・日時が記録されます）。<br>
+  訂正しても全社ナレッジは自動更新されません。反映は別途の承認候補になります。</p>
+  <textarea id="fixText" placeholder="正しい内容を入力"></textarea>
+  <div class="crow" style="justify-content:flex-end;gap:8px">
+    <button class="btn" id="fixCancel">キャンセル</button>
+    <button class="btn primary" id="fixSave">訂正を保存</button>
+  </div>
+</div></dialog>
+
+<script type="module">
+import {
+  createSession, toggleMode, setMode, setDraft, submit, applyAnswer, failAnswer, retry,
+  requestHqReview, applyCorrection, setFeedback, feedbackCount, questionStatus,
+} from './lib/chat-ai-session.js';
+import { buildContext, createMockAdapter, adapterBadge } from './lib/chat-ai-adapter.js';
+import { formatSources } from './lib/chat-ai-ux.js';
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+const hhmm = (iso) => { const d = new Date(iso); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
+
+// ── 合成データ（本番データは使わない）────────────────────────────────────
+const ROOM = { id: 'store_A', name: 'NAORU〇〇院グループ（検証用）', shopId: 'A' };
+const PEOPLE = {
+  staff: { id: 's1', name: '佐藤', role: 'staff', canCorrect: false },
+  hq:    { id: 'hq1', name: '本部 太郎', role: 'hq', canCorrect: true },
+};
+const DOCS = [
+  { id:'faq_family', kind:'faq', title:'家族施術制度', version:'1.2', updatedAt:'2026-09-12T00:00:00Z',
+    visibility:'company', keywords:['家族施術','家族の施術','家族'],
+    answer:'家族施術制度は2親等以内のご家族が対象です。利用時は事前に店長へ申請し、施術記録に「家族施術」と記載してください。月あたりの上限は1名につき2回です。' },
+  { id:'faq_shift', kind:'faq', title:'シフト提出ルール', version:'3.0', updatedAt:'2026-08-30T00:00:00Z',
+    visibility:'company', keywords:['シフト','希望休'],
+    answer:'シフト希望は前月15日までに提出してください。希望休は月4日まで、連休希望は前月10日までの相談が必要です。' },
+  { id:'note_clean', kind:'knowledge', title:'当院の掃除当番メモ', visibility:'room', roomId:'store_A',
+    updatedAt:'2026-09-01T00:00:00Z', keywords:['掃除','当番'], body:'掃除当番は週替わりです。' },
+  // ↓ これらは参照させない（他店舗 / 人事 / 個人相談）。buildContext が弾くことの確認用。
+  { id:'other_shop', kind:'knowledge', title:'B院の議事録', visibility:'shop', shopId:'B', keywords:['議事録'], body:'他店の内容' },
+  { id:'hr', kind:'knowledge', title:'人事評価シート', visibility:'company', personnel:true, keywords:['評価'], body:'人事情報' },
+  { id:'priv', kind:'knowledge', title:'個人相談ログ', visibility:'company', private:true, keywords:['相談'], body:'Private AI Chat' },
+];
+
+const adapter = createMockAdapter({ delayMs: 350 });
+let viewer = PEOPLE.staff;
+let state = createSession({
+  roomId: ROOM.id, roomName: ROOM.name, viewerId: viewer.id, viewerName: viewer.name, viewerRole: viewer.role,
+  participants: [PEOPLE.staff, PEOPLE.hq],
+});
+let fixTarget = '';
+
+const badge = adapterBadge(adapter);
+$('adapterBanner').className = `banner ${badge.tone === 'live' ? 'live' : 'mock'}`;
+$('adapterBanner').innerHTML = `🧪 ${esc(badge.label)} — ${esc(badge.note)}`;
+$('roomName').textContent = ROOM.name;
+$('roomMeta').textContent = '参加者: 佐藤 / 本部 太郎（この画面の投稿はすべて合成データです）';
+$('notes').innerHTML = `
+  <ul style="margin:0;padding-left:18px">
+    <li>AI は<b>明示的に選ばれたときだけ</b>動きます。通常投稿や、貼り付け文に「@AI」が入っているだけでは起動しません。</li>
+    <li>AI の回答は<b>質問と同じルーム</b>にのみ投稿されます。DM・一斉配信・他ルームへの送信はできません。</li>
+    <li>AI へ渡すのは「今回の質問」「このルームの履歴」「このルームに共有された資料」だけです（他店舗・人事情報・個人相談は渡しません）。</li>
+    <li>通知・監査は共通基盤に接続予定です。<b>未接続のため「通知済み」とは表示しません</b>。</li>
+    <li>音声入力は外部アプリの文字起こしを貼り付けて使います（この画面では音声認識を持ちません）。</li>
+  </ul>`;
+
+function switchRole(next) {
+  viewer = next;
+  state = { ...state, viewerId: viewer.id, viewerName: viewer.name, viewerRole: viewer.role };
+  $('roleStaff').setAttribute('aria-pressed', String(viewer.role === 'staff'));
+  $('roleHq').setAttribute('aria-pressed', String(viewer.role === 'hq'));
+  render();
+}
+$('roleStaff').onclick = () => switchRole(PEOPLE.staff);
+$('roleHq').onclick = () => switchRole(PEOPLE.hq);
+
+// ── コンポーザー ─────────────────────────────────────────────────────────
+function renderComposer() {
+  const ai = state.mode === 'ai';
+  $('modeBar').className = `mode ${ai ? 'ai' : 'normal'}`;
+  $('modeBar').innerHTML = ai
+    ? `🤖 AIに質問中 — この内容は @AI 宛に送信されます。<b>質問とAIの回答はルーム参加者全員に公開されます。</b>
+       <span style="flex:1"></span><button class="btn" id="modeOff" style="padding:2px 8px">通常に戻す</button>`
+    : '通常メッセージ — AIは動きません（@AIモードにすると質問できます）';
+  $('modeBar').style.display = 'flex';
+  $('composer').className = `composer ${ai ? 'ai' : ''}`;
+  $('input').placeholder = ai ? 'AIへの質問を入力（例: 家族施術のルールは？）' : 'メッセージを入力';
+  $('aiToggle').setAttribute('aria-pressed', String(ai));
+  $('aiToggle').textContent = ai ? '🤖 AIに質問中' : '🤖 AIに質問';
+  $('send').textContent = ai ? '🤖 AIに質問' : '送信';
+  const off = $('modeOff'); if (off) off.onclick = () => { state = setMode(state, 'normal'); renderComposer(); };
+}
+
+$('aiToggle').onclick = () => { state = toggleMode(state); renderComposer(); $('input').focus(); };
+$('input').addEventListener('input', (e) => {
+  state = setDraft(state, e.target.value);
+  const caret = e.target.selectionStart || 0;
+  const before = e.target.value.slice(0, caret);
+  const m = /(?:^|[\s　])[@＠]([^\s@＠　]{0,20})$/.exec(before);
+  const box = $('mention');
+  if (m) {
+    box.hidden = false;
+    box.innerHTML = `<button data-pick="ai">🤖 AI（このルームのみんなに見える形で質問）</button>
+                     <button data-pick="hq">本部 太郎</button>`;
+  } else { box.hidden = true; box.innerHTML = ''; }
+});
+$('mention').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  const ta = $('input');
+  const caret = ta.selectionStart || ta.value.length;
+  const before = ta.value.slice(0, caret).replace(/(?:^|[\s　])[@＠][^\s@＠　]{0,20}$/, (s) => s.replace(/[@＠][^\s@＠　]{0,20}$/, ''));
+  if (b.dataset.pick === 'ai') {
+    ta.value = `${before}@AI ${ta.value.slice(caret)}`.trim() + ' ';
+    state = setMode(setDraft(state, ta.value), 'ai');       // 明示的に選んだ＝AIモードへ
+    mentionPicked = true;
+  } else {
+    ta.value = `${before}@本部 太郎 ${ta.value.slice(caret)}`;
+    state = setDraft(state, ta.value);
+  }
+  $('mention').hidden = true; renderComposer(); ta.focus();
+});
+let mentionPicked = false;
+
+$('send').onclick = () => doSend();
+$('input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); doSend(); }
+});
+
+async function doSend() {
+  const text = $('input').value;
+  const r = submit(state, { text, mentionPicked, clientId: `c_${Date.now()}` });
+  mentionPicked = false;
+  if (r.skipped === 'empty') return;
+  state = r.state;
+  $('input').value = state.draft;
+  render();
+  if (!r.aiRequest) return;
+  await askAi(r.aiRequest, text);
+}
+
+async function askAi(req, keepDraft) {
+  render();
+  const context = buildContext({ roomId: ROOM.id, shopId: ROOM.shopId, docs: DOCS, history: state.messages });
+  const res = await adapter.ask({ question: req.question, roomId: req.roomId, context });
+  if (!res || !res.ok) {
+    state = failAnswer(state, { questionId: req.questionId, error: (res && res.error) || '回答の取得に失敗しました', keepDraft }).state;
+    $('input').value = state.draft || keepDraft || '';
+    render(); return;
+  }
+  state = applyAnswer(state, {
+    questionId: req.questionId, raw: res.message, sources: res.sources,
+    confidence: res.sources && res.sources.length ? 0.86 : 0.2,
+    sample: res.sample, shop: ROOM.name,
+    hqMentions: [{ id: PEOPLE.hq.id, name: PEOPLE.hq.name }],
+  }).state;
+  render();
+}
+
+// ── 描画 ────────────────────────────────────────────────────────────────
+function answerCard(a) {
+  const q = state.messages.find(m => m.id === a.replyToId) || {};
+  const ai = a.ai || {};
+  const st = questionStatus(state, a.replyToId);
+  const fb = feedbackCount(state, a.id);
+  const fixes = state.corrections[a.id] || [];
+  const srcs = (ai.sources || []);
+  return `
+  <div class="ai-card" data-answer="${esc(a.id)}">
+    <div class="lbl">🤖 AIによる回答
+      ${a.sample ? '<span class="chip">サンプル回答（mock）</span>' : ''}
+      ${srcs.length ? `<span class="chip" style="background:#fff">出典 ${srcs.length}件に基づく回答</span>` : ''}
+    </div>
+    <div class="q">この質問への回答: 「${esc(q.text || '')}」（${esc(q.fromName || '')} ${esc(hhmm(q.createdAt || a.createdAt))}）</div>
+    <div class="ans">${esc(a.text)}</div>
+    ${srcs.length ? `<div class="src">📚 使用した出典
+        <ul>${srcs.map(s => `<li>${esc(s.title)}${s.version ? ` <span class="muted">v${esc(s.version)}</span>` : ''}
+          <span class="muted">${s.updatedAt ? `（${esc(String(s.updatedAt).slice(0,10).replace(/-/g,'/'))} 更新）` : '（更新日不明）'}</span></li>`).join('')}</ul>
+      </div>`
+      : `<div class="nosrc">⚠️ 根拠不足・本部確認が必要です（社内規程に基づく回答ではありません）</div>`}
+    <div class="acts">
+      <button class="btn" data-hq="${esc(a.replyToId)}" ${st.hq && st.hq.status === 'pending' ? 'disabled' : ''}>🙋 本部に確認</button>
+      ${viewer.canCorrect ? `<button class="btn" data-fix="${esc(a.id)}">✏️ 回答を訂正</button>`
+        : `<button class="btn" disabled title="訂正できるのは本部/オーナーです">✏️ 回答を訂正</button>`}
+      <button class="btn ${fb.mine === 'up' ? 'on' : ''}" data-fb="up" data-a="${esc(a.id)}">👍 参考になった${fb.up ? ` ${fb.up}` : ''}</button>
+      <button class="btn ${fb.mine === 'down' ? 'on' : ''}" data-fb="down" data-a="${esc(a.id)}">👎 ならなかった${fb.down ? ` ${fb.down}` : ''}</button>
+    </div>
+    ${st.hq ? `<div class="hq">🙋 本部確認: ${st.hq.status === 'pending' ? '確認待ち' : '対応済み'}
+        （依頼: ${esc(st.hq.byName || st.hq.by)} / ${esc(hhmm(st.hq.at))}）
+        ・通知: <b>未接続</b>（共通基盤に接続後に通知されます）</div>` : ''}
+    ${fixes.map(f => `<div class="fix"><div class="meta">✏️ 訂正 — ${esc(f.byName || f.by)}（${esc(f.role)}） ${esc(hhmm(f.at))}
+        ・ナレッジ反映: <b>承認候補</b>（自動更新しません）</div>${esc(f.text)}</div>`).join('')}
+  </div>`;
+}
+
+function render() {
+  renderComposer();
+  const html = state.messages.map(m => {
+    if (m.fromStaffId === '__ai__') {
+      return `<div class="msg"><div class="av" style="background:var(--ai-bg);color:var(--ai)">AI</div>
+        <div class="body"><div class="who">🤖 NAORUアシスタント<span class="time">${esc(hhmm(m.createdAt))}</span></div>
+        ${answerCard(m)}</div></div>`;
+    }
+    const st = questionStatus(state, m.id);
+    return `<div class="msg"><div class="av">${esc((m.fromName || '?').charAt(0))}</div>
+      <div class="body">
+        <div class="who">${esc(m.fromName)}${m.askedAi ? '<span class="chip">@AI 宛</span>' : ''}<span class="time">${esc(hhmm(m.createdAt))}</span></div>
+        <div class="bubble">${esc(m.text)}</div>
+        ${st.pending ? '<div class="muted" style="margin-top:4px">🤖 回答を作成中…</div>' : ''}
+        ${st.error ? `<div class="err">⚠️ ${esc(st.error)}
+            <button class="btn" data-retry="${esc(m.id)}" style="margin-left:8px">再試行</button>
+            <button class="btn" data-hq="${esc(m.id)}" ${st.hq ? 'disabled' : ''}>🙋 本部に確認</button></div>` : ''}
+      </div></div>`;
+  }).join('');
+  $('stream').innerHTML = html || '<p class="muted">まだ投稿はありません。下の「🤖 AIに質問」を押して質問してみてください。</p>';
+
+  const answered = Object.keys(state.answersByQuestion).length > 0;
+  const hqAsked = Object.keys(state.hqRequests).length > 0;
+  const fixed = Object.keys(state.corrections).length > 0;
+  const steps = [
+    ['質問を入力', !!state.messages.length], ['@AIモードで送信', state.messages.some(m => m.askedAi)],
+    ['同じルームにAI回答', answered], ['出典を確認', answered],
+    ['本部に確認依頼', hqAsked], ['本部が訂正', fixed],
+  ];
+  $('steps').innerHTML = steps.map(([label, done]) => `<li class="${done ? 'done' : ''}">${done ? '✓ ' : ''}${esc(label)}</li>`).join('');
+}
+
+$('stream').addEventListener('click', async (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.hq) {
+    const r = requestHqReview(state, { questionId: b.dataset.hq, by: viewer.id, byName: viewer.name });
+    state = r.state; render(); return;
+  }
+  if (b.dataset.fix) { fixTarget = b.dataset.fix; $('fixText').value = ''; $('fixDlg').showModal(); return; }
+  if (b.dataset.fb) { state = setFeedback(state, { answerId: b.dataset.a, verdict: b.dataset.fb, by: viewer.id }).state; render(); return; }
+  if (b.dataset.retry) {
+    const r = retry(state, b.dataset.retry); state = r.state; render();
+    if (r.aiRequest) await askAi(r.aiRequest, state.draft);
+  }
+});
+$('fixCancel').onclick = () => $('fixDlg').close();
+$('fixSave').onclick = () => {
+  const text = $('fixText').value.trim(); if (!text) return;
+  const r = applyCorrection(state, { answerId: fixTarget, text, by: viewer.id, byName: viewer.name, role: viewer.role, canCorrect: viewer.canCorrect });
+  if (r.ok) { state = r.state; $('fixDlg').close(); render(); }
+};
+
+render();
+</script>
+</body>
+</html>

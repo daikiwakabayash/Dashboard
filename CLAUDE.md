@@ -13,7 +13,8 @@
 > 現時点で実際に読めるのはこのブランチだけです）。**統合後に正式採用ブランチへ更新してください。**
 > 採用commitの一覧は ROADMAP.md §3 にあります（③の成果物は `codex/phase1-knowledge-base` 側）。
 >
-> ⚠️ **開発窓口（統括セッション）は確定前です。** 確定するまで、担当の移動と割り当ての確定は行いません。
+> **統括・依頼窓口は「① Claude Code の Dashboard 担当」です**（2026-09-18 確定）。
+> Codex は成果物を専用branchへ引継ぎ保存し、追加指示まで待機します（WORK_LEDGER.md §10）。
 >
 > ⚠️ **`api/plan-store.js` のナレッジ同期箇所（`KNOWLEDGE_GAS_SECRET`）** は引継ぎ直後です。
 > 触る前に `WORK_LEDGER.md` §7 を確認してください（Secret未設定のため現在 fail closed）。

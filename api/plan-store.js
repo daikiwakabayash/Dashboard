@@ -695,12 +695,37 @@ export default async function handler(req, res) {
     //     許可一覧は環境変数（META_AD_ACCOUNT_IDS: カンマ区切り）で人が設定する。
     //     未設定なら META_AD_ACCOUNT_ID の1件のみを許可する。
     const allowList = String(process.env.META_AD_ACCOUNT_IDS || process.env.META_AD_ACCOUNT_ID || '')
-      .split(',').map(x => x.trim()).filter(Boolean);
+      .split(',').map(x => x.trim()).filter(Boolean)
+      // 形式が明らかに不正なものは許可リストとして採用しない（Metaの広告アカウントは act_ で始まる）
+      .filter(x => /^act_[A-Za-z0-9]+$/.test(x));
     const requested = String(req.query.accountId || '').slice(0, 64);
     const accountId = requested || allowList[0] || '';
     if (requested && allowList.length && !allowList.includes(requested)) {
       return res.status(403).json({ ok: false, error: 'forbidden', code: 'account_not_allowed',
         message: 'この広告アカウントは許可されていません' });
+    }
+    // 🔴 実Credential が入っているのに許可リストが空／不正なら、**上流を呼ばない**。
+    //    「未接続なのでサンプルを出す」状態とは区別し、設定の誤りとして明示する。
+    //    （許可リストが空のまま実データを取りに行くと、対象外のアカウントを読んでしまう）
+    const liveCreds = !!(base && key);
+    if (liveCreds && (!allowList.length || !accountId || !allowList.includes(accountId))) {
+      return res.status(200).json({
+        ok: true,
+        sample: false,                     // ← サンプル表示ではない
+        connection: {
+          connected: false, mode: 'misconfigured',
+          reason: !allowList.length
+            ? '広告アカウントの許可リスト（META_AD_ACCOUNT_IDS）が未設定または不正です'
+            : 'この広告アカウントは許可リストにありません',
+          hint: '実データの取得は行いませんでした。許可リストの設定を確認してください（設定は人が行います）',
+        },
+        data: {
+          ok: false, connected: false, isSample: false,
+          error: { code: 'ACCOUNT_NOT_ALLOWED', message: '許可された広告アカウントが設定されていません', retryable: false },
+          freshness: { lastSuccessAt: null, lastAttemptAt: null, lagMinutes: null },
+        },
+        apiVersion: META_API_VERSION,
+      });
     }
 
     // (6) 期間は**広告アカウントのタイムゾーン**基準。未設定なら環境変数、既定は Asia/Tokyo。

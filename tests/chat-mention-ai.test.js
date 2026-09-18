@@ -42,3 +42,19 @@ describe('チャットのメンション候補: AI', () => {
     expect(ai).toBeGreaterThan(dmGuard);
   });
 });
+
+describe('チャットのコンポーザー: 「AIに質問」ボタンは置かない', () => {
+  it('🔴 ボタンを消した（メンションで呼ぶ）', () => {
+    expect(html).not.toContain('chatSend(true)');
+    const composer = html.slice(html.indexOf('chatEmojiOpen ?'), html.indexOf('chatEmojiOpen ?') + 3000);
+    expect(composer).not.toContain('AIに質問');
+  });
+  it('AIを呼ぶ手段はメンションが残っている', () => {
+    expect(html).toContain("id: '__ai__'");
+    expect(html).toContain('/[@＠]\\s*ai\\b/i.test(t)');
+  });
+  it('送信ボタンは右端のまま', () => {
+    const send = html.slice(html.indexOf('onClick={chatSend} disabled'), html.indexOf('onClick={chatSend} disabled') + 300);
+    expect(send).toContain('ml-auto');
+  });
+});

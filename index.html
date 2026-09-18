@@ -2700,7 +2700,9 @@
             // ナレッジ資料の保存/削除
             const knowSave = async () => {
                 const e = knowEdit; if (!e || !String(e.body || '').trim()) return;
-                const doc = { id: e.id || undefined, title: e.title || '', body: e.body, shopScope: e.shopScope || '', source: e.source || '', updatedBy: authState.staffName || authState.owner || '管理者' };
+                const doc = { id: e.id || undefined, title: e.title || '', body: e.body, shopScope: e.shopScope || '', source: e.source || '',
+                    autoSync: e.autoSync !== false, sync: e.sync, revisions: e.revisions,
+                    updatedBy: authState.staffName || authState.owner || '管理者' };
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'knowledge', action: e.id ? 'update' : 'add', doc }) }); } catch {}
                 setKnowEdit(null); await faqAdminLoad();
             };
@@ -2708,6 +2710,30 @@
                 if (!id || !window.confirm('この資料を削除しますか？')) return;
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'knowledge', action: 'delete', id }) }); } catch {}
                 await faqAdminLoad();
+            };
+            // 自動更新で変わった資料の「確認しました」（未確認の印を外す）
+            const knowMarkSeen = async (id) => {
+                try {
+                    await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() },
+                        body: JSON.stringify({ type: 'knowledge', action: 'reviewed', id }) });
+                } catch {}
+                await faqAdminLoad();
+            };
+            // いま取り直す（1日1回の自動更新を待たずに手で動かす）
+            const [knowSyncing, setKnowSyncing] = useState(false);
+            const [knowSyncMsg, setKnowSyncMsg] = useState('');
+            const knowSyncNow = async () => {
+                if (knowSyncing) return;
+                setKnowSyncing(true); setKnowSyncMsg('');
+                try {
+                    const r = await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() },
+                        body: JSON.stringify({ type: 'knowledge', action: 'sync' }) });
+                    const j = await r.json().catch(() => null);
+                    if (!j || !j.ok) setKnowSyncMsg('取り直せませんでした');
+                    else if (j.reason) setKnowSyncMsg(j.reason);
+                    else setKnowSyncMsg(`${j.checked}件を確認し、${j.updated}件が新しくなりました${j.failed ? `（${j.failed}件は取得できず）` : ''}`);
+                } catch { setKnowSyncMsg('取り直せませんでした'); }
+                finally { setKnowSyncing(false); await faqAdminLoad(); }
             };
             // 一括貼付インポート: 1行=「質問<TAB>回答[<TAB>店舗]」（Googleスプレッドシート/Excelからコピー）。カンマ区切りも可。
             const faqBulkImport = async () => {
@@ -21152,9 +21178,19 @@
                                 <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 md:p-5">
                                     <div className="flex items-center gap-2 mb-3 flex-wrap">
                                         <span className="text-[14px] font-black text-slate-800">📚 ナレッジ資料（長文）</span>
-                                        <span className="text-[10px] text-slate-400 font-bold">本文（中身）を貼るとAIが学習します＝「✅反映済み」。⚠️ URLだけでは学習されません（Googleスライド/ドキュメントはClaudeに取込を依頼、または中身を貼付）。</span>
-                                        {!knowEdit && <button onClick={() => setKnowEdit({ title: '', body: '', shopScope: '', source: '' })} className="ml-auto px-3 py-1.5 rounded-lg bg-slate-800 text-white font-bold text-[12px] hover:bg-slate-900">＋ 資料を追加</button>}
+                                        <span className="text-[10px] text-slate-400 font-bold">本文（中身）を貼るとAIが学習します＝「✅反映済み」。出典にGoogleスプレッドシート／スライド／ドキュメントのURLを入れておくと、1日1回そこから自動で最新にします。</span>
+                                        {/* 1日1回の自動更新を待たずに、いますぐ取り直す */}
+                                        {/* 最後に自動更新が動いた時刻。ここが古いままなら日次の自動更新が動いていない（CRON_SECRET 未設定など）。 */}
+                                        {(() => {
+                                            const last = (knowDocs || []).reduce((a, d) => Math.max(a, (d && d.sync && d.sync.lastCheckedAt) || 0), 0);
+                                            return <span className={`ml-auto text-[10px] font-bold ${last ? 'text-slate-400' : 'text-amber-600'}`}>
+                                                {last ? `最終更新確認 ${new Date(last).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : 'まだ自動更新が動いていません'}
+                                            </span>;
+                                        })()}
+                                        <button onClick={knowSyncNow} disabled={knowSyncing} className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 font-bold text-[12px] hover:bg-slate-50 disabled:opacity-40">{knowSyncing ? '取り直しています…' : '🔄 いま取り直す'}</button>
+                                        {!knowEdit && <button onClick={() => setKnowEdit({ title: '', body: '', shopScope: '', source: '' })} className="px-3 py-1.5 rounded-lg bg-slate-800 text-white font-bold text-[12px] hover:bg-slate-900">＋ 資料を追加</button>}
                                     </div>
+                                    {knowSyncMsg && <div className="mb-2 px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 text-[12px] font-bold text-slate-600">{knowSyncMsg}</div>}
                                     {knowEdit && (
                                         <div className="space-y-2 mb-3 border border-slate-200 rounded-xl p-3 bg-slate-50/50">
                                             <div className="flex gap-2 flex-wrap">
@@ -21164,7 +21200,20 @@
                                                     {shopList.map((s, i) => <option key={i} value={s.name}>{s.name.replace(/^NAORU\s*/, '')} 限定</option>)}
                                                 </select>
                                             </div>
-                                            <input value={knowEdit.source} onChange={e => setKnowEdit(k => ({ ...k, source: e.target.value }))} placeholder="出典（任意・例: GoogleスライドURL / 議事録）" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-[12px] font-medium outline-none focus:border-indigo-400" />
+                                            <input value={knowEdit.source} onChange={e => setKnowEdit(k => ({ ...k, source: e.target.value }))} placeholder="出典（GoogleスプレッドシートやスライドのURLを貼ると、1日1回ここから自動で最新にします）" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-[12px] font-medium outline-none focus:border-indigo-400" />
+                                            {/* Google の URL なら自動更新の対象。それ以外（自由文）は対象外だと分かるように出す。 */}
+                                            {(() => {
+                                                const ok = /^https:\/\/docs\.google\.com\/(spreadsheets|presentation|document)\/d\/[A-Za-z0-9_-]{20,}/.test(String(knowEdit.source || '').trim());
+                                                if (!String(knowEdit.source || '').trim()) return null;
+                                                return ok ? (
+                                                    <label className="flex items-center gap-2 text-[12px] font-bold text-emerald-700">
+                                                        <input type="checkbox" checked={knowEdit.autoSync !== false} onChange={e => setKnowEdit(k => ({ ...k, autoSync: e.target.checked }))} />
+                                                        1日1回このURLから自動で最新にする（更新があれば「更新あり」と出します）
+                                                    </label>
+                                                ) : (
+                                                    <div className="text-[11px] font-bold text-slate-400">※ 自動更新はGoogleのスプレッドシート・スライド・ドキュメントのURLのときだけ働きます。</div>
+                                                );
+                                            })()}
                                             <textarea value={knowEdit.body} onChange={e => setKnowEdit(k => ({ ...k, body: e.target.value }))} rows={8} placeholder="ここに本文（文字起こし・資料の中身）を貼り付け。長文OK。" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-medium outline-none focus:border-indigo-400 resize-y" />
                                             <div className="flex items-center gap-2">
                                                 <button onClick={() => setKnowEdit(null)} className="text-[12px] font-bold text-slate-400 hover:text-slate-600">キャンセル</button>
@@ -21187,10 +21236,23 @@
                                                             ? <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-emerald-100 text-emerald-700 shrink-0">✅ 反映済み</span>
                                                             : <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-amber-100 text-amber-700 shrink-0">⚠️ 未反映（中身が空/URLのみ）</span>}
                                                         {d.shopScope ? <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-violet-50 text-violet-600 shrink-0">{String(d.shopScope).replace(/^NAORU\s*/, '')}</span> : <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-slate-100 text-slate-500 shrink-0">全店</span>}
+                                                        {/* 自動更新の状態。更新があったら本部が「確認しました」を押すまで残す。 */}
+                                                        {d.sync && d.sync.needsReview && (
+                                                            <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-amber-100 text-amber-800 shrink-0">🔔 更新あり（未確認）</span>
+                                                        )}
+                                                        {d.sync && d.sync.lastError && (
+                                                            <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-rose-100 text-rose-700 shrink-0" title={d.sync.lastError}>⚠️ 取得できず</span>
+                                                        )}
+                                                        {d.autoSync !== false && /^https:\/\/docs\.google\.com\//.test(String(d.source || '')) && !(d.sync && d.sync.needsReview) && (
+                                                            <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black bg-sky-50 text-sky-600 shrink-0">🔄 自動更新</span>
+                                                        )}
                                                     </div>
                                                     <div className="text-[11px] text-slate-400 truncate">{(d.body || '').slice(0, 80)}{bodyLen > 80 ? '…' : ''}（{bodyLen.toLocaleString()}字）</div>
                                                 </div>
-                                                <button onClick={() => setKnowEdit({ id: d.id, title: d.title, body: d.body, shopScope: d.shopScope || '', source: d.source || '' })} className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-bold text-slate-500 hover:bg-slate-100">編集</button>
+                                                <button onClick={() => setKnowEdit({ id: d.id, title: d.title, body: d.body, shopScope: d.shopScope || '', source: d.source || '', autoSync: d.autoSync !== false, sync: d.sync, revisions: d.revisions })} className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-bold text-slate-500 hover:bg-slate-100">編集</button>
+                                                {d.sync && d.sync.needsReview && (
+                                                    <button onClick={() => knowMarkSeen(d.id)} className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-black text-amber-800 bg-amber-100 hover:bg-amber-200">確認しました</button>
+                                                )}
                                                 <button onClick={() => knowDelete(d.id)} className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-bold text-rose-500 hover:bg-rose-50">削除</button>
                                             </div>
                                             );

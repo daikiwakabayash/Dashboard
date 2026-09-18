@@ -15,6 +15,7 @@
 
 import { getVotingState, validateVote, upsertVote, removeVote, isPeriodPublished, autoPublishLabel, listPeriods } from '../lib/thanksgift.js';
 import { ensureBaseRooms, extractLinks, toggleReaction, genId } from '../lib/chat.js';
+import { carryManaged, stripManaged, applyMemberChange } from '../lib/chat-room-fields.js';
 import { videoEmbed } from '../lib/board.js';
 import { analyzeStore, couponReminderItems, buildStoreMessage } from '../lib/patrol.js';
 import { buildSearchRequest, parsePlacesResponse, reviewRequestUrl, buildLegacyReviewsRequest, parseLegacyReviews } from '../lib/places.js';
@@ -1962,7 +1963,10 @@ export default async function handler(req, res) {
 
       // ルーム作成（group/dm）。members・name・kind をそのまま採用。
       if (action === 'createRoom' && body.room) {
-        const r = body.room;
+        // ⚠️ storeId / eventId / status / autoMembers は**サーバー管理**。
+        //    クライアント入力からは受け取らない（stripManaged）。
+        //    既に同じIDのRoomがある場合は、その値を引き継ぐ（createRoom は作り直すため）。
+        const r = stripManaged(body.room);
         const room = {
           id: r.id ? String(r.id) : genId('room'),
           kind: (r.kind === 'dm' || r.kind === 'group') ? r.kind : 'group',
@@ -1974,9 +1978,17 @@ export default async function handler(req, res) {
           createdBy: String(r.createdBy || ''),
           createdAt: new Date().toISOString(),
         };
-        const nextRooms = rooms.filter(x => x && x.id !== room.id).concat(room);
+        const prevRoom = rooms.find(x => x && String(x.id) === String(room.id)) || null;
+        // ⚠️ 既存IDを指定した createRoom で、**見えないRoomを作り直せない**ようにする。
+        //    （他人のDMや別店舗のルームのIDを当てて、名前やメンバーを書き換える経路を塞ぐ）
+        if (prevRoom && !canViewRoom(chatActor, prevRoom)) {
+          return res.status(403).json({ ok: false, error: 'forbidden', code: 'room_not_visible',
+            message: 'このルームを操作する権限がありません' });
+        }
+        const merged = carryManaged(prevRoom, room);      // 付加情報を消さない
+        const nextRooms = rooms.filter(x => x && x.id !== merged.id).concat(merged);
         await save({ rooms: nextRooms });
-        return res.status(200).json({ ok: true, room });
+        return res.status(200).json({ ok: true, room: merged });
       }
 
       // グループのメンバー変更（招待/退会）。group のみ・メンバー or root。
@@ -1984,11 +1996,24 @@ export default async function handler(req, res) {
         const rid = String(body.roomId);
         const room = rooms.find(r => r && r.id === rid);
         if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
-        const isMember = (room.members || []).map(String).includes(String(body.staffId));
-        if (!(body.root || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        // ⚠️ メンバー変更も認可する。body.root / body.staffId の申告ではなく、
+        //    検証済み actor がそのルームを見られることを条件にする。
+        if (!canViewRoom(chatActor, room)) {
+          return res.status(403).json({ ok: false, error: 'forbidden', code: 'room_not_visible' });
+        }
         const oldM = (room.members || []).map(String);
         const members = [...new Set(body.members.map(String))].slice(0, 500);
-        const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, members } : r);
+        // 付加フィールドを保ったままメンバーを差し替える。
+        // 人が新しく入れた人は autoMembers から外れる＝手動参加に昇格し、以後は同期が外せない。
+        // ⚠️ 一般のリクエストが「システム同期」を名乗れないようにする。
+        //    bySync を認めるのは、サーバー間のエージェントトークン（source='agent'）または
+        //    cron で本人確認できた場合だけ。クライアントの申告だけでは human 扱いにする。
+        //    （sync 扱いだと、人が入れた人を自動削除の対象にできてしまう）
+        const syncAllowed = body.bySync === true && !!chatActor && chatActor.verified === true
+          && (chatActor.source === 'agent' || chatActor.source === 'cron');
+        const nextRooms = rooms.map(r => (r && r.id === rid)
+          ? applyMemberChange(r, members, { by: syncAllowed ? 'sync' : 'human' })
+          : r);
         // システムメッセージ（追加/退出させた）＝ actorName + names が渡された時のみ生成（events等の内部更新では出さない）
         let sysArr = null;
         if (body.actorName && body.names && typeof body.names === 'object') {
@@ -2042,14 +2067,16 @@ export default async function handler(req, res) {
         if (!room || room.kind !== 'group') return res.status(400).json({ ok: false, error: 'not_group' });
         const isMember = (room.members || []).map(String).includes(String(body.staffId));
         if (!(body.root || isMember)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        // ⚠️ patch には管理フィールドを入れない（クライアントから書かせない）
         const patch = {};
         if (typeof body.name === 'string') patch.name = body.name.slice(0, 60);
         // アイコン: 絵文字(icon) と 画像(iconImg=画像ID) は排他。片方を設定するともう片方はクリア。
         if (typeof body.icon === 'string') { patch.icon = body.icon.slice(0, 16); if (patch.icon) patch.iconImg = ''; }
         if (typeof body.iconImg === 'string') { patch.iconImg = body.iconImg.slice(0, 64); if (patch.iconImg) patch.icon = ''; }
-        const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, ...patch } : r);
+        const safePatch = stripManaged(patch);
+        const nextRooms = rooms.map(r => r && r.id === rid ? { ...r, ...safePatch } : r);
         await save({ rooms: nextRooms });
-        return res.status(200).json({ ok: true, room: { ...room, ...patch } });
+        return res.status(200).json({ ok: true, room: { ...room, ...safePatch } });
       }
 
       // メッセージをルーム上部に固定（アナウンス）／解除。room.pinned にスナップショットを保持。

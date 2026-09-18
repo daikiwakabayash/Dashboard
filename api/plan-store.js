@@ -22,6 +22,9 @@ import {
   makeRequestRecord, buildSources, needsHqReview, wrapDocsAsData, upsertReview, appendCorrection,
   isTrialRoom, normalizeConfig as normalizeAiCfg, pickAllowedDocs,
 } from '../lib/chatai.js';
+import { parseSourceUrl as knowParseSource, isSyncable as knowSyncable,
+  applyFetched as knowApplyFetched, markReviewed as knowMarkReviewed,
+  syncSummary as knowSyncSummary } from '../lib/knowledge-sync.js';
 // ②が作った「名前で選ぶ」ための組み立て。画面側で同じ判定を書き直さないよう、
 // サーバーがここで組み立てて返す（どのルーム・どの資料が対象かはサーバーが決める）。
 import { buildTrialTargets } from '../lib/chat-ai-adapter.js';
@@ -1757,6 +1760,48 @@ export default async function handler(req, res) {
     }
   }
 
+  // ── ナレッジ資料の自動更新（Google シート/スライド/ドキュメント）──
+  // 取得そのものは **既存の Apps Script（GAS）** に任せる。
+  // Dashboard 側に新しい認証情報を持たない（GAS は既に御社アカウントで動いている）。
+  const knowRunSync = async (docs) => {
+    const gasUrl = GAS_URL();
+    const targets = docs.filter(knowSyncable);
+    if (!gasUrl) return { configured: false, checked: 0, updated: 0, failed: 0,
+      reason: 'Apps Script の接続先（PLAN_GAS_URL / SETTLEMENT_GAS_URL）が未設定です', summary: knowSyncSummary(docs) };
+    if (!targets.length) return { configured: true, checked: 0, updated: 0, failed: 0,
+      reason: '出典に Google の URL が入っていて、自動更新がONの資料がありません', summary: knowSyncSummary(docs) };
+    const started = Date.now(); const BUDGET_MS = 50000;   // 関数の上限60秒に収める
+    const byId = new Map(docs.map(d => [String(d && d.id), d]));
+    let updated = 0, failed = 0, checked = 0;
+    // 前回の確認が古いものから順に。時間切れになっても次回続きから進む。
+    const ordered = targets.slice().sort((a, b) =>
+      (((a.sync && a.sync.lastCheckedAt) || 0) - ((b.sync && b.sync.lastCheckedAt) || 0)));
+    for (const doc of ordered) {
+      if (Date.now() - started > BUDGET_MS) break;
+      const src = knowParseSource(doc.source);
+      let fetched;
+      try {
+        const j = await gasCall(gasUrl, 'POST', { action: 'readKnowledgeDoc', kind: src.kind, fileId: src.fileId });
+        fetched = (j && j.ok) ? { ok: true, body: j.body, title: j.title }
+          : { ok: false, error: String((j && (j.error || j.message)) || '取得できませんでした').slice(0, 300) };
+      } catch (e) { fetched = { ok: false, error: String((e && e.message) || e).slice(0, 300) }; }
+      const r = knowApplyFetched(doc, fetched);
+      if (r.doc && typeof r.doc.body === 'string') r.doc.body = r.doc.body.slice(0, 40000);  // 保存上限に合わせる
+      byId.set(String(doc.id), r.doc);
+      checked++;
+      if (r.changed) updated++;
+      else if (r.reason === 'fetch_failed' || r.reason === 'empty_body') failed++;
+    }
+    const next = docs.map(d => byId.get(String(d && d.id)) || d);
+    await blobSet(KNOWLEDGE_KEY, { docs: next }, hasKV, hasSB, gas);
+    try {
+      const built = buildAuditEntry({ action: 'knowledge_autosync', entity: 'knowledge', entityId: 'sync',
+        after: { checked, updated, failed }, actor: chatActor, source: 'cron' });
+      if (built.ok && hasKV) await kvAppendJson(ccKey(AUDIT_KEY), built.entry, AUDIT_CAP);
+    } catch (_) {}
+    return { configured: true, checked, updated, failed, summary: knowSyncSummary(next) };
+  };
+
   // ── ナレッジ資料（長文: 文字起こし/シート・スライドの中身/マニュアル）: ?type=knowledge ──
   const isKnow = (req.method === 'GET' ? req.query.type : (req.body || {}).type) === 'knowledge';
   if (isKnow) {
@@ -1764,16 +1809,31 @@ export default async function handler(req, res) {
     try {
       const cur = (await blobGet(KNOWLEDGE_KEY, hasKV, hasSB, gas)) || {};
       const docs = Array.isArray(cur.docs) ? cur.docs : [];
-      if (req.method === 'GET') return res.status(200).json({ docs, configured: true });
+      if (req.method === 'GET') {
+        // 日次の自動更新（Vercel Cron）。人の操作ではないので CRON_SECRET で認証する。
+        if (String(req.query.action || '') === 'cronsync') {
+          const secret = process.env.CRON_SECRET || '';
+          if (secret && String(req.headers.authorization || '') !== `Bearer ${secret}`) {
+            return res.status(401).json({ ok: false, error: 'unauthorized' });
+          }
+          return res.status(200).json({ ok: true, ...(await knowRunSync(docs)) });
+        }
+        return res.status(200).json({ docs, configured: true, summary: knowSyncSummary(docs) });
+      }
       const body = req.body || {};
       const clean = (d) => ({
         id: String(d.id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6))),
         title: String(d.title || '').slice(0, 200),
         body: String(d.body || '').slice(0, 40000),          // 長文（1資料上限4万字）
         shopScope: String(d.shopScope || '').slice(0, 60),   // '' = 全社共通
-        source: String(d.source || '').slice(0, 200),        // 例: Googleスライドのタイトル/URL、議事録2026-09 等
+        source: String(d.source || '').slice(0, 500),        // 例: GoogleスライドのURL、議事録2026-09 等
         updatedAt: new Date().toISOString(),
         updatedBy: String(d.updatedBy || '').slice(0, 60),
+        // ⚠️ 自動更新の情報は落とさない。ここで消すと、画面から1回編集しただけで
+        //    「未確認」の印や履歴が消え、更新に気づけなくなる。
+        autoSync: d.autoSync !== false,
+        sync: (d.sync && typeof d.sync === 'object') ? d.sync : undefined,
+        revisions: Array.isArray(d.revisions) ? d.revisions.slice(0, 20) : undefined,
       });
       if ((body.action === 'add' || body.action === 'update') && body.doc) {
         const rec = clean(body.doc);
@@ -1793,6 +1853,20 @@ export default async function handler(req, res) {
         const next = [...map.values()].slice(0, 1000);
         await blobSet(KNOWLEDGE_KEY, { docs: next }, hasKV, hasSB, gas);
         return res.status(200).json({ ok: true, count: next.length });
+      }
+      // 手動での「いま取り直す」
+      if (body.action === 'sync') return res.status(200).json({ ok: true, ...(await knowRunSync(docs)) });
+      // 「更新を確認しました」（未確認の印を外す）
+      if (body.action === 'reviewed' && body.id) {
+        const id = String(body.id);
+        const next = docs.map(d => (d && d.id === id) ? knowMarkReviewed(d, chatActor) : d);
+        await blobSet(KNOWLEDGE_KEY, { docs: next }, hasKV, hasSB, gas);
+        try {
+          const built = buildAuditEntry({ action: 'knowledge_sync_reviewed', entity: 'knowledge', entityId: id,
+            actor: chatActor, source: chatActor && chatActor.source });
+          if (built.ok && hasKV) await kvAppendJson(ccKey(AUDIT_KEY), built.entry, AUDIT_CAP);
+        } catch (_) {}
+        return res.status(200).json({ ok: true, doc: next.find(d => d && d.id === id) || null, summary: knowSyncSummary(next) });
       }
       return res.status(400).json({ ok: false, error: 'invalid knowledge action' });
     } catch (err) {

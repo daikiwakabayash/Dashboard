@@ -1,5 +1,20 @@
 # NAORU Dashboard
 
+> **開発の正本は naoru-ai-platform の `ROADMAP.md` です。**
+> 進捗・仕様・採用commit・残件・完了条件はそちらが正本で、このファイルは Dashboard の技術仕様だけを持ちます。
+> 両者が食い違う場合は ROADMAP.md が優先します。
+>
+> - 正本（進捗・採用commit・完了条件）: [naoru-ai-platform/ROADMAP.md](https://github.com/daikiwakabayash/naoru-ai-platform/blob/codex/phase1-knowledge-base/ROADMAP.md)
+> - 作業台帳（誰がどのファイルを触っているか）: `naoru-ai-platform/WORK_LEDGER.md`
+> - 報告テンプレート・受入一覧: `naoru-ai-platform/REPORT_TEMPLATE.md`
+> - 作業規則・業務AI設計: `naoru-ai-platform/AGENTS.md`
+>
+> ⚠️ **開発窓口（統括セッション）は確定前です。** 確定するまで、担当の移動と割り当ての確定は行いません。
+>
+> ⚠️ **`api/plan-store.js` のナレッジ同期箇所（`KNOWLEDGE_GAS_SECRET`）** は引継ぎ直後です。
+> 触る前に `WORK_LEDGER.md` §7 を確認してください（Secret未設定のため現在 fail closed）。
+
+
 ## プロジェクト概要
 NAORU整骨院グループの経営ダッシュボード。GAS(Google Apps Script)・Square API・Claude AIを統合した分析ツール。
 

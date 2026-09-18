@@ -162,6 +162,51 @@ check('⚠️ 認証ヘッダが付いている（サーバーが本人を確か
   saved ? Object.keys(saved.headers).filter(k => k.startsWith('x-cc')).join(',') : '');
 check('⚠️ 役割や社員IDを送っていない', !!saved && saved.body.profile.role === undefined && saved.body.root === undefined);
 
+// ── デザイン（UI試作V3）──────────────────────────────────────────
+await page.keyboard.press('Escape').catch(() => {});
+await page.waitForTimeout(1200);
+check('組織図に V3 の見た目が当たっている', (await page.locator('[data-nowl="org"]').count()) > 0);
+const tokens = await page.evaluate(() => {
+  const el = document.querySelector('[data-nowl="org"]');
+  if (!el) return null;
+  const cs = getComputedStyle(el);
+  return { red: cs.getPropertyValue('--nowl-red').trim(), ink: cs.getPropertyValue('--nowl-ink').trim() };
+});
+check('試作の赤と墨黒が使われている', !!tokens && tokens.red === '#b92d3d' && tokens.ink === '#18191c', JSON.stringify(tokens));
+
+// スタッフのカードが列で並ぶ（PC4列・中間3列・スマホ2列）
+const cols = async (w) => {
+  await page.setViewportSize({ width: w, height: 900 });
+  await page.waitForTimeout(700);
+  return page.evaluate(() => {
+    const g = document.querySelector('.nowl-people');
+    if (!g) return 0;
+    return getComputedStyle(g).gridTemplateColumns.split(' ').filter(Boolean).length;
+  });
+};
+const c390 = await cols(390), c768 = await cols(768), c1440 = await cols(1440);
+check('スマホ(390px)は2列', c390 === 2, String(c390));
+check('中間(768px)は3列', c768 === 3, String(c768));
+check('PC(1440px)は4列', c1440 === 4, String(c1440));
+check('横に溢れていない（390px）', await (async () => {
+  await page.setViewportSize({ width: 390, height: 900 }); await page.waitForTimeout(700);
+  return page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1);
+})());
+await page.setViewportSize({ width: 1280, height: 900 });
+await page.waitForTimeout(700);
+
+// ポップアップ: Escape で閉じ、フォーカスが戻る
+await page.getByText('青木ひかる', { exact: false }).first().click().catch(() => {});
+await page.waitForTimeout(1200);
+await page.getByRole('button', { name: /^編集$|本部編集/ }).first().click().catch(() => {});
+await page.waitForTimeout(1200);
+check('プロフィール編集がぼかし付きで開く', (await page.locator('[data-nowl-modal="profile"]').count()) > 0);
+await page.keyboard.press('Escape');
+await page.waitForTimeout(1000);
+check('Escape で閉じられる', (await page.locator('[data-nowl-modal="profile"]').count()) === 0);
+check('閉じたあとフォーカスが本文に戻っている',
+  await page.evaluate(() => document.activeElement && document.activeElement !== document.body));
+
 check('JSエラーが出ていない', errors.length === 0, errors.slice(0, 2).join(' / '));
 await page.screenshot({ path: (process.env.OUT_DIR || '/tmp') + '/org-profile-screen.png', fullPage: false });
 await browser.close(); server.close();

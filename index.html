@@ -843,6 +843,57 @@
         const ORG_KW_KEYS = Object.keys(ORG_KW).sort((a, b) => b.length - a.length);
         const orgGeoRank = (name) => { const s = String(name || '').replace(/NAORU/gi, '').replace(/院/g, '').trim(); for (const k of ORG_KW_KEYS) { if (s.includes(k)) return ORG_KW[k]; } return 950; };
         const orgRegionOf = (r) => r === 1 ? '北海道' : (r >= 2 && r <= 7) ? '東北' : (r >= 8 && r <= 14) ? '関東' : (r >= 15 && r <= 23) ? '中部' : (r >= 24 && r <= 30) ? '近畿' : (r >= 31 && r <= 35) ? '中国' : (r >= 36 && r <= 39) ? '四国' : (r >= 40 && r <= 46) ? '九州' : r === 47 ? '沖縄' : r >= 1000 ? '海外' : 'その他';
+        // ── ニュース記事のイベントリンク（lib/news-event.js の画面側ミラー）────
+        // ⚠️ 押した本人だけが参加する。自分のイベントリンクだけを受け付け、外部URLは読みに行かない。
+        const evLinkFor = (rowId) => {
+            const id = String(rowId || '').trim();
+            return id ? `${location.origin}/?tab=events&ev=${encodeURIComponent(id)}` : '';
+        };
+        const evLinksIn = (text) => {
+            const found = String(text == null ? '' : text).match(/https?:\/\/[^\s<>"'）)】」]+/g) || [];
+            const out = [], seen = new Set();
+            for (const raw of found) {
+                const url = raw.replace(/[.,、。]+$/, '');
+                let u; try { u = new URL(url); } catch { continue; }
+                if (u.host !== location.host) continue;               // 別サイトは対象外
+                if (u.searchParams.get('tab') !== 'events') continue;
+                const rowId = String(u.searchParams.get('ev') || '').trim();
+                if (!rowId || seen.has(rowId)) continue;
+                seen.add(rowId); out.push({ url, rowId });
+                if (out.length >= 10) break;
+            }
+            return out;
+        };
+        const evResolveRow = (rowId, sections) => {
+            const id = String(rowId || '').trim();
+            if (!id) return { found: false, reason: 'no_id' };
+            const map = (sections && typeof sections === 'object') ? sections : {};
+            for (const [section, rows] of Object.entries(map)) {
+                for (const row of (Array.isArray(rows) ? rows : [])) {
+                    if (!row || String(row.id) !== id) continue;
+                    const c = (row.cells && typeof row.cells === 'object') ? row.cells : {};
+                    return { found: true, section, rowId: id, title: String(c.chatTitle || '').trim() || section,
+                        date: String(c.date || ''), roomId: String(c.roomId || ''), ownerId: String(c.ownerId || '') };
+                }
+            }
+            return { found: false, reason: 'not_found' };
+        };
+        const EV_JOIN_LABEL = {
+            no_event: 'このイベントは見つかりません（削除された可能性があります）',
+            no_room: 'このイベントにはまだグループチャットがありません',
+            no_access: 'このグループチャットを開く権限がありません',
+            joined: 'グループチャットを開く',
+            can_join: 'グループチャットへ参加',
+        };
+        const evJoinStateOf = (ev, rooms, myId) => {
+            if (!ev || !ev.found) return 'no_event';
+            if (!ev.roomId) return 'no_room';
+            const room = (Array.isArray(rooms) ? rooms : []).find(r => r && String(r.id) === String(ev.roomId));
+            if (!room) return 'no_access';
+            const me = String(myId || ''); if (!me) return 'no_access';
+            return (Array.isArray(room.members) ? room.members : []).map(String).includes(me) ? 'joined' : 'can_join';
+        };
+
         // ── 送信先の絞り込み（エリア）──────────────────────────────────────
         // 「神奈川のエリアに送る」「大阪以外に送る」を、いまある所属店舗名だけで組み立てる。
         // 判定ロジックは lib/audience.js と同じ（tests/audience.test.js ＋ html-structure テストで一致を担保）。
@@ -1003,7 +1054,7 @@
         const ORG_REGION_RANK = { '北海道':1,'東北':2,'関東':8,'中部':15,'近畿':24,'中国':31,'四国':36,'九州':40,'沖縄':47,'その他':950,'海外':1000 };
         const ORG_REGION_EMOJI = { '北海道':'🗻','東北':'🍎','関東':'🗼','中部':'🗻','近畿':'🏯','中国':'⛩️','四国':'🌉','九州':'🌋','沖縄':'🏝️','海外':'🌏','その他':'📍' };
 
-        // 掲示板: 動画URL → 埋め込み情報（lib/board.js と同仕様のフロント版）
+        // ニュース: 動画URL → 埋め込み情報（lib/board.js と同仕様のフロント版）
         const boardVideoEmbed = (url) => {
             const u = String(url || '').trim(); if (!u) return null; let m;
             if ((m = u.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/))) return { kind: 'youtube', embedUrl: `https://www.youtube.com/embed/${m[1]}` };
@@ -1011,7 +1062,7 @@
             if (/\.(mp4|webm|ogg|mov|m4v)(\?.*)?$/i.test(u)) return { kind: 'file', src: u };
             return { kind: 'link', src: u };
         };
-        // 掲示板: 添付ファイルのダウンロードチップ（クリックで取得→保存）
+        // ニュース: 添付ファイルのダウンロードチップ（クリックで取得→保存）
         const BoardFile = ({ file }) => {
             const [busy, setBusy] = React.useState(false);
             const dl = async () => {
@@ -1340,7 +1391,7 @@
             );
         };
 
-        // お知らせハブのコメント入力（@メンション補完・返信対応）。トップレベル定義で状態消失を防ぐ。
+        // ニュースのコメント入力（@メンション補完・返信対応）。トップレベル定義で状態消失を防ぐ。
         const BoardCommentBox = ({ users, replyTo, onCancelReply, onSubmit, placeholder }) => {
             const [draft, setDraft] = React.useState('');
             const [mention, setMention] = React.useState(null);
@@ -2375,7 +2426,7 @@
                 if (!authState.authenticated) return;
                 if (!authState.root && currentPage === 'settings') setCurrentPage('salonone');
                 if (authRole === 'staff' && currentPage === 'settlement') setCurrentPage('salonone');
-                // コミュニケーション4機能（チャット/お知らせ/勉強会/組織図）は当面 本部(hq)・管理者(root) のみ。
+                // コミュニケーション4機能（チャット/ニュース/勉強会/組織図）は当面 本部(hq)・管理者(root) のみ。
                 if (!authState.root && ['chat', 'board', 'events', 'org'].includes(currentPage)) setCurrentPage('salonone');
             }, [authState.authenticated, authState.root, authRole, currentPage]);
             const [rawData, setRawData] = useState(() => {
@@ -3545,7 +3596,7 @@
                 const onKey = (e) => { const list = (chatLightbox.list || []); if (!list.length) return; if (e.key === 'ArrowRight') setChatLightbox(v => ({ ...v, i: ((v.i || 0) + 1) % list.length })); else if (e.key === 'ArrowLeft') setChatLightbox(v => ({ ...v, i: ((v.i || 0) - 1 + list.length) % list.length })); else if (e.key === 'Escape') setChatLightbox(null); };
                 window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
             }, [chatLightbox]);
-            // 本部(hq)は root権限だが、チャット/掲示板の表示は「管理者」ではなく本人名で行う（＝個人アカウント）。
+            // 本部(hq)は root権限だが、チャット/ニュースの表示は「管理者」ではなく本人名で行う（＝個人アカウント）。
             const authIsHq = isHqRole(authState.role);
             const chatMyId = (authState.root && !authIsHq) ? '__root__' : String(authState.staffId || authState.owner || '');
             const [orgHq, setOrgHq] = useState([]); // 本部メンバー [{owner, name, staffId}]（accountmetaのrole==='hq'）。名前解決にも使う
@@ -4478,7 +4529,7 @@
             const [chatMemberQ, setChatMemberQ] = useState('');   // メンバー招待の検索
             const [chatRenameVal, setChatRenameVal] = useState(null); // 名前編集中の値（nullで非編集）
 
-            // ── 掲示板（全社発信） ────────────────────────────────────────
+            // ── ニュース（全社発信） ────────────────────────────────────────
             const [boardData, setBoardData] = useState({ posts: [], reads: {}, version: 0, configured: true, loaded: false });
             const boardVersionRef = useRef(0);   // 最後に読み込んだ版（古いデータでの上書きを検出するため送る）
             const [boardText, setBoardText] = useState('');
@@ -4497,7 +4548,7 @@
             const [boardStatusId, setBoardStatusId] = useState(''); // リアクション状況モーダルの投稿id
             const [boardOpenId, setBoardOpenId] = useState('');     // 全画面表示中の投稿id（もっと見る）
             const [boardComposerOpen, setBoardComposerOpen] = useState(false); // 投稿作成モーダル（既定は閉＝一覧がメイン）
-            const [boardSearch, setBoardSearch] = useState(''); // お知らせのキーワード検索
+            const [boardSearch, setBoardSearch] = useState(''); // ニュースのキーワード検索
             const [boardDrag, setBoardDrag] = useState(false);    // ドラッグ&ドロップ中ハイライト
             const BOARD_STAMPS = ['👍', '🙏', '🎉', '🔥', '💛', '👏', '✅', '😊'];
             const [boardBm, setBoardBm] = useState(() => { try { return JSON.parse(localStorage.getItem('naoru_board_bm') || '[]') || []; } catch { return []; } });
@@ -4507,7 +4558,7 @@
             const boardLastSeen = Math.max(((boardData.reads || {})[chatMyId]) || 0, boardSeenLocal || 0);
             const boardIsUnread = (p) => (Date.parse(p.createdAt || '') || 0) > boardLastSeen && String(p.authorId) !== chatMyId;
             const boardUnreadTotal = useMemo(() => (boardData.posts || []).reduce((n, p) => boardIsUnread(p) ? n + 1 : n, 0), [boardData, boardLastSeen, chatMyId]);
-            // ── アプリアイコンのバッジ（未読の赤丸＋数字）: チャット＋お知らせハブの合計。 ──
+            // ── アプリアイコンのバッジ（未読の赤丸＋数字）: チャット＋ニュースの合計。 ──
             // PWA(ホーム画面に追加)でiOS16.4+/Android/デスクトップに表示。SWにも同期し、閉じている間の
             // プッシュ受信でインクリメントされる基準値を最新化する。
             useEffect(() => {
@@ -4539,7 +4590,7 @@
                     setBoardData({ posts: Array.isArray(j.posts) ? j.posts : [], reads: (j.reads && typeof j.reads === 'object') ? j.reads : {}, version: boardVersionRef.current, configured: j.configured !== false, loaded: true });
                 } catch { setBoardData(d => ({ ...d, loaded: true })); }
             };
-            // 掲示板の更新系はこれを通す。
+            // ニュースの更新系はこれを通す。
             //  ・見ていた版(expectedVersion)を送り、他の人が先に更新していたらサーバーが 409 を返す
             //  ・409 のときは最新を読み直して**1回だけ**やり直す（利用者の操作は変わらない）
             //  ・clientId を付けるので、再送されても二重に登録されない
@@ -4609,7 +4660,7 @@
                 setBoardData(d => ({ ...d, posts: (d.posts || []).map(p => { if (!p || p.id !== id) return p; return { ...p, reactions: reactToggleOne(p.reactions, emoji, chatMyId) }; }), reads: { ...(d.reads || {}), [chatMyId]: Math.max((d.reads || {})[chatMyId] || 0, Date.now()) } }));
                 try { await boardMutate({ action: 'react', id, emoji, staffId: chatMyId }); await boardLoad(); } catch {}
             };
-            // ── お知らせハブ: コメント（返信・メンション対応） ──
+            // ── ニュース: コメント（返信・メンション対応） ──
             const [boardReplyTo, setBoardReplyTo] = useState({});   // {postId:{id,name}} 返信先コメント
             const [boardActOpen, setBoardActOpen] = useState(false); // 更新（アクティビティ）パネル
             const [boardActSeen, setBoardActSeen] = useState(() => { try { return Number(localStorage.getItem('naoru_board_act_seen')) || 0; } catch { return 0; } });
@@ -4629,7 +4680,7 @@
                 const items = [];
                 (boardData.posts || []).forEach(p => {
                     items.push({ ts: Date.parse(p.createdAt || '') || 0, kind: 'post', postId: p.id, by: p.authorId, title: p.title || p.text || '（無題）', important: !!p.important });
-                    (Array.isArray(p.comments) ? p.comments : []).forEach(c => items.push({ ts: Date.parse(c.createdAt || '') || 0, kind: 'comment', postId: p.id, by: c.fromStaffId, name: c.fromName, title: p.title || 'お知らせ', text: c.text }));
+                    (Array.isArray(p.comments) ? p.comments : []).forEach(c => items.push({ ts: Date.parse(c.createdAt || '') || 0, kind: 'comment', postId: p.id, by: c.fromStaffId, name: c.fromName, title: p.title || 'ニュース', text: c.text }));
                 });
                 return items.sort((a, b) => b.ts - a.ts).slice(0, 60);
             }, [boardData]);
@@ -4651,7 +4702,7 @@
                     return { enabled: !!j.enabled, publicKey: j.publicKey || '' };   // 最新値を返す（stateは非同期のため呼び出し側で使う）
                 } catch { return { enabled: false, publicKey: '' }; }
             };
-            // 通知の種類（掲示板ON/OFF・チャット all/mention/off）を保存
+            // 通知の種類（ニュースON/OFF・チャット all/mention/off）を保存
             const pushSetPrefs = async (next) => {
                 setPushState(s => ({ ...s, prefs: next }));   // 楽観更新
                 try { await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'push', action: 'setPrefs', staffId: chatMyId, prefs: next }) }); } catch {}
@@ -4705,7 +4756,7 @@
             //   タブ単位の安定ID（共有rootログインでも複数人を別アイコンで区別）。表示名は本人・page=今見ているタブ。
             const presenceIdRef = useRef('');
             if (!presenceIdRef.current) { try { let t = sessionStorage.getItem('naoru_presence_tab'); if (!t) { t = Math.random().toString(36).slice(2, 10); sessionStorage.setItem('naoru_presence_tab', t); } presenceIdRef.current = `${String(authState.staffId || authState.owner || (authState.root ? 'root' : 'anon'))}__${t}`; } catch { presenceIdRef.current = `anon__${Math.random().toString(36).slice(2, 10)}`; } }
-            const presencePageLabel = (id) => ({ dashboard: 'ダッシュボード', charts: 'グラフ', finance: '財務', zenkanri: '全体管理シート', salonone: 'SalonOne売上', mktg: 'マーケティング', marketing: 'マーケティング', square: 'サブスク分析', cohort: 'コホートLTV', planning: '事業計画', allowance: '手当・領収書', settlement: '返金明細書', thanksgift: 'サンクスギフト', chat: 'チャット', board: 'お知らせ', events: '勉強会・イベント', org: '組織図', askai: 'AIに質問', patrol: 'AIパトロール', meo: 'MEO対策', faqadmin: 'FAQ管理', customers: '顧客', settings: '設定' }[id] || '');
+            const presencePageLabel = (id) => ({ dashboard: 'ダッシュボード', charts: 'グラフ', finance: '財務', zenkanri: '全体管理シート', salonone: 'SalonOne売上', mktg: 'マーケティング', marketing: 'マーケティング', square: 'サブスク分析', cohort: 'コホートLTV', planning: '事業計画', allowance: '手当・領収書', settlement: '返金明細書', thanksgift: 'サンクスギフト', chat: 'チャット', board: 'ニュース', events: '勉強会・イベント', org: '組織図', askai: 'AIに質問', patrol: 'AIパトロール', meo: 'MEO対策', faqadmin: 'FAQ管理', customers: '顧客', settings: '設定' }[id] || '');
             const presenceRole = authIsHq ? 'hq' : authState.root ? 'root' : (authRole || '');
             // ハートビート: 30秒ごと＋タブ切替時に送信。離脱時は sendBeacon で即削除。
             useEffect(() => {
@@ -5139,7 +5190,7 @@
                 if (ST_NON_THERAPIST.has(n)) return true;
                 return /^ヘルプ/.test(n) || /^受付/.test(n) || /オーナー/.test(n) || /^楽トレ/.test(n);
             };
-            // お知らせの対象者（＝閲覧想定メンバー）: 全店スタッフ（施術者以外/退職除外）。未リアクション者の母集団に使う。
+            // ニュースの対象者（＝閲覧想定メンバー）: 全店スタッフ（施術者以外/退職除外）。未リアクション者の母集団に使う。
             // ※ isNonTherapistName / ST_NON_THERAPIST 定義後に置く（useMemoは描画時に同期実行されるためTDZ回避）。
             const boardAudience = useMemo(() => {
                 const seen = new Set(); const out = [];
@@ -5373,14 +5424,14 @@
                 const iv = setInterval(chatLoad, currentPage === 'chat' ? 6000 : 25000);
                 return () => clearInterval(iv);
             }, [authState.authenticated, currentPage]);
-            // 掲示板: 認証後に定期ポーリング（未読バッジ更新）。※開いただけでは既読にしない（未読は読むまで残す）。
+            // ニュース: 認証後に定期ポーリング（未読バッジ更新）。※開いただけでは既読にしない（未読は読むまで残す）。
             useEffect(() => {
                 if (!authState.authenticated) return;
                 boardLoad();
                 const iv = setInterval(boardLoad, currentPage === 'board' ? 8000 : 30000);
                 return () => clearInterval(iv);
             }, [authState.authenticated, currentPage]);
-            // 掲示板を開いたら soStaffs（本名解決用）＋プロフィール（担当店舗解決用）を確保
+            // ニュースを開いたら soStaffs（本名解決用）＋プロフィール（担当店舗解決用）を確保
             useEffect(() => {
                 if (currentPage !== 'board') return;
                 profileLoad();
@@ -5682,7 +5733,7 @@
             useEffect(() => {
                 if (((currentPage === 'settlement' && stAdminOpen) || currentPage === 'settings') && stAccounts === null) stLoadAccounts();
             }, [currentPage, stAdminOpen]);
-            // ログイン後＋チャット/組織図/掲示板/イベントを開いた時に本部メンバー（accountmetaのrole==='hq'）を読み込む
+            // ログイン後＋チャット/組織図/ニュース/イベントを開いた時に本部メンバー（accountmetaのrole==='hq'）を読み込む
             // （組織図・チャットDM名・イベント参加者名の解決に使う・plan-storeは未認証GET）
             const refreshOrgHq = React.useCallback(() => {
                 return loadAcctMeta().then(meta => {
@@ -13105,7 +13156,7 @@
             }
 
             // GAS経営データ(rawData)を必要とするのは一部の分析ページのみ。
-            // それ以外（チャット/重要掲示板/勉強会/組織図/全体管理シート/SalonOne 等）は
+            // それ以外（チャット/ニュース/勉強会/組織図/全体管理シート/SalonOne 等）は
             // データ取得を待たずに即表示＝アプリ/チャットが素早く開く（データは裏で読み込み継続）。
             const BIZ_DATA_PAGES = ['dashboard', 'charts', 'marketing', 'planning'];
             if (loading && BIZ_DATA_PAGES.includes(currentPage)) {
@@ -13245,7 +13296,7 @@
                             </div>
                         );
                     })()}
-                    {/* 通知の種類設定モーダル（チャット/掲示板の受け取り方を選ぶ） */}
+                    {/* 通知の種類設定モーダル（チャット/ニュースの受け取り方を選ぶ） */}
                     {pushPrefsOpen && (
                         <div className="fixed inset-0 z-[110] bg-black/40 flex items-end md:items-center justify-center p-0 md:p-4" onClick={() => setPushPrefsOpen(false)}>
                             <div className="bg-white w-full md:max-w-md rounded-t-2xl md:rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
@@ -13266,7 +13317,7 @@
                                         </div>
                                     </div>
                                     <div>
-                                        <div className="text-[13px] font-bold text-ink-800 mb-2">📣 重要掲示板</div>
+                                        <div className="text-[13px] font-bold text-ink-800 mb-2">📣 ニュース</div>
                                         <button onClick={() => pushSetPrefs({ ...pushState.prefs, board: !pushState.prefs.board })} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl border text-[14px] font-medium transition ${pushState.prefs.board ? 'border-brand-300 bg-brand-50 text-brand-700' : 'border-[#EAECF0] bg-white text-ink-700'}`}>
                                             <span>新しい投稿・コメントを通知</span>
                                             <span className={`relative w-11 h-6 rounded-full transition ${pushState.prefs.board ? 'bg-brand-500' : 'bg-[#CBD2DC]'}`}><span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition ${pushState.prefs.board ? 'left-[22px]' : 'left-0.5'}`} /></span>
@@ -13326,7 +13377,7 @@
                                         </button>}
                                         {authState.root && <button onClick={() => { setMobileAcctOpen(false); setCurrentPage('board'); }} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-[14px] font-semibold text-ink-800 hover:bg-ink-50 active:bg-ink-50 transition">
                                             <span className="w-9 h-9 rounded-lg bg-ink-50 text-ink-600 flex items-center justify-center shrink-0"><Megaphone size={18} /></span>
-                                            重要掲示板
+                                            ニュース
                                         </button>}
                                         {/* 通知のON/OFF（スマホはここから設定できる） */}
                                         <button onClick={() => { if (pushState.subscribed) { pushUnsubscribe(); } else { pushSubscribe(); } }} disabled={pushState.busy} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-[14px] font-semibold text-ink-800 hover:bg-ink-50 active:bg-ink-50 transition disabled:opacity-60">
@@ -13334,7 +13385,7 @@
                                             <span className="flex-1 text-left">{pushState.subscribed ? '通知はオン' : '通知をオンにする'}</span>
                                             {pushState.subscribed && <span className="text-[11px] font-bold text-emerald-600">ON</span>}
                                         </button>
-                                        {/* 通知の種類（チャット/掲示板の受け取り方を選ぶ） */}
+                                        {/* 通知の種類（チャット/ニュースの受け取り方を選ぶ） */}
                                         <button onClick={() => { setMobileAcctOpen(false); setPushPrefsOpen(true); }} className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-[14px] font-semibold text-ink-800 hover:bg-ink-50 active:bg-ink-50 transition">
                                             <span className="w-9 h-9 rounded-lg bg-ink-50 text-ink-600 flex items-center justify-center shrink-0"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 7h-9" /><path d="M14 17H5" /><circle cx="17" cy="17" r="3" /><circle cx="7" cy="7" r="3" /></svg></span>
                                             <span className="flex-1 text-left">通知の種類を設定</span>
@@ -14124,6 +14175,39 @@
                                             <div className={`text-[14px] text-[#475467] leading-[1.5] whitespace-pre-wrap break-words ${longText ? 'line-clamp-6' : ''}`} style={{ wordBreak: 'break-word' }}>{chatLinkify((p.text || '').replace(/\n{3,}/g, '\n\n'))}</div>
                                             {longText && <button onClick={e => { e.stopPropagation(); openBoardPost(p); }} className="mt-1 text-[13px] font-bold text-brand-600 hover:underline">…もっと見る</button>}
                                         </div>}
+                                        {/* ── 記事に貼られたイベントリンク → グループチャットへ参加 ──
+                                            ⚠️ 押した本人だけが参加する。リンクを貼っただけで全員は入らない。
+                                            ⚠️ 自分のイベントリンクだけを見る（外部URLは読みに行かない）。 */}
+                                        {(() => {
+                                            const links = evLinksIn(`${p.text || ''} ${p.link || ''}`);
+                                            if (!links.length) return null;
+                                            return (
+                                                <div data-news-events className="mt-2.5 space-y-1.5" onClick={e => e.stopPropagation()}>
+                                                    {links.map(({ url, rowId }) => {
+                                                        const ev = evResolveRow(rowId, (evData && evData.sections) || {});
+                                                        const st = evJoinStateOf(ev, chatData.rooms, chatMyId);
+                                                        const ok = st === 'can_join' || st === 'joined';
+                                                        return (
+                                                            <div key={rowId} className={`rounded-xl border px-3 py-2.5 ${ok ? 'border-brand-200 bg-brand-50/40' : 'border-[#EAECF0] bg-[#F8F9FB]'}`}>
+                                                                <div className="flex items-center gap-2 flex-wrap">
+                                                                    <span className="text-[15px] leading-none">📅</span>
+                                                                    <span className="text-[13px] font-bold text-[#111827] truncate">{ev.found ? ev.title : 'イベント'}</span>
+                                                                    {ev.found && ev.date && <span className="text-[11px] font-bold text-[#98A2B3]">{ev.date}</span>}
+                                                                </div>
+                                                                {ok ? (
+                                                                    <button data-news-join={rowId} onClick={() => evJoinChat(ev.roomId)} disabled={evChatBusy === ev.roomId}
+                                                                        className={`mt-2 inline-flex items-center justify-center gap-1.5 h-9 px-4 rounded-xl text-[13px] font-bold transition disabled:opacity-50 ${st === 'joined' ? 'border border-brand-300 text-brand-600 hover:bg-brand-50' : 'bg-brand-500 hover:bg-brand-600 text-white shadow-sm shadow-brand-200/50'}`}>
+                                                                        <MessageSquare size={15} />{evChatBusy === ev.roomId ? '開いています…' : EV_JOIN_LABEL[st]}
+                                                                    </button>
+                                                                ) : (
+                                                                    <div className="mt-1.5 text-[12px] font-bold text-[#98A2B3]">{EV_JOIN_LABEL[st]}</div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            );
+                                        })()}
                                         {/* リンク・画像・動画・ファイルは全画面表示でのみ展開。一覧は「表示」チップに集約してコンパクトに。 */}
                                         {full ? (<>
                                             {p.link && <a href={p.link} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="mt-2.5 inline-flex items-center gap-1.5 text-[13px] text-brand-600 hover:underline break-all">🔗 {p.link}</a>}
@@ -14216,7 +14300,7 @@
                                         <div className="flex items-center justify-between gap-3 mb-4">
                                             <div className="flex items-center gap-2.5 min-w-0">
                                                 <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-500 to-brand-600 flex items-center justify-center text-white shrink-0 shadow-md shadow-brand-500/25"><Megaphone size={18} /></div>
-                                                <h1 className="text-[20px] md:text-[22px] font-semibold tracking-tight text-ink-900">重要掲示板</h1>
+                                                <h1 className="text-[20px] md:text-[22px] font-semibold tracking-tight text-ink-900">ニュース</h1>
                                             </div>
                                             <div className="flex items-center gap-2 shrink-0">
                                                 {/* 更新フィード（何がいつ更新されたか） */}
@@ -14239,7 +14323,7 @@
                                                                         <button key={i} onClick={() => setBoardActOpen(false)} className={`w-full text-left px-4 py-2.5 border-b border-[#F6F7F9] hover:bg-[#F8F9FB] transition ${fresh ? 'bg-brand-50/40' : ''}`}>
                                                                             <div className="flex items-center gap-1.5">
                                                                                 <span className="text-[13px]">{it.kind === 'post' ? (it.important ? '❗' : '📣') : '💬'}</span>
-                                                                                <span className="text-[12px] font-bold text-[#111827] truncate flex-1">{it.kind === 'post' ? '新しいお知らせ' : `${who} さんがコメント`}</span>
+                                                                                <span className="text-[12px] font-bold text-[#111827] truncate flex-1">{it.kind === 'post' ? '新しいニュース' : `${who} さんがコメント`}</span>
                                                                                 {fresh && <span className="w-2 h-2 rounded-full bg-rose-500 shrink-0" />}
                                                                             </div>
                                                                             <div className="text-[12px] text-[#475467] truncate mt-0.5">{it.kind === 'comment' ? (it.text || '') : it.title}{it.kind === 'post' ? `（${who}）` : ''}</div>
@@ -14255,7 +14339,7 @@
                                             </div>
                                         </div>
 
-                                        {!boardData.configured && <div className="mb-4 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[13px]">共有ストア（KV/Supabase/GAS）が未設定のため、お知らせは保存されません。管理者に有効化を依頼してください。</div>}
+                                        {!boardData.configured && <div className="mb-4 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[13px]">共有ストア（KV/Supabase/GAS）が未設定のため、ニュースは保存されません。管理者に有効化を依頼してください。</div>}
 
                                         <div>
                                             {/* ── 投稿作成（ボタンで開くモーダル。投稿者は少数のため一覧をメインに） ── */}
@@ -14264,7 +14348,7 @@
                                                 <div className="bg-white w-full md:max-w-lg rounded-none md:rounded-2xl shadow-2xl h-[100dvh] md:h-auto md:max-h-[92vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
                                                     <div className="px-2 md:px-5 pb-3 border-b border-[#EAECF0] flex items-center gap-2 shrink-0 pt-[calc(env(safe-area-inset-top,0px)+12px)] md:pt-3">
                                                         <button onClick={() => setBoardComposerOpen(false)} className="md:hidden w-9 h-9 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-ink-700 shrink-0" title="戻る"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg></button>
-                                                        <div className="flex items-center gap-2 text-[15px] font-semibold text-[#111827]"><Send size={16} className="text-brand-500" />全社向けお知らせを作成</div>
+                                                        <div className="flex items-center gap-2 text-[15px] font-semibold text-[#111827]"><Send size={16} className="text-brand-500" />全社向けニュースを作成</div>
                                                         <button onClick={() => setBoardComposerOpen(false)} className="ml-auto w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3]"><X size={18} /></button>
                                                     </div>
                                                     <div className="overflow-y-auto px-5 py-4">
@@ -14273,7 +14357,7 @@
                                                     <Label opt="（任意・太字で表示されます）">タイトル</Label>
                                                     <input value={boardTitle} onChange={e => setBoardTitle(e.target.value)} placeholder="例）9月の運営連絡" className={inputCls} />
                                                     <Label>本文</Label>
-                                                    <textarea value={boardText} onChange={e => setBoardText(e.target.value)} rows={4} placeholder="お知らせの内容を入力してください…" className="w-full resize-none rounded-lg border border-[#EAECF0] bg-white px-3.5 py-2.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
+                                                    <textarea value={boardText} onChange={e => setBoardText(e.target.value)} rows={4} placeholder="ニュースの内容を入力してください…" className="w-full resize-none rounded-lg border border-[#EAECF0] bg-white px-3.5 py-2.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
                                                     <Label opt="（任意）">関連リンク</Label>
                                                     <div className="relative"><span className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]">🔗</span><input value={boardLink} onChange={e => setBoardLink(e.target.value)} placeholder="例）https://example.com" className={inputCls + ' pl-9'} /></div>
                                                     <Label opt="（任意）">動画URL</Label>
@@ -14300,7 +14384,7 @@
                                                     </div>
                                                     </div>
                                                     <div className="px-5 pt-3.5 border-t border-[#EAECF0] shrink-0 pb-[max(env(safe-area-inset-bottom,0px),14px)]">
-                                                        <button onClick={boardPost} disabled={boardPosting || composerEmpty} className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-semibold text-[14px] disabled:bg-[#EAECF0] disabled:text-[#98A2B3] active:scale-[0.99] transition shadow-lg shadow-brand-200/40"><Send size={16} />お知らせを投稿</button>
+                                                        <button onClick={boardPost} disabled={boardPosting || composerEmpty} className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-semibold text-[14px] disabled:bg-[#EAECF0] disabled:text-[#98A2B3] active:scale-[0.99] transition shadow-lg shadow-brand-200/40"><Send size={16} />ニュースを投稿</button>
                                                     </div>
                                                 </div>
                                             </div>
@@ -14311,7 +14395,7 @@
                                                 <div className="bg-white rounded-2xl border border-[#EAECF0] p-4 md:p-5">
                                                     <div className="flex items-center gap-2 text-[15px] font-semibold text-[#111827] mb-3"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-brand-500"><path d="M22 12h-6l-2 3h-4l-2-3H2" /><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" /></svg>受信一覧{boardUnreadTotal > 0 && <span className="text-[11px] font-bold text-white bg-brand-500 rounded-full px-1.5 py-0.5">未読 {boardUnreadTotal}</span>}</div>
                                                     {/* キーワード検索（タイトル・本文・発信者・リンクを対象） */}
-                                                    <div className="relative mb-2.5"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]" /><input value={boardSearch} onChange={e => setBoardSearch(e.target.value)} placeholder="キーワードで過去のお知らせを検索" className="w-full h-9 pl-9 pr-8 rounded-lg bg-[#F8F9FB] border border-[#EAECF0] text-[13px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />{boardSearch && <button onClick={() => setBoardSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center justify-center rounded-full text-[#98A2B3] hover:bg-[#EAECF0]"><X size={13} /></button>}</div>
+                                                    <div className="relative mb-2.5"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98A2B3]" /><input value={boardSearch} onChange={e => setBoardSearch(e.target.value)} placeholder="キーワードで過去のニュースを検索" className="w-full h-9 pl-9 pr-8 rounded-lg bg-[#F8F9FB] border border-[#EAECF0] text-[13px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />{boardSearch && <button onClick={() => setBoardSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center justify-center rounded-full text-[#98A2B3] hover:bg-[#EAECF0]"><X size={13} /></button>}</div>
                                                     <div className="flex items-center gap-1.5 flex-wrap">
                                                         {[['all', 'すべて'], ['hq', '本部'], ['staff', '店舗'], ['important', '⭐ 重要']].map(([k, label]) => (
                                                             <button key={k} onClick={() => setBoardFilter(k)} className={`px-2.5 py-1.5 rounded-full text-[12px] font-semibold border transition ${boardFilter === k ? 'bg-brand-500 border-brand-500 text-white' : 'bg-white border-[#EAECF0] text-[#667085] hover:bg-[#F8F9FB]'}`}>{label}</button>
@@ -14320,7 +14404,7 @@
                                                 </div>
 
                                                 {!boardData.loaded ? <div className="text-center text-[#98A2B3] text-[13px] py-10">読み込み中…</div>
-                                                 : posts.length === 0 ? <div className="mt-3 bg-white border border-[#EAECF0] rounded-2xl text-center text-[#98A2B3] text-[14px] py-16"><Megaphone size={40} className="mx-auto mb-3 opacity-50" />{bq ? `「${bq}」に一致するお知らせはありません。` : boardFilter === 'all' ? <>まだお知らせはありません。<br />右上の「投稿する」から発信してみましょう。</> : '該当するお知らせはありません。'}</div>
+                                                 : posts.length === 0 ? <div className="mt-3 bg-white border border-[#EAECF0] rounded-2xl text-center text-[#98A2B3] text-[14px] py-16"><Megaphone size={40} className="mx-auto mb-3 opacity-50" />{bq ? `「${bq}」に一致するニュースはありません。` : boardFilter === 'all' ? <>まだニュースはありません。<br />右上の「投稿する」から発信してみましょう。</> : '該当するニュースはありません。'}</div>
                                                  : (<>
                                                     <div className={`mt-3 ${boardView === 'grid' ? 'grid grid-cols-1 xl:grid-cols-2 gap-3' : 'space-y-3'}`}>
                                                         {posts.map(p => PostCard(p))}
@@ -14362,7 +14446,7 @@
                                                     <div className="flex items-center justify-between px-5 py-4 border-b border-[#EAECF0]">
                                                         <div>
                                                             <div className="text-[15px] font-semibold text-[#111827]">リアクション状況</div>
-                                                            <div className="text-[12px] text-[#98A2B3] mt-0.5 truncate max-w-[260px]">{sp.title || sp.text || 'お知らせ'}</div>
+                                                            <div className="text-[12px] text-[#98A2B3] mt-0.5 truncate max-w-[260px]">{sp.title || sp.text || 'ニュース'}</div>
                                                         </div>
                                                         <button onClick={() => setBoardStatusId('')} className="w-8 h-8 flex items-center justify-center rounded-lg text-[#98A2B3] hover:bg-[#F2F4F7]"><X size={18} /></button>
                                                     </div>
@@ -14491,6 +14575,8 @@
                                                                         </div>
                                                                     </div>
                                                                 )}
+                                                                {/* ニュース記事に貼るためのリンク。グループがある行だけ出す（未作成の部屋へは誘導しない） */}
+                                                                {room && <button data-ev-copylink onClick={() => { const u = evLinkFor(row.id); try { navigator.clipboard.writeText(u); } catch {} evNotify('リンクをコピーしました。ニュース記事に貼ると参加ボタンが出ます'); }} className="inline-flex items-center justify-center gap-1 h-9 px-3 rounded-xl border border-[#EAECF0] text-[12px] font-bold text-[#667085] hover:bg-[#F8F9FB] transition" title="ニュース記事に貼るリンクをコピー">🔗 リンク</button>}
                                                                 {hasContact && (room
                                                                     ? <button onClick={() => evJoinChat(cv(row, 'roomId'))} disabled={evChatBusy === cv(row, 'roomId')} className="flex-1 inline-flex items-center justify-center gap-1.5 h-9 rounded-xl bg-brand-500 hover:bg-brand-600 text-white text-[13px] font-bold shadow-sm shadow-brand-200/50 disabled:opacity-50 transition"><MessageSquare size={15} />グループチャットへ参加</button>
                                                                     : (canEdit
@@ -26540,7 +26626,7 @@
                 //    問題なければ rootOnly を外して全ロールに開放する。チャットを一番上に配置。
                 { label: 'コミュニケーション', accent: { pill: 'bg-blue-50 text-blue-700', dot: 'bg-blue-500', chip: 'group-hover:bg-blue-50 group-hover:text-blue-600' }, items: [
                     { id: 'chat', label: 'チャット', icon: <MessageSquare size={18} />, mobileIcon: <MessageSquare size={18} />, badge: chatUnread, rootOnly: true },
-                    { id: 'board', label: '重要掲示板', icon: <Megaphone size={18} />, mobileIcon: <Megaphone size={18} />, badge: boardUnread, rootOnly: true },
+                    { id: 'board', label: 'ニュース', icon: <Megaphone size={18} />, mobileIcon: <Megaphone size={18} />, badge: boardUnread, rootOnly: true },
                     { id: 'events', label: '勉強会・イベント', icon: <Calendar size={18} />, mobileIcon: <Calendar size={18} />, badge: eventsUnread, rootOnly: true },
                     { id: 'org', label: '組織図', icon: <Users size={18} />, mobileIcon: <Users size={18} />, rootOnly: true },
                     { id: 'askai', label: 'AIに質問', icon: <span className="text-[17px] leading-none">🤖</span>, mobileIcon: <span className="text-[17px] leading-none">🤖</span> },

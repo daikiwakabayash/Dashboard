@@ -130,3 +130,21 @@ describe('index.html - セキュリティ', () => {
     expect(html).not.toMatch(/AKfycb[a-zA-Z0-9_-]+/);
   });
 });
+
+// ── ニュース（旧「重要掲示板」）の名称 ──────────────────────────────
+// 画面タイトルとメニュー名を「ニュース」に統一する（オーナー指示・UI試作V3）。
+// ⚠️ 内部ID（board / type=board / naoru:board:v1）は変えない。既存データを失わないため。
+describe('index.html - ニュースの名称', () => {
+  it('利用者に見える「掲示板」「お知らせ」が残っていない', () => {
+    expect(html).not.toContain('掲示板');
+    expect(html).not.toContain('お知らせ');
+  });
+  it('メニューと画面タイトルが「ニュース」', () => {
+    expect(html).toContain("label: 'ニュース'");
+    expect(html).toMatch(/>ニュース<\/h1>/);
+  });
+  it('内部IDは board のまま（保存先を変えない）', () => {
+    expect(html).toContain("{ id: 'board'");
+    expect(html).toContain("type: 'board'");
+  });
+});

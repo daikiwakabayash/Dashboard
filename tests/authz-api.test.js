@@ -268,12 +268,23 @@ describe('cc_authz - enforce: ここで初めて拒否する', () => {
 });
 
 describe('cc_authz - 既存機能への影響', () => {
-  it('enforce にしても既存の type= は認可の対象外（chat / board / allowance）', async () => {
+  it('enforce にしても既存の type= は cc_authz の対象外（ログイン済みなら止まらない）', async () => {
     setMode('enforce');
+    process.env.DASHBOARD_PASSWORD = 'pw-for-test';
+    process.env.AUTH_SALT = 'salt-for-test';
+    const hdr = { 'x-cc-owner': '__root__', 'x-cc-token': hashOwnerToken('__root__', 'pw-for-test', 'salt-for-test') };
+    for (const type of ['board', 'allowance', 'adspend']) {
+      const res = await call({ method: 'GET', headers: hdr, query: { type } });
+      expect(res.statusCode, type).toBe(200);          // ← 正規ユーザーは止まらない
+      expect(res.headers['X-CC-Authz'], type).toBeUndefined();
+    }
+  });
+  it('🔴 未ログインでは社内限定データを取れない（別PRで追加したゲート）', async () => {
+    setMode('off');
     for (const type of ['board', 'allowance', 'adspend']) {
       const res = await call({ method: 'GET', query: { type } });
-      expect(res.statusCode, type).toBe(200);          // ← 既存機能は止まらない
-      expect(res.headers['X-CC-Authz'], type).toBeUndefined();
+      expect(res.statusCode, type).toBe(403);
+      expect(res.body.code, type).toBe('login_required');
     }
   });
 });

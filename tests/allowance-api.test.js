@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import handler from '../api/plan-store.js';
+import { hashOwnerToken } from '../lib/settlement.js';
 
 const KV = 'https://kv.test';
 let store;
@@ -56,7 +57,18 @@ function mockRes() {
   r.end = () => r;
   return r;
 }
-const call = async (req) => { const res = mockRes(); await handler({ headers: {}, query: {}, body: {}, ...req }, res); return res; };
+// 社内限定データはログインが必須（誰でも取れる状態を塞いだため）。
+// テストは「ログイン済みの正規ユーザー」を表すので、資格情報を付けて呼ぶ。
+const AUTH_HDR = () => {
+  process.env.DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || 'pw-for-test';
+  process.env.AUTH_SALT = process.env.AUTH_SALT || 'salt-for-test';
+  return { 'x-cc-owner': '__root__', 'x-cc-token': hashOwnerToken('__root__', process.env.DASHBOARD_PASSWORD, process.env.AUTH_SALT) };
+};
+const call = async (req) => {
+  const res = mockRes();
+  await handler({ headers: { ...AUTH_HDR(), ...(req.headers || {}) }, query: {}, body: {}, ...req, headers: { ...AUTH_HDR(), ...(req.headers || {}) } }, res);
+  return res;
+};
 const get = () => call({ method: 'GET', query: { type: 'allowance' } });
 const post = (body) => call({ method: 'POST', body: { type: 'allowance', ...body } });
 const sub = (id, amount = 1000, over = {}) => ({ id, staffId: 's1', staffName: 'サンプル太郎', month: '2026-08', category: '健康手当', amount, ...over });

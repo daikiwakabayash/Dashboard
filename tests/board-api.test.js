@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import handler from '../api/plan-store.js';
+import { hashOwnerToken } from '../lib/settlement.js';
 
 // ── KV を模したインメモリのストア ──
 // 実際のハンドラをそのまま動かして、同時更新・二重送信・古い上書きの挙動を検証する。
@@ -77,7 +78,18 @@ function mockRes() {
   r.end = () => r;
   return r;
 }
-const call = async (req) => { const res = mockRes(); await handler({ headers: {}, query: {}, body: {}, ...req }, res); return res; };
+// 社内限定データはログインが必須（誰でも取れる状態を塞いだため）。
+// テストは「ログイン済みの正規ユーザー」を表すので、資格情報を付けて呼ぶ。
+const AUTH_HDR = () => {
+  process.env.DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || 'pw-for-test';
+  process.env.AUTH_SALT = process.env.AUTH_SALT || 'salt-for-test';
+  return { 'x-cc-owner': '__root__', 'x-cc-token': hashOwnerToken('__root__', process.env.DASHBOARD_PASSWORD, process.env.AUTH_SALT) };
+};
+const call = async (req) => {
+  const res = mockRes();
+  await handler({ headers: { ...AUTH_HDR(), ...(req.headers || {}) }, query: {}, body: {}, ...req, headers: { ...AUTH_HDR(), ...(req.headers || {}) } }, res);
+  return res;
+};
 const get = () => call({ method: 'GET', query: { type: 'board' } });
 const post = (body) => call({ method: 'POST', body: { type: 'board', ...body } });
 const mkPost = (clientId, text, extra = {}) => ({ action: 'post', post: { clientId, authorId: 'u1', authorName: 'A', text }, ...extra });

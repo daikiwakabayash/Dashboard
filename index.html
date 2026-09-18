@@ -2717,7 +2717,10 @@
             // CPA算出＋AIアシスタント(グループ@AI)が店舗の広告費を答えるための共有元。
             const [soAdSpend, setSoAdSpend] = useState(() => { try { return JSON.parse(localStorage.getItem('so_adspend_v1') || '{}'); } catch { return {}; } });
             // 起動時に共有ストアから読み込み（サーバー値を正とし、localStorageは即時表示用キャッシュ）
+            // ⚠️ 広告費は社内限定データでログインが必要。認証前に叩くと 403 になり空のままになるため、
+            //    ログイン完了を待ってから取得する（依存配列に authenticated を入れる）。
             useEffect(() => {
+                if (!authState.authenticated) return;
                 let alive = true;
                 (async () => {
                     try {
@@ -2730,7 +2733,7 @@
                     } catch {}
                 })();
                 return () => { alive = false; };
-            }, []);
+            }, [authState.authenticated]);
             // shop 未指定=全社合計（spend[rk][media]）、shop 指定=店舗別（spend[rk].__shops__[shop][media]）
             const soSetAdSpend = (rangeKey, media, yen, shop) => {
                 setSoAdSpend(prev => {

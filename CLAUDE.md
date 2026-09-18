@@ -4,10 +4,14 @@
 > 進捗・仕様・採用commit・残件・完了条件はそちらが正本で、このファイルは Dashboard の技術仕様だけを持ちます。
 > 両者が食い違う場合は ROADMAP.md が優先します。
 >
-> - 正本（進捗・採用commit・完了条件）: [naoru-ai-platform/ROADMAP.md](https://github.com/daikiwakabayash/naoru-ai-platform/blob/codex/phase1-knowledge-base/ROADMAP.md)
-> - 作業台帳（誰がどのファイルを触っているか）: `naoru-ai-platform/WORK_LEDGER.md`
-> - 報告テンプレート・受入一覧: `naoru-ai-platform/REPORT_TEMPLATE.md`
-> - 作業規則・業務AI設計: `naoru-ai-platform/AGENTS.md`
+> - 正本（進捗・採用commit・完了条件）: [ROADMAP.md](https://github.com/daikiwakabayash/naoru-ai-platform/blob/docs/command-center-integration/ROADMAP.md)
+> - 作業台帳（誰がどのファイルを触っているか）: [WORK_LEDGER.md](https://github.com/daikiwakabayash/naoru-ai-platform/blob/docs/command-center-integration/WORK_LEDGER.md)
+> - 報告テンプレート・受入一覧: [REPORT_TEMPLATE.md](https://github.com/daikiwakabayash/naoru-ai-platform/blob/docs/command-center-integration/REPORT_TEMPLATE.md)
+> - 作業規則・業務AI設計: [AGENTS.md](https://github.com/daikiwakabayash/naoru-ai-platform/blob/docs/command-center-integration/AGENTS.md)
+>
+> ⚠️ 上記リンクは **`docs/command-center-integration` ブランチ**を指しています（新文書はまだ未統合で、
+> 現時点で実際に読めるのはこのブランチだけです）。**統合後に正式採用ブランチへ更新してください。**
+> 採用commitの一覧は ROADMAP.md §3 にあります（③の成果物は `codex/phase1-knowledge-base` 側）。
 >
 > ⚠️ **開発窓口（統括セッション）は確定前です。** 確定するまで、担当の移動と割り当ての確定は行いません。
 >

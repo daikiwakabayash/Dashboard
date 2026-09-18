@@ -2500,32 +2500,60 @@
             const aiTrialLoadCfg = async () => {
                 const j = await aiPost({ action: 'config' });
                 const cfg = j.config || null;
-                const rid = aiTrial.roomId || ((cfg && cfg.trialRooms[0]) || '');
-                setAiTrial(p => ({ ...p, cfg, roomId: p.roomId || rid }));
+                // 対象ルーム・許可資料は **サーバーが名前付きで返す**（画面でID判定をしない）
+                const targets = j.targets || { rooms: [], docs: [], reasons: [] };
+                const rid = aiTrial.roomId || (targets.rooms[0] && targets.rooms[0].id) || ((cfg && cfg.trialRooms[0]) || '');
+                const allowedDocIds = targets.docs.map(d => d.id);
+                setAiTrial(p => ({ ...p, cfg, targets, choices: j.choices || { rooms: [], docs: [] },
+                    roomId: p.roomId || rid, picked: { roomId: rid, hintDocIds: allowedDocIds } }));
                 // 設定を読んだら、そのルームの保存済み質問・回答も読み直す
                 // （再読み込み後に画面が空にならないように）
                 if (rid) await aiTrialLoadAnswers(rid);
             };
-            // request_id はタブをまたいでも同じ値になるよう、質問文とルームから作る。
-            // （同じ質問の再送・別タブからの再送で回答が二重にならない）
-            const aiMakeRequestId = (rid, q) => {
-                const src = `${rid}|${String(q).trim()}`;
-                let h = 0x811c9dc5;
-                for (let i = 0; i < src.length; i++) h = Math.imul(h ^ src.charCodeAt(i), 0x01000193) >>> 0;
-                return `req_${src.length.toString(36)}_${h.toString(16)}`;
+            // 依頼IDは **送信のたびに新しく発行**する。
+            // ⚠️ 以前は「ルーム＋質問本文」のハッシュで固定IDを作っていたため、
+            //    同じ質問をもう一度送ると必ず replay になり、新規に質問できなかった。
+            //    同じ送信を**再試行**するときだけ、発行済みのIDを持ち回す。
+            //    （同じIDでの重複実行の防止はサーバー側の責任。lib/chat-ai-session.js と同じ形式）
+            const aiMakeRequestId = () => {
+                return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
             };
-            const aiTrialAsk = async () => {
-                const q = aiTrial.q.trim(); const rid = aiTrial.roomId;
-                if (!q || !rid || aiTrial.busy) return;
-                setAiTrial(p => ({ ...p, busy: true, error: '' }));
-                const j = await aiPost({ action: 'ask', question: q, room_id: rid, request_id: aiMakeRequestId(rid, q) });
+            const aiTrialAsk = async (opts = {}) => {
+                if (aiTrial.busy) return;                         // 二重クリック防止（送信中は何もしない）
+                const retry = opts.retry === true;
+                // ⚠️ 再試行は **送信したときの内容をそのまま**使う。
+                //    入力欄はユーザーが編集できるので、再試行中に書き換えられていても
+                //    元の送信（依頼ID・本文・ルーム）を変えてはいけない。
+                //    変えてしまうと、サーバーからは「同じ依頼IDで内容が違う」＝
+                //    request_conflict になり、やり直せなくなる。
+                const q = retry ? String(aiTrial.lastQuestion || '') : aiTrial.q.trim();
+                const rid = retry ? String(aiTrial.lastRoomId || '') : aiTrial.roomId;
+                if (!q || !rid) return;
+                if (retry && !aiTrial.canRetry) return;            // 自動再試行できない失敗では動かさない
+                // 再試行のときだけ前回のIDを使う。新規送信なら必ず新しいID。
+                const requestId = retry && aiTrial.lastRequestId ? aiTrial.lastRequestId : aiMakeRequestId();
+                // 資料は「選べたもの」だけを送る。選択肢に無いIDは送らない（②の pickedTarget と同じ考え方）
+                const picked = (aiTrial.picked && aiTrial.picked.roomId === rid) ? aiTrial.picked : null;
+                const hintDocIds = retry ? aiTrial.lastHintDocIds : (picked ? picked.hintDocIds : undefined);
+                setAiTrial(p => ({ ...p, busy: true, error: '', canRetry: false,
+                    lastRequestId: requestId, lastQuestion: q, lastRoomId: rid, lastHintDocIds: hintDocIds }));
+                const j = await aiPost({ action: 'ask', question: q, room_id: rid, request_id: requestId,
+                    hint_doc_ids: hintDocIds });
                 if (!j.ok) {
-                    setAiTrial(p => ({ ...p, busy: false, error: `${j.error.message}（${j.error.code}${j.error.retryable ? '・再試行できます' : ''}）` }));
+                    // 再試行してよいかは **サーバーの retryable に従う**（画面で勝手に決めない）。
+                    // 認証切れ・権限剥奪・対象外ルーム・内容競合は retryable:false で返るため、
+                    // ここでボタンは出ない。自動再試行もしない（押すのは人）。
+                    setAiTrial(p => ({ ...p, busy: false, canRetry: j.error.retryable === true,
+                        error: `${j.error.message}（${j.error.code}${j.error.retryable ? '・同じ送信を再試行できます' : ''}）` }));
                     return;   // ⚠️ 質問の下書きは消さない
                 }
                 await aiTrialLoadAnswers(rid);
-                setAiTrial(p => ({ ...p, busy: false, q: j.replay ? p.q : '' }));
+                setAiTrial(p => ({ ...p, busy: false, canRetry: false, q: j.replay ? p.q : '' }));
             };
+            // 同じ送信のやり直し。**新しいIDを発行しない**（回答が二重にならない）。
+            // サーバーに回答が保存済みで応答だけ失われた場合は replay として
+            // 同じ answer_message_id が返るので、回答が増えない。
+            const aiTrialRetry = () => aiTrialAsk({ retry: true });
             const aiTrialReview = async (aid) => {
                 const a = aiTrial.answers[aid]; if (!a) return;
                 const j = await aiPost({ action: 'hq_review', answer_message_id: aid, question_message_id: a.questionMessageId, room_id: aiTrial.roomId });
@@ -21319,8 +21347,14 @@
                     {/* ══════════ AI Agent Activity（Phase 2・フラグ cc_agentlog がONのときだけ描画） ══════════ */}
                     {currentPage === 'aitrial' && ccOn('cc_ai_trial') && (() => {
                         const t = aiTrial;
-                        const rooms = (t.cfg && t.cfg.trialRooms) || [];
-                        const docs = (t.cfg && t.cfg.allowedDocIds) || [];
+                        // サーバーが返した名前付きの対象。未取得のときだけ設定値のIDへ退避する。
+                        const targets = t.targets || { rooms: [], docs: [], reasons: [] };
+                        const rooms = targets.rooms.length ? targets.rooms
+                            : ((t.cfg && t.cfg.trialRooms) || []).map(id => ({ id, name: id, members: [] }));
+                        const docs = targets.docs.length ? targets.docs
+                            : ((t.cfg && t.cfg.allowedDocIds) || []).map(id => ({ id, title: id }));
+                        const choices = t.choices || { rooms: [], docs: [] };
+                        const memberNames = (r) => (r.members || []).map(m => m.name || m.id).join('、');
                         const SRC = {
                             server_verified: { cls: 'bg-emerald-50 text-emerald-800 border-emerald-200', label: '📚 検証済みの出典' },
                             unverified: { cls: 'bg-amber-50 text-amber-900 border-amber-300', label: '⚠️ 参照候補として渡した資料（未検証）' },
@@ -21352,23 +21386,50 @@
                                         <select value={t.roomId} onChange={e => { const v = e.target.value; setAiTrial(p => ({ ...p, roomId: v })); aiTrialLoadAnswers(v); }}
                                             className="px-2 py-1.5 rounded-lg border border-ink-200 text-[12px] font-bold">
                                             <option value="">選択してください</option>
-                                            {rooms.map(r => <option key={r} value={r}>{r}</option>)}
+                                            {rooms.map(r => (
+                                                <option key={r.id} value={r.id}>
+                                                    {r.name}{memberNames(r) ? `（${memberNames(r)}）` : ''}
+                                                </option>
+                                            ))}
                                         </select>
-                                        <span className="text-ink-400">許可FAQ: {docs.length ? docs.join(', ') : <span className="text-amber-700">なし（根拠不足になります）</span>}</span>
+                                        <span className="text-ink-400">許可FAQ: {docs.length
+                                            ? docs.map(d => d.title).join('、')
+                                            : <span className="text-amber-700">なし（根拠不足になります）</span>}</span>
                                         <button onClick={() => aiTrialLoadAnswers(t.roomId)} disabled={!t.roomId}
                                             className="ml-auto px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200 hover:bg-ink-50 disabled:opacity-40">再読み込み</button>
                                     </div>
                                     <textarea value={t.q} onChange={e => setAiTrial(p => ({ ...p, q: e.target.value }))}
                                         placeholder="質問を入力（例: 家族施術のルールは？）" rows={3}
                                         className="w-full px-3 py-2 rounded-xl border border-ink-200 text-[13px] resize-y" />
-                                    <div className="flex items-center gap-2">
-                                        <button onClick={aiTrialAsk} disabled={!t.q.trim() || !t.roomId || t.busy}
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        {/* 新規の送信。押すたびに新しい依頼IDを発行する。 */}
+                                        <button onClick={() => aiTrialAsk()} disabled={!t.q.trim() || !t.roomId || t.busy}
                                             className="px-4 py-2 rounded-xl text-[13px] font-bold bg-ink-900 text-white disabled:opacity-40">
                                             {t.busy ? '回答を作成中…' : 'AIに質問する'}
                                         </button>
+                                        {/* 同じ送信のやり直し。**依頼IDを発行し直さない**ので回答が二重にならない。
+                                            通信の失敗など、サーバーが retryable と返した場合だけ出す。 */}
+                                        {t.canRetry && (
+                                            <button onClick={aiTrialRetry} disabled={t.busy}
+                                                className="px-4 py-2 rounded-xl text-[13px] font-bold border border-ink-300 text-ink-900 hover:bg-ink-50 disabled:opacity-40">
+                                                {t.busy ? '再試行中…' : '同じ送信を再試行'}
+                                            </button>
+                                        )}
                                         {t.error && <span className="text-[12px] text-red-700">{t.error}</span>}
                                     </div>
-                                    {t.error && <div className="text-[11px] text-ink-400">※ 質問の下書きは消していません。そのまま再試行できます。</div>}
+                                    {t.canRetry && (
+                                        <div className="text-[11px] text-ink-400">
+                                            ※「同じ送信を再試行」は、さきほど送った内容（{t.lastQuestion ? `「${String(t.lastQuestion).slice(0, 24)}${String(t.lastQuestion).length > 24 ? '…' : ''}」` : 'その質問'}）を
+                                            同じ依頼IDのまま送り直します。入力欄を書き換えても、送り直す内容は変わりません。
+                                            すでにサーバーに回答が保存されていた場合は、同じ回答がそのまま表示されます（二重になりません）。
+                                        </div>
+                                    )}
+                                    {t.error && !t.canRetry && (
+                                        <div className="text-[11px] text-ink-400">
+                                            ※ 質問の下書きは消していません。内容を確認してから、あらためて質問してください
+                                            （この失敗は同じ送信のやり直しでは解消しません）。
+                                        </div>
+                                    )}
                                 </section>
 
                                 <section className="space-y-3">
@@ -21452,21 +21513,40 @@
                                 <details className="p-4 rounded-2xl bg-white border border-ink-100">
                                     <summary className="text-[12px] font-black text-ink-700 cursor-pointer">検証の設定（ルームID・許可FAQ）</summary>
                                     <div className="mt-3 space-y-2 text-[12px]">
-                                        <label className="block">
-                                            <span className="font-bold text-ink-400">検証用ルームID（カンマ区切り）</span>
-                                            <input defaultValue={rooms.join(',')} id="ai-cfg-rooms"
-                                                className="mt-1 w-full px-3 py-2 rounded-lg border border-ink-200" />
-                                        </label>
-                                        <label className="block">
-                                            <span className="font-bold text-ink-400">許可するFAQのID（カンマ区切り・少数のみ）</span>
-                                            <input defaultValue={docs.join(',')} id="ai-cfg-docs"
-                                                className="mt-1 w-full px-3 py-2 rounded-lg border border-ink-200" />
-                                        </label>
+                                        {/* 内部IDの手入力はさせない。名前で選び、送るのは登録済みのIDだけ。 */}
+                                        <div>
+                                            <span className="font-bold text-ink-400">検証に使うルーム（名前で選びます）</span>
+                                            <div className="mt-1 max-h-40 overflow-auto rounded-lg border border-ink-200 divide-y divide-ink-100">
+                                                {choices.rooms.length === 0 && <div className="px-3 py-2 text-ink-400">選べるルームがありません</div>}
+                                                {choices.rooms.map(r => (
+                                                    <label key={r.id} className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-ink-50">
+                                                        <input type="checkbox" data-ai-room={r.id}
+                                                            defaultChecked={((t.cfg && t.cfg.trialRooms) || []).includes(r.id)} />
+                                                        <span>{r.name}</span>
+                                                    </label>
+                                                ))}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <span className="font-bold text-ink-400">AIに渡すFAQ（タイトルで選びます・少数のみ）</span>
+                                            <div className="mt-1 max-h-40 overflow-auto rounded-lg border border-ink-200 divide-y divide-ink-100">
+                                                {choices.docs.length === 0 && <div className="px-3 py-2 text-ink-400">選べるFAQがありません</div>}
+                                                {choices.docs.map(d => (
+                                                    <label key={d.id} className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-ink-50">
+                                                        <input type="checkbox" data-ai-doc={d.id}
+                                                            defaultChecked={((t.cfg && t.cfg.allowedDocIds) || []).includes(d.id)} />
+                                                        <span>{d.title}</span>
+                                                    </label>
+                                                ))}
+                                            </div>
+                                        </div>
                                         <button onClick={async () => {
-                                            const tr = String((document.getElementById('ai-cfg-rooms') || {}).value || '').split(',').map(x => x.trim()).filter(Boolean);
-                                            const dc = String((document.getElementById('ai-cfg-docs') || {}).value || '').split(',').map(x => x.trim()).filter(Boolean);
+                                            const picks = (attr) => Array.from(document.querySelectorAll(`[data-ai-${attr}]`))
+                                                .filter(el => el.checked).map(el => el.getAttribute(`data-ai-${attr}`));
+                                            const tr = picks('room');
+                                            const dc = picks('doc');
                                             const j = await aiPost({ action: 'config', config: { trialRooms: tr, allowedDocIds: dc } });
-                                            if (j.ok) { setAiTrial(p => ({ ...p, cfg: j.config, roomId: p.roomId || j.config.trialRooms[0] || '' })); }
+                                            if (j.ok) { await aiTrialLoadCfg(); }
                                         }} className="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-ink-900 text-white">設定を保存</button>
                                     </div>
                                 </details>

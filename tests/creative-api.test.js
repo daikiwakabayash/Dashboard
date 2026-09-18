@@ -4,6 +4,10 @@ import { _clearBearerCache } from '../lib/actor.js';
 import { hashOwnerToken } from '../lib/settlement.js';
 import { kvEvalFake } from './helpers/kv-fake.js';
 import { newDataKey, encryptBytes, toB64, cipherLength } from '../lib/creative-crypto.js';
+import { CLAIM_CHECKS } from '../lib/creative.js';
+
+// 承認の前に人が確かめる項目（架空の体験談・効果保証・偽のBefore/After・正本）
+const CLAIMS = Object.fromEntries(CLAIM_CHECKS.map(c => [c.key, true]));
 
 const KV = 'https://kv.test';
 const STORE_URL = 'https://abc123.public.blob.vercel-storage.com/creative/a.png';
@@ -422,18 +426,18 @@ describe('Creative Library: 承認と完成ファイル', () => {
   it('🔴 sample は承認できない', async () => {
     const { a, c } = await finished('sample');
     await post({ action: 'asset_rights', asset_id: a.id, status: 'confirmed' });
-    const r = await post({ action: 'approve', creative_id: c.id });
+    const r = await post({ action: 'approve', creative_id: c.id, claims: CLAIMS });
     expect(r.body.error.code).toBe('sample_not_approvable');
     expect(r.body.error.message).toContain('サンプル');
   });
   it('🔴 権利未確認なら承認できない', async () => {
     const { c } = await finished('live');                    // 権利 unconfirmed のまま
-    expect((await post({ action: 'approve', creative_id: c.id })).body.error.code).toBe('rights_unconfirmed');
+    expect((await post({ action: 'approve', creative_id: c.id, claims: CLAIMS })).body.error.code).toBe('rights_unconfirmed');
   });
   it('権利確認済み＋実生成なら承認でき、完成ファイルを取得できる', async () => {
     const { a, c } = await finished('live');
     await post({ action: 'asset_rights', asset_id: a.id, status: 'confirmed' });
-    const ap = await post({ action: 'approve', creative_id: c.id });
+    const ap = await post({ action: 'approve', creative_id: c.id, claims: CLAIMS });
     expect(ap.body.creative.status).toBe('approved');
     expect(ap.body.creative.reviewer.id).toBe('__root__');
     const d = await post({ action: 'deliverables', creative_id: c.id });
@@ -465,5 +469,54 @@ describe('Creative Library: 比較と他テナント', () => {
     store.set(CREATIVE, JSON.stringify(raw));
     expect((await post({ action: 'list' })).body.assets).toHaveLength(0);
     expect((await post({ action: 'compare', asset_id: a.id })).body.error.code).toBe('not_found');
+  });
+});
+
+describe('🔴 承認の前に人が確かめる', () => {
+  const finished = async (mode) => {
+    connect();
+    jobState = { poll: { status: 'completed', mode, files: [{ src: 'job', jobId: 'job_up_1', index: 0, contentType: 'image/png', bytes: 10 }] } };
+    const a = await newAsset();
+    const c0 = (await post({ action: 'creative_create', asset_id: a.id })).body.creative;
+    await post({ action: 'generate', creative_id: c0.id });
+    return { a, c: (await post({ action: 'job_status', creative_id: c0.id })).body.creative };
+  };
+  it('🔴 確認しないまま承認できない', async () => {
+    const { a, c } = await finished('live');
+    await post({ action: 'asset_rights', asset_id: a.id, status: 'confirmed' });
+    const r = await post({ action: 'approve', creative_id: c.id });
+    expect(r.body.error.code).toBe('claims_unchecked');
+    expect(r.body.error.message).toContain('架空の体験談');
+  });
+  it('🔴 一部だけ確認しても承認できない', async () => {
+    const { a, c } = await finished('live');
+    await post({ action: 'asset_rights', asset_id: a.id, status: 'confirmed' });
+    expect((await post({ action: 'approve', creative_id: c.id, claims: { noGuarantee: true } })).body.error.code).toBe('claims_unchecked');
+  });
+  it('🔴 実際の施術素材は、写真の利用許可を確認するまで承認できない', async () => {
+    connect();
+    jobState = { poll: { status: 'completed', mode: 'live', files: [{ src: 'job', jobId: 'job_up_1', index: 0, contentType: 'image/png' }] } };
+    const a = (await post({ action: 'asset_create',
+      asset: { title: '施術の写真', files: [IMG()], kind: 'real' } })).body.asset;
+    expect(a.kind).toBe('real');
+    const c0 = (await post({ action: 'creative_create', asset_id: a.id })).body.creative;
+    await post({ action: 'generate', creative_id: c0.id });
+    const c = (await post({ action: 'job_status', creative_id: c0.id })).body.creative;
+    await post({ action: 'asset_rights', asset_id: a.id, status: 'confirmed' });
+    const r = await post({ action: 'approve', creative_id: c.id, claims: CLAIMS });
+    expect(r.body.error.code).toBe('consent_unconfirmed');
+    await post({ action: 'asset_rights', asset_id: a.id, status: 'confirmed', consent_photo: true });
+    expect((await post({ action: 'approve', creative_id: c.id, claims: CLAIMS })).body.creative.status).toBe('approved');
+  });
+  it('誰がいつ確かめたかが残る', async () => {
+    const { a, c } = await finished('live');
+    await post({ action: 'asset_rights', asset_id: a.id, status: 'confirmed' });
+    const r = await post({ action: 'approve', creative_id: c.id, claims: CLAIMS });
+    expect(r.body.creative.claims).toMatchObject({ ...CLAIMS, by: '__root__' });
+    expect(r.body.creative.claims.at).toBeGreaterThan(0);
+  });
+  it('素材の区分は既定でデモ（実素材だと名乗らせない）', async () => {
+    expect((await newAsset()).kind).toBe('demo');
+    expect((await newAsset()).kindLabel).toBe('デモ素材');
   });
 });

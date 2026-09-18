@@ -1034,7 +1034,8 @@ export default async function handler(req, res) {
       const done = await mutateCreative((st) => {
         const a = st.assets[id];
         if (!mine(a)) { err = 'not_found'; return null; }
-        const r = confirmRights(a, body.status, { ...ctx, note: body.note });
+        const r = confirmRights(a, body.status, { ...ctx, note: body.note,
+          consentPhoto: body.consent_photo, consentVoice: body.consent_voice, consentNote: body.consent_note });
         if (!r.ok) { err = r.error; return null; }
         st.assets[id] = r.asset; out = r.asset; return true;
       });
@@ -1224,13 +1225,17 @@ export default async function handler(req, res) {
       const done = await mutateCreative((st) => {
         const c = st.creatives[id];
         if (!mine(c)) { err = 'not_found'; return null; }
-        const r = approveCreative(c, st.assets[c.assetId], ctx);
+        // ⚠️ 承認前の確認（架空の体験談・効果保証・偽のBefore/After・正本）は
+        //    **人が押した分だけ**サーバーへ届く。届いていなければ承認しない。
+        const r = approveCreative(c, st.assets[c.assetId], { ...ctx, claims: body.claims });
         if (!r.ok) { err = r.error; return null; }
         st.creatives[id] = r.creative; out = r.creative; return true;
       });
       if (err) {
         const msg = { sample_not_approvable: 'サンプル・未接続の案は承認できません（実生成の結果だけを承認します）',
                       rights_unconfirmed: '素材の権利が未確認です。先に権利を確認してください',
+                      consent_unconfirmed: '実際の施術素材です。写真の利用許可を確認してください',
+                      claims_unchecked: '内容の確認（架空の体験談・効果保証・偽のBefore/After・正本の使用）がすべて必要です',
                       invalid_transition: 'いまの状態では承認できません' }[err];
         return res.status(200).json(cerr(err, msg));
       }

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
-  STATUSES, CHANNELS, canTransition, normalizeFile, normalizeFiles,
+  STATUSES, CHANNELS, CLAIM_CHECKS, ASSET_KIND_LABEL, normalizeCost, normalizeGenSettings, claimsOk,
+  canTransition, normalizeFile, normalizeFiles,
   buildAsset, confirmRights, buildCreative, startJob, completeJob,
   requestRevision, approve, deliverables, compareSet, normalizeStore,
   publicFile, publicAsset, publicCreative, buildGenerateRequest, pendingRevision,
@@ -8,6 +9,9 @@ import {
 } from '../lib/creative.js';
 
 const CTX = { tenantId: 'naoru', actorId: '__root__', actorName: '本部' };
+// 承認の前に人が確かめる項目（架空の体験談・効果保証・偽のBefore/After・正本）
+const CLAIMS = Object.fromEntries(CLAIM_CHECKS.map(c => [c.key, true]));
+const OK = { ...CTX, claims: CLAIMS };
 // 保存先には**暗号文しか置かない**。記録は「保存先URL＋包んだ鍵」を持ち、画面へは渡さない。
 const STORE = 'https://abc123.public.blob.vercel-storage.com/creative/';
 const encOf = (n) => ({ alg: 'A256GCM-CHUNK1M', key: 'd3JhcHBlZC1rZXktYjY0', plainBytes: n });
@@ -75,7 +79,7 @@ describe('🔴 保存先URLと鍵を画面・③へ渡さない', () => {
   });
   it('完成ファイル・比較でも配信口だけを渡す', () => {
     const a = confirmRights(buildAsset({ title: 'x', files: [IMG] }, CTX).asset, 'confirmed', CTX).asset;
-    const up = approve(buildCreative(a, { origin: 'uploaded', files: [IMG] }, CTX).creative, a, CTX).creative;
+    const up = approve(buildCreative(a, { origin: 'uploaded', files: [IMG] }, CTX).creative, a, OK).creative;
     expect(deliverables(up).files[0].src).toContain('action=file');
     expect(JSON.stringify(deliverables(up))).not.toContain('blob.vercel-storage.com');
     expect(JSON.stringify(compareSet([up], a.id))).not.toContain('blob.vercel-storage.com');
@@ -205,7 +209,7 @@ describe('修正依頼', () => {
   it('🔴 承認済みには修正依頼を出せない（新しい版を作る）', () => {
     const a = confirmed();
     const c = completeJob(startJob(buildCreative(a, {}, CTX).creative, CTX).creative, { ok: true, files: [IMG], mode: 'live' }).creative;
-    const ap = approve(c, a, CTX, 4000).creative;
+    const ap = approve(c, a, OK, 4000).creative;
     expect(requestRevision(ap, { text: 'x' }, CTX).error).toBe('invalid_transition');
   });
 });
@@ -216,29 +220,29 @@ describe('承認', () => {
   it('🔴 sample は承認できない（完成ファイルにしない）', () => {
     const a = confirmed();
     const s = completeJob(startJob(buildCreative(a, {}, CTX).creative, CTX).creative, { ok: true, files: [IMG], mode: 'sample' }).creative;
-    expect(approve(s, a, CTX).error).toBe('sample_not_approvable');
+    expect(approve(s, a, OK).error).toBe('sample_not_approvable');
   });
   it('🔴 未接続のまま承認できない', () => {
     const a = confirmed();
     const n = completeJob(startJob(buildCreative(a, {}, CTX).creative, CTX).creative, { ok: true, files: [IMG] }).creative;
-    expect(approve(n, a, CTX).error).toBe('sample_not_approvable');
+    expect(approve(n, a, OK).error).toBe('sample_not_approvable');
   });
   it('🔴 素材権利が未確認なら承認できない', () => {
     const a = asset();                       // unconfirmed
-    expect(approve(live(a), a, CTX).error).toBe('rights_unconfirmed');
+    expect(approve(live(a), a, OK).error).toBe('rights_unconfirmed');
     const r = confirmRights(a, 'restricted', CTX).asset;
-    expect(approve(live(r), r, CTX).error).toBe('rights_unconfirmed');
+    expect(approve(live(r), r, OK).error).toBe('rights_unconfirmed');
   });
   it('権利確認済み＋実生成なら承認でき、確認者が残る', () => {
     const a = confirmed();
-    const r = approve(live(a), a, CTX, 5000);
+    const r = approve(live(a), a, OK, 5000);
     expect(r.creative.status).toBe('approved');
     expect(r.creative.reviewer).toMatchObject({ id: '__root__', name: '本部', at: 5000 });
   });
   it('手元の素材をそのまま使う案は、権利確認済みなら承認できる', () => {
     const a = confirmed();
     const up = buildCreative(a, { origin: 'uploaded', files: [IMG] }, CTX).creative;
-    expect(approve(up, a, CTX).creative.status).toBe('approved');
+    expect(approve(up, a, OK).creative.status).toBe('approved');
   });
 });
 
@@ -247,7 +251,7 @@ describe('完成ファイルの取得', () => {
     const a = confirmed();
     const c = completeJob(startJob(buildCreative(a, {}, CTX).creative, CTX).creative, { ok: true, files: [IMG, MOV], mode: 'live' }).creative;
     expect(deliverables(c).ok).toBe(false);          // まだ確認待ち
-    const ap = approve(c, a, CTX).creative;
+    const ap = approve(c, a, OK).creative;
     const d = deliverables(ap);
     expect(d.ok).toBe(true);
     expect(d.files).toHaveLength(2);
@@ -383,5 +387,114 @@ describe('生成ジョブの進み具合（非同期）', () => {
   });
   it('失敗は理由が残る', () => {
     expect(jobProgress({ status: 'failed', error: { message: '素材が読めません' } }).result.reason).toBe('素材が読めません');
+  });
+});
+
+describe('🔴 デモ素材と実際の施術素材を区別する', () => {
+  it('区分の申告が無ければデモ素材として扱う（実素材だと名乗らせない）', () => {
+    expect(buildAsset({ title: 'x', files: [IMG] }, CTX).asset.kind).toBe('demo');
+    expect(buildAsset({ title: 'x', files: [IMG], kind: 'なんでも' }, CTX).asset.kind).toBe('demo');
+    expect(buildAsset({ title: 'x', files: [IMG], kind: 'real' }, CTX).asset.kind).toBe('real');
+  });
+  it('画面に出す言葉を持つ', () => {
+    expect(ASSET_KIND_LABEL.demo).toBe('デモ素材');
+    expect(ASSET_KIND_LABEL.real).toBe('実際の施術素材');
+  });
+  it('🔴 実素材は、写真の利用許可を確認するまで承認できない', () => {
+    const real = confirmRights(buildAsset({ title: '施術', files: [IMG], kind: 'real' }, CTX).asset, 'confirmed', CTX).asset;
+    const c = buildCreative(real, { origin: 'uploaded', files: [IMG] }, CTX).creative;
+    expect(approve(c, real, OK).error).toBe('consent_unconfirmed');
+    const ok = confirmRights(real, 'confirmed', { ...CTX, consentPhoto: true }).asset;
+    expect(ok.consent.photo).toBe(true);
+    expect(ok.consent.confirmedBy).toBe('__root__');
+    expect(approve(c, ok, OK).creative.status).toBe('approved');
+  });
+  it('デモ素材は写真の許可を求めない（架空の素材だから）', () => {
+    const demo = confirmRights(buildAsset({ title: 'デモ', files: [IMG] }, CTX).asset, 'confirmed', CTX).asset;
+    const c = buildCreative(demo, { origin: 'uploaded', files: [IMG] }, CTX).creative;
+    expect(approve(c, demo, OK).creative.status).toBe('approved');
+  });
+  it('声の許可も別に記録できる', () => {
+    const a = confirmRights(buildAsset({ title: 'x', files: [IMG] }, CTX).asset, 'confirmed', { ...CTX, consentVoice: true }).asset;
+    expect(a.consent).toMatchObject({ voice: true, photo: false });
+  });
+});
+
+describe('🔴 架空の体験談・効果保証・偽のBefore/After を作らない', () => {
+  const ready = () => {
+    const a = confirmRights(buildAsset({ title: 'x', files: [IMG] }, CTX).asset, 'confirmed', CTX).asset;
+    return { a, c: buildCreative(a, { origin: 'uploaded', files: [IMG] }, CTX).creative };
+  };
+  it('確認する項目が4つある', () => {
+    expect(CLAIM_CHECKS.map(c => c.key)).toEqual(['noFakeTestimonial', 'noGuarantee', 'noFakeBeforeAfter', 'brandFromSource']);
+  });
+  it('🔴 確認していないものは承認できない', () => {
+    const { a, c } = ready();
+    expect(approve(c, a, CTX).error).toBe('claims_unchecked');
+    expect(approve(c, a, { ...CTX, claims: { noFakeTestimonial: true } }).error).toBe('claims_unchecked');
+  });
+  it('🔴 自動で確認済みにしない（既定は全部 false）', () => {
+    expect(claimsOk(ready().c.claims)).toBe(false);
+  });
+  it('すべて確認すれば承認でき、誰がいつ確かめたかが残る', () => {
+    const { a, c } = ready();
+    const r = approve(c, a, { ...CTX, claims: CLAIMS }, 5000);
+    expect(r.creative.status).toBe('approved');
+    expect(r.creative.claims).toMatchObject({ ...CLAIMS, by: '__root__', at: 5000 });
+  });
+  it('🔴 修正して版が変わったら、確認はやり直しになる', () => {
+    const { a } = ready();
+    const done = completeJob(startJob(buildCreative(a, {}, CTX).creative, CTX).creative, { ok: true, files: [IMG], mode: 'live' }).creative;
+    const v2 = requestRevision({ ...done, claims: { ...CLAIMS, by: 'x', at: 1 } }, { text: '直して' }, CTX).creative;
+    expect(claimsOk(v2.claims)).toBe(false);
+  });
+});
+
+describe('生成設定・制作費・CTA・親Creative を保持する', () => {
+  it('CTAを持ち、③への依頼にも入る', () => {
+    const a = buildAsset({ title: 'x', files: [IMG] }, CTX).asset;
+    const c = buildCreative(a, { cta: '今すぐ予約' }, CTX).creative;
+    expect(c.cta).toBe('今すぐ予約');
+    expect(buildGenerateRequest(c, a, { jobId: 'j' }).request.cta).toBe('今すぐ予約');
+  });
+  it('生成設定は知らないキーを生やさない', () => {
+    expect(Object.keys(normalizeGenSettings({ evil: 1 })).sort()).toEqual(['brandVersion', 'formats', 'mode', 'note', 'preset']);
+    expect(normalizeGenSettings({ formats: ['1:1', '4:5', '9:16'], mode: 'sample' }))
+      .toMatchObject({ formats: ['1:1', '4:5', '9:16'], mode: 'sample' });
+    expect(normalizeGenSettings({ mode: 'なんでも' }).mode).toBe('');
+  });
+  it('🔴 制作費は「分からない」を 0 にしない', () => {
+    expect(normalizeCost({})).toMatchObject({ amount: null, currency: '' });
+    expect(normalizeCost(null).amount).toBe(null);
+    expect(normalizeCost({ amount: 0 })).toMatchObject({ amount: 0, currency: 'JPY' });
+    expect(normalizeCost({ amount: 1200, currency: 'USD' })).toMatchObject({ amount: 1200, currency: 'USD' });
+    expect(normalizeCost({ amount: -5 }).amount).toBe(null);
+  });
+  it('🔴 通貨を勝手に換算しない', () => {
+    expect(normalizeCost({ amount: 10, currency: 'USD' }).currency).toBe('USD');
+    expect(normalizeCost({ amount: 10, currency: 'ドル' }).currency).toBe('JPY');   // 形式が違えば既定の JPY
+  });
+  it('③が返した生成設定と制作費を残す', () => {
+    const a = buildAsset({ title: 'x', files: [IMG] }, CTX).asset;
+    const g = startJob(buildCreative(a, {}, CTX).creative, CTX).creative;
+    const done = completeJob(g, { ok: true, files: [IMG], mode: 'sample',
+      genSettings: { formats: ['1:1'], preset: 'brandA' }, cost: { amount: 300, currency: 'JPY', source: 'third_party' } }).creative;
+    expect(done.genSettings).toMatchObject({ formats: ['1:1'], preset: 'brandA', mode: 'sample' });
+    expect(done.cost).toMatchObject({ amount: 300, currency: 'JPY', source: 'third_party' });
+  });
+  it('③が制作費を返さなければ未記録のまま（0にしない）', () => {
+    const a = buildAsset({ title: 'x', files: [IMG] }, CTX).asset;
+    const g = startJob(buildCreative(a, {}, CTX).creative, CTX).creative;
+    expect(completeJob(g, { ok: true, files: [IMG], mode: 'sample' }).creative.cost.amount).toBe(null);
+  });
+  it('🔴 修正版は親と元の版を持ち、旧版の中身を履歴に残す', () => {
+    const a = buildAsset({ title: 'x', files: [IMG] }, CTX).asset;
+    const done = completeJob(startJob(buildCreative(a, { cta: '予約する' }, CTX).creative, CTX).creative,
+      { ok: true, files: [IMG], mode: 'live', headline: '元の見出し' }).creative;
+    const v2 = requestRevision(done, { text: '直して' }, CTX).creative;
+    expect(v2.parentCreativeId).toBe(done.id);
+    expect(v2.sourceCreativeVersion).toBe(1);
+    expect(v2.version).toBe(2);
+    expect(v2.revisions[0].snapshot).toMatchObject({ headline: '元の見出し', cta: '予約する' });
   });
 });

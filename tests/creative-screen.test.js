@@ -19,7 +19,7 @@ beforeAll(() => {
   // 画面のJSXブロック（最初の出現はポーリング登録なので、JSX側の目印で切り出す）
   const marker = "{currentPage === 'creative' && ccOn('cc_creative_library') && (() => {";
   const from = html.indexOf(marker);
-  screen = from >= 0 ? html.slice(from, from + 22000) : '';
+  screen = from >= 0 ? html.slice(from, from + 30000) : '';
 });
 
 describe('クリエイティブ画面: 入口と権限', () => {
@@ -65,6 +65,21 @@ describe('クリエイティブ画面: 実ファイルを出す配線がある�
     expect(html).toContain("action: 'job_status'");
     const poll = html.slice(html.indexOf('const cvPoll ='), html.indexOf('const cvGenerate'));
     expect(poll).toContain('Math.min(10000');          // 無制限に叩かない
+  });
+  it('承認の前に確認する項目がある（自動でチェックを入れない）', () => {
+    expect(html).toContain('承認の前に確認してください');
+    for (const k of ['noFakeTestimonial', 'noGuarantee', 'noFakeBeforeAfter', 'brandFromSource']) expect(html, k).toContain(k);
+    expect(html).toContain('claims: {}');                   // 既定は空（全部 false）
+    expect(html).toContain('CV_CLAIM_CHECKS.every(ck => c.claims[ck.key])');   // 全部そろうまで押せない
+  });
+  it('デモ素材と実際の施術素材を選べる', () => {
+    expect(html).toContain('data-cv-kind');
+    expect(html).toContain('実際の施術素材');
+    expect(html).toContain('写真の利用許可を得ていますか');
+  });
+  it('🔴 制作費は分からないものを 0 と書かない', () => {
+    expect(screen).toContain("制作費:");
+    expect(screen).toContain("'未記録'");
   });
   it('🔴 複数案を横に並べて見比べられる', () => {
     expect(screen).toContain('複数案を比較');

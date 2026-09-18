@@ -119,7 +119,7 @@ async function creativeApi(req, res, url, body) {
   if (action === 'asset_rights') {
     const a = state.assets[body.asset_id];
     if (!a) return json(res, cerr('not_found'));
-    const r = confirmRights(a, body.status, CTX);
+    const r = confirmRights(a, body.status, { ...CTX, consentPhoto: body.consent_photo, consentVoice: body.consent_voice });
     if (!r.ok) return json(res, cerr(r.error));
     state.assets[a.id] = r.asset;
     return json(res, { ok: true, asset: publicAsset(r.asset) });
@@ -152,9 +152,11 @@ async function creativeApi(req, res, url, body) {
   }
   if (action === 'approve') {
     const c = state.creatives[body.creative_id];
-    const r = approveCreative(c, state.assets[c.assetId], CTX);
+    const r = approveCreative(c, state.assets[c.assetId], { ...CTX, claims: body.claims });
     if (!r.ok) return json(res, cerr(r.error, { rights_unconfirmed: '素材の権利が未確認です。先に権利を確認してください',
-      sample_not_approvable: 'サンプル・未接続の案は承認できません' }[r.error]));
+      sample_not_approvable: 'サンプル・未接続の案は承認できません',
+      consent_unconfirmed: '実際の施術素材です。写真の利用許可を確認してください',
+      claims_unchecked: '内容の確認（架空の体験談・効果保証・偽のBefore/After・正本の使用）がすべて必要です' }[r.error]));
     state.creatives[c.id] = r.creative;
     return json(res, { ok: true, creative: publicCreative(r.creative) });
   }
@@ -328,6 +330,11 @@ check('この素材を案にできる（③未接続でも確認まで進める�
 
 // 権利未確認のあいだは承認できない
 await page.getByRole('button', { name: /^承認する$/ }).first().click().catch(() => {});
+await page.waitForTimeout(900);
+for (const k of ['noFakeTestimonial', 'noGuarantee', 'noFakeBeforeAfter', 'brandFromSource']) {
+  await page.locator(`[data-cv-claim="${k}"]`).first().check().catch(() => {});
+}
+await page.locator('[data-cv-approve-yes]').first().click().catch(() => {});
 await page.waitForTimeout(1500);
 check('🔴 権利未確認では承認できない', (await txt()).includes('権利が未確認'));
 
@@ -336,8 +343,20 @@ await page.waitForTimeout(2000);
 check('権利を確認済みにできる', (await txt()).includes('確認済み'));
 
 await page.getByRole('button', { name: /^承認する$/ }).first().click();
+await page.waitForTimeout(1200);
+check('🔴 承認は確認のチェックをはさむ', (await page.locator('[data-cv-claims]').count()) === 1);
+const yes = page.locator('[data-cv-approve-yes]').first();
+check('🔴 確認前は承認ボタンを押せない', await yes.isDisabled());
+for (const k of ['noFakeTestimonial', 'noGuarantee', 'noFakeBeforeAfter', 'brandFromSource']) {
+  await page.locator(`[data-cv-claim="${k}"]`).first().check();
+  await page.waitForTimeout(150);
+}
+check('4つ確認すると押せるようになる', !(await yes.isDisabled()));
+await yes.click();
 await page.waitForTimeout(2500);
 check('承認できる', (await txt()).includes('承認済み'));
+check('内容の確認済みが残る', (await txt()).includes('内容の確認済み'));
+check('制作費は未記録と出る（0にしない）', (await txt()).includes('制作費: 未記録'));
 
 await page.getByRole('button', { name: /完成ファイルを取得/ }).first().click();
 await page.waitForTimeout(2000);

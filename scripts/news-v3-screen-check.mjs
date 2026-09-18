@@ -48,6 +48,8 @@ const server = http.createServer((req, res) => {
       const type = req.method === 'GET' ? url.searchParams.get('type') : body.type;
       if (type === 'ccflags') return json(res, { flags: { cc_all: true, cc_authz: 'off' }, configured: true, env: 'preview' });
       if (type === 'board') {
+        // 試験用: ピックアップ指定を外して「指定が無いとき」の見え方を確かめる
+        if (req.method === 'POST' && body.action === '__nofeat') { posts.forEach(x => { x.featured = false; }); return json(res, { ok: true }); }
         if (req.method === 'POST' && body.action === 'status_counts') {
           const counts = {};
           for (const id of (body.ids || [])) counts[id] = { read: { p1: 5, p2: 5, p3: 3, p4: 8 }[id] || 0, acked: 0, total: 8 };
@@ -221,6 +223,21 @@ check('見つからないときは案内と解除ボタンが出る',
   (await txt()).includes('に一致するお知らせがありません') && (await page.locator('[data-news-clearfilter]').count()) > 0);
 await page.locator('[data-news-clearfilter]').first().click();
 await page.waitForTimeout(800);
+
+// ── 🔴 ピックアップ指定が無くても第一印象を空にしない ─────────────
+await page.evaluate(() => fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ type: 'board', action: '__nofeat' }) }));
+await page.reload({ waitUntil: 'commit' });
+for (let i = 0; i < 40; i++) { if ((await txt()).includes('お知らせ')) break; await page.waitForTimeout(500); }
+const pw2 = page.locator('input[type="password"]');
+if (await pw2.count()) { await pw2.first().fill(process.env.STUB_PW || 'pw'); await page.keyboard.press('Enter'); await page.waitForTimeout(3000); }
+await page.getByRole('button', { name: /ニュース/ }).first().click().catch(() => {});
+await page.waitForTimeout(2500);
+t = await txt();
+check('🔴 ピックアップ指定が無くても、いちばん新しい記事が大きく出る',
+  (await page.locator('[data-news-hero]').count()) === 1 && t.includes('いちばん新しいお知らせ'),
+  t.includes('いちばん新しいお知らせ') ? '注記あり' : '注記なし');
+check('指定が無いときは EDITOR\'S PICK を付けない（指定済みと区別する）', !t.includes("EDITOR'S PICK"));
 
 // ── 記事を開く ──────────────────────────────────────────
 await page.locator('[data-news-card="p1"] button').first().click();

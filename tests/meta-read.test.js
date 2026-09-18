@@ -4,7 +4,7 @@ import {
   normalizeMetric, normalizeMetrics, normalizeOverview, normalizeFreshness,
   buildTree, lastCompleteDays, connectionState, META_API_VERSION,
   looksLikeSample, currencySymbol, normalizeUnit, isCurrencyUnit,
-  parseAccountAllowList, declaredMode} from '../lib/meta-read.js';
+  parseAccountAllowList, declaredMode, modeConflictOf} from '../lib/meta-read.js';
 
 const FIXTURE = JSON.parse(fs.readFileSync(new URL('../fixtures/meta-overview-sample.json', import.meta.url), 'utf8'));
 
@@ -556,5 +556,66 @@ describe('🔴 金額指標（spend/cpc/cpm）は count / ratio を受け付け�
     expect(r.ok).toBe(true);
     expect(r.totals.spend.value).toBeNull();
     expect(r.totals.cpc.value).toBeNull();
+  });
+});
+
+// ── ③受入(第2回)で残った2件 ─────────────────────────────────────────
+// 1) 矛盾（mode=live / data_mode=sample）が warning なしで sample 扱いになっていた
+// 2) connectionState がサンプルでも mode:'live' を返していた（矛盾ケースに限らない）
+describe('🔴 申告の食い違いを明示し、接続表示を実データへ昇格させない', () => {
+  const ENV = { META_READ_API_BASE: 'https://platform.test', META_READ_API_KEY: 'k' };
+  const mk = (ov) => normalizeOverview({
+    api_version: 'meta-read-1', status: 'ok',
+    account: { id: 'act_1', currency: 'JPY' }, period: {},
+    totals: { spend: { value: 100, unit: 'JPY' } }, rows: [], ...ov,
+  });
+
+  it('modeConflictOf は live×sample の食い違いだけを拾う', () => {
+    expect(modeConflictOf({ mode: 'live', data_mode: 'sample' })).toBeTruthy();
+    expect(modeConflictOf({ mode: 'sample', data_mode: 'live' })).toBeTruthy();
+    expect(modeConflictOf({ mode: 'live', data_mode: 'live' })).toBeNull();
+    expect(modeConflictOf({ mode: 'live', data_mode: 'unknown' })).toBeNull();   // これは MODE_UNCONFIRMED 側
+    expect(modeConflictOf({ mode: 'live' })).toBeNull();
+  });
+
+  it('🔴 矛盾したときは notices に MODE_CONFLICT を出す（黙ってsample扱いにしない）', () => {
+    const r = mk({ mode: 'live', data_mode: 'sample' });
+    expect(r.isSample).toBe(true);
+    expect(r.modeConflict).toBeTruthy();
+    expect(r.notices.map(n => n.code)).toContain('MODE_CONFLICT');
+    expect(r.notices[0].severity).toBe('warning');
+    expect(r.notices[0].message).toContain('data_mode=sample');
+  });
+
+  it('矛盾が無ければ notices は空（余計な警告を出さない）', () => {
+    expect(mk({ mode: 'live', data_mode: 'live' }).notices).toEqual([]);
+    expect(mk({ _fixture: true, mode: 'live', data_mode: 'live' }).notices).toEqual([]);
+  });
+
+  it('🔴 矛盾した応答の接続表示を live にしない', () => {
+    const c = connectionState(ENV, mk({ mode: 'live', data_mode: 'sample' }));
+    expect(c.mode).not.toBe('live');
+    expect(c.mode).toBe('sample');
+    expect(c.code).toBe('MODE_CONFLICT');
+    expect(c.reason).toContain('食い違');
+  });
+
+  it('🔴 矛盾でなくても、サンプル応答の接続表示は live にしない', () => {
+    const c = connectionState(ENV, mk({ _fixture: true, mode: 'live', data_mode: 'live' }));
+    expect(c.mode).toBe('sample');
+    expect(c.code).toBe('SAMPLE_DATA');
+    expect(c.connected).toBe(true);        // 到達はできている（未接続とは区別する）
+  });
+
+  it('実データのときだけ live', () => {
+    expect(connectionState(ENV, mk({ mode: 'live', data_mode: 'live' })).mode).toBe('live');
+  });
+
+  it('未接続・エラーの判定は従来どおり（回帰）', () => {
+    expect(connectionState({}, null).mode).toBe('sample');
+    expect(connectionState({ META_READ_API_BASE: 'https://x' }, null).mode).toBe('sample');
+    const err = normalizeOverview({ api_version: 'meta-read-1', status: 'error', mode: 'live', data_mode: 'live',
+      error: { code: 'RATE_LIMITED', retryable: true } });
+    expect(connectionState(ENV, err).mode).toBe('error');
   });
 });

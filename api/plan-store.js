@@ -54,6 +54,9 @@ const KV_TOKEN = () => process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDI
 const SB_URL = () => process.env.SUPABASE_URL || '';
 const SB_KEY = () => process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || '';
 const GAS_URL = () => process.env.PLAN_GAS_URL || process.env.SETTLEMENT_GAS_URL || '';
+// どちらの環境変数が使われているか（設定の取り違えを切り分けるため。URL そのものは出さない）
+const GAS_SOURCE = () => (process.env.PLAN_GAS_URL ? 'PLAN_GAS_URL'
+  : (process.env.SETTLEMENT_GAS_URL ? 'SETTLEMENT_GAS_URL' : ''));
 const GOALS_KEY = 'naoru:plan:goals';
 const ACTIONS_KEY = 'naoru:plan:actions';
 const ALLOWANCE_KEY = 'naoru:allowance:v1'; // { submissions:[...], productivity:{…} } 旧形式。提出は追記ログ(ALLOWANCE_LOG_KEY)・生産性は別キー(ALLOWANCE_PROD_KEY)へ移行済み。ここはRollback用の写しとして維持
@@ -1787,7 +1790,11 @@ export default async function handler(req, res) {
         const j = await gasCall(gasUrl, 'POST', { action: 'readKnowledgeDoc', kind: src.kind, fileId: src.fileId, secret: knowledgeSecret });
         fetched = (j && j.ok) ? { ok: true, body: j.body, title: j.title }
           : { ok: false, error: String((j && (j.error || j.message)) || '取得できませんでした').slice(0, 300) };
-      } catch (e) { fetched = { ok: false, error: String((e && e.message) || e).slice(0, 300) }; }
+      } catch (e) {
+        // ⚠️ どの設定を使って失敗したかを添える。URL は出さない（設定名だけで切り分けられる）。
+        const msg = String((e && e.message) || e).slice(0, 200);
+        fetched = { ok: false, error: `${msg}（接続先の設定: ${GAS_SOURCE() || '未設定'}）` };
+      }
       const r = knowApplyFetched(doc, fetched);
       if (r.doc && typeof r.doc.body === 'string') r.doc.body = r.doc.body.slice(0, 40000);  // 保存上限に合わせる
       byId.set(String(doc.id), r.doc);

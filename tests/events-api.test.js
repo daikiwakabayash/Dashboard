@@ -274,3 +274,88 @@ describe('🔴 イベントのお知らせは、意味のあるときだけ1回'
     expect(metaRaw('n4').notified).toEqual({});
   });
 });
+
+// ── 過去の開催のふりかえり ────────────────────────────────────────
+describe('ふりかえり（レポート・写真・配布資料・録画）', () => {
+  const metaRaw = (id) => JSON.parse(store.get(`naoru:events:meta:${id}`) || 'null');
+
+  it('主催者は書ける', async () => {
+    // r1 の主催者は hq9。root は本部なので常に書ける
+    const r = await post({ action: 'recap_set', id: 'r1', recap: { note: '当日の様子です' } });
+    expect(r.body.ok).toBe(true);
+    expect(metaRaw('r1').recap.note).toBe('当日の様子です');
+  });
+
+  it('主催者でも本部でもない人は書けない', async () => {
+    const r = await post({ action: 'recap_set', id: 'r1', recap: { note: 'よその人' } }, SHOP());
+    expect(r.statusCode).toBe(403);
+    expect(metaRaw('r1')).toBe(null);
+  });
+
+  it('🔴 写真があるのに掲載許可が未確認なら保存しない', async () => {
+    const r = await post({ action: 'recap_set', id: 'r1', recap: { photoIds: ['img1'], consent: false } });
+    expect(r.body.ok).toBe(false);
+    expect(r.body.error).toBe('consent_unconfirmed');
+    expect(r.body.message).toContain('掲載許可');
+    expect(metaRaw('r1')).toBe(null);            // 書かれていない
+  });
+
+  it('許可を確かめれば写真も保存できる', async () => {
+    const r = await post({ action: 'recap_set', id: 'r1', recap: { photoIds: ['img1', 'img2'], consent: true } });
+    expect(r.body.ok).toBe(true);
+    expect(metaRaw('r1').recap.photoIds).toEqual(['img1', 'img2']);
+    expect(metaRaw('r1').recap.consent).toBe(true);
+  });
+
+  it('🔴 meta_set からはふりかえりを変えられない（掲載許可の確認を迂回させない）', async () => {
+    await post({ action: 'recap_set', id: 'r1', recap: { note: '正しいレポート' } });
+    const r = await post({ action: 'meta_set', id: 'r1', meta: { title: '題名', recap: { photoIds: ['sneaky'], note: 'すり替え' } } });
+    expect(r.body.ok).toBe(true);
+    expect(metaRaw('r1').title).toBe('題名');                 // 他の項目は変わる
+    expect(metaRaw('r1').recap.note).toBe('正しいレポート');   // ふりかえりは変わらない
+    expect(metaRaw('r1').recap.photoIds).toEqual([]);
+  });
+
+  it('録画は https のものだけ', async () => {
+    await post({ action: 'recap_set', id: 'r1', recap: { note: 'x', videoUrl: 'http://example.com/v' } });
+    expect(metaRaw('r1').recap.videoUrl).toBe('');
+    await post({ action: 'recap_set', id: 'r1', recap: { note: 'x', videoUrl: 'https://example.com/v' } });
+    expect(metaRaw('r1').recap.videoUrl).toBe('https://example.com/v');
+  });
+
+  it('空にして消せる', async () => {
+    await post({ action: 'recap_set', id: 'r1', recap: { note: 'あとで消す' } });
+    const r = await post({ action: 'recap_set', id: 'r1', recap: {} });
+    expect(r.body.ok).toBe(true);
+    expect(metaRaw('r1').recap.note).toBe('');
+  });
+
+  it('無い行には書けない', async () => {
+    const r = await post({ action: 'recap_set', id: 'zzz', recap: { note: 'x' } });
+    expect(r.statusCode).toBe(404);
+  });
+
+  it('ふりかえりを書いても、表の行は1バイトも変わらない', async () => {
+    const before = JSON.stringify(raw());
+    await post({ action: 'recap_set', id: 'r1', recap: { note: '当日の様子です' } });
+    expect(JSON.stringify(raw())).toBe(before);
+  });
+
+  it('写真と配布資料の実体は別キーに入る', async () => {
+    const img = await post({ action: 'uploadImage', dataUrl: 'data:image/png;base64,iVBORw0KGgo=' });
+    expect(img.body.ok).toBe(true);
+    expect(store.has(`naoru:chat:img:${img.body.id}`)).toBe(true);
+    const f = await post({ action: 'uploadFile', dataUrl: 'data:application/pdf;base64,AAAA', name: '資料.pdf', fileType: 'application/pdf' });
+    expect(f.body.ok).toBe(true);
+    expect(store.has(`naoru:board:file:${f.body.id}`)).toBe(true);
+    // 取り出せる
+    const got = await call({ method: 'GET', query: { type: 'events', file: f.body.id } });
+    expect(got.body.ok).toBe(true);
+    expect(got.body.name).toBe('資料.pdf');
+  });
+
+  it('画像でないものを画像として受け取らない', async () => {
+    const r = await post({ action: 'uploadImage', dataUrl: 'data:text/html;base64,PHNjcmlwdD4=' });
+    expect(r.statusCode).toBe(400);
+  });
+});

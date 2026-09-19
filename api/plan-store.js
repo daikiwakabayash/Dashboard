@@ -46,6 +46,8 @@ import {
   metaKey as evMetaKey, normalizeMeta as evNormalizeMeta, readEvent as evReadEvent,
   canPublish as evCanPublish, SECTION_KEYS as EVENT_SECTION_KEYS,
 } from '../lib/event-fields.js';
+import { normalizeRecap as evNormalizeRecap, recapReady as evRecapReady, hasRecap as evHasRecap,
+         RECAP_REASON as EV_RECAP_REASON } from '../lib/event-recap.js';
 import { parseSourceUrl as knowParseSource, isSyncable as knowSyncable,
   applyFetched as knowApplyFetched, markReviewed as knowMarkReviewed,
   syncSummary as knowSyncSummary } from '../lib/knowledge-sync.js';
@@ -2683,6 +2685,55 @@ export default async function handler(req, res) {
           chatOnly: evChatOnly(st, room), chatOnlyLabel: EV_CHAT_ONLY_LABEL });
       }
 
+      // ── 過去の開催のふりかえり（レポート・写真・配布資料・録画）────────────
+      // ⚠️ 書けるのは**主催者と本部だけ**（既存の編集権限と同じ）。
+      // ⚠️ 写真があるのに掲載許可が未確認なら**保存しない**。理由を返す（黙って落とさない）。
+      // ⚠️ 写真・資料の実体は別キー。ここにはIDだけを入れる。
+      if (req.method === 'POST' && action === 'recap_set') {
+        const rowId = String(body.id || '').slice(0, 64);
+        const sections = await loadSections();
+        const found = findRow(sections, rowId);
+        if (!found) return res.status(404).json({ ok: false, error: 'not_found' });
+        const prev = await blobGet(evMetaKey(rowId), hasKV, hasSB, gas).catch(() => null);
+        const ev = evReadEvent(found.row, found.section, prev);
+        if (!(isHq || (ev.ownerId && ev.ownerId === meId))) {
+          return res.status(403).json({ ok: false, error: 'forbidden', message: 'ふりかえりを書けるのは主催者と本部だけです' });
+        }
+        const recap = evNormalizeRecap({ ...(body.recap || {}), updatedAt: Date.now(), updatedBy: meId });
+        // 空にする（消す）のは許す。中身があるときだけ中身を確かめる。
+        if (evHasRecap(recap)) {
+          const chk = evRecapReady(recap);
+          if (!chk.ok) return res.status(200).json({ ok: false, error: chk.reason, message: EV_RECAP_REASON[chk.reason] || '保存できませんでした' });
+        }
+        const meta = evNormalizeMeta({ ...(prev || {}), recap });
+        await blobSet(evMetaKey(rowId), meta, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, id: rowId, recap: meta.recap });
+      }
+
+      // ふりかえりの写真・配布資料。⚠️ 実体は別キーへ。meta には入れない。
+      if (req.method === 'POST' && action === 'uploadImage' && body.dataUrl) {
+        const dataUrl = String(body.dataUrl);
+        if (!/^data:image\/(png|jpe?g|gif|webp);base64,/.test(dataUrl)) return res.status(400).json({ ok: false, error: 'bad_image' });
+        if (dataUrl.length > 3_500_000) return res.status(413).json({ ok: false, error: 'too_large' });
+        const id = genId('img');
+        await blobSet(CHAT_IMG_PREFIX + id, dataUrl, hasKV, hasSB, gas);   // 画像はチャットと同じ保存先を再利用
+        return res.status(200).json({ ok: true, id });
+      }
+      if (req.method === 'POST' && action === 'uploadFile' && body.dataUrl && body.name) {
+        const dataUrl = String(body.dataUrl);
+        if (!/^data:[^;]+;base64,/.test(dataUrl)) return res.status(400).json({ ok: false, error: 'bad_file' });
+        if (dataUrl.length > 6_000_000) return res.status(413).json({ ok: false, error: 'too_large' });
+        const id = genId('file');
+        await blobSet(BOARD_FILE_PREFIX + id, { name: String(body.name).slice(0, 120), type: String(body.fileType || ''), dataUrl }, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, id });
+      }
+      // 配布資料の取り出し: GET ?type=events&file=<id>
+      if (req.method === 'GET' && req.query.file) {
+        const f = await blobGet(BOARD_FILE_PREFIX + String(req.query.file), hasKV, hasSB, gas);
+        if (!f) return res.status(404).json({ ok: false, error: 'not_found' });
+        return res.status(200).json({ ok: true, ...f });
+      }
+
       // 行ごとの追加項目（題名・要約・対象・料金・カバー等）。
       // ⚠️ 編集は主催者と本部だけ。cells には触らない。
       if (req.method === 'POST' && action === 'meta_set') {
@@ -2695,7 +2746,10 @@ export default async function handler(req, res) {
         if (!(isHq || (ev.ownerId && ev.ownerId === meId))) {
           return res.status(403).json({ ok: false, error: 'forbidden', message: '編集できるのは主催者と本部だけです' });
         }
-        const meta = evNormalizeMeta({ ...(prev || {}), ...(body.meta || {}), updatedAt: Date.now(), updatedBy: meId });
+        // ⚠️ ふりかえりはここからは変えさせない（写真の掲載許可の確認を迂回されないため）。
+        //    変更は action:'recap_set' だけを通す。
+        const { recap: _ignoredRecap, ...metaIn } = (body.meta && typeof body.meta === 'object') ? body.meta : {};
+        const meta = evNormalizeMeta({ ...(prev || {}), ...metaIn, recap: (prev && prev.recap) || null, updatedAt: Date.now(), updatedBy: meId });
         // ⚠️ 中身が空のまま公開させない（空の予定が並ぶのを防ぐ）。
         if (meta.status === 'open') {
           const pub = evCanPublish(evReadEvent(found.row, found.section, meta));

@@ -557,6 +557,28 @@
         @media (min-width: 1024px) { .nowl-h1 { font-size: 42px; letter-spacing: -1.8px; line-height: 1.34; } }
         .nowl-lead { font-size: 12px; color: var(--nowl-muted); margin: 14px 0 0; line-height: 1.85; }
         @media (min-width: 1024px) { .nowl-lead { font-size: 13px; margin-top: 16px; } }
+        /* ── 業務AIの提案（既存の画面の中に置く小さな面）──────────────
+           ⚠️ 事実と見立てを見た目でも分ける。数値のそばには必ず但し書きを出す。 */
+        .ai-card { background: #fff; border: 1px solid #EAECF0; border-radius: 14px; padding: 16px 18px; }
+        .ai-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+        .ai-badge { font-size: 11px; font-weight: 800; color: #C43000; background: #FFF4EE; border: 1px solid #FFE4D6; border-radius: 999px; padding: 4px 11px; }
+        .ai-latin { font-size: 9px; letter-spacing: 1.6px; font-weight: 700; color: #98A2B3; }
+        .ai-fresh { margin-left: auto; font-size: 11px; font-weight: 700; color: #667085; }
+        .ai-fresh.old { color: #a73649; }
+        .ai-verdict { font-size: 13px; font-weight: 700; color: #667085; margin: 0; }
+        .ai-sec + .ai-sec { margin-top: 14px; padding-top: 14px; border-top: 1px solid #F2F4F7; }
+        .ai-sec h4 { display: flex; align-items: baseline; gap: 8px; font-size: 12px; font-weight: 800; color: #111827; margin: 0 0 8px; }
+        .ai-sec h4 span { font-size: 10px; font-weight: 700; color: #98A2B3; }
+        .ai-sec ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+        .ai-sec li { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
+        .ai-claim { flex: 1; min-width: 0; font-size: 13px; line-height: 1.75; color: #3f4149; }
+        .ai-val { font-size: 15px; font-weight: 800; color: #111827; white-space: nowrap; }
+        .ai-val.muted { font-size: 12px; font-weight: 700; color: #98A2B3; }
+        .ai-note { display: block; width: 100%; font-size: 10px; line-height: 1.7; color: #98A2B3; margin-top: 3px; }
+        .ai-needapv { font-size: 10px; font-weight: 800; color: #7a6034; background: #f6efe1; border-radius: 999px; padding: 4px 10px; white-space: nowrap; }
+        .ai-readonly { font-size: 10px; font-weight: 800; color: #667085; background: #F2F4F7; border-radius: 999px; padding: 4px 10px; white-space: nowrap; }
+        .ai-foot { font-size: 10px; line-height: 1.8; color: #98A2B3; margin: 10px 0 0; }
+
         /* ── NAORUニュース ファーストビュー ────────────────────────
            左にブランド色の面（言葉と操作）、右に写真。境目は斜めに切る。
            ⚠️ スマホは縦に積む（斜めのままだと文字が写真に食い込む）。 */
@@ -1368,6 +1390,70 @@
         const orgMapPathOf = (k) => ORG_MAP_PATHS[k] || ORG_MAP_PATHS.other;
         const ORG_MAP_NOTE = '地図は簡略化した飾りです（出典: Natural Earth／パブリックドメイン）。位置や距離を正確に示すものではありません。';
         const ORG_COLLAPSE_OVER = 12;
+
+        // ── 業務AIの回答（lib/ai-answer.js と同じ）────────────────────
+        // 正本の契約は naoru-ai-platform/AGENTS.md §3。
+        // ⚠️ 出典の無い主張は事実として出さない。未取得は 0 で埋めない。
+        // ⚠️ 外向きの操作はここでは実行しない。承認へ回すだけ。
+        const AI_AGENTS = [
+            { key: 'chief',     label: 'Chief of Staff',    ja: '経営の相談役',   screen: 'home' },
+            { key: 'marketing', label: 'Marketing Analyst', ja: '集客の分析',     screen: 'mktg' },
+            { key: 'finance',   label: 'Finance Analyst',   ja: 'お金の分析',     screen: 'planning' },
+            { key: 'storerisk', label: 'Store Risk Agent',  ja: '店舗の変化検知', screen: 'zenkanri' },
+            { key: 'sns',       label: 'SNS Intelligence',  ja: 'SNSの企画',      screen: 'creative' },
+            { key: 'content',   label: 'Content Studio',    ja: '制作',           screen: 'creative' },
+            { key: 'product',   label: 'Product Engineer',  ja: '開発',           screen: 'settings' },
+            { key: 'knowledge', label: 'Knowledge Manager', ja: '資料の整理',     screen: 'knowledge' },
+        ];
+        const aiAgentOf = (k) => AI_AGENTS.find(a => a.key === String(k || '')) || null;
+        const AI_OUTWARD = ['meta_budget_change', 'meta_pause', 'meta_resume', 'creative_replace', 'knowledge_publish', 'sns_post', 'lp_change'];
+        const aiNeedsApproval = (a) => {
+            const kind = String((a && a.kind) || '');
+            if (!kind) return true;                      // ⚠️ 分からない種別は承認が要る側に倒す
+            return AI_OUTWARD.includes(kind) || !kind.startsWith('read_');
+        };
+        const aiDisplayValue = (c) => {
+            const v = (c && c.value);
+            if (v === null || v === undefined || v === '' || !Number.isFinite(Number(v))) return '未取得';
+            const n = Number(v);
+            const t = Math.abs(n) >= 1000 ? Math.round(n).toLocaleString('ja-JP') : String(n);
+            return c.unit ? `${t}${c.unit}` : t;
+        };
+        const aiClaimNote = (c, citations) => {
+            const list = Array.isArray(citations) ? citations : [];
+            const ids = Array.isArray(c && c.citationIds) ? c.citationIds : [];
+            const names = ids.map(id => (list.find(x => x && x.id === id) || {}).label || id).filter(Boolean);
+            return [`対象期間: ${(c && c.period) || '不明'}`, `出典: ${names.length ? names.join('・') : '不明'}`,
+                    `集計定義: ${(c && c.defVersion) || '不明'}`].join(' / ');
+        };
+        const aiFreshnessLabel = (f, now) => {
+            const at = Number(f && f.at);
+            if (!Number.isFinite(at) || at <= 0) return '更新日時が不明';
+            const sec = Math.max(0, Math.floor(((now || Date.now()) - at) / 1000));
+            if (sec < 60) return 'たった今の情報';
+            if (sec < 3600) return `${Math.floor(sec / 60)}分前の情報`;
+            if (sec < 86400) return `${Math.floor(sec / 3600)}時間前の情報`;
+            return `${Math.floor(sec / 86400)}日前の情報`;
+        };
+        const aiIsStale = (f, now, maxAgeMs) => {
+            const at = Number(f && f.at);
+            if (!Number.isFinite(at) || at <= 0) return true;   // ⚠️ 分からなければ「古いかも」側
+            return ((now || Date.now()) - at) > (maxAgeMs || 24 * 3600 * 1000);
+        };
+        const aiVerdict = (a) => {
+            const st = String((a && a.status) || 'queued');
+            if (st === 'failed' || st === 'cancelled') return 'failed';
+            if (st === 'queued' || st === 'running') return 'running';
+            const facts = Array.isArray(a && a.facts) ? a.facts : [];
+            const hyp = Array.isArray(a && a.hypotheses) ? a.hypotheses : [];
+            const acts = Array.isArray(a && a.proposedActions) ? a.proposedActions : [];
+            const miss = Array.isArray(a && a.missingData) ? a.missingData : [];
+            if (!facts.length && !hyp.length && !acts.length) return 'insufficient';
+            if (!facts.length && miss.length) return 'insufficient';
+            return 'ok';
+        };
+        const AI_VERDICT_LABEL = { ok: '', insufficient: '判断できませんでした（根拠が足りません）',
+            running: '調べています…', failed: '取得できませんでした' };
 
         // ── NAORUニュース: ファーストビュー（lib/news-hero.js と同じ）────────
         const NEWS_HERO_DEFAULT = {
@@ -5562,6 +5648,112 @@
             const [chatPanel, setChatPanel] = useState('');       // '' | 'members' | 'settings'（会話ヘッダーのパネル）
             const [chatMemberQ, setChatMemberQ] = useState('');   // メンバー招待の検索
             const [chatRenameVal, setChatRenameVal] = useState(null); // 名前編集中の値（nullで非編集）
+
+            // ── 業務AIの回答（既存の画面の中に出す）────────────────────────
+            // ⚠️ ①は回答を作らない。③が入れたものだけを出す。
+            //    入っていなければ何も出さない（それらしい提案を並べない）。
+            const [aiAnswers, setAiAnswers] = useState({});      // { screen: [answer] }
+            const aiLoadedRef = useRef({});
+            const aiLoad = async (screen) => {
+                if (!screen || aiLoadedRef.current[screen]) return;
+                aiLoadedRef.current[screen] = true;
+                try {
+                    const r = await fetch(`/api/plan-store?type=aianswer&screen=${encodeURIComponent(screen)}`, { cache: 'no-store', headers: ccAuthHeaders() });
+                    const j = await r.json().catch(() => null);
+                    if (j && j.ok) setAiAnswers(p => ({ ...p, [screen]: Array.isArray(j.answers) ? j.answers : [] }));
+                } catch { /* 取れなければ何も出さない */ }
+            };
+
+            /**
+             * 担当AIの提案パネル。**既存の画面の中**に置く（別画面を作らない）。
+             * ⚠️ ③が回答を入れていなければ何も出さない。
+             * ⚠️ 事実と仮説を分けて出す。数値には対象期間・出典・集計定義を必ず添える。
+             * ⚠️ 取れていない項目は「未取得」と出す（0 で埋めない）。
+             * ⚠️ 外向きの操作はここでは実行しない。承認へ回すだけ。
+             */
+            const AiPanel = ({ screen }) => {
+                React.useEffect(() => { aiLoad(screen); }, [screen]);
+                if (!ccOn('cc_ai_agents')) return null;
+                const list = (aiAnswers[screen] || []).filter(Boolean);
+                if (!list.length) return null;               // ⚠️ 空の枠を作らない
+                const now = Date.now();
+                return (
+                    <div data-ai-panel={screen} className="flex flex-col gap-3 mb-5">
+                        {list.map(a => {
+                            const ag = aiAgentOf(a.agent);
+                            if (!ag) return null;
+                            const v = aiVerdict(a);
+                            const cits = Array.isArray(a.citations) ? a.citations : [];
+                            const facts = Array.isArray(a.facts) ? a.facts : [];
+                            const hyp = Array.isArray(a.hypotheses) ? a.hypotheses : [];
+                            const miss = Array.isArray(a.missingData) ? a.missingData : [];
+                            const acts = Array.isArray(a.proposedActions) ? a.proposedActions : [];
+                            const stale = aiIsStale(a.freshness, now);
+                            return (
+                                <section key={a.agent} data-ai-answer={a.agent} className="ai-card">
+                                    <div className="ai-head">
+                                        <span className="ai-badge">{ag.ja}</span>
+                                        <span className="ai-latin">{ag.label}</span>
+                                        {/* ⚠️ いつ時点の情報かを必ず出す。分からなければ「不明」と出す */}
+                                        <span data-ai-fresh className={`ai-fresh${stale ? ' old' : ''}`}>{aiFreshnessLabel(a.freshness, now)}</span>
+                                    </div>
+
+                                    {v !== 'ok' ? (
+                                        <p data-ai-verdict className="ai-verdict">{AI_VERDICT_LABEL[v]}
+                                            {a.error ? <span className="block text-[11px] text-[#98A2B3] mt-1">{a.error}</span> : null}</p>
+                                    ) : (<>
+                                        {facts.length > 0 && (
+                                            <div data-ai-facts className="ai-sec">
+                                                <h4>わかっていること<span>出典のある事実</span></h4>
+                                                <ul>
+                                                    {facts.map((f, i) => (
+                                                        <li key={i}>
+                                                            <span className="ai-claim">{f.text}</span>
+                                                            {f.value !== null && f.value !== undefined && <b className="ai-val">{aiDisplayValue(f)}</b>}
+                                                            <small data-ai-note className="ai-note">{aiClaimNote(f, cits)}</small>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        )}
+                                        {hyp.length > 0 && (
+                                            <div data-ai-hypotheses className="ai-sec">
+                                                <h4>AIの見立て<span>まだ裏が取れていません</span></h4>
+                                                <ul>{hyp.map((h, i) => <li key={i}><span className="ai-claim">{h.text}</span></li>)}</ul>
+                                            </div>
+                                        )}
+                                        {miss.length > 0 && (
+                                            <div data-ai-missing className="ai-sec">
+                                                <h4>取れていないもの<span>0 では埋めていません</span></h4>
+                                                <ul>{miss.map((m, i) => <li key={i}><span className="ai-claim">{m}<b className="ai-val muted">未取得</b></span></li>)}</ul>
+                                            </div>
+                                        )}
+                                        {acts.length > 0 && (
+                                            <div data-ai-actions className="ai-sec">
+                                                <h4>やってはどうか<span>AIは実行しません</span></h4>
+                                                <ul>
+                                                    {acts.map((p2, i) => (
+                                                        <li key={p2.id || i} data-ai-action={p2.kind || 'unknown'}>
+                                                            <span className="ai-claim">{p2.title}{p2.why ? <small className="ai-note">{p2.why}</small> : null}</span>
+                                                            {aiNeedsApproval(p2)
+                                                                ? <span className="ai-needapv">人の承認が要ります</span>
+                                                                : <span className="ai-readonly">読み取りのみ</span>}
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                                <p className="ai-foot">※ ここから実行はできません。承認センターで内容を確かめてから実行します。</p>
+                                            </div>
+                                        )}
+                                        {cits.length > 0 && (
+                                            <p data-ai-citations className="ai-foot">出典: {cits.map(c => `${c.label}${c.current ? '' : '（過去版）'}`).join('・')}</p>
+                                        )}
+                                    </>)}
+                                </section>
+                            );
+                        })}
+                    </div>
+                );
+            };
 
             // ── ニュース（全社発信） ────────────────────────────────────────
             const [boardData, setBoardData] = useState({ posts: [], reads: {}, hero: null, version: 0, configured: true, loaded: false });
@@ -18319,6 +18511,9 @@
                                             </div>
                                         </div>
 
+                                        {/* 担当AI（Marketing Analyst）の提案。⚠️ ③が入れていなければ何も出ない */}
+                                        <AiPanel screen="mktg" />
+
                                         {/* Filters Row */}
                                         {mktData.length > 0 && (
                                             <div className="flex flex-wrap items-end gap-2 pt-2 border-t border-slate-100">
@@ -23050,6 +23245,9 @@
                                         </div>
                                     )}
 
+                                    {/* 担当AI（Chief of Staff）の提案。⚠️ ③が入れていなければ何も出ない */}
+                                    <AiPanel screen="home" />
+
                                     {/* 重要指標 */}
                                     <div className="nowl-sechead">
                                         <h2>重要指標 <span>KEY METRICS</span></h2>
@@ -25456,6 +25654,7 @@
                                             ['cc_ai_trial', '@AI 検証', '本部・管理者のみ。許可した検証用ルームだけでAIが答えます'],
                                             ['cc_creative_library', 'クリエイティブ', '本部・管理者のみ。⚠️ 先に CREATIVE_ASSET_KEY（32文字以上）の登録が必要です'],
                                             ['cc_home', '経営ホーム', '本部・管理者のみ。重要指標・要確認の店舗・承認待ちを1画面に'],
+                                            ['cc_ai_agents', '業務AIの提案', '既存の画面の中に、担当AIの提案と承認導線を出します。⚠️ ③が接続するまで何も出ません'],
                                         ].map(([k, label, note]) => (
                                             <div key={k} className="flex items-center gap-3 py-1.5">
                                                 <span className="text-[13px] font-bold text-slate-800 flex-1">

@@ -191,7 +191,7 @@ check('見出しが出る', fvTxt.includes('この仲間と、') && fvTxt.includ
 check('理念の言葉が出る', fvTxt.includes('元気な社会を創造する。'));
 check('肩書きが出る', fvTxt.includes('NAORU NEWS / ONE TEAM'));
 check('しめの言葉が出る', fvTxt.includes('ともにつくる。'));
-check('写真が未設定でも成り立つ（空の面にしない）', (await page.locator('[data-news-fv-noimg]').count()) === 1);
+check('写真が未設定でも、同梱の集合写真で成り立つ（空の面にしない）', (await page.locator('[data-news-fv-default]').count()) === 1);
 check('🔴 「お知らせを投稿」が押せる形で出ている', (await page.locator('[data-news-fv-post]').count()) === 1);
 await page.locator('[data-news-fv-post]').first().click();
 await page.waitForTimeout(900);
@@ -221,7 +221,7 @@ check('保存すると差し替えの画面が閉じる', (await page.locator('[
 check('サーバーに写真と掲載許可が届いている', !!(hero && hero.imgId) && hero.consent === true);
 await page.evaluate(() => { window.scrollTo(0, 0); for (const el of document.querySelectorAll('*')) { if (el.scrollTop > 0) el.scrollTop = 0; } });
 await page.waitForTimeout(700);
-check('写真が出るようになる（「まだ設定されていません」が消える）', (await page.locator('[data-news-fv-noimg]').count()) === 0);
+check('差し替えた写真に入れ替わる（既定の写真が消える）', (await page.locator('[data-news-fv-default]').count()) === 0);
 
 // ── 下書き → 下見 → 投稿 ──────────────────────────────────
 await page.getByRole('button', { name: /お知らせを投稿/ }).first().click();

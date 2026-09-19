@@ -144,6 +144,7 @@ const maps = await page.locator('.org-map path').count();
 check('飾りの地図が描かれている', maps >= 9, `${maps} 枚`);
 const box = await page.locator('[data-org-band="hokkaido"] .org-map').first().boundingBox();
 check('地図に大きさがある（潰れていない）', !!box && box.width > 40 && box.height > 40, box ? `${Math.round(box.width)}x${Math.round(box.height)}` : 'なし');
+check('🔴 組織図に「当月売上で絞る」を出さない', !(await txt()).includes('当月売上で絞る'));
 check('🔴 「正確な地図ではない」と画面に書いてある', t.includes('位置や距離を正確に示すものではありません'));
 
 // ── 索引 ────────────────────────────────────────────────

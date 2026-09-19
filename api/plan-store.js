@@ -67,6 +67,8 @@ import { normalizeStatus as newsStatus, isDraft as newsIsDraft, visibleFor as ne
          DRAFT as NEWS_DRAFT, PUBLISHED as NEWS_PUBLISHED } from '../lib/news-archive.js';
 import { HERO_KEY as NEWS_HERO_KEY, normalizeHero as newsNormalizeHero, canEditHero as newsCanEditHero,
          heroReady as newsHeroReady, HERO_REASON as NEWS_HERO_REASON } from '../lib/news-hero.js';
+import { normalizeAnswer as aiNormalizeAnswer, demoteUncited as aiDemoteUncited,
+         AGENT_KEYS as AI_AGENT_KEYS, agentOf as aiAgentOf } from '../lib/ai-answer.js';
 import { prKey as boardPrKey, normalizePr, markRead as boardMarkRead, markAck as boardMarkAck,
          postStatus as boardPostStatus, canSeeDetail as boardCanSeeDetail, outOfAudience as boardOutOfAudience } from '../lib/board-status.js';
 // ── Command Center（Phase 0〜2）。既存の type= には一切触れない追加のみ ──
@@ -366,6 +368,7 @@ export default async function handler(req, res) {
     'push',         // Webプッシュ購読（個人の端末・通知設定。未認証で他人のstaffIdを名乗れないようにする）
     'blobcheck',    // 添付保存先の設定状況（インフラ情報）
     'setupstatus',  // 設定状況（どの環境変数が入っているか。⚠️ 値そのものは返さない）
+    'aianswer',     // 業務AIの回答（③が入れる。⚠️ 書けるのはエージェント用トークンとrootだけ）
   ];
   const reqType = (req.method === 'GET' ? req.query.type : (req.body || {}).type);
   let chatActor = null;
@@ -474,6 +477,65 @@ export default async function handler(req, res) {
   //    既存データの参照先が変わると社内の運用が壊れるため、新規キーのみ対象。
   const CC_ENV = String(process.env.VERCEL_ENV || process.env.CC_ENV || 'development');
   const ccKey = (base) => (CC_ENV === 'production' ? base : `${base}:${CC_ENV}`);
+
+  // ── 業務AIの回答: ?type=aianswer ───────────────────────────────
+  // 正本の契約は naoru-ai-platform/AGENTS.md §3。ここは①側の**受け皿**。
+  //
+  // ⚠️ ③の生成APIはまだ接続していない。ここは「入れ物」であり、
+  //    ①が回答を作ることはない（作れば、それは根拠の無い主張になる）。
+  // ⚠️ 書けるのは**エージェント用トークン（CC_AGENT_TOKEN）と root だけ**。
+  //    画面から名乗るだけでは書けない。
+  // ⚠️ サーバー側で形を検証する（AGENTS.md §3「出力形式をサーバー側で検証する」）。
+  //    **出典の無い主張・モデルが作った値は、保存の時点で事実から仮説へ落とす。**
+  //    落とした経緯は demoted に残す（黙って捨てない）。
+  if (reqType === 'aianswer') {
+    const AI_KEY = ccKey('naoru:cc:aianswer:v1');
+    const AI_CAP = 200;
+    if (req.method === 'GET') {
+      const all = (await blobGet(AI_KEY, hasKV, hasSB, gas).catch(() => null)) || {};
+      const agent = String(req.query.agent || '').slice(0, 40);
+      if (agent) {
+        if (!AI_AGENT_KEYS.includes(agent)) return res.status(400).json({ ok: false, error: 'unknown_agent' });
+        return res.status(200).json({ ok: true, answers: agent in all ? [all[agent]] : [], configured: true });
+      }
+      // 画面ごとに引く（どの画面にどの担当を出すかは lib/ai-answer.js が持つ）
+      const screen = String(req.query.screen || '').slice(0, 40);
+      const keys = screen ? AI_AGENT_KEYS.filter(k => (aiAgentOf(k) || {}).screen === screen) : AI_AGENT_KEYS;
+      return res.status(200).json({ ok: true, answers: keys.map(k => all[k]).filter(Boolean), configured: true });
+    }
+    const body = req.body || {};
+    if (body.action === 'put' && body.answer) {
+      // ⚠️ サーバー間（③）か root だけ。名乗りは信用しない。
+      const isAgent = !!chatActor && chatActor.verified === true && chatActor.source === 'agent';
+      const isRoot = !!chatActor && chatActor.verified === true && chatActor.role === 'root';
+      if (!isAgent && !isRoot) {
+        return res.status(403).json({ ok: false, error: 'forbidden', code: 'agent_or_root',
+          message: '業務AIの回答を入れられるのは、サーバー間のトークンと管理者だけです' });
+      }
+      const a0 = aiNormalizeAnswer(body.answer);
+      if (!a0.agent) return res.status(400).json({ ok: false, error: 'unknown_agent', message: '担当が分かりません' });
+      // 🔴 ここが要。出典の無い主張は保存の時点で事実から外す。
+      const { answer, demoted } = aiDemoteUncited(a0);
+      const rec = { ...answer, demoted: demoted.map(d => ({ text: d.claim.text, reason: d.reason })).slice(0, 30),
+                    receivedAt: Date.now(), receivedFrom: isAgent ? 'agent' : 'root' };
+      const all = (await blobGet(AI_KEY, hasKV, hasSB, gas).catch(() => null)) || {};
+      const next = { ...all, [answer.agent]: rec };
+      // 担当は8人ぶんしか無いので上限には掛からないが、念のため
+      const keys = Object.keys(next).slice(-AI_CAP);
+      await blobSet(AI_KEY, Object.fromEntries(keys.map(k => [k, next[k]])), hasKV, hasSB, gas);
+      return res.status(200).json({ ok: true, agent: answer.agent, demoted: rec.demoted });
+    }
+    if (body.action === 'clear' && body.agent) {
+      const isRoot = !!chatActor && chatActor.verified === true && chatActor.role === 'root';
+      if (!isRoot) return res.status(403).json({ ok: false, error: 'forbidden', code: 'root_only' });
+      const all = (await blobGet(AI_KEY, hasKV, hasSB, gas).catch(() => null)) || {};
+      delete all[String(body.agent).slice(0, 40)];
+      await blobSet(AI_KEY, all, hasKV, hasSB, gas);
+      return res.status(200).json({ ok: true });
+    }
+    return res.status(400).json({ ok: false, error: 'invalid aianswer action' });
+  }
+
 
   // ── @AI 実接続（検証用・本部/root限定）────────────────────────────────
   // 契約: CHAT_AI_API_CONTRACT.md（②合意版 7a02420）。

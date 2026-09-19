@@ -86,6 +86,7 @@ import {
   sendKey as drSendKey, contentHash as drContentHash, shouldSend as drShouldSend, recordSent as drRecordSent,
   detectAggregationRun as drDetectAggregationRun, advanceObservation as drAdvanceObservation,
   planRun as drPlanRun, normalizeSummary as drNormalizeSummary, normalizeChannels as drNormalizeChannels,
+  normalizeStaff as drNormalizeStaff,
 } from '../lib/daily-report.js';
 import { ANALYTICS_BASE as SO_ANALYTICS_BASE, buildUpstreamUrl as soBuildUpstreamUrl } from '../lib/salonone.js';
 import { AUDIT_KEY, AUDIT_CAP, buildEntry as buildAuditEntry, listEntries as listAuditEntries } from '../lib/audit.js';
@@ -628,13 +629,15 @@ export default async function handler(req, res) {
     const drBuild = async (setting, phase, ymd) => {
       const needSales = phase !== DR_PREP;                 // オープン前はまだ売上が無い
       const mr = drMonthRange(setting.targetMonth);
+      const dayQ = { from: ymd, to: ymd, shop_id: setting.shopId };
       // 集客の累計は対象月の範囲で取る。対象月が未設定なら当日のみ（勝手な範囲を作らない）。
-      const chQ = (phase === DR_OPEN || !mr)
-        ? { from: ymd, to: ymd, shop_id: setting.shopId }
-        : { from: mr.from, to: mr.to, shop_id: setting.shopId };
-      const [sumRaw, chRaw] = await Promise.all([
-        needSales ? drSoGet('sales/summary', { from: ymd, to: ymd, shop_id: setting.shopId }) : Promise.resolve(null),
-        drSoGet('marketing/by-channel', chQ),
+      const chQ = (phase === DR_OPEN || !mr) ? dayQ : { from: mr.from, to: mr.to, shop_id: setting.shopId };
+      // プレオープン日報はセラピスト別の横並びが主役なので by-staff も取る。
+      const needStaff = phase === DR_PREOPEN;
+      const [sumRaw, chRaw, stRaw] = await Promise.all([
+        needSales ? drSoGet('sales/summary', dayQ) : Promise.resolve(null),
+        needStaff ? Promise.resolve(null) : drSoGet('marketing/by-channel', chQ),
+        needStaff ? drSoGet('marketing/by-staff', dayQ) : Promise.resolve(null),
       ]);
       // 店舗別の広告費（既存の ?type=adspend ストア）。対象月ぶんだけ。
       let spend = null;
@@ -647,11 +650,14 @@ export default async function handler(req, res) {
         } catch (_) { spend = null; }
       }
       const snaps = await drLoadSnaps();
+      // sales/summary の by_staff（売上・Google口コミ）と marketing/by-staff を突き合わせる
+      const byStaff = (sumRaw && (sumRaw.by_staff || sumRaw.byStaff)) || null;
       return drBuildReport(phase, {
         shopId: setting.shopId,
         shopName: setting.shopName || setting.shopId,
         ymd, setting,
         summary: needSales ? drNormalizeSummary(sumRaw) : null,
+        staff: needStaff ? drNormalizeStaff(byStaff, stRaw) : null,
         channels: drNormalizeChannels(chRaw),
         prevSnap: snaps[String(setting.shopId)] || null,
         spend,

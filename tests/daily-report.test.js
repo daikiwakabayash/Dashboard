@@ -6,6 +6,7 @@ import {
   normalizeShopSetting, normalizeSettings, targetsFor, settingReady,
   yen, people, percent, rate, signed, sumStrict, footer,
   snapshotOf, dailyDelta, normalizeSpend, spendTotal, cpa,
+  normalizeStaff, buildStaffTable, preOpenDayLabel,
   buildPrepReport, buildPreOpenReport, buildOpenReport, buildReport, reportReady,
   sendKey, contentHash, alreadySent, shouldSend, recordSent,
   detectAggregationRun, advanceObservation, planRun,
@@ -353,26 +354,144 @@ describe('① オープン前 集客レポート（prep）', () => {
   });
 });
 
-describe('② プレオープン期間（preopen）', () => {
+describe('② プレオープン日報（preopen）', () => {
+  // 見本（03 / 比較テーブル型）と同じ数字
+  const STAFF = () => ([
+    { id: 'a', name: 'スタッフA', sales: 32000, booking: 7, visit: 5, cancel: 2, join: 1, repeat: 5, prepaid: 4, review: 2 },
+    { id: 'b', name: 'スタッフB', sales: 57750, booking: 8, visit: 8, cancel: 0, join: 3, repeat: 6, prepaid: 5, review: 3 },
+  ]);
   const r = buildPreOpenReport({
-    setting: PREP_SETTING, shopName: 'テスト院', ymd: '2026-09-28',
-    summary: summary(), channels: CH(), prevSnap: PREV(), fetchedAt: AT,
+    setting: PREP_SETTING, shopName: 'テスト院', ymd: '2026-09-27',
+    summary: { grossSales: 89750 }, staff: STAFF(),
+    fetchedAt: Date.UTC(2026, 8, 27, 9, 42),        // 18:42 JST
   });
-  it('プレオープン専用の見出し', () => {
-    expect(r.card.title).toBe('プレオープン 日次レポート');
-    expect(r.kind).toBe(PREOPEN);
+
+  it('見本と同じ見出し・対象日・集計時刻', () => {
+    expect(r.card.title).toBe('プレオープン日報');
+    expect(r.card.atLabel).toBe('対象日：2026/09/27（日）');
+    expect(r.card.atRight).toBe('集計実行 18:42・当日時点');
   });
-  it('🔴 当日の実績が出る（施術が始まっているため）', () => {
-    expect(r.text).toContain('売上 ¥482,000');
-    expect(r.text).toContain('来店 24名（新規 6名 ／ 既存 18名）');
+  it('🔴 プレオープン何日目かが出る', () => {
+    expect(r.card.badge).toBe('プレオープン初日');
+    expect(preOpenDayLabel('2026-09-27', '2026-09-28')).toBe('プレオープン2日目');
+    expect(preOpenDayLabel('', '2026-09-28')).toBe('プレオープン');
+    expect(preOpenDayLabel('2026-09-27', '2026-09-26')).toBe('プレオープン');   // 前日は数えない
   });
-  it('本オープンに向けた集客も出る', () => {
-    expect(r.card.goal.current).toBe(96);
-    expect(r.card.goal.headline).toBe('本オープンまで、あと54名');
-    expect(r.text).toContain('本オープン 10/1(木)');
+  it('本日売上と内訳が帯に出る', () => {
+    expect(r.card.highlight.value).toBe(89750);
+    expect(r.card.highlight.note).toBe('新規来店13名・入会4名・次回予約11名');
   });
-  it('🔴 確定前の可能性を断る', () => {
-    expect(r.text).toContain('確定前の値になることがあります');
+  it('セラピストが列に並ぶ', () => {
+    // 並び順は取り込み側（normalizeStaff）の責任。ここは渡した順のまま列になる。
+    expect(r.card.table.staff.map(x => x.name)).toEqual(['スタッフA', 'スタッフB']);
+  });
+  it('🔴 見本の10行がそろっている', () => {
+    expect(r.card.table.rows.map(x => x.label)).toEqual([
+      '本日売上（税抜）', '当日予約数（取消を含む）', '新規来店数', 'キャンセル数', '入会人数',
+      '入会率', 'リピート数（次回予約）', 'リピート率', '前金あり', 'Google口コミ',
+    ]);
+  });
+  it('🔴 店舗合計は見本と一致する', () => {
+    const t = Object.fromEntries(r.card.table.rows.map(x => [x.label, x.total]));
+    expect(t['本日売上（税抜）']).toBe(89750);
+    expect(t['当日予約数（取消を含む）']).toBe(15);
+    expect(t['新規来店数']).toBe(13);
+    expect(t['キャンセル数']).toBe(2);
+    expect(t['入会人数']).toBe(4);
+    expect(t['リピート数（次回予約）']).toBe(11);
+    expect(t['前金あり']).toBe(9);
+    expect(t['Google口コミ']).toBe(5);
+  });
+  it('🔴 率は合計から計算し直す（平均しない）', () => {
+    const t = Object.fromEntries(r.card.table.rows.map(x => [x.label, x.total]));
+    expect(Math.round(t['入会率'] * 10) / 10).toBe(30.8);      // 4 ÷ 13
+    expect(Math.round(t['リピート率'] * 10) / 10).toBe(84.6);  // 11 ÷ 13
+    const join = r.card.table.rows.find(x => x.label === '入会率');
+    expect(join.values.map(v => Math.round(v * 10) / 10)).toEqual([20, 37.5]);   // A, B の順
+  });
+  it('🔴 計算の定義を必ず添える', () => {
+    expect(r.card.notes).toEqual([
+      '入会率＝入会人数 ÷ 新規来店数',
+      'リピート率＝次回予約獲得人数 ÷ 新規来店数（再来店数とは別）',
+      '売上：SalonOneの当日計上額・税抜　／　前金あり・口コミは当日獲得人数',
+    ]);
+  });
+  it('🔴 「集計実行」の後に出していると断る', () => {
+    expect(r.card.footer.schedule).toContain('「集計実行」の完了後');
+    expect(r.text).toContain('その後に会計が動くと数字が変わることがあります');
+  });
+  it('文字だけでも読める形になっている', () => {
+    expect(r.text).toContain('【プレオープン日報】テスト院　プレオープン初日');
+    expect(r.text).toContain('本日売上 ¥89,750');
+    expect(r.text).toContain('入会率　20% ／ 37.5%　＝ 30.8%');
+  });
+
+  it('🔴 次回予約・前金が取れなければ「未取得」（0名と書かない）', () => {
+    const noRepeat = STAFF().map(x => ({ ...x, repeat: null, prepaid: null }));
+    const t = buildPreOpenReport({ setting: PREP_SETTING, ymd: '2026-09-27',
+      summary: { grossSales: 89750 }, staff: noRepeat, fetchedAt: AT });
+    const rows = Object.fromEntries(t.card.table.rows.map(x => [x.label, x.total]));
+    expect(rows['リピート数（次回予約）']).toBe(null);
+    expect(rows['リピート率']).toBe(null);
+    expect(t.card.highlight.note).toContain(`次回予約${NOT_FETCHED}`);
+    expect(t.missing).toContain('次回予約数（取得元が未確認）');
+    expect(t.missing).toContain('前金あり（取得元が未確認）');
+    expect(t.text).not.toContain('次回予約0名');
+  });
+  it('🔴 1人でも欠けていれば合計を出さない', () => {
+    const half = STAFF(); half[0].visit = null;
+    const t = buildPreOpenReport({ setting: PREP_SETTING, ymd: '2026-09-27', staff: half, fetchedAt: AT });
+    const rows = Object.fromEntries(t.card.table.rows.map(x => [x.label, x.total]));
+    expect(rows['新規来店数']).toBe(null);
+    expect(rows['入会率']).toBe(null);
+  });
+  it('セラピスト別が取れなければ missing に積む', () => {
+    const t = buildPreOpenReport({ setting: PREP_SETTING, ymd: '2026-09-27', staff: null, fetchedAt: AT });
+    expect(t.missing).toContain('セラピスト別の実績');
+    expect(t.text).toContain(NOT_FETCHED);
+  });
+  it('入力が空でも落ちない', () => {
+    expect(typeof buildPreOpenReport({}).text).toBe('string');
+  });
+});
+
+describe('セラピスト別の取り込み（2つの応答を突き合わせる）', () => {
+  const SUM_BY_STAFF = [
+    { staff_id: 1, staff_name: 'スタッフA', digest_sales: 32000, google_review_count: 2 },
+    { staff_id: 2, staff_name: 'スタッフB', digest_sales: 57750, google_review_count: 3 },
+  ];
+  const MK_BY_STAFF = [
+    { staff_id: 0, is_total: true, new_booking_count: 15, new_visit_count: 13 },
+    { staff_id: 1, staff_name: 'スタッフA', new_booking_count: 7, new_visit_count: 5, cancel_count: 2, purchase_count: 1 },
+    { staff_id: 2, staff_name: 'スタッフB', new_booking_count: 8, new_visit_count: 8, cancel_count: 0, purchase_count: 3 },
+  ];
+  it('staff_id で2つの応答が1人にまとまる', () => {
+    const rows = normalizeStaff(SUM_BY_STAFF, MK_BY_STAFF);
+    const a = rows.find(x => x.id === '1');
+    expect(a).toMatchObject({ name: 'スタッフA', sales: 32000, review: 2, booking: 7, visit: 5, cancel: 2, join: 1 });
+  });
+  it('🔴 合計行（is_total）は列にしない（二重に数えない）', () => {
+    expect(normalizeStaff(SUM_BY_STAFF, MK_BY_STAFF).map(x => x.id)).toEqual(['2', '1']);
+  });
+  it('🔴 確認できていない項目は null のまま（推測で埋めない）', () => {
+    const rows = normalizeStaff(SUM_BY_STAFF, MK_BY_STAFF);
+    expect(rows[0].repeat).toBe(null);
+    expect(rows[0].prepaid).toBe(null);
+  });
+  it('将来その項目が返ってくれば拾える', () => {
+    const rows = normalizeStaff(SUM_BY_STAFF, [{ staff_id: 1, next_booking_count: 5, prepaid_count: 4 }]);
+    const a = rows.find(x => x.id === '1');
+    expect(a.repeat).toBe(5);
+    expect(a.prepaid).toBe(4);
+  });
+  it('片方しか無くても落ちない', () => {
+    expect(normalizeStaff(SUM_BY_STAFF, null).length).toBe(2);
+    expect(normalizeStaff(null, MK_BY_STAFF).length).toBe(2);
+    expect(normalizeStaff(null, null)).toBe(null);
+    expect(normalizeStaff([], [])).toBe(null);
+  });
+  it('名前が無い人は「(不明)」にする（空欄にしない）', () => {
+    expect(normalizeStaff([{ staff_id: 9, digest_sales: 1 }], null)[0].name).toBe('(不明)');
   });
 });
 
@@ -411,7 +530,7 @@ describe('期間で振り分ける', () => {
   const base = { setting: PREP_SETTING, ymd: '2026-09-19', channels: CH(), summary: summary(), fetchedAt: AT };
   it('期間ごとに別のテンプレートが出る', () => {
     expect(buildReport(PREP, base).card.title).toBe('オープン前 集客レポート');
-    expect(buildReport(PREOPEN, base).card.title).toBe('プレオープン 日次レポート');
+    expect(buildReport(PREOPEN, base).card.title).toBe('プレオープン日報');
     expect(buildReport(OPEN, base).card.title).toBe('日報');
   });
   it('未知の期間は日報にする（勝手な集客レポートを出さない）', () => {

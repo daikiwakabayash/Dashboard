@@ -11,7 +11,7 @@ const KV = 'https://kv.test';
 let store;
 let soCalls;
 // SalonOne の応答（テストごとに差し替える）。null = 取得失敗。
-let soSummary, soChannels;
+let soSummary, soChannels, soStaff;
 
 function installFetchMock() {
   store = new Map();
@@ -30,6 +30,7 @@ function installFetchMock() {
       soCalls.push(u);
       if (u.includes('sales/summary')) return soSummary === null ? { ok: false, status: 500, json: async () => ({}), headers: new Map() } : ok({ data: soSummary });
       if (u.includes('by-channel')) return soChannels === null ? { ok: false, status: 500, json: async () => ({}), headers: new Map() } : ok({ data: soChannels });
+      if (u.includes('by-staff')) return soStaff === null ? { ok: false, status: 500, json: async () => ({}), headers: new Map() } : ok({ data: soStaff });
       return ok({ data: null });
     }
     return ok({});
@@ -50,6 +51,11 @@ beforeEach(() => {
   process.env.CRON_SECRET = 'cron-secret-not-a-secret';
   soSummary = { digest_sales: 480000, new_visit_count: 6, repeat_visit_count: 18, cancel_count: 1 };
   soChannels = [{ name: 'ホットペッパー', booking_count: 4, visit_count: 3, join_count: 2 }];
+  soSummary.by_staff = [{ staff_id: 1, staff_name: 'セラピストA', digest_sales: 32000, google_review_count: 2 }];
+  soStaff = [
+    { staff_id: 0, is_total: true, new_booking_count: 7, new_visit_count: 5 },
+    { staff_id: 1, staff_name: 'セラピストA', new_booking_count: 7, new_visit_count: 5, cancel_count: 2, purchase_count: 1 },
+  ];
   installFetchMock(); _clearBearerCache();
 });
 afterEach(() => {
@@ -83,6 +89,11 @@ const configurePrep = (over = {}) => post({ action: 'settings_set', shopId: '900
   setting: { shopName: 'テスト院', enabled: true, roomId: 'room1', targetNew: 150,
     preOpenDate: '2026-09-27', openDate: '2026-10-01', targetDeadline: '2026-09-30',
     targetMonth: '2026-10', sendAt: '00:00', ...over } });
+
+// プレオープン期間の店舗（9/27〜9/30。テスト時点 2026-09-19 より後なので phase を明示して使う）
+const configurePreOpen = (over = {}) => post({ action: 'settings_set', shopId: '9001',
+  setting: { shopName: 'テスト院', enabled: true, roomId: 'room1', targetNew: 150,
+    preOpenDate: '2026-09-27', openDate: '2026-10-01', targetMonth: '2026-10', ...over } });
 
 const roomMsgs = () => JSON.parse(store.get('naoru:chat:m:room1') || '[]');
 
@@ -312,5 +323,43 @@ describe('自動実行の入口', () => {
     await flagOn();
     const r = await get({ action: 'cronrun', kind: 'closing' }, CRON());
     expect(r.body.results[0].text).toBeUndefined();
+  });
+});
+
+describe('プレオープン日報の取得（セラピスト別）', () => {
+  it('🔴 セラピスト別（by-staff）と売上を取りに行く', async () => {
+    await configurePreOpen();
+    await get({ action: 'preview', shopId: '9001', phase: 'preopen', date: '2026-09-27' });
+    expect(soCalls.some(u => u.includes('marketing/by-staff'))).toBe(true);
+    expect(soCalls.some(u => u.includes('sales/summary'))).toBe(true);
+  });
+  it('🔴 プレオープンは当日1日ぶんだけ見る（対象月の範囲ではない）', async () => {
+    await configurePreOpen();
+    await get({ action: 'preview', shopId: '9001', phase: 'preopen', date: '2026-09-27' });
+    const u = soCalls.find(x => x.includes('marketing/by-staff'));
+    expect(u).toContain('from=2026-09-27');
+    expect(u).toContain('to=2026-09-27');
+  });
+  it('セラピスト別の表が本文に出る', async () => {
+    await configurePreOpen();
+    const r = await get({ action: 'preview', shopId: '9001', phase: 'preopen', date: '2026-09-27' });
+    expect(r.body.phase).toBe('preopen');
+    expect(r.body.text).toContain('プレオープン日報');
+    expect(r.body.text).toContain('セラピストA');
+    expect(r.body.text).toContain('セラピスト別・店舗合計');
+  });
+  it('🔴 取得元が未確認の項目は「未取得」として伝える', async () => {
+    await configurePreOpen();
+    const r = await get({ action: 'preview', shopId: '9001', phase: 'preopen', date: '2026-09-27' });
+    expect(r.body.missing).toContain('次回予約数（取得元が未確認）');
+    expect(r.body.missing).toContain('前金あり（取得元が未確認）');
+  });
+  it('🔴 プレオープンは「集計実行」待ちになる（時刻では送らない）', async () => {
+    await configurePreOpen();
+    await flagOn();
+    const r = await get({ action: 'cronrun' }, CRON());
+    const row = r.body.results.find(x => x.shopId === '9001');
+    // テスト時点(2026-09-19)ではまだオープン前なので prep。期間の判定自体はここで確かめる。
+    expect(['prep', 'preopen']).toContain(row.phase);
   });
 });

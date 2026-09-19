@@ -1587,18 +1587,22 @@
                             )}
                         </>)}
 
-                        {/* ── オープン前: 本日の動き ── */}
-                        {isPrep && Array.isArray(c.today) && (<>
+                        {/* ── 本日の数字（オープン前＝新規/取消/増減、オープン後＝売上/来店/入会）──
+                               ⚠️ 期間で中身が違うので、カードが持つ today をそのまま描く。 */}
+                        {Array.isArray(c.today) && c.today.length > 0 && (<>
                             <div data-rep-trio className="rep-trio">
-                                {c.today.map((x, i) => (
-                                    <div key={i}>
-                                        <div className="rep-trio-k">{x.label}</div>
-                                        <div className={`rep-trio-v${x.signed && typeof x.value === 'number' && x.value > 0 ? ' up' : ''}`}>
-                                            {x.signed ? repSign(x.value, '') : repNum(x.value)}
-                                            {typeof x.value === 'number' && Number.isFinite(x.value) && <em>{x.unit}</em>}
+                                {c.today.map((x, i) => {
+                                    const num = typeof x.value === 'number' && Number.isFinite(x.value);
+                                    return (
+                                        <div key={i}>
+                                            <div className="rep-trio-k">{x.label}</div>
+                                            <div className={`rep-trio-v${x.signed && num && x.value > 0 ? ' up' : ''}`}>
+                                                {x.money ? repYen(x.value) : x.signed ? repSign(x.value, '') : repNum(x.value)}
+                                                {num && !x.money && <em>{x.unit}</em>}
+                                            </div>
                                         </div>
-                                    </div>
-                                ))}
+                                    );
+                                })}
                             </div>
                             {c.todayNote && <p className="rep-note">{c.todayNote}</p>}
                         </>)}
@@ -1615,24 +1619,29 @@
                         {ch && Array.isArray(ch.rows) && ch.rows.length > 0 && (<>
                             <div className="rep-sec"><h4>{ch.header}</h4><span>{ch.note}</span></div>
                             <div className="rep-tw">
+                                {/* ⚠️ 列の定義はカード（サーバー）が持つ。ここで項目名を当てない。
+                                       期間ごとに列が違うので、当てると別の期間で全部「未取得」になる。 */}
                                 <table data-rep-channels className="rep-t">
-                                    <thead><tr><th>媒体</th><th>新規 / 件</th><th>取消 / 件</th><th>累計 / 名</th></tr></thead>
+                                    <thead><tr>
+                                        <th>媒体</th>
+                                        {(ch.cols || []).map(c => <th key={c.key}>{c.label}</th>)}
+                                    </tr></thead>
                                     <tbody>
                                         {ch.rows.map((r, i) => (
                                             <tr key={i}>
                                                 <td>{r.name}</td>
-                                                <td>{repCell(r.added, v => repNum(v))}</td>
-                                                <td>{repCell(r.cancelled, v => repNum(v))}</td>
-                                                <td className="tot">{repCell(r.total, v => repNum(v))}</td>
+                                                {(ch.cols || []).map(c => (
+                                                    <td key={c.key} className={c.strong ? 'tot' : ''}>{repCell(r[c.key], v => repNum(v))}</td>
+                                                ))}
                                             </tr>
                                         ))}
                                     </tbody>
                                     {ch.total && (
                                         <tfoot><tr>
                                             <td>合計</td>
-                                            <td>{repCell(ch.total.added, v => repNum(v))}</td>
-                                            <td>{repCell(ch.total.cancelled, v => repNum(v))}</td>
-                                            <td className="tot">{repCell(ch.total.total, v => repNum(v))}</td>
+                                            {(ch.cols || []).map(c => (
+                                                <td key={c.key} className={c.strong ? 'tot' : ''}>{repCell(ch.total[c.key], v => repNum(v))}</td>
+                                            ))}
                                         </tr></tfoot>
                                     )}
                                 </table>

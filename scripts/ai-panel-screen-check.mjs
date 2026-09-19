@@ -69,11 +69,13 @@ const server = http.createServer((req, res) => {
     }
     if (p === '/api/plan-store') {
       const type = req.method === 'GET' ? url.searchParams.get('type') : body.type;
-      if (type === 'ccflags') return json(res, { flags: { cc_all: true, cc_authz: 'off', cc_home: true, cc_ai_agents: true }, configured: true, env: 'preview' });
+      if (type === 'ccflags') return json(res, { flags: { cc_all: true, cc_authz: 'off', cc_home: true, cc_ai_agents: true, cc_creative_library: true }, configured: true, env: 'preview' });
       if (type === 'aianswer') {
         if (req.method === 'GET') {
           const screen = url.searchParams.get('screen') || '';
-          const SCREEN = { chief: 'home', marketing: 'mktg' };
+          // 担当 → 置いた画面（lib/ai-answer.js の AGENTS と同じ）
+          const SCREEN = { chief: 'home', marketing: 'mktg', finance: 'planning', storerisk: 'zenkanri',
+                           sns: 'creative', content: 'creative', product: 'settings', knowledge: 'knowledge' };
           const out = Object.values(answers).filter(a => SCREEN[a.agent] === screen).map(demote);
           return json(res, { ok: true, answers: out, configured: true });
         }
@@ -233,6 +235,37 @@ await page.setViewportSize({ width: 1500, height: 1000 });
 await page.waitForTimeout(700);
 await page.screenshot({ path: `${out}/ai-panel.png` });
 check('画面の写しを保存した', fs.existsSync(`${out}/ai-panel.png`), `${out}/ai-panel.png`);
+
+// ── 🔴 8人ぶんの置き場所が全部あるか ─────────────────────────────
+// ⚠️ ナレッジは独立ページが無く FAQ管理 の中にある（③との screen キーは変えない）。
+const PLACES = [
+  ['chief', 'home', /経営ホーム|ホーム/],
+  ['marketing', 'mktg', /マーケティング/],
+  ['finance', 'planning', /事業計画/],
+  ['storerisk', 'zenkanri', /全体管理/],
+  ['sns', 'creative', /クリエイティブ/],
+  ['product', 'settings', /設定/],
+  ['knowledge', 'knowledge', /FAQ管理/],
+];
+await page.evaluate(async () => {
+  await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'aianswer', action: '__clear' }) });
+});
+for (const [agent] of PLACES) {
+  await put({ agent, status: 'completed', citations: [CITE],
+    facts: [{ text: `${agent} の事実`, value: 1, unit: '件', period: '2026-09',
+              defVersion: 'agg-v2', citationIds: ['c1'], origin: 'source' }],
+    freshness: { at: Date.now() - 60000 } });
+}
+await page.setViewportSize({ width: 1500, height: 1000 });
+await page.reload({ waitUntil: 'commit' });
+for (let i = 0; i < 40; i++) { if ((await txt()).trim().length > 40) break; await page.waitForTimeout(700); }
+for (const [, screen, menu] of PLACES) {
+  await page.getByRole('button', { name: menu }).first().click().catch(() => {});
+  await page.waitForTimeout(1800);
+  const n = await page.locator(`[data-ai-panel="${screen}"]`).count();
+  check(`${screen} の画面に提案の置き場所がある`, n >= 1, `${n} 個`);
+}
 check('画面のエラーが出ていない', errors.length === 0, errors.slice(0, 2).join(' | '));
 
 const ok = results.filter(r => r.pass).length;

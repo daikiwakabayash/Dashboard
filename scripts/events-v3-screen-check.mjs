@@ -411,6 +411,17 @@ const evBox = await page.evaluate(() => {
            inside: f ? (f.bottom <= a.bottom + 1 && f.top >= a.top - 1) : false };
 });
 check('🔴 スマホで見出しカードが高くなりすぎない', !!evBox && evBox.h <= 620, evBox ? `${evBox.h}px` : 'なし');
+// ⚠️ 1件あたりが長いと、スマホで1〜2件しか並ばない
+const evCard = await page.evaluate(() => {
+  const c = document.querySelector('[data-ev-card]');
+  if (!c) return null;
+  const cov = c.querySelector('.ev-cover');
+  const sym = c.querySelector('.ev-cover-symbol');
+  const inside = (sym && cov) ? (sym.getBoundingClientRect().bottom <= cov.getBoundingClientRect().bottom + 1) : true;
+  return { h: Math.round(c.getBoundingClientRect().height), symInside: inside };
+});
+check('🔴 スマホでイベント1件が高くなりすぎない', !!evCard && evCard.h <= 360, evCard ? `${evCard.h}px` : 'なし');
+check('表紙の数字が表紙の中に収まる', !!evCard && evCard.symInside === true);
 check('🔴 スマホで飾りの文字が切れない', !!evBox && evBox.inside === true);
 await page.setViewportSize({ width: 1400, height: 1000 });
 await page.waitForTimeout(700);

@@ -954,6 +954,26 @@
         .ev-action:hover { background: #efeff1; }
         .ev-action.joined { color: var(--nowl-red); background: #f9eff0; }
         .ev-action:disabled { opacity: .5; }
+
+        /* ── スマホのイベントカード ──────────────────────────────
+           ⚠️ 1件あたりの縦が長く、少ししか並ばなかった。行間・余白・表紙を詰める。
+              押すところ（ボタン）の大きさは 44px のまま変えない。 */
+        @media (max-width: 767px) {
+            .ev-cards { gap: 12px; }
+            .ev-card { border-radius: 12px; }
+            .ev-cover { height: 112px; }
+            /* ⚠️ ☆の下に潜って数字が欠けて見えるので、少し下げる */
+            .ev-cover-symbol { right: 16px; top: 36px; font-size: 40px; letter-spacing: -3px; }
+            .ev-cover-word { left: 16px; bottom: 13px; font-size: 18px; letter-spacing: 1.5px; }
+            .ev-cover-caption { left: 16px; top: 14px; }
+            .ev-save { right: 9px; top: 9px; padding: 6px 9px; font-size: 14px; line-height: 16px; }
+            .ev-body { padding: 13px 14px 14px; }
+            .ev-card h3 { font-size: 14px; line-height: 1.5; margin: 7px 0 5px; }
+            .ev-summary { line-height: 1.7; }
+            .ev-meta { margin-top: 9px; gap: 8px; }
+            .ev-people { margin-top: 10px; padding-top: 9px; }
+            .ev-action { margin-top: 10px; padding: 11px; }
+        }
         .ev-invite { display: flex; align-items: center; gap: 20px; border: 1px dashed #d0cacc; border-radius: 14px; padding: 22px; margin: 26px 0; flex-wrap: wrap; }
         .ev-invite-icon { width: 40px; height: 40px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: #f6ecee; color: var(--nowl-red); font-size: 20px; flex-shrink: 0; }
         .ev-facts { display: grid; grid-template-columns: 1fr; border: 1px solid var(--nowl-line); border-radius: 12px; gap: 14px; padding: 18px; margin: 18px 0; }
@@ -15805,8 +15825,13 @@
                             // 年月の選択肢は**月で絞る前**の一覧から作る（絞ると選択肢が1つに減ってしまうため）
                             const monthOpts = newsMonthOptions(livePosts.filter(p => chatIsRoot || newsForMe(p, { shop: chatMyShop, shops: authState.shops })));
                             const page = newsPageOf(posts, boardShown);   // 追加読込（最初は12件）
-                            const dFull = (iso) => { const d = new Date(iso); return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日(${WD[d.getDay()]}) ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; };
-                            const rel = (iso) => { const d = new Date(iso), now = new Date(); const s = (now - d) / 1000; if (s < 60) return 'たった今'; if (s < 3600) return `${Math.floor(s / 60)}分前`; if (s < 86400) return `${Math.floor(s / 3600)}時間前`; const days = Math.floor(s / 86400); return days <= 30 ? `${days}日前` : ''; };
+                            // ⚠️ 読めない日時は「NaN年NaN月…」と書かず、何も出さない（でたらめを表示しない）
+                            const dFull = (iso) => {
+                                const d = new Date(iso);
+                                if (!Number.isFinite(d.getTime())) return '';
+                                return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日(${WD[d.getDay()]}) ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+                            };
+                            const rel = (iso) => { const d = new Date(iso), now = new Date(); if (!Number.isFinite(d.getTime())) return ''; const s = (now - d) / 1000; if (s < 60) return 'たった今'; if (s < 3600) return `${Math.floor(s / 60)}分前`; if (s < 86400) return `${Math.floor(s / 3600)}時間前`; const days = Math.floor(s / 86400); return days <= 30 ? `${days}日前` : ''; };
                             const canPost = !!chatMyId;
                             const composerEmpty = !boardText.trim() && !boardTitle.trim() && !boardLink.trim() && !boardVideo.trim() && !boardImgs.length && !boardFiles.length;
                             const publishReady = boardFormCheck(false);   // そのまま出してよいか（宛先・期限まで）
@@ -16795,7 +16820,9 @@
                                                                         <span className="nowl-badge neutral">{e.sectionLabel}</span>
                                                                     </div>
                                                                     <button onClick={() => evOpenDetail(e)} className="text-left"><h3 className="line-clamp-2">{e.title}</h3></button>
-                                                                    <p className="ev-summary line-clamp-2">{e.summary || '　'}</p>
+                                                                    {/* ⚠️ 要約が題名と同じときは出さない（同じ文を2度書いて高さだけ取らない） */}
+                                                                    {e.summary && e.summary.trim() !== String(e.title || '').trim()
+                                                                        && <p className="ev-summary line-clamp-2">{e.summary}</p>}
                                                                     <div className="ev-meta">
                                                                         {placeLabel(e) && <span>📍 {placeLabel(e)}</span>}
                                                                         {e.owner && <span>👤 {e.owner}</span>}

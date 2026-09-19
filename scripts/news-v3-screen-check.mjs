@@ -152,6 +152,16 @@ const cardBox = await page.evaluate(() => {
 check('🔴 写真の表紙は横長（16:9）で出す', !!cardBox && Math.abs(cardBox.ratio - 1.78) < 0.08, cardBox ? String(cardBox.ratio) : 'なし');
 check('🔴 写真は上から切る（見出しの入った画像でも文字が残る）', !!cardBox && /0%|top/.test(cardBox.pos), cardBox ? cardBox.pos : 'なし');
 check('🔴 下の情報は1行にまとめる（既読を2回書かない）', !!cardBox && cardBox.rows === 1, cardBox ? `${cardBox.rows} 行` : 'なし');
+// ⚠️ 1件あたりが長いと、スマホで1件しか並ばない
+await page.setViewportSize({ width: 390, height: 844 });
+await page.waitForTimeout(800);
+const cardH = await page.evaluate(() => {
+  const c = document.querySelector('[data-news-card="p4"]');
+  return c ? Math.round(c.getBoundingClientRect().height) : -1;
+});
+check('🔴 スマホで記事1件が高くなりすぎない', cardH > 0 && cardH <= 430, `${cardH}px`);
+await page.setViewportSize({ width: 1440, height: 1000 });
+await page.waitForTimeout(700);
 const cards = await page.locator('[data-news-card]').count();
 check('カードが記事の数だけ出る', cards === 4, `${cards} 件`);
 const cover = await page.locator('[data-news-card="p2"] .nowl-cover strong').first().innerText().catch(() => '');

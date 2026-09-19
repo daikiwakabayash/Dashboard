@@ -412,3 +412,105 @@ describe('掲示板 - 同時投稿の競合窓（compare-and-set）', () => {
     expect((await get()).body.posts.filter(p => p.text === 'z')).toHaveLength(1);   // 1件だけ
   });
 });
+
+// ── 下書き（status:'draft'）────────────────────────────────────────
+// ⚠️ 他人の下書きは**サーバーが返さない**（画面で隠すだけにしない）。
+// ⚠️ 下書きは通知も未読も出さない。公開したときだけ知らせる。
+describe('ニュースの下書き', () => {
+  // ログイン済みのスタッフ（root ではない人）として呼ぶ
+  const staffHdr = () => {
+    process.env.AUTH_SALT = process.env.AUTH_SALT || 'salt-for-test';
+    process.env.SETTLEMENT_OWNER_PASSWORDS = JSON.stringify({ 'セラピスト花子': 'staff-pw', 'セラピスト太郎': 'other-pw' });
+    return (owner, pw) => ({ 'x-cc-owner': encodeURIComponent(owner), 'x-cc-token': hashOwnerToken(owner, pw, process.env.AUTH_SALT) });
+  };
+  const asStaff = (owner, pw, body) => call({ method: 'POST', headers: staffHdr()(owner, pw), body: { type: 'board', ...body } });
+  const getAs = (owner, pw) => call({ method: 'GET', headers: staffHdr()(owner, pw), query: { type: 'board' } });
+
+  it('下書きとして保存できる（公開済みにはならない）', async () => {
+    const r = await post({ action: 'post', post: { clientId: 'd1', authorId: 'u1', authorName: 'A', title: '書きかけ', text: 'あとで直す', status: 'draft' } });
+    expect(r.body.ok).toBe(true);
+    expect(r.body.post.status).toBe('draft');
+    expect(r.body.post.updatedAt).toBeTruthy();
+  });
+
+  it('status を付けない従来の投稿は公開済みのまま', async () => {
+    const r = await post(mkPost('c1', 'ふつうの投稿'));
+    expect(r.body.post.status).toBe('published');
+  });
+
+  it('他人の下書きは一覧に返さない', async () => {
+    await asStaff('セラピスト花子', 'staff-pw', { action: 'post', post: { clientId: 'd2', authorId: 'セラピスト花子', authorName: '花子', text: '花子の下書き', status: 'draft' } });
+    const mine = await getAs('セラピスト花子', 'staff-pw');
+    expect(mine.body.posts.map(p => p.text)).toContain('花子の下書き');
+    const other = await getAs('セラピスト太郎', 'other-pw');
+    expect(other.body.posts.map(p => p.text)).not.toContain('花子の下書き');
+  });
+
+  it('本部（root）には全員の下書きが見える', async () => {
+    await asStaff('セラピスト花子', 'staff-pw', { action: 'post', post: { clientId: 'd3', authorId: 'セラピスト花子', authorName: '花子', text: '花子の下書き2', status: 'draft' } });
+    const hq = await get();
+    expect(hq.body.posts.map(p => p.text)).toContain('花子の下書き2');
+  });
+
+  it('他人の下書きは閲覧状況からも引けない（あることを教えない）', async () => {
+    const made = await asStaff('セラピスト花子', 'staff-pw', { action: 'post', post: { clientId: 'd4', authorId: 'セラピスト花子', authorName: '花子', text: '花子の下書き3', status: 'draft' } });
+    const id = made.body.post.id;
+    const r = await asStaff('セラピスト太郎', 'other-pw', { action: 'status', id });
+    expect(r.statusCode).toBe(404);
+  });
+
+  it('下書きは書き直せる', async () => {
+    const made = await post({ action: 'post', post: { clientId: 'd5', authorId: 'u1', authorName: 'A', title: '前', text: '前の本文', status: 'draft' } });
+    const id = made.body.post.id;
+    const r = await post({ action: 'editDraft', id, post: { title: '後', text: '直した本文' } });
+    expect(r.body.ok).toBe(true);
+    const after = (await get()).body.posts.find(p => p.id === id);
+    expect(after.title).toBe('後');
+    expect(after.text).toBe('直した本文');
+    expect(after.status).toBe('draft');
+  });
+
+  it('公開済みの記事は書き直せない（既読の記録と食い違うため）', async () => {
+    const made = await post(mkPost('c2', '公開済み'));
+    const r = await post({ action: 'editDraft', id: made.body.post.id, post: { title: 'すり替え', text: 'すり替え' } });
+    expect(r.statusCode).toBe(409);
+    expect(r.body.error).toBe('not_draft');
+  });
+
+  it('下書きを公開すると、公開した時刻が createdAt になる', async () => {
+    const made = await post({ action: 'post', post: { clientId: 'd6', authorId: 'u1', authorName: 'A', title: '先週書いた', text: 'いま出す', status: 'draft' } });
+    const id = made.body.post.id;
+    // 先週書いたことにする
+    const raw = rawBoard();
+    raw.posts.find(p => p.id === id).createdAt = '2026-09-01T00:00:00.000Z';
+    store.set('naoru:board:v1', JSON.stringify(raw));
+
+    const r = await post({ action: 'publish', id });
+    expect(r.body.ok).toBe(true);
+    const after = (await get()).body.posts.find(p => p.id === id);
+    expect(after.status).toBe('published');
+    expect(Date.parse(after.createdAt)).toBeGreaterThan(Date.parse('2026-09-01T00:00:00.000Z'));
+  });
+
+  it('宛先があいまいな下書きは公開できない', async () => {
+    const made = await post({ action: 'post', post: { clientId: 'd7', authorId: 'u1', authorName: 'A', title: '店舗指定', text: 'x', status: 'draft', audience: { kind: 'shops', shops: [] } } });
+    const r = await post({ action: 'publish', id: made.body.post.id });
+    expect(r.statusCode).toBe(400);
+    expect(r.body.reason).toBe('no_shops');
+  });
+
+  it('他人の下書きは公開できない', async () => {
+    const made = await asStaff('セラピスト花子', 'staff-pw', { action: 'post', post: { clientId: 'd8', authorId: 'セラピスト花子', authorName: '花子', title: '花子の下書き4', text: 'x', status: 'draft' } });
+    const r = await asStaff('セラピスト太郎', 'other-pw', { action: 'publish', id: made.body.post.id });
+    expect(r.statusCode).toBe(403);
+  });
+
+  it('既に公開されていれば、もう一度公開しても何も壊さない', async () => {
+    const made = await post({ action: 'post', post: { clientId: 'd9', authorId: 'u1', authorName: 'A', title: 'x', text: 'y', status: 'draft' } });
+    const id = made.body.post.id;
+    await post({ action: 'publish', id });
+    const again = await post({ action: 'publish', id });
+    expect(again.body.ok).toBe(true);
+    expect(again.body.already).toBe(true);
+  });
+});

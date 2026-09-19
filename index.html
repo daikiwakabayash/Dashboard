@@ -665,6 +665,20 @@
         .nowl-circle { border: 1px solid #dadce3; border-radius: 50%; width: 36px; height: 36px; font-size: 18px; display: inline-flex; align-items: center; justify-content: center; color: #4a4c53; flex-shrink: 0; }
         .nowl-circle:hover { border-color: var(--nowl-red); color: var(--nowl-red); }
         .nowl-empty { padding: 40px; grid-column: 1 / -1; text-align: center; font-size: 12px; color: var(--nowl-muted); border: 1px dashed #dddde5; border-radius: 10px; }
+        /* 過去記事の年月見出しと、追加読込 */
+        .nowl-month { display: flex; align-items: center; gap: 12px; margin: 22px 0 12px; }
+        .nowl-month:first-child { margin-top: 4px; }
+        .nowl-month h3 { font-size: 13px; font-weight: 850; letter-spacing: -.2px; color: var(--nowl-ink); margin: 0; white-space: nowrap; }
+        @media (min-width: 900px) { .nowl-month h3 { font-size: 15px; } }
+        .nowl-month span { font-size: 10px; font-weight: 700; color: #9a9aa3; white-space: nowrap; }
+        .nowl-month::after { content: ''; flex: 1; height: 1px; background: var(--nowl-line); }
+        .nowl-more {
+            display: inline-flex; align-items: center; gap: 10px; min-height: 44px; padding: 12px 24px;
+            border-radius: 999px; border: 1px solid #dddde5; background: #fff; font-size: 13px; font-weight: 750; color: var(--nowl-ink);
+            transition: border-color .2s, box-shadow .2s;
+        }
+        .nowl-more:hover { border-color: #c4c4cf; box-shadow: 0 4px 14px rgba(24,25,28,.06); }
+        .nowl-more span { font-size: 11px; font-weight: 700; color: #9a9aa3; }
 
         /* ── 組織図（地図つきの地域ビュー）────────────────────────────
            ⚠️ 地図は簡略化した飾り。位置や距離を正確に示すものではない。 */
@@ -1288,6 +1302,59 @@
         const orgMapPathOf = (k) => ORG_MAP_PATHS[k] || ORG_MAP_PATHS.other;
         const ORG_MAP_NOTE = '地図はおおよその形を表した飾りです。位置や距離を正確に示すものではありません。';
         const ORG_COLLAPSE_OVER = 12;
+
+        // ── ニュース: 下書きと年月（lib/news-archive.js と同じ）────────────
+        // ⚠️ status が無い古い投稿は「公開済み」。勝手に下書きへ倒さない。
+        // ⚠️ 年月は**日本時間**で決める（UTCで切ると夜の記事が翌月に寄る）。
+        const NEWS_DRAFT = 'draft', NEWS_PUBLISHED = 'published', NEWS_PAGE = 12;
+        const newsIsDraft = (p) => String((p && p.status) || '') === NEWS_DRAFT;
+        const newsParseAt = (v) => {
+            const t = String(v == null ? '' : v).trim();
+            if (!t) return null;
+            if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(t)) { const x = Date.parse(t.replace(' ', 'T')); return Number.isFinite(x) ? x : null; }
+            const m = t.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+            if (!m) { const x = Date.parse(t); return Number.isFinite(x) ? x : null; }
+            return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4] || 0) - 9, Number(m[5] || 0), Number(m[6] || 0));
+        };
+        const newsMonthKeyOf = (iso) => {
+            const t = newsParseAt(iso);
+            if (t == null) return '';
+            const d = new Date(t + 9 * 3600 * 1000);
+            return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+        };
+        const newsMonthLabel = (key) => {
+            const m = String(key || '').match(/^(\d{4})-(\d{2})$/);
+            return m ? `${Number(m[1])}年${Number(m[2])}月` : '日付なし';
+        };
+        const newsGroupByMonth = (posts) => {
+            const out = [], byKey = new Map();
+            for (const p of (Array.isArray(posts) ? posts : [])) {
+                if (!p) continue;
+                const key = newsMonthKeyOf(p.createdAt);
+                let g = byKey.get(key);
+                if (!g) { g = { key, label: newsMonthLabel(key), posts: [] }; byKey.set(key, g); out.push(g); }
+                g.posts.push(p);
+            }
+            return out;
+        };
+        const newsMonthOptions = (posts) => {
+            const count = new Map();
+            for (const p of (Array.isArray(posts) ? posts : [])) {
+                if (!p) continue;
+                const k = newsMonthKeyOf(p.createdAt);
+                count.set(k, (count.get(k) || 0) + 1);
+            }
+            return [...count.entries()]
+                .sort((a, b) => (a[0] && b[0]) ? (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0) : (a[0] ? -1 : b[0] ? 1 : 0))
+                .map(([key, n]) => ({ key, label: newsMonthLabel(key), count: n }));
+        };
+        const newsPageOf = (posts, shown) => {
+            const list = Array.isArray(posts) ? posts : [];
+            const n = Math.max(NEWS_PAGE, Math.min(Number(shown) || NEWS_PAGE, list.length || NEWS_PAGE));
+            const items = list.slice(0, n);
+            const remaining = Math.max(0, list.length - items.length);
+            return { items, hasMore: remaining > 0, remaining, next: n + NEWS_PAGE };
+        };
 
         // ── 新規顧客一覧（lib/acq-list.js と同じ）────────────────────
         // ⚠️ 時間帯の指定が無い日時は**日本時間**として読む（UTCで読むと9時間ずれる）。
@@ -5385,6 +5452,10 @@
             const [boardStatusId, setBoardStatusId] = useState(''); // リアクション状況モーダルの投稿id
             const [boardOpenId, setBoardOpenId] = useState('');     // 全画面表示中の投稿id（もっと見る）
             const [boardComposerOpen, setBoardComposerOpen] = useState(false); // 投稿作成モーダル（既定は閉＝一覧がメイン）
+            const [boardDraftId, setBoardDraftId] = useState('');   // 書き直している下書きのid（'' = 新規）
+            const [boardPreview, setBoardPreview] = useState(false); // 「出したらどう見えるか」の下見
+            const [boardShown, setBoardShown] = useState(NEWS_PAGE); // 一覧にいま出している件数（追加読込）
+            const [boardMonth, setBoardMonth] = useState('');        // 年月で絞る（'' = 絞らない）
             const [boardSearch, setBoardSearch] = useState(''); // ニュースのキーワード検索
             const [boardDrag, setBoardDrag] = useState(false);    // ドラッグ&ドロップ中ハイライト
             const BOARD_STAMPS = ['👍', '🙏', '🎉', '🔥', '💛', '👏', '✅', '😊'];
@@ -5393,7 +5464,8 @@
             // 既読の時刻は「サーバー保存 or 端末ローカルの新しい方」を採用（サーバー未保存でもリロードで通知が復活しない）。
             const [boardSeenLocal, setBoardSeenLocal] = useState(() => { try { return Number(localStorage.getItem('naoru_board_seen')) || 0; } catch { return 0; } });
             const boardLastSeen = Math.max(((boardData.reads || {})[chatMyId]) || 0, boardSeenLocal || 0);
-            const boardIsUnread = (p) => (Date.parse(p.createdAt || '') || 0) > boardLastSeen && String(p.authorId) !== chatMyId;
+            // ⚠️ 下書きは誰の未読にもしない（自分の書きかけで赤丸が付かないように）
+            const boardIsUnread = (p) => !newsIsDraft(p) && (Date.parse(p.createdAt || '') || 0) > boardLastSeen && String(p.authorId) !== chatMyId;
             const boardUnreadTotal = useMemo(() => (boardData.posts || []).reduce((n, p) => boardIsUnread(p) ? n + 1 : n, 0), [boardData, boardLastSeen, chatMyId]);
             // ── アプリアイコンのバッジ（未読の赤丸＋数字）: チャット＋ニュースの合計。 ──
             // PWA(ホーム画面に追加)でiOS16.4+/Android/デスクトップに表示。SWにも同期し、閉じている間の
@@ -5519,22 +5591,71 @@
                 reader.onerror = () => resolve(null);
                 reader.readAsDataURL(file);
             });
-            const boardPost = async () => {
-                const t = boardText.trim(); const ti = boardTitle.trim();
-                if (!t && !ti && boardImgs.length === 0 && boardFiles.length === 0 && !boardVideo.trim() && !boardLink.trim()) return;
-                // ⚠️ 曖昧な宛先・期限のまま出さない
-                if (boardAudKind === 'shops' && !boardAudShops.length) return;
-                if (boardNeedsAck && !/^\d{4}-\d{2}-\d{2}$/.test(boardDue)) return;
+            // いま書いている内容を、記事1件の形にまとめる（下見・下書き・投稿で同じものを使う）
+            const boardFormPost = () => ({
+                authorId: chatMyId, authorName: chatMyName, authorShop: chatMyShop, authorRoot: chatIsRoot,
+                title: boardTitle.trim(), important: boardImportant, text: boardText.trim(), link: boardLink.trim(),
+                imgIds: boardImgs.map(i => i.id), files: boardFiles, videoUrl: boardVideo.trim(),
+                category: boardCat, audience: { kind: boardAudKind, shops: boardAudShops },
+                needsAck: boardNeedsAck, dueDate: boardDue, featured: boardFeatured, coverImgId: boardCover,
+            });
+            const boardResetComposer = () => {
+                setBoardText(''); setBoardTitle(''); setBoardLink(''); setBoardImportant(false); setBoardImgs([]); setBoardFiles([]); setBoardVideo('');
+                setBoardCat(''); setBoardAudKind('all'); setBoardAudShops([]); setBoardNeedsAck(false); setBoardDue(''); setBoardFeatured(false); setBoardCover('');
+                setBoardDraftId(''); setBoardPreview(false);
+            };
+            // 中身が空でないか／宛先と期限があいまいでないか。
+            // ⚠️ 下書きは途中でも保存できる（中身が何かあればよい）。公開は宛先・期限まで確かめる。
+            const boardFormCheck = (asDraft) => {
+                const f = boardFormPost();
+                const hasBody = !!(f.text || f.title || f.link || f.videoUrl || f.imgIds.length || f.files.length);
+                if (!hasBody) return { ok: false, reason: 'empty' };
+                if (asDraft) return { ok: true };
+                if (f.audience.kind === 'shops' && !f.audience.shops.length) return { ok: false, reason: 'no_shops' };
+                if (f.needsAck && !/^\d{4}-\d{2}-\d{2}$/.test(f.dueDate)) return { ok: false, reason: 'no_due' };
+                return { ok: true };
+            };
+            // 下書きを開いて書き直す
+            const boardEditDraft = (p) => {
+                if (!p) return;
+                setBoardDraftId(String(p.id));
+                setBoardTitle(p.title || ''); setBoardText(p.text || ''); setBoardLink(p.link || '');
+                setBoardImportant(!!p.important); setBoardVideo(p.videoUrl || '');
+                setBoardImgs((p.imgIds || []).map(id => ({ id })));
+                setBoardFiles(Array.isArray(p.files) ? p.files : []);
+                setBoardCat(p.category || '');
+                setBoardAudKind((p.audience && p.audience.kind) || 'all');
+                setBoardAudShops((p.audience && p.audience.shops) || []);
+                setBoardNeedsAck(!!p.needsAck); setBoardDue(p.dueDate || '');
+                setBoardFeatured(!!p.featured); setBoardCover(p.coverImgId || '');
+                setBoardPreview(false); setBoardComposerOpen(true);
+            };
+            /**
+             * 保存する。mode='draft' なら下書き、'publish' ならそのまま出す。
+             * ⚠️ 下書きを書き直してから出すときは、**先に書き直しを保存してから公開**する
+             *    （古い中身のまま公開されるのを防ぐ）。
+             */
+            const boardPost = async (mode) => {
+                const asDraft = mode === 'draft';
+                if (!boardFormCheck(asDraft).ok) return;
                 setBoardPosting(true);
                 try {
-                    // clientId は1回の送信で固定。再送・409リトライでも同じ値を使うため二重投稿にならない。
-                    await boardMutate({ action: 'post', post: { clientId: boardClientId(), authorId: chatMyId, authorName: chatMyName, authorShop: chatMyShop, authorRoot: chatIsRoot, title: ti, important: boardImportant, text: t, link: boardLink.trim(), imgIds: boardImgs.map(i => i.id), files: boardFiles, videoUrl: boardVideo.trim(),
-                        category: boardCat, audience: { kind: boardAudKind, shops: boardAudShops }, needsAck: boardNeedsAck, dueDate: boardDue, featured: boardFeatured, coverImgId: boardCover } });
-                    setBoardText(''); setBoardTitle(''); setBoardLink(''); setBoardImportant(false); setBoardImgs([]); setBoardFiles([]); setBoardVideo('');
-                    setBoardCat(''); setBoardAudKind('all'); setBoardAudShops([]); setBoardNeedsAck(false); setBoardDue(''); setBoardFeatured(false); setBoardCover('');
+                    const post = boardFormPost();
+                    if (boardDraftId) {
+                        await boardMutate({ action: 'editDraft', id: boardDraftId, post });
+                        if (!asDraft) await boardMutate({ action: 'publish', id: boardDraftId });
+                    } else {
+                        // clientId は1回の送信で固定。再送・409リトライでも同じ値を使うため二重投稿にならない。
+                        await boardMutate({ action: 'post', post: { ...post, clientId: boardClientId(), status: asDraft ? NEWS_DRAFT : NEWS_PUBLISHED } });
+                    }
+                    boardResetComposer();
                     setBoardComposerOpen(false);
                     await boardLoad();
                 } catch {} finally { setBoardPosting(false); }
+            };
+            // 下書きの一覧から、そのまま公開する
+            const boardPublishDraft = async (id) => {
+                try { await boardMutate({ action: 'publish', id }); await boardLoad(); } catch {}
             };
             // ドラッグ&ドロップ／選択で画像orファイルを取り込む共通処理
             const boardTakeFiles = async (fileList) => {
@@ -5573,12 +5694,15 @@
             const boardActivity = useMemo(() => {
                 const items = [];
                 (boardData.posts || []).forEach(p => {
+                    if (newsIsDraft(p)) return;                 // ⚠️ 下書きは更新履歴に出さない
                     items.push({ ts: Date.parse(p.createdAt || '') || 0, kind: 'post', postId: p.id, by: p.authorId, title: p.title || p.text || '（無題）', important: !!p.important });
                     (Array.isArray(p.comments) ? p.comments : []).forEach(c => items.push({ ts: Date.parse(c.createdAt || '') || 0, kind: 'comment', postId: p.id, by: c.fromStaffId, name: c.fromName, title: p.title || 'ニュース', text: c.text }));
                 });
                 return items.sort((a, b) => b.ts - a.ts).slice(0, 60);
             }, [boardData]);
             const boardActUnseen = boardActivity.filter(it => it.ts > boardActSeen && String(it.by) !== chatMyId).length;
+            // 絞り込みを変えたら、出す件数を最初に戻す（前の絞り込みの件数を引きずらない）
+            useEffect(() => { setBoardShown(NEWS_PAGE); }, [boardFilter, boardCatFilter, boardSearch, boardMonth, boardSort]);
             const boardOpenActivity = () => { setBoardActOpen(o => { const n = !o; if (n) { const ts = Date.now(); setBoardActSeen(ts); try { localStorage.setItem('naoru_board_act_seen', String(ts)); } catch {} } return n; }); };
 
             // ── Webプッシュ通知（購読） ──────────────────────────────────
@@ -15150,7 +15274,14 @@
                         {currentPage === 'board' && (() => {
                             const WD = ['日', '月', '火', '水', '木', '金', '土'];
                             const bq = boardSearch.trim();
-                            const filtered = (boardData.posts || []).filter(p => {
+                            // ⚠️ 下書きは一覧に混ぜない（書きかけが並ぶのを防ぐ）。
+                            //    書いた本人と本部にだけ、一覧の上にまとめて出す（勉強会・イベントと同じ扱い）。
+                            //    ⚠️ 他人の下書きはサーバーが返していない。ここで隠すだけにしていない。
+                            const allPosts = boardData.posts || [];
+                            const myDrafts = allPosts.filter(p => p && newsIsDraft(p))
+                                .slice().sort((a, b) => (newsParseAt(b.updatedAt || b.createdAt) || 0) - (newsParseAt(a.updatedAt || a.createdAt) || 0));
+                            const livePosts = allPosts.filter(p => p && !newsIsDraft(p));
+                            const filtered = livePosts.filter(p => {
                                 const catOk = boardFilter === 'all' ? true : boardFilter === 'hq' ? p.authorRoot : boardFilter === 'staff' ? !p.authorRoot
                                     : boardFilter === 'important' ? p.important
                                     : boardFilter === 'featured' ? p.featured
@@ -15159,6 +15290,7 @@
                                     : true;
                                 if (!catOk) return false;
                                 if (boardCatFilter && String(p.category || '') !== boardCatFilter) return false;
+                                if (boardMonth && newsMonthKeyOf(p.createdAt) !== boardMonth) return false;
                                 // ⚠️ 公開対象が店舗指定の記事は、対象の人にだけ出す（本部は全部見える）
                                 if (!chatIsRoot && !newsForMe(p, { shop: chatMyShop, shops: authState.shops })) return false;
                                 if (!bq) return true;
@@ -15168,7 +15300,7 @@
                             // ⚠️ ピックアップは**絞り込みの影響を受けない**ようにする（タブを変えるたびに入れ替わらない）。
                             //    指定（ピックアップ）があればそれ、無ければいちばん新しい記事。
                             const heroPost = (() => {
-                                const mineAll = (boardData.posts || []).filter(p => p && (chatIsRoot || newsForMe(p, { shop: chatMyShop, shops: authState.shops })));
+                                const mineAll = livePosts.filter(p => p && (chatIsRoot || newsForMe(p, { shop: chatMyShop, shops: authState.shops })));
                                 const byNew = mineAll.slice().sort((a, b) => (Date.parse(b.createdAt || '') || 0) - (Date.parse(a.createdAt || '') || 0));
                                 return byNew.find(p => p.featured) || byNew[0] || null;
                             })();
@@ -15177,10 +15309,14 @@
                                 const da = Date.parse(a.createdAt || '') || 0, db = Date.parse(b.createdAt || '') || 0;
                                 return boardSort === 'old' ? da - db : db - da;
                             });
+                            // 年月の選択肢は**月で絞る前**の一覧から作る（絞ると選択肢が1つに減ってしまうため）
+                            const monthOpts = newsMonthOptions(livePosts.filter(p => chatIsRoot || newsForMe(p, { shop: chatMyShop, shops: authState.shops })));
+                            const page = newsPageOf(posts, boardShown);   // 追加読込（最初は12件）
                             const dFull = (iso) => { const d = new Date(iso); return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日(${WD[d.getDay()]}) ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; };
                             const rel = (iso) => { const d = new Date(iso), now = new Date(); const s = (now - d) / 1000; if (s < 60) return 'たった今'; if (s < 3600) return `${Math.floor(s / 60)}分前`; if (s < 86400) return `${Math.floor(s / 3600)}時間前`; const days = Math.floor(s / 86400); return days <= 30 ? `${days}日前` : ''; };
                             const canPost = !!chatMyId;
                             const composerEmpty = !boardText.trim() && !boardTitle.trim() && !boardLink.trim() && !boardVideo.trim() && !boardImgs.length && !boardFiles.length;
+                            const publishReady = boardFormCheck(false);   // そのまま出してよいか（宛先・期限まで）
                             const Label = ({ children, opt }) => <div className="text-[12px] font-semibold text-[#344054] mb-1.5 mt-3.5">{children}{opt && <span className="ml-1 text-[11px] font-normal text-[#98A2B3]">{opt}</span>}</div>;
                             const inputCls = 'w-full h-10 rounded-lg border border-[#EAECF0] bg-white px-3.5 text-[14px] text-[#111827] placeholder:text-[#98A2B3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition';
                             const BmIcon = ({ on }) => <svg width="16" height="16" viewBox="0 0 24 24" fill={on ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" /></svg>;
@@ -15516,10 +15652,30 @@
                                                 <div className="nowl-pop bg-white w-full md:max-w-lg rounded-none md:rounded-2xl shadow-2xl h-[100dvh] md:h-auto md:max-h-[92vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
                                                     <div className="px-2 md:px-5 pb-3 border-b border-[#EAECF0] flex items-center gap-2 shrink-0 pt-[calc(env(safe-area-inset-top,0px)+12px)] md:pt-3">
                                                         <button onClick={() => setBoardComposerOpen(false)} className="md:hidden w-9 h-9 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-ink-700 shrink-0" title="戻る"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg></button>
-                                                        <div className="flex items-center gap-2 text-[15px] font-semibold text-[#111827]"><Send size={16} className="text-brand-500" />全社向けニュースを作成</div>
-                                                        <button onClick={() => setBoardComposerOpen(false)} className="ml-auto w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3]"><X size={18} /></button>
+                                                        <div className="flex items-center gap-2 text-[15px] font-semibold text-[#111827]"><Send size={16} className="text-brand-500" />{boardDraftId ? '下書きを書き直す' : '全社向けニュースを作成'}</div>
+                                                        <button onClick={() => { setBoardComposerOpen(false); if (boardDraftId) boardResetComposer(); }} className="ml-auto w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[#F2F4F7] text-[#98A2B3]"><X size={18} /></button>
                                                     </div>
-                                                    <div className="overflow-y-auto px-5 py-4">
+                                                    {/* 入力／下見（出したらどう見えるか）の切り替え */}
+                                                    <div data-news-composer-tabs className="px-5 pt-3 shrink-0">
+                                                        <div className="nowl-seg">
+                                                            <button data-news-composer-tab="edit" onClick={() => setBoardPreview(false)} className={!boardPreview ? 'on' : ''}>入力</button>
+                                                            <button data-news-composer-tab="preview" onClick={() => setBoardPreview(true)} className={boardPreview ? 'on' : ''}>下見</button>
+                                                        </div>
+                                                    </div>
+                                                    {boardPreview && (() => {
+                                                        // ⚠️ 下見は**見るだけ**。押しても何も起きないようにして、存在しない記事を開かせない。
+                                                        const pv = { ...boardFormPost(), id: boardDraftId || '__preview__', createdAt: new Date().toISOString(), comments: [], reactions: {} };
+                                                        return (
+                                                            <div data-news-preview className="overflow-y-auto px-5 py-4">
+                                                                <div className="text-[12px] font-semibold text-[#344054] mb-2">一覧ではこう並びます</div>
+                                                                <div style={{ pointerEvents: 'none', maxWidth: 360 }}>{NewsCard(pv)}</div>
+                                                                <div className="text-[12px] font-semibold text-[#344054] mt-5 mb-2">開いたときはこう見えます</div>
+                                                                <div style={{ pointerEvents: 'none' }}>{PostCard(pv, true)}</div>
+                                                                <p className="text-[11px] text-[#98A2B3] mt-3 leading-relaxed">※ 下見は、いま入力している内容から作った見本です。まだ誰にも公開されていません。</p>
+                                                            </div>
+                                                        );
+                                                    })()}
+                                                    <div className="overflow-y-auto px-5 py-4" style={boardPreview ? { display: 'none' } : undefined}>
                                                     <Label>送信者</Label>
                                                     <div className="flex items-center gap-2.5"><ChatAvatar name={chatMyName} /><div><div className="text-[14px] font-semibold text-[#111827] leading-tight">{chatMyName}{chatIsRoot && <span className="ml-1.5 text-[10px] font-bold text-brand-700 bg-brand-50 px-1.5 py-0.5 rounded">本部</span>}</div><div className="text-[11px] text-[#98A2B3] leading-tight">全社に公開されます</div></div></div>
                                                     <Label opt="（任意・太字で表示されます）">タイトル</Label>
@@ -15583,7 +15739,7 @@
                                                     </label>
                                                     {(boardImgs.length > 0 || boardFiles.length > 0) && (
                                                         <div className="mt-2 flex flex-wrap gap-2">
-                                                            {boardImgs.map((s, i) => <div key={s.id || i} className="relative"><img src={s.dataUrl} className="w-16 h-16 rounded-lg object-cover border border-[#EAECF0]" alt="" /><button onClick={() => setBoardImgs(p => p.filter((_, j) => j !== i))} className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-[#111827] text-white rounded-full flex items-center justify-center"><X size={11} /></button></div>)}
+                                                            {boardImgs.map((s, i) => <div key={s.id || i} className="relative">{s.dataUrl ? <img src={s.dataUrl} className="w-16 h-16 rounded-lg object-cover border border-[#EAECF0]" alt="" /> : <ChatImage imgId={s.id} className="w-16 h-16 rounded-lg object-cover border border-[#EAECF0]" />}<button onClick={() => setBoardImgs(p => p.filter((_, j) => j !== i))} className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-[#111827] text-white rounded-full flex items-center justify-center"><X size={11} /></button></div>)}
                                                             {boardFiles.map((f, i) => <div key={f.id || i} className="relative inline-flex items-center gap-1.5 pl-2.5 pr-6 py-2 rounded-lg border border-[#EAECF0] bg-[#F8F9FB] text-[12px] font-semibold text-[#111827] max-w-[200px]"><FileText size={14} className="text-[#667085] shrink-0" /><span className="truncate">{f.name}</span><button onClick={() => setBoardFiles(p => p.filter((_, j) => j !== i))} className="absolute top-1/2 -translate-y-1/2 right-1.5 w-4 h-4 text-[#98A2B3] hover:text-rose-500"><X size={12} /></button></div>)}
                                                         </div>
                                                     )}
@@ -15596,7 +15752,21 @@
                                                     </div>
                                                     </div>
                                                     <div className="px-5 pt-3.5 border-t border-[#EAECF0] shrink-0 pb-[max(env(safe-area-inset-bottom,0px),14px)]">
-                                                        <button onClick={boardPost} disabled={boardPosting || composerEmpty} className="w-full inline-flex items-center justify-center gap-2 py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-semibold text-[14px] disabled:bg-[#EAECF0] disabled:text-[#98A2B3] active:scale-[0.99] transition shadow-lg shadow-brand-200/40"><Send size={16} />ニュースを投稿</button>
+                                                        <div className="flex gap-2">
+                                                            <button data-news-save-draft onClick={() => boardPost('draft')} disabled={boardPosting || composerEmpty}
+                                                                className="shrink-0 inline-flex items-center justify-center gap-1.5 px-4 py-3 rounded-xl border border-[#EAECF0] bg-white text-[#344054] font-semibold text-[14px] hover:bg-[#F8F9FB] disabled:text-[#98A2B3] transition">下書きに保存</button>
+                                                            <button data-news-publish onClick={() => boardPost('publish')} disabled={boardPosting || !publishReady.ok}
+                                                                className="flex-1 inline-flex items-center justify-center gap-2 py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-semibold text-[14px] disabled:bg-[#EAECF0] disabled:text-[#98A2B3] active:scale-[0.99] transition shadow-lg shadow-brand-200/40"><Send size={16} />ニュースを投稿</button>
+                                                        </div>
+                                                        {/* ⚠️ 出せない理由をそのまま書く（押せないだけにしない） */}
+                                                        {!publishReady.ok && !composerEmpty && (
+                                                            <p data-news-publish-why className="mt-2 text-[11px] text-[#a73649]">
+                                                                {publishReady.reason === 'no_shops' ? '公開対象で店舗を1つ以上えらんでください。'
+                                                                 : publishReady.reason === 'no_due' ? '「確認しました」を求めるときは、期限を入れてください。'
+                                                                 : '内容を入力してください。'}
+                                                            </p>
+                                                        )}
+                                                        <p className="mt-2 text-[11px] text-[#98A2B3]">下書きは、あなたと本部にだけ見えます。通知も未読も出ません。</p>
                                                     </div>
                                                 </div>
                                             </div>
@@ -15604,6 +15774,37 @@
 
                                             {/* ── ピックアップ＋一覧（UI試作V3）── */}
                                             <div className="min-w-0">
+                                                {/* 下書き（書いた本人と本部だけ）。⚠️ 一覧には混ぜない */}
+                                                {myDrafts.length > 0 && (
+                                                    <div data-news-drafts className="mb-5 p-4 rounded-2xl border border-dashed border-[#d0cacc] bg-white">
+                                                        <div className="text-[12px] font-black text-ink-900">下書き {myDrafts.length}件
+                                                            <span className="ml-2 font-normal text-[11px] text-[#9a9aa3]">（あなたと本部にだけ見えています。通知も未読も出ません）</span>
+                                                        </div>
+                                                        <div className="mt-3 flex flex-col gap-2">
+                                                            {myDrafts.map(d => {
+                                                                const who = chatResolveName(d.authorId, d.authorName || '');
+                                                                const at = newsParseAt(d.updatedAt || d.createdAt);
+                                                                const when = at == null ? '' : (() => { const x = new Date(at); return `${x.getMonth() + 1}月${x.getDate()}日 ${x.getHours()}:${String(x.getMinutes()).padStart(2, '0')}`; })();
+                                                                const ready = !!(String(d.title || '').trim() || String(d.text || '').trim());
+                                                                return (
+                                                                    <div key={d.id} data-news-draft={d.id} className="flex items-center gap-2 flex-wrap px-3 py-2.5 rounded-xl border border-[#EAECF0] bg-[#FBFBFC]">
+                                                                        <span className="nowl-badge neutral">下書き</span>
+                                                                        <span className="text-[13px] font-bold text-ink-900 truncate max-w-[52%]">{d.title || (d.text || '').slice(0, 30) || '（まだ何も書かれていません）'}</span>
+                                                                        <span className="text-[11px] text-[#98A2B3]">{[who, when].filter(Boolean).join(' · ')}</span>
+                                                                        <span className="ml-auto flex items-center gap-1.5">
+                                                                            <button data-news-draft-edit={d.id} onClick={() => boardEditDraft(d)}
+                                                                                className="px-3 h-9 rounded-lg border border-[#EAECF0] bg-white text-[12px] font-bold text-[#344054] hover:bg-[#F8F9FB]">書き直す</button>
+                                                                            <button data-news-draft-publish={d.id} onClick={() => boardPublishDraft(d.id)} disabled={!ready}
+                                                                                className="px-3 h-9 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-[12px] font-bold disabled:bg-[#EAECF0] disabled:text-[#98A2B3]">投稿する</button>
+                                                                            <button data-news-draft-delete={d.id} onClick={() => boardDelete(d.id)} aria-label="下書きを削除"
+                                                                                className="w-9 h-9 flex items-center justify-center rounded-lg text-[#98A2B3] hover:text-rose-500 hover:bg-[#F2F4F7]"><X size={15} /></button>
+                                                                        </span>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </div>
+                                                )}
                                                 {/* 確認が必要なお知らせ（期限つきで、まだ期限内のもの） */}
                                                 {(() => {
                                                     const need = posts.filter(p => p.needsAck && newsDueState(p.dueDate) !== 'over')
@@ -15695,6 +15896,16 @@
                                                             className={boardCatFilter === c.key ? 'on' : ''}># {c.label}</button>
                                                     ))}
                                                 </div>
+                                                {/* 過去記事の年月。⚠️ 記事が1か月分しか無いときは出さない（選べない帯を置かない） */}
+                                                {monthOpts.length > 1 && (
+                                                    <div data-news-months className="nowl-tags">
+                                                        <button data-news-month-btn="all" onClick={() => setBoardMonth('')} className={boardMonth === '' ? 'on' : ''}>すべての期間</button>
+                                                        {monthOpts.map(m => (
+                                                            <button key={m.key || 'none'} data-news-month-btn={m.key} onClick={() => setBoardMonth(boardMonth === m.key ? '' : m.key)}
+                                                                className={boardMonth === m.key ? 'on' : ''}>{m.label}<span className="ml-1.5 text-[10px] opacity-70">{m.count}</span></button>
+                                                        ))}
+                                                    </div>
+                                                )}
 
                                                 {!boardData.loaded ? <div className="text-center text-[#98A2B3] text-[13px] py-10">読み込み中…</div>
                                                  : posts.length === 0 ? (
@@ -15703,17 +15914,25 @@
                                                             : boardFilter === 'saved' ? <>保存したお知らせはまだありません。カードの☆で保存できます。</>
                                                             : boardFilter === 'unread' ? <>未読のお知らせはありません。</>
                                                             : <>まだお知らせはありません。右上の「お知らせを投稿」から発信してみましょう。</>}
-                                                        {(bq || boardCatFilter || boardFilter !== 'all') && (
+                                                        {(bq || boardCatFilter || boardMonth || boardFilter !== 'all') && (
                                                             <div className="mt-3">
-                                                                <button data-news-clearfilter onClick={() => { setBoardSearch(''); setBoardCatFilter(''); setBoardFilter('all'); }}
+                                                                <button data-news-clearfilter onClick={() => { setBoardSearch(''); setBoardCatFilter(''); setBoardFilter('all'); setBoardMonth(''); }}
                                                                     className="px-3 py-2 rounded-lg border border-[#e4e4eb] text-[11px] font-bold text-[#4a4c53] hover:bg-white">絞り込みを解除する</button>
                                                             </div>
                                                         )}
                                                     </div>
                                                  ) : (<>
-                                                    <NewsCounts ids={posts.slice(0, 60).map(x => x.id)} />
-                                                    <div className="nowl-postgrid">{posts.map(p => NewsCard(p))}</div>
-                                                    <div className="text-center text-[11px] text-[#B0B7C3] py-6">これ以上ありません</div>
+                                                    <NewsCounts ids={page.items.slice(0, 60).map(x => x.id)} />
+                                                    {/* 過去記事は年月ごとにまとめて出す。⚠️ 年月は日本時間で決める */}
+                                                    {newsGroupByMonth(page.items).map(g => (
+                                                        <section key={g.key || 'none'} data-news-month={g.key}>
+                                                            <div className="nowl-month"><h3>{g.label}</h3><span>{g.posts.length}件</span></div>
+                                                            <div className="nowl-postgrid">{g.posts.map(p => NewsCard(p))}</div>
+                                                        </section>
+                                                    ))}
+                                                    {page.hasMore
+                                                        ? <div className="text-center py-6"><button data-news-more onClick={() => setBoardShown(page.next)} className="nowl-more">もっと読む<span>あと {page.remaining}件</span></button></div>
+                                                        : <div className="text-center text-[11px] text-[#B0B7C3] py-6">これ以上ありません</div>}
                                                  </>)}
                                             </div>
                                         </div>

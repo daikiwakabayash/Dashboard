@@ -250,3 +250,34 @@ describe('resolveActor - ヘッダ経由の認証（日本語アカウント名�
     expect(a.role).toBe('root');
   });
 });
+
+describe('同一人物の別ID（altIds）', () => {
+  it('SalonOne の staff_id が user_id と別番号でも、本人の識別子として持つ', async () => {
+    const a = await resolveActor({ headers: { authorization: 'Bearer t' }, body: {} }, {
+      env: {},
+      verifySalonOneBearer: async () => ({ root: false, role: 'shop_staff', shopNames: ['NAORU 渋谷院'], userId: 'u1', staffId: '4321', loginId: 'aoki' }),
+      skipCache: true,
+    });
+    expect(a.verified).toBe(true);
+    expect(a.id).toBe('u1');
+    expect(a.altIds).toEqual(['4321']);
+  });
+  it('staff_id が無ければ altIds は空（空文字を入れない）', async () => {
+    const a = await resolveActor({ headers: { authorization: 'Bearer t' }, body: {} }, {
+      env: {},
+      verifySalonOneBearer: async () => ({ root: false, role: 'shop_staff', shopNames: [], userId: 'u1', staffId: '', loginId: 'aoki' }),
+      skipCache: true,
+    });
+    expect(a.altIds).toEqual([]);
+  });
+  it('本部アカウントに紐付けた staffId も本人の識別子になる', async () => {
+    const a = await resolveActor({ headers: {}, body: { owner: '本部 花子', token: 'tok' } }, {
+      env: {},
+      verifyOwnerToken: () => true,
+      loadAccounts: async () => ({ passwords: { '本部 花子': 'pw' }, shopsMap: {}, metaMap: { '本部 花子': { role: 'hq', staffName: '本部 花子', staffId: '900' } } }),
+    });
+    expect(a.verified).toBe(true);
+    expect(a.id).toBe('本部 花子');
+    expect(a.altIds).toEqual(['900']);
+  });
+});

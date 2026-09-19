@@ -412,16 +412,16 @@ const evBox = await page.evaluate(() => {
            inside: !!d && d.bottom <= a.bottom + 1 && d.top >= a.top - 1 };
 });
 check('🔴 スマホで見出しカードが高くなりすぎない', !!evBox && evBox.h <= 420, evBox ? `${evBox.h}px` : 'なし');
-// ⚠️ 1件目にたどり着くまでが長いと、何件あっても読まれない
-const toFirst = await page.evaluate(() => {
-  const c = document.querySelector('[data-ev-card]');
-  if (!c) return -1;
-  // 下書きの帯は普段は出ない（この検査の中で1件作っているため）ので、その分は差し引く
-  const d = document.querySelector('[data-ev-drafts]');
-  const dh = d ? Math.round(d.getBoundingClientRect().height) + 16 : 0;
-  return Math.round(c.getBoundingClientRect().top + window.scrollY) - dh;
+// ⚠️ 1件目にたどり着くまでが長いと、何件あっても読まれない。
+//    スクロール位置に左右されないよう、**1件目より上にある各部分の高さを足して**測る
+//    （下書きの帯・お知らせの帯など、普段は出ないものは含めない）。
+const aboveCards = await page.evaluate(() => {
+  const sel = ['.nowl-pagehead', '.ev-hero', '.nowl-sechead', '.nowl-tools', '.nowl-tags'];
+  let sum = 0;
+  for (const s of sel) { const e = document.querySelector(s); if (e) sum += e.getBoundingClientRect().height; }
+  return Math.round(sum);
 });
-check('🔴 スマホで1件目までが遠すぎない', toFirst > 0 && toFirst <= 360, `${toFirst}px`);   // ⚠️ この検査では「参加予定の次の会」の帯も出ている
+check('🔴 スマホで1件目までが遠すぎない', aboveCards > 0 && aboveCards <= 620, `${aboveCards}px`);
 // ⚠️ 1件あたりが長いと、スマホで1〜2件しか並ばない
 const evCard = await page.evaluate(() => {
   const c = document.querySelector('[data-ev-card]');

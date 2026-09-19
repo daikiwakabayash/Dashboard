@@ -4286,6 +4286,8 @@
 
             // ── Creative Library（本部/root限定・cc_creative_library）──────────
             // 生成そのものは③。ここは「依頼する・見る・比べる・直してもらう・承認する」だけ。
+            // ③の上限を一度取れたか（取れるまでは cvLoad のたびに聞き直す）
+            const cvLimitsRef = useRef(false);
             const CV_TEXT_FIELDS = ['headline', 'body', 'cta'];
             const CV_TEXT_LABEL = { headline: '見出し', body: '本文', cta: 'ボタンの文言' };
             const cvPost = async (payload) => {
@@ -4295,15 +4297,23 @@
                 if (r.status === 403) return { ok: false, error: { code: 'forbidden', message: 'この機能は利用できません' } };
                 return await r.json().catch(() => ({ ok: false, error: { code: 'internal', message: '応答を読めませんでした' } }));
             };
-            const cvLoad = async () => {
+            // force=true で③の上限も取り直す。
+            // ⚠️ 既定では**取り直さない**。cvLoad は操作のたびに走るので、毎回聞くと
+            //    ③（worker 1本）へ1セッションで10往復ぶつけることになる。
+            //    上限はテンプレの版が変わったときだけ変わるので、
+            //    最初の1回と「再読み込み」を押したときだけ取りに行く。
+            const cvLoad = async (force = false) => {
                 const j = await cvPost({ action: 'list' });
                 if (!j.ok) { setCv(p => ({ ...p, error: (j.error && j.error.message) || '' })); return; }
                 setCv(p => ({ ...p, assets: j.assets || [], creatives: j.creatives || [],
                     channels: j.channels || [], generator: j.generator || null, error: '' }));
+                if (!force && cvLimitsRef.current) return;
                 // ③のテンプレ上限。一覧とは別に取る（③が遅くても一覧を止めない）。
                 // ⚠️ 失敗しても①の既定値で埋めない。未取得のままにして送信を止める。
                 const l = await cvPost({ action: 'limits' });
-                setCv(p => ({ ...p, limits: (l.ok && l.limits) ? l.limits : { loaded: false, reason: '上限を取得できませんでした', text: {} } }));
+                const lim = (l.ok && l.limits) ? l.limits : { loaded: false, reason: '上限を取得できませんでした', text: {} };
+                cvLimitsRef.current = !!lim.loaded;
+                setCv(p => ({ ...p, limits: lim }));
             };
             // 文字数の残り。上限が未取得なら「—」を出す（0や満了にしない）。
             const cvCount = (limits, field, value) => {
@@ -25510,7 +25520,7 @@
                                     {c.generator && (c.generator.connected
                                         ? <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-50 text-emerald-800">生成API 接続済み</span>
                                         : <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-slate-100 text-slate-700">生成API 未接続</span>)}
-                                    <button onClick={cvLoad} className="ml-auto px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200 hover:bg-ink-50">再読み込み</button>
+                                    <button onClick={() => cvLoad(true)} className="ml-auto px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200 hover:bg-ink-50">再読み込み</button>
                                 </header>
 
                                 {c.generator && !c.generator.connected && (

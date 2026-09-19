@@ -73,6 +73,19 @@ import { prKey as boardPrKey, normalizePr, markRead as boardMarkRead, markAck as
          postStatus as boardPostStatus, canSeeDetail as boardCanSeeDetail, outOfAudience as boardOutOfAudience } from '../lib/board-status.js';
 // ── Command Center（Phase 0〜2）。既存の type= には一切触れない追加のみ ──
 import { FLAGS_KEY, DEFAULT_FLAGS, normalizeFlags, applyFlagChange, killAll } from '../lib/ccflags.js';
+import { isOn as ccIsOn } from '../lib/ccflags.js';
+// 日報・集客速報（?type=dailyreport）。文面と判断はすべてこのモジュール側にある。
+// ⚠️ jstYmd は meo.js のものと名前が衝突するので別名にする（JST の切り方は同じ）。
+import {
+  CLOSING as DR_CLOSING, PREOPEN as DR_PREOPEN, KINDS as DR_KINDS, REPORT_VERSION as DR_VERSION,
+  SETTINGS_KEY as DR_SETTINGS_KEY, LOG_KEY as DR_LOG_KEY,
+  jstYmd as drJstYmd, normalizeSettings as drNormalizeSettings, normalizeShopSetting as drNormalizeShopSetting,
+  settingReady as drSettingReady, buildReport as drBuildReport, reportReady as drReportReady,
+  sendKey as drSendKey, contentHash as drContentHash, shouldSend as drShouldSend, recordSent as drRecordSent,
+  detectAggregationRun as drDetectAggregationRun, advanceObservation as drAdvanceObservation,
+  planRun as drPlanRun, normalizeSummary as drNormalizeSummary, normalizeChannels as drNormalizeChannels,
+} from '../lib/daily-report.js';
+import { ANALYTICS_BASE as SO_ANALYTICS_BASE, buildUpstreamUrl as soBuildUpstreamUrl } from '../lib/salonone.js';
 import { AUDIT_KEY, AUDIT_CAP, buildEntry as buildAuditEntry, listEntries as listAuditEntries } from '../lib/audit.js';
 import { APPROVAL_KEY, APPROVAL_CAP, buildApproval, decide as decideApproval, repropose as reproposeApproval, recordExecution, listApprovals, pendingCount } from '../lib/approvals.js';
 import { AGENTLOG_KEY, AGENTLOG_CAP, startRun, finishRun, listRuns, summarize as summarizeRuns, anomalies as runAnomalies } from '../lib/agentlog.js';
@@ -106,6 +119,8 @@ const CHAT_MSG_PREFIX = 'naoru:chat:m:';      // メッセージはルーム別�
 // ※以前あった索引(midx)は廃止。送信時に空ベースから作り直して他ルームを消す不具合があったため、
 //   GETは権威ある rooms 一覧から per-room キーをMGETでまとめて引く方式に変更した。
 const CHAT_IMG_PREFIX = 'naoru:chat:img:';    // 画像は1枚1キーで別保存（blob肥大化を避ける）
+const DR_SENDER_ID = '__daily_report__';      // 日報の自動投稿。人の staffId と衝突しない固定ID
+const DR_SENDER_NAME = '日報（自動）';          // 発言者名。人の発言と見分けられるようにする
 const CHAT_MSG_CAP = 400;                     // 1ルームあたり保持する最大メッセージ数（古いものから破棄）
 const BOARD_KEY = 'naoru:board:v1';           // { posts:[...], reads:{…旧}, _v } 掲示板（全社発信）。既読は BOARD_READS_KEY へ分離済み（旧readsは移行用に残す）
 const BOARD_FILE_PREFIX = 'naoru:board:file:';// 添付ファイルは1件1キーで別保存
@@ -369,6 +384,7 @@ export default async function handler(req, res) {
     'blobcheck',    // 添付保存先の設定状況（インフラ情報）
     'setupstatus',  // 設定状況（どの環境変数が入っているか。⚠️ 値そのものは返さない）
     'aianswer',     // 業務AIの回答（③が入れる。⚠️ 書けるのはエージェント用トークンとrootだけ）
+    'dailyreport',  // 日報・集客速報の設定と送信（⚠️ 設定変更と送信は本部/rootだけ・中で再確認する）
   ];
   const reqType = (req.method === 'GET' ? req.query.type : (req.body || {}).type);
   let chatActor = null;
@@ -534,6 +550,225 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
     return res.status(400).json({ ok: false, error: 'invalid aianswer action' });
+  }
+
+  // ── 日報・集客速報の自動送信: ?type=dailyreport ─────────────────────────
+  // ① 営業後の日報（SalonOne の「集計実行」を合図に）と
+  // ② オープン前の集客速報（指定時刻）を、**チェックを入れた店舗だけ** グループチャットへ出す。
+  // 文面の組み立て・送ってよいかの判断は lib/daily-report.js（純粋関数・合成データで検証済み）。
+  //
+  // 🔴 安全側の既定（オーナー承認前に勝手に流れないようにする）:
+  //   1. フラグ cc_daily_report が OFF の間は **1通も送らない**（既定OFF）。
+  //   2. 店舗ごとの enabled も既定 OFF。送信先ルーム未設定なら送らない。
+  //   3. 同じ店舗・同じ日・同じ種別は 1 回だけ（再実行・多重起動で二重に出ない）。
+  //   4. 数字が1つも取れていない日は送らない（中身の無い定型文を流さない）。
+  //   5. 設定変更・手動送信は 本部/root だけ。エージェント用トークンでは変えられない。
+  //
+  // 🔴 未確認（AGENTS.md §2 / 既存事実として扱わない）:
+  //   SalonOne 側に「集計実行が押された」を知らせる Webhook があるかは未確認。
+  //   trigger='aggregate' は当日の入金ベース売上の動きを見る **代理シグナル（仮案）**。
+  if (reqType === 'dailyreport') {
+    const DR_SET_KEY = ccKey(DR_SETTINGS_KEY);
+    const DR_LOG_K = ccKey(DR_LOG_KEY);
+    const DR_OBS_KEY = ccKey('naoru:dailyreport:obs:v1');
+
+    const verified = !!chatActor && chatActor.verified === true;
+    const src = String((chatActor && chatActor.source) || '');
+    // 設定変更と手動送信は「画面にログインした本部/root」だけ。
+    // ⚠️ source==='agent' / 'cron' は含めない（③や自動実行が送信範囲を広げられないようにする）。
+    const isHq = verified && ['root', 'admin'].includes(chatActor.role) && src !== 'agent' && src !== 'cron';
+    const isCron = verified && src === 'cron';
+    const isRoot = verified && chatActor.role === 'root';
+
+    const drFlags = normalizeFlags(await blobGet(ccKey(FLAGS_KEY), hasKV, hasSB, gas).catch(() => null));
+    const drOn = ccIsOn(drFlags, 'cc_daily_report');
+
+    const drLoadSettings = async () => drNormalizeSettings(await blobGet(DR_SET_KEY, hasKV, hasSB, gas).catch(() => null));
+    const drLoadLog = async () => {
+      const v = await blobGet(DR_LOG_K, hasKV, hasSB, gas).catch(() => null);
+      return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+    };
+
+    // ── SalonOne から当日ぶんを読む（読み取りのみ・失敗は null を返す）──────
+    // ⚠️ 失敗を 0 にしない。null のまま文面へ渡し「未取得」と書かせる。
+    const drSoGet = async (resource, query) => {
+      const apiKey = process.env.SALONONE_API_KEY || '';
+      if (!apiKey) return null;
+      try {
+        // buildUpstreamUrl は { url, endpoint } を返す（文字列ではない）
+        const { url } = soBuildUpstreamUrl(resource, query, process.env.SALONONE_API_BASE || SO_ANALYTICS_BASE);
+        const r = await fetch(url, { headers: { 'X-SalonOne-Api-Key': apiKey } });
+        if (!r.ok) return null;
+        const j = await r.json().catch(() => null);
+        if (!j) return null;
+        return j.data !== undefined ? j.data : j;
+      } catch (_) { return null; }
+    };
+
+    // 1店舗ぶんの文面を作る（送らない）。
+    const drBuild = async (setting, kind, ymd) => {
+      const q = { from: ymd, to: ymd, shop_id: setting.shopId };
+      const needSales = kind === DR_CLOSING;
+      const [sumRaw, chRaw] = await Promise.all([
+        needSales ? drSoGet('sales/summary', q) : Promise.resolve(null),
+        drSoGet('marketing/by-channel', q),
+      ]);
+      return drBuildReport(kind, {
+        shopId: setting.shopId,
+        shopName: setting.shopName || setting.shopId,
+        ymd,
+        summary: needSales ? drNormalizeSummary(sumRaw) : null,
+        channels: drNormalizeChannels(chRaw),
+        target: setting.targetNew,
+        fetchedAt: Date.now(),
+      });
+    };
+
+    // ── 実際にチャットへ出す（ここが唯一の送信口）────────────────────────
+    // ⚠️ 呼ぶ前に必ず drOn / settingReady / shouldSend / reportReady を通すこと。
+    const drPost = async (setting, report) => {
+      const msg = {
+        id: genId('m'),
+        roomId: setting.roomId,
+        fromStaffId: DR_SENDER_ID,
+        fromName: DR_SENDER_NAME,
+        fromShop: setting.shopName || '',
+        text: report.text,
+        imgIds: [], links: [], mentions: [],
+        createdAt: new Date().toISOString(),
+        // 自動投稿であることを本文の外にも残す（人の発言と混ざらないように）
+        auto: { kind: report.kind, ymd: report.ymd, shopId: setting.shopId, version: DR_VERSION },
+      };
+      if (hasKV) await kvAppendJson(CHAT_MSG_PREFIX + String(setting.roomId), msg, CHAT_MSG_CAP);
+      else {
+        const base = (await blobGet(CHAT_MSG_PREFIX + String(setting.roomId), hasKV, hasSB, gas)) || [];
+        await blobSet(CHAT_MSG_PREFIX + String(setting.roomId), (Array.isArray(base) ? base : []).concat(msg).slice(-CHAT_MSG_CAP), hasKV, hasSB, gas);
+      }
+      return msg.id;
+    };
+
+    // 1店舗ぶんを「判定 → 作成 → 送信 → 記録」まで。dry=true なら作るだけ。
+    const drRunOne = async (setting, kind, ymd, { dry, force }) => {
+      const ready = drSettingReady(setting);
+      if (!ready.ok) return { shopId: setting.shopId, sent: false, reason: ready.reason };
+      const report = await drBuild(setting, kind, ymd);
+      const rr = drReportReady(report);
+      if (!rr.ok) return { shopId: setting.shopId, sent: false, reason: rr.reason, missing: report.missing, text: report.text };
+      const hash = drContentHash(report.text);
+      const log = await drLoadLog();
+      const key = drSendKey(setting.shopId, ymd, kind);
+      const decide = drShouldSend({ log, key, hash, force });
+      if (!decide.send) return { shopId: setting.shopId, sent: false, reason: decide.reason, text: report.text };
+      if (dry) return { shopId: setting.shopId, sent: false, reason: 'dry_run', text: report.text, missing: report.missing };
+      const messageId = await drPost(setting, report);
+      // 🔴 記録は送信の直後。ここを飛ばすと再実行で二重に出る。
+      await blobSet(DR_LOG_K, drRecordSent(await drLoadLog(), key, { at: Date.now(), hash, messageId, roomId: setting.roomId }), hasKV, hasSB, gas);
+      return { shopId: setting.shopId, sent: true, reason: 'ok', messageId, missing: report.missing, text: report.text };
+    };
+
+    if (req.method === 'GET') {
+      const action = String(req.query.action || '').slice(0, 40);
+
+      // ── 自動実行（Vercel Cron）──────────────────────────────────────
+      // ⚠️ 人の操作ではないので CRON_SECRET で認証する（他の cron と同じ作法）。
+      if (action === 'cronrun') {
+        const secret = process.env.CRON_SECRET || '';
+        if (secret && String(req.headers.authorization || '') !== `Bearer ${secret}`) {
+          return res.status(401).json({ ok: false, error: 'unauthorized' });
+        }
+        if (!isCron && !isRoot) return res.status(403).json({ ok: false, error: 'forbidden', code: 'cron_only' });
+        const kind = DR_KINDS.includes(String(req.query.kind || '')) ? String(req.query.kind) : DR_PREOPEN;
+        // 🔴 フラグOFFの間は**送らない**。何が送られる予定かだけ返す（画面で確認できる）。
+        const dry = !drOn || req.query.dry === '1';
+        const settings = await drLoadSettings();
+        const log = await drLoadLog();
+        const now = Date.now();
+        const plan = drPlanRun({ settings, kind, log, nowMs: now });
+        const ymd = drJstYmd(now);
+        const results = [];
+        for (const p of plan) {
+          if (p.reason === 'manual_only') { results.push({ shopId: p.setting.shopId, sent: false, reason: 'manual_only' }); continue; }
+          if (p.reason === 'already') { results.push({ shopId: p.setting.shopId, sent: false, reason: 'already' }); continue; }
+          if (p.reason === 'needs_aggregate_check') {
+            // 「集計実行」は直接観測できないため、入金ベース売上の動きで代用する（仮案）。
+            const obsAll = (await blobGet(DR_OBS_KEY, hasKV, hasSB, gas).catch(() => null)) || {};
+            const obsKey = `${p.setting.shopId}|${ymd}`;
+            const sum = drNormalizeSummary(await drSoGet('sales/summary', { from: ymd, to: ymd, shop_id: p.setting.shopId }));
+            const cur = { digest: sum ? sum.digest : null, at: now };
+            const det = drDetectAggregationRun(obsAll[obsKey] || null, cur);
+            await blobSet(DR_OBS_KEY, { ...obsAll, [obsKey]: drAdvanceObservation(obsAll[obsKey] || null, cur) }, hasKV, hasSB, gas);
+            if (!det.settled) { results.push({ shopId: p.setting.shopId, sent: false, reason: `aggregate_${det.reason}` }); continue; }
+          } else if (!p.due) {
+            results.push({ shopId: p.setting.shopId, sent: false, reason: p.reason }); continue;
+          }
+          results.push(await drRunOne(p.setting, kind, ymd, { dry, force: false }));
+        }
+        return res.status(200).json({ ok: true, kind, ymd, dry, flagOn: drOn, planned: plan.length, results: results.map(r => ({ ...r, text: undefined })) });
+      }
+
+      // ここから先は本部/root だけ（設定と売上の下書きが見えるため）
+      if (!isHq) return res.status(403).json({ ok: false, error: 'forbidden', code: 'hq_only',
+        message: '日報の設定は本部・管理者のみが操作できます' });
+
+      // ── 下書きの確認（送らない）────────────────────────────────────
+      if (action === 'preview') {
+        const shopId = String(req.query.shopId || '').slice(0, 40);
+        const kind = DR_KINDS.includes(String(req.query.kind || '')) ? String(req.query.kind) : DR_CLOSING;
+        const settings = await drLoadSettings();
+        const setting = settings.shops[shopId] || drNormalizeShopSetting({ shopId, shopName: String(req.query.shopName || '') }, shopId);
+        if (!setting.shopId) return res.status(400).json({ ok: false, error: 'shop_required' });
+        const ymd = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || '')) ? String(req.query.date) : drJstYmd(Date.now());
+        const report = await drBuild({ ...setting, shopName: setting.shopName || String(req.query.shopName || '') }, kind, ymd);
+        return res.status(200).json({ ok: true, kind, ymd, text: report.text, missing: report.missing,
+          ready: drReportReady(report), setting: drSettingReady(setting), flagOn: drOn });
+      }
+
+      const settings = await drLoadSettings();
+      const log = await drLoadLog();
+      // 直近の送信記録だけ返す（全部返すと重い）
+      const recent = Object.entries(log).sort((a, b) => (b[1].at || 0) - (a[1].at || 0)).slice(0, 100)
+        .map(([k, v]) => ({ key: k, at: v.at, roomId: v.roomId }));
+      return res.status(200).json({
+        ok: true, settings, recent, flagOn: drOn,
+        today: drJstYmd(Date.now()),
+        salonOneConfigured: !!String(process.env.SALONONE_API_KEY || '').trim(),
+        cronConfigured: !!String(process.env.CRON_SECRET || '').trim(),
+        // 🔴 画面に「未確認」を出すための印。確定した事実として表示させない。
+        aggregateTriggerConfirmed: false,
+      });
+    }
+
+    const body = req.body || {};
+    const action = String(body.action || '').slice(0, 40);
+    if (!isHq) return res.status(403).json({ ok: false, error: 'forbidden', code: 'hq_only',
+      message: '日報の設定は本部・管理者のみが操作できます' });
+
+    // 店舗ごとの設定を1件だけ更新する（他店の設定を巻き込まない）。
+    if (action === 'settings_set') {
+      const shopId = String(body.shopId || '').slice(0, 40);
+      if (!shopId) return res.status(400).json({ ok: false, error: 'shop_required' });
+      const cur = await drLoadSettings();
+      const prev = cur.shops[shopId] || drNormalizeShopSetting({}, shopId);
+      const patch = (body.setting && typeof body.setting === 'object' && !Array.isArray(body.setting)) ? body.setting : {};
+      const next = drNormalizeShopSetting({ ...prev, ...patch, shopId,
+        updatedAt: Date.now(), updatedBy: String(chatActor.id || '').slice(0, 80) }, shopId);
+      await blobSet(DR_SET_KEY, { ...cur, shops: { ...cur.shops, [shopId]: next } }, hasKV, hasSB, gas);
+      return res.status(200).json({ ok: true, setting: next, ready: drSettingReady(next), flagOn: drOn });
+    }
+
+    // 人が押す「いま送る」。フラグOFFなら送らず下書きだけ返す。
+    if (action === 'send') {
+      const shopId = String(body.shopId || '').slice(0, 40);
+      const kind = DR_KINDS.includes(String(body.kind || '')) ? String(body.kind) : DR_CLOSING;
+      const cur = await drLoadSettings();
+      const setting = cur.shops[shopId];
+      if (!setting) return res.status(400).json({ ok: false, error: 'shop_not_configured' });
+      const ymd = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date || '')) ? String(body.date) : drJstYmd(Date.now());
+      const r = await drRunOne(setting, kind, ymd, { dry: !drOn, force: body.force === true });
+      return res.status(200).json({ ok: true, flagOn: drOn, ...r });
+    }
+
+    return res.status(400).json({ ok: false, error: 'invalid dailyreport action' });
   }
 
 

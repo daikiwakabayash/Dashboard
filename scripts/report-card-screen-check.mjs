@@ -30,6 +30,8 @@ const PREP_CARD = {
   ],
   todayNote: '',
   channels: { header: '媒体別の予約状況', note: '本日 00:00〜19:00',
+    cols: [{ key: 'added', label: '新規 / 件' }, { key: 'cancelled', label: '取消 / 件' },
+           { key: 'total', label: '累計 / 名', strong: true }],
     rows: [
       { name: 'Meta広告', added: 5, cancelled: 1, total: 52 },
       { name: 'チラシ', added: 2, cancelled: 1, total: 24 },
@@ -78,7 +80,25 @@ const msg = (id, card) => ({
   createdAt: new Date('2026-09-27T09:42:00Z').toISOString(),
   auto: { phase: card.kind, ymd: '2026-09-27', shopId: '1', version: 'daily-report-2', card },
 });
-const MESSAGES = { room1: [msg('m1', PREP_CARD), msg('m2', PREOPEN_CARD)] };
+// オープン後の日報。🔴 媒体別の列がオープン前と違う（予約/来店/入会）。
+// 描く側が項目名を当てていると、ここが全部「未取得」になる。
+const OPEN_CARD = {
+  kind: 'open', brand: 'NAORU × SalonOne', title: '日報', badge: '日報',
+  atLabel: '2026/10/05（月）・日本時間',
+  today: [
+    { label: '売上合計', value: 482000, unit: '円', money: true },
+    { label: '来店', value: 24, unit: '名' },
+    { label: '入会', value: 3, unit: '名' },
+  ],
+  channels: { header: '媒体別（新規予約）', note: '10/5(月)',
+    cols: [{ key: 'booking', label: '予約 / 件' }, { key: 'visit', label: '来店 / 名' },
+           { key: 'join', label: '入会 / 名', strong: true }],
+    rows: [{ name: 'ホットペッパー', booking: 4, visit: 3, join: 2 },
+           { name: 'Google', booking: 2, visit: 2, join: 1 }],
+    total: { booking: 6, visit: 5, join: 3 } },
+  footer: { source: 'SalonOne・更新 10/5(月) 22:00', schedule: '毎日22:00配信' },
+};
+const MESSAGES = { room1: [msg('m1', PREP_CARD), msg('m2', PREOPEN_CARD), msg('m3', OPEN_CARD)] };
 
 const json = (res, o) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(o)); };
 
@@ -215,6 +235,18 @@ check('表は指で横に送れる（切り落とさない）',
   await pre.locator('.rep-tw').first().evaluate(el => getComputedStyle(el).overflowX === 'auto'));
 check('🔴 数字は選んでコピーできる（画像ではない）',
   await pre.locator('[data-rep-staff]').first().evaluate(el => getComputedStyle(el).userSelect !== 'none'));
+
+// ── オープン後の日報（媒体別の列がオープン前と違う）─────────────────
+const opn = page.locator('[data-rep-card="open"]');
+check('オープン後の日報もカードで出る', (await opn.count()) === 1);
+t = await opn.first().innerText();
+check('売上・来店・入会が出る', t.includes('¥482,000') && t.includes('24') && t.includes('3'));
+check('🔴 媒体別の見出しがオープン後のもの（予約/来店/入会）',
+  t.includes('予約 / 件') && t.includes('来店 / 名') && t.includes('入会 / 名'));
+check('🔴 媒体別の中身が実際に出る（全部「未取得」にならない）',
+  t.includes('ホットペッパー') && t.includes('4') && !/ホットペッパー[^\n]*未取得/.test(t),
+  (t.split('\n').find(x => x.includes('ホットペッパー')) || ''));
+check('合計行が出る', (await opn.locator('[data-rep-channels] tfoot').count()) === 1);
 
 check('画面のエラーが出ていない', errors.length === 0, errors.join(' | '));
 

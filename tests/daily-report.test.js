@@ -788,3 +788,48 @@ describe('リピート（次回予約）を新規客台帳から読む', () => {
     expect(Math.round(row('リピート率').total * 10) / 10).toBe(66.7);   // 2 ÷ 3
   });
 });
+
+describe('🔴 媒体別の表は、列の定義をカード側が持つ', () => {
+  // 期間ごとに列が違う。描く側に項目名を当てさせると、別の期間で全部「未取得」になる。
+  it('オープン前は 新規／取消／累計', () => {
+    const r = buildPrepReport({ setting: PREP_SETTING, ymd: '2026-09-19',
+      channels: CH(), prevSnap: PREV(), fetchedAt: AT });
+    expect(r.card.channels.cols.map(c => c.key)).toEqual(['added', 'cancelled', 'total']);
+    expect(r.card.channels.cols.map(c => c.label)).toEqual(['新規 / 件', '取消 / 件', '累計 / 名']);
+  });
+  it('オープン後は 予約／来店／入会', () => {
+    const r = buildOpenReport({ setting: PREP_SETTING, ymd: '2026-10-05', summary: summary(),
+      channels: [{ name: 'ホットペッパー', booking: 4, visit: 3, join: 2 }], fetchedAt: AT });
+    expect(r.card.channels.cols.map(c => c.key)).toEqual(['booking', 'visit', 'join']);
+    expect(r.card.channels.cols.map(c => c.label)).toEqual(['予約 / 件', '来店 / 名', '入会 / 名']);
+  });
+  it('🔴 どの列もカードの行から実際に読める（全部「未取得」にならない）', () => {
+    for (const r of [
+      buildPrepReport({ setting: PREP_SETTING, ymd: '2026-09-19', channels: CH(), prevSnap: PREV(), fetchedAt: AT }),
+      buildOpenReport({ setting: PREP_SETTING, ymd: '2026-10-05', summary: summary(),
+        channels: [{ name: 'ホットペッパー', booking: 4, visit: 3, join: 2 }], fetchedAt: AT }),
+    ]) {
+      const { cols, rows } = r.card.channels;
+      expect(rows.length).toBeGreaterThan(0);
+      for (const c of cols) {
+        expect(rows.some(x => typeof x[c.key] === 'number')).toBe(true);
+      }
+    }
+  });
+  it('オープン後にも合計行が出る', () => {
+    const r = buildOpenReport({ setting: PREP_SETTING, ymd: '2026-10-05', summary: summary(),
+      channels: [{ name: 'A', booking: 4, visit: 3, join: 2 }, { name: 'B', booking: 2, visit: 2, join: 1 }],
+      fetchedAt: AT });
+    expect(r.card.channels.total).toEqual({ booking: 6, visit: 5, join: 3 });
+  });
+  it('🔴 1つでも欠けた列の合計は出さない', () => {
+    const r = buildOpenReport({ setting: PREP_SETTING, ymd: '2026-10-05', summary: summary(),
+      channels: [{ name: 'A', booking: 4, visit: 3, join: 2 }, { name: 'B', booking: 2 }], fetchedAt: AT });
+    expect(r.card.channels.total.booking).toBe(6);
+    expect(r.card.channels.total.visit).toBe(null);
+  });
+  it('媒体が1件も無ければ合計行を作らない', () => {
+    const r = buildOpenReport({ setting: PREP_SETTING, ymd: '2026-10-05', summary: summary(), channels: [], fetchedAt: AT });
+    expect(r.card.channels.total).toBe(null);
+  });
+});

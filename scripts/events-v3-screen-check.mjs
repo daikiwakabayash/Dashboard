@@ -397,6 +397,23 @@ await page.keyboard.press('Escape');
 await page.waitForTimeout(700);
 check('Escape で閉じる', (await page.locator('[data-nowl-modal="event"]').count()) === 0);
 
+// ⚠️ スマホの見出しカード: 中身に合った高さで、飾りの日付が切れないこと
+await page.setViewportSize({ width: 390, height: 844 });
+await page.waitForTimeout(900);
+const evBox = await page.evaluate(() => {
+  const hero = document.querySelector('.ev-hero');
+  const art = document.querySelector('.ev-hero-art');
+  const foot = document.querySelector('.ev-art-foot');
+  if (!hero || !art) return null;
+  const a = art.getBoundingClientRect();
+  const f = foot ? foot.getBoundingClientRect() : null;
+  return { h: Math.round(hero.getBoundingClientRect().height),
+           inside: f ? (f.bottom <= a.bottom + 1 && f.top >= a.top - 1) : false };
+});
+check('🔴 スマホで見出しカードが高くなりすぎない', !!evBox && evBox.h <= 620, evBox ? `${evBox.h}px` : 'なし');
+check('🔴 スマホで飾りの文字が切れない', !!evBox && evBox.inside === true);
+await page.setViewportSize({ width: 1400, height: 1000 });
+await page.waitForTimeout(700);
 await page.screenshot({ path: path.join(OUT, 'events-v3.png'), fullPage: true });
 check('画面の写しを保存した', true, path.join(OUT, 'events-v3.png'));
 check('画面のエラーが出ていない', errors.length === 0, errors.slice(0, 2).join(' | '));

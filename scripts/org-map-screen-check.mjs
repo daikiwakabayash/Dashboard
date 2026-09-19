@@ -216,6 +216,52 @@ await page.setViewportSize({ width: 1440, height: 1000 });
 await page.waitForTimeout(700);
 await page.screenshot({ path: path.join(OUT, 'org-map.png'), fullPage: true });
 check('画面の写しを保存した', true, path.join(OUT, 'org-map.png'));
+// ── 地域ごとのアクセントカラー ──────────────────────────────────
+// ⚠️ 色は飾り。地域名は必ず文字でも出ていること（色だけで意味を伝えない）。
+const tone = await page.evaluate(() => {
+  const keys = ['hokkaido', 'tohoku', 'kanto', 'chubu', 'kansai', 'chugoku',
+                'shikoku', 'kyushu', 'okinawa', 'australia', 'malaysia', 'hq'];
+  const out = {};
+  for (const k of keys) {
+    const el = document.querySelector(`[data-org-band="${k}"]`);
+    if (!el) continue;
+    const cs = getComputedStyle(el);
+    const side = el.querySelector('.org-band-side') || el.querySelector('.org-fold');
+    out[k] = {
+      top: cs.borderTopColor,
+      left: cs.borderLeftColor,
+      soft: side ? getComputedStyle(side).backgroundColor : '',
+      accent: cs.getPropertyValue('--org-accent').trim(),
+      name: (el.innerText || '').slice(0, 8),
+    };
+  }
+  return out;
+});
+const keys = Object.keys(tone);
+check('地域ごとに色が付いている', keys.length >= 9, `${keys.length} 地域`);
+check('🔴 地域ごとに違う色になっている（同じ色が混ざらない）',
+  new Set(keys.map(k => tone[k].accent)).size === keys.length,
+  keys.map(k => `${k}:${tone[k].accent}`).join(' '));
+check('枠に色の縁取りが入っている',
+  keys.every(k => /rgb/.test(tone[k].top) && tone[k].top !== 'rgba(0, 0, 0, 0)'));
+check('地域の帯に薄い下地が入っている',
+  keys.every(k => /rgb/.test(tone[k].soft) && tone[k].soft !== 'rgba(0, 0, 0, 0)'));
+check('🔴 色だけに頼らず地域名が文字で出ている',
+  keys.every(k => tone[k].name.trim().length > 0));
+// 地図の色が地域色と揃っているか（灰色の決め打ちに戻っていないか）
+const mapCol = await page.evaluate(() => {
+  const el = document.querySelector('[data-org-band="hokkaido"] .org-map path');
+  return el ? getComputedStyle(el).fill : '';
+});
+check('飾りの地図も地域色になる', /rgb\(61, 137, 201\)/.test(mapCol), mapCol);
+// 読みやすさ: 店舗名は色を変えていない（濃い文字のまま）
+const shopCol = await page.evaluate(() => {
+  const el = document.querySelector('.org-shop-name');
+  return el ? getComputedStyle(el).color : '';
+});
+check('🔴 店舗名の色は変えていない（読みやすさを落とさない）',
+  !/rgb\(61, 137, 201\)/.test(shopCol), shopCol);
+
 check('画面のエラーが出ていない', errors.length === 0, errors.slice(0, 2).join(' | '));
 
 await browser.close(); server.close();

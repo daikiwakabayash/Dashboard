@@ -11,7 +11,7 @@ const KV = 'https://kv.test';
 let store;
 let soCalls;
 // SalonOne の応答（テストごとに差し替える）。null = 取得失敗。
-let soSummary, soChannels, soStaff;
+let soSummary, soChannels, soStaff, soCustomers;
 
 function installFetchMock() {
   store = new Map();
@@ -31,6 +31,7 @@ function installFetchMock() {
       if (u.includes('sales/summary')) return soSummary === null ? { ok: false, status: 500, json: async () => ({}), headers: new Map() } : ok({ data: soSummary });
       if (u.includes('by-channel')) return soChannels === null ? { ok: false, status: 500, json: async () => ({}), headers: new Map() } : ok({ data: soChannels });
       if (u.includes('by-staff')) return soStaff === null ? { ok: false, status: 500, json: async () => ({}), headers: new Map() } : ok({ data: soStaff });
+      if (u.includes('new-customers')) return soCustomers === null ? { ok: false, status: 500, json: async () => ({}), headers: new Map() } : ok({ data: soCustomers });
       return ok({ data: null });
     }
     return ok({});
@@ -55,6 +56,11 @@ beforeEach(() => {
   soStaff = [
     { staff_id: 0, is_total: true, new_booking_count: 7, new_visit_count: 5 },
     { staff_id: 1, staff_name: 'セラピストA', new_booking_count: 7, new_visit_count: 5, cancel_count: 2, purchase_count: 1 },
+  ];
+  // 新規客台帳（2回目の欄に「次回予約」が入っている＝リピート）
+  soCustomers = [
+    { customer_id: 1, staff_id: 1, staff_name: 'セラピストA', visited_completed: true, has_next_reservation: true },
+    { customer_id: 2, staff_id: 1, staff_name: 'セラピストA', visited_completed: true, has_next_reservation: false },
   ];
   installFetchMock(); _clearBearerCache();
 });
@@ -348,11 +354,12 @@ describe('プレオープン日報の取得（セラピスト別）', () => {
     expect(r.body.text).toContain('セラピストA');
     expect(r.body.text).toContain('セラピスト別・店舗合計');
   });
-  it('🔴 取得元が未確認の項目は「未取得」として伝える', async () => {
+  it('🔴 取得元が未確認の項目は「未取得」として伝える（前金はまだ未確認）', async () => {
     await configurePreOpen();
     const r = await get({ action: 'preview', shopId: '9001', phase: 'preopen', date: '2026-09-27' });
-    expect(r.body.missing).toContain('次回予約数（取得元が未確認）');
     expect(r.body.missing).toContain('前金あり（取得元が未確認）');
+    // 次回予約は新規客台帳から取れるようになったので、台帳が返れば missing に出ない
+    expect(r.body.missing).not.toContain('次回予約数（取得元が未確認）');
   });
   it('🔴 プレオープンは「集計実行」待ちになる（時刻では送らない）', async () => {
     await configurePreOpen();
@@ -361,5 +368,32 @@ describe('プレオープン日報の取得（セラピスト別）', () => {
     const row = r.body.results.find(x => x.shopId === '9001');
     // テスト時点(2026-09-19)ではまだオープン前なので prep。期間の判定自体はここで確かめる。
     expect(['prep', 'preopen']).toContain(row.phase);
+  });
+});
+
+describe('リピート（次回予約）を新規客台帳から取る', () => {
+  it('🔴 新規客台帳を取りに行く', async () => {
+    await configurePreOpen();
+    await get({ action: 'preview', shopId: '9001', phase: 'preopen', date: '2026-09-27' });
+    expect(soCalls.some(u => u.includes('marketing/new-customers'))).toBe(true);
+  });
+  it('台帳からリピート数が入る', async () => {
+    await configurePreOpen();
+    const r = await get({ action: 'preview', shopId: '9001', phase: 'preopen', date: '2026-09-27' });
+    expect(r.body.text).toContain('リピート数（次回予約）　1名');
+    expect(r.body.missing).not.toContain('次回予約数（取得元が未確認）');
+  });
+  it('🔴 台帳が取れなければ「未取得」のまま（0名にしない）', async () => {
+    soCustomers = null;
+    await configurePreOpen();
+    const r = await get({ action: 'preview', shopId: '9001', phase: 'preopen', date: '2026-09-27' });
+    expect(r.body.text).toContain('リピート数（次回予約）　未取得');
+    expect(r.body.missing).toContain('次回予約数（取得元が未確認）');
+  });
+  it('🔴 台帳に次回予約の項目が無ければ「未取得」のまま', async () => {
+    soCustomers = [{ customer_id: 1, staff_id: 1, staff_name: 'セラピストA', visited_completed: true, ltv: 3500 }];
+    await configurePreOpen();
+    const r = await get({ action: 'preview', shopId: '9001', phase: 'preopen', date: '2026-09-27' });
+    expect(r.body.text).toContain('リピート数（次回予約）　未取得');
   });
 });

@@ -86,7 +86,7 @@ import {
   sendKey as drSendKey, contentHash as drContentHash, shouldSend as drShouldSend, recordSent as drRecordSent,
   detectAggregationRun as drDetectAggregationRun, advanceObservation as drAdvanceObservation,
   planRun as drPlanRun, normalizeSummary as drNormalizeSummary, normalizeChannels as drNormalizeChannels,
-  normalizeStaff as drNormalizeStaff,
+  normalizeStaff as drNormalizeStaff, repeatByStaff as drRepeatByStaff, mergeRepeat as drMergeRepeat,
 } from '../lib/daily-report.js';
 import { ANALYTICS_BASE as SO_ANALYTICS_BASE, buildUpstreamUrl as soBuildUpstreamUrl } from '../lib/salonone.js';
 import { AUDIT_KEY, AUDIT_CAP, buildEntry as buildAuditEntry, listEntries as listAuditEntries } from '../lib/audit.js';
@@ -634,10 +634,13 @@ export default async function handler(req, res) {
       const chQ = (phase === DR_OPEN || !mr) ? dayQ : { from: mr.from, to: mr.to, shop_id: setting.shopId };
       // プレオープン日報はセラピスト別の横並びが主役なので by-staff も取る。
       const needStaff = phase === DR_PREOPEN;
-      const [sumRaw, chRaw, stRaw] = await Promise.all([
+      const [sumRaw, chRaw, stRaw, custRaw] = await Promise.all([
         needSales ? drSoGet('sales/summary', dayQ) : Promise.resolve(null),
         needStaff ? Promise.resolve(null) : drSoGet('marketing/by-channel', chQ),
         needStaff ? drSoGet('marketing/by-staff', dayQ) : Promise.resolve(null),
+        // 新規客台帳（マーケティング→新規管理の元）。2回目の欄に「次回予約」が入っていれば
+        // リピート、空なら離反。ここから担当ごとのリピート数を出す。
+        needStaff ? drSoGet('marketing/new-customers', { ...dayQ, limit: 1000 }) : Promise.resolve(null),
       ]);
       // 店舗別の広告費（既存の ?type=adspend ストア）。対象月ぶんだけ。
       let spend = null;
@@ -652,12 +655,19 @@ export default async function handler(req, res) {
       const snaps = await drLoadSnaps();
       // sales/summary の by_staff（売上・Google口コミ）と marketing/by-staff を突き合わせる
       const byStaff = (sumRaw && (sumRaw.by_staff || sumRaw.byStaff)) || null;
+      // 台帳から担当ごとのリピート数を作り、セラピスト別の行へ差し込む。
+      // ⚠️ 台帳が取れない／項目が分からないときは差し込まない（未取得のまま出す）。
+      const custRows = Array.isArray(custRaw) ? custRaw
+        : (custRaw && Array.isArray(custRaw.rows)) ? custRaw.rows : null;
+      const staffRows = needStaff
+        ? drMergeRepeat(drNormalizeStaff(byStaff, stRaw) || [], drRepeatByStaff(custRows))
+        : null;
       return drBuildReport(phase, {
         shopId: setting.shopId,
         shopName: setting.shopName || setting.shopId,
         ymd, setting,
         summary: needSales ? drNormalizeSummary(sumRaw) : null,
-        staff: needStaff ? drNormalizeStaff(byStaff, stRaw) : null,
+        staff: (needStaff && staffRows && staffRows.length) ? staffRows : null,
         channels: drNormalizeChannels(chRaw),
         prevSnap: snaps[String(setting.shopId)] || null,
         spend,

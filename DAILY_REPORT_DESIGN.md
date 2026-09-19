@@ -114,14 +114,43 @@ SalonOne の数字を、スタッフの手打ちではなく、決まったテ�
 | キャンセル数 | `marketing/by-staff.cancel_count` | ✅ |
 | 入会人数 | `marketing/by-staff.purchase_count` | ✅（画面の「購入数」と同じ定義） |
 | 入会率 | 計算（入会人数 ÷ 新規来店数） | ✅ |
-| **リピート数（次回予約）** | — | **🔴 該当する項目が確認できていない** |
-| リピート率 | 計算（上が取れないと出せない） | 🔴 |
+| **リピート数（次回予約）** | `marketing/new-customers`（新規客台帳） | **⚠️ 項目名だけ未確認**（下記） |
+| リピート率 | 計算（リピート数 ÷ 新規来店数） | 同上 |
 | **前金あり** | — | **🔴 該当する項目が確認できていない** |
 | Google口コミ | `sales/summary` の `by_staff.google_review_count` | ✅ |
 
-未確認の2つは **0 で埋めず「未取得」** と書き、`missing` にも積む。
-`lib/daily-report.js` の `NEXT_BOOKING_KEYS` / `PREPAID_KEYS` に候補キーを置いてあるが、
-これは**推測**であり当たる保証はない。実際の項目名が分かったら、その配列に足すだけでよい。
+#### リピート（次回予約）の取り方（オーナーの説明・2026-09-19）
+
+マーケティング → 新規管理 の「新規客台帳」は1人1行で 1回目・2回目… と並ぶ。
+1回目に来店すると日時と金額が入り、**次回予約を取っていれば2回目の欄に「次回予約」が入る**。
+2回目が空＝次回予約なし＝リピートしていない（画面上部の「離反 / 次回予約なし」と同じ）。
+この台帳の元が `marketing/new-customers`。担当（セラピスト）も行に入っている。
+
+そこで `marketing/new-customers` を当日ぶん取り、担当ごとに
+「初回に来店した人数」と「そのうち次回予約がある人数」を数える（`repeatByStaff`）。
+
+🔴 **ただし「次回予約があるか」を表す項目名は未確認。** ありそうな形をいくつか受けている:
+
+| 形 | 受けるキー |
+| --- | --- |
+| 真偽値 | `has_next_reservation` / `has_next_booking` / `next_reservation` / `has_next_visit` |
+| 日時 | `next_reservation_at` / `next_booking_at` / `next_visit_at` / `next_appointment_at` |
+| 離反フラグ | `is_churn` / `churned` / `is_churned`（反転） |
+| 文言 | `continuation_status` / `retention_status` が「継続」「離反」 |
+| 並び | `visits` / `appointments` / `reservations` の2件目があるか |
+
+どれにも当たらなければ **0 ではなく「未取得」**。実際の項目名が分かれば、
+`lib/daily-report.js` のキー配列に足すだけでよい。
+**いちばん早いのは、`marketing/new-customers` の実際の応答を1件（匿名化して）見せてもらうこと。**
+
+🔴 **1人でも分からない行があれば、その担当のリピート数は「未取得」にする**（少なく見せない）。
+来店していない人はリピートの母数に入れない。
+
+#### 前金あり
+
+初回が本来1,000円や2,000円のところ、オプション等で5,000円もらっている場合が「前金あり」。
+**🔴 判定に必要な「本来の初回金額」をどこから取るかが未確定**（オーナーから改めて説明の予定）。
+いまは「未取得」と出す。`PREPAID_KEYS` に候補キーを置いてあるが**推測**。
 
 ⚠️ 売上が税抜か税込かも未確認。見本の脚注どおりの表記にしてある。
 
@@ -211,9 +240,10 @@ Webhook が使えると分かれば、`detectAggregationRun()` を差し替え�
 | `lib/daily-report.js` | 文面・設定・二重送信の判定（純粋関数・I/Oなし） |
 | `api/plan-store.js` の `?type=dailyreport` | 設定の保存、下書き、送信、自動実行 |
 | `index.html` の `DailyReportPanel` | オーナー設定の中の設定画面 |
-| `tests/daily-report.test.js` | 文面・期間判定・差分・広告費・セラピスト別（107件） |
-| `tests/daily-report-api.test.js` | 権限・送信抑止・二重送信・期間別の取得範囲（38件） |
-| `scripts/daily-report-screen-check.mjs` | 画面（57件・スタブAPI） |
+| `tests/daily-report.test.js` | 文面・期間判定・差分・広告費・セラピスト別・リピート（122件） |
+| `tests/daily-report-api.test.js` | 権限・送信抑止・二重送信・期間別の取得範囲（42件） |
+| `scripts/daily-report-screen-check.mjs` | 設定画面（59件・スタブAPI） |
+| `scripts/report-card-screen-check.mjs` | チャット内のカード（34件・スタブAPI） |
 
 ## 7. 本番で動かすまでに要ること
 

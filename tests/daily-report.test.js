@@ -7,6 +7,7 @@ import {
   yen, people, percent, rate, signed, sumStrict, footer,
   snapshotOf, dailyDelta, normalizeSpend, spendTotal, cpa,
   normalizeStaff, buildStaffTable, preOpenDayLabel,
+  repeatStateOf, visitedOf, repeatByStaff, mergeRepeat,
   buildPrepReport, buildPreOpenReport, buildOpenReport, buildReport, reportReady,
   sendKey, contentHash, alreadySent, shouldSend, recordSent,
   detectAggregationRun, advanceObservation, planRun,
@@ -690,5 +691,100 @@ describe('出典フッター', () => {
     expect(f).toContain(`出典: SalonOne ${NOT_FETCHED}`);
     expect(f).toContain(`対象期間: ${NOT_FETCHED}`);
     expect(f).toContain(`取得時刻: ${NOT_FETCHED}`);
+  });
+});
+
+describe('リピート（次回予約）を新規客台帳から読む', () => {
+  // オーナーの説明: 2回目の欄に「次回予約」が入っていればリピート、空なら離反。
+  it('はっきり「次回予約あり/なし」で来る形', () => {
+    expect(repeatStateOf({ has_next_reservation: true })).toBe(true);
+    expect(repeatStateOf({ has_next_reservation: false })).toBe(false);
+  });
+  it('次回予約の日時で来る形', () => {
+    expect(repeatStateOf({ next_reservation_at: '2026-10-08 10:00' })).toBe(true);
+    expect(repeatStateOf({ next_reservation_at: '' })).toBe(false);
+    expect(repeatStateOf({ next_reservation_at: null })).toBe(false);
+  });
+  it('「継続／離反」で来る形（画面の表示と同じ）', () => {
+    expect(repeatStateOf({ continuation_status: '継続' })).toBe(true);
+    expect(repeatStateOf({ continuation_status: '離反' })).toBe(false);
+    expect(repeatStateOf({ is_churn: true })).toBe(false);
+    expect(repeatStateOf({ is_churn: false })).toBe(true);
+  });
+  it('1回目・2回目…が並びで来る形（2件目があればリピート）', () => {
+    expect(repeatStateOf({ visits: [{ at: '09-03' }, { at: '09-17' }] })).toBe(true);
+    expect(repeatStateOf({ visits: [{ at: '09-03' }] })).toBe(false);
+    expect(repeatStateOf({ visits: [] })).toBe(false);
+  });
+  it('🔴 どの形にも当たらなければ「分からない」（0 にしない）', () => {
+    expect(repeatStateOf({ customer_id: 1, ltv: 3500 })).toBe(null);
+    expect(repeatStateOf(null)).toBe(null);
+    expect(repeatStateOf('x')).toBe(null);
+  });
+  it('初回に来たかを読む', () => {
+    expect(visitedOf({ visited_completed: true })).toBe(true);
+    expect(visitedOf({ visited_completed: false })).toBe(false);
+    expect(visitedOf({ first_appointment_status: 'completed' })).toBe(true);
+    expect(visitedOf({ first_appointment_status: 'cancelled' })).toBe(false);
+    expect(visitedOf({ customer_id: 1 })).toBe(null);
+  });
+
+  const LEDGER = () => ([
+    // 担当A: 来店2・うち次回予約1
+    { customer_id: 1, staff_id: '1', staff_name: '植松', visited_completed: true, has_next_reservation: true },
+    { customer_id: 2, staff_id: '1', staff_name: '植松', visited_completed: true, has_next_reservation: false },
+    // 担当B: 来店1・次回予約1／未来店1（母数に入れない）
+    { customer_id: 3, staff_id: '2', staff_name: '亀井', visited_completed: true, has_next_reservation: true },
+    { customer_id: 4, staff_id: '2', staff_name: '亀井', visited_completed: false, has_next_reservation: false },
+  ]);
+
+  it('担当ごとに来店数とリピート数を数える', () => {
+    const by = repeatByStaff(LEDGER());
+    expect(by['1']).toEqual({ staffId: '1', staffName: '植松', visited: 2, repeat: 1 });
+    expect(by['2']).toEqual({ staffId: '2', staffName: '亀井', visited: 1, repeat: 1 });
+  });
+  it('🔴 来ていない人はリピートの母数に入れない', () => {
+    expect(repeatByStaff(LEDGER())['2'].visited).toBe(1);   // 4番は未来店なので数えない
+  });
+  it('🔴 1人でも分からなければ、その担当は「未取得」にする（少なく見せない）', () => {
+    const rows = LEDGER();
+    delete rows[1].has_next_reservation;                     // 2番だけ分からない
+    const by = repeatByStaff(rows);
+    expect(by['1'].repeat).toBe(null);
+    expect(by['1'].visited).toBe(null);
+    expect(by['2'].repeat).toBe(1);                          // 他の担当は影響を受けない
+  });
+  it('担当が分からない行は捨てる（誰の実績か決められない）', () => {
+    expect(repeatByStaff([{ customer_id: 9, visited_completed: true }])).toBe(null);
+  });
+  it('台帳が空なら null（0人ではない）', () => {
+    expect(repeatByStaff([])).toBe(null);
+    expect(repeatByStaff(null)).toBe(null);
+  });
+
+  it('セラピスト別の行へ差し込める（IDで合わせる）', () => {
+    const staff = [{ id: '1', name: '植松', repeat: null }, { id: '2', name: '亀井', repeat: null }];
+    const out = mergeRepeat(staff, repeatByStaff(LEDGER()));
+    expect(out.map(x => x.repeat)).toEqual([1, 1]);
+  });
+  it('IDが違っても名前で合わせられる', () => {
+    const staff = [{ id: 'x', name: '植松', repeat: null }];
+    expect(mergeRepeat(staff, repeatByStaff(LEDGER()))[0].repeat).toBe(1);
+  });
+  it('台帳が取れなければ元のまま（未取得のまま）', () => {
+    const staff = [{ id: '1', name: '植松', repeat: null }];
+    expect(mergeRepeat(staff, null)[0].repeat).toBe(null);
+  });
+
+  it('🔴 差し込んだあと、リピート率が出せるようになる', () => {
+    const staff = [
+      { id: '1', name: '植松', sales: 32000, visit: 2, join: 1, repeat: null },
+      { id: '2', name: '亀井', sales: 57750, visit: 1, join: 1, repeat: null },
+    ];
+    const merged = mergeRepeat(staff, repeatByStaff(LEDGER()));
+    const t = buildStaffTable(merged);
+    const row = (l) => t.rows.find(x => x.label === l);
+    expect(row('リピート数（次回予約）').total).toBe(2);
+    expect(Math.round(row('リピート率').total * 10) / 10).toBe(66.7);   // 2 ÷ 3
   });
 });

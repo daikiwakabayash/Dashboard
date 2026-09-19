@@ -60,7 +60,9 @@ import { mergeAppointments, mergeDismissed, flatten as soflFlatten } from '../li
 import { ALLOWANCE_LOG_KEY, ALLOWANCE_PROD_KEY, ALLOWANCE_LOG_CAP, makeEntry as makeAllowanceEntry, mergeSubmissions, isDuplicateSubmit, mergeProductivity, bumpProductivity } from '../lib/allowance-store.js';
 import { BOARD_READS_KEY, normalizeReads, mergeReads, bumpRead, versionOf, isStale, upsertPost, upsertComment } from '../lib/board-store.js';
 import { normalizeIntro, canEditProfile } from '../lib/profile-fields.js';
-import { normalizeMeta as newsMeta, audienceFor as newsAudienceFor } from '../lib/news-post.js';
+import { normalizeMeta as newsMeta, audienceFor as newsAudienceFor, canPublish as newsCanPublish } from '../lib/news-post.js';
+import { normalizeStatus as newsStatus, isDraft as newsIsDraft, visibleFor as newsVisibleFor,
+         DRAFT as NEWS_DRAFT, PUBLISHED as NEWS_PUBLISHED } from '../lib/news-archive.js';
 import { prKey as boardPrKey, normalizePr, markRead as boardMarkRead, markAck as boardMarkAck,
          postStatus as boardPostStatus, canSeeDetail as boardCanSeeDetail, outOfAudience as boardOutOfAudience } from '../lib/board-status.js';
 // ── Command Center（Phase 0〜2）。既存の type= には一切触れない追加のみ ──
@@ -68,7 +70,7 @@ import { FLAGS_KEY, DEFAULT_FLAGS, normalizeFlags, applyFlagChange, killAll } fr
 import { AUDIT_KEY, AUDIT_CAP, buildEntry as buildAuditEntry, listEntries as listAuditEntries } from '../lib/audit.js';
 import { APPROVAL_KEY, APPROVAL_CAP, buildApproval, decide as decideApproval, repropose as reproposeApproval, recordExecution, listApprovals, pendingCount } from '../lib/approvals.js';
 import { AGENTLOG_KEY, AGENTLOG_CAP, startRun, finishRun, listRuns, summarize as summarizeRuns, anomalies as runAnomalies } from '../lib/agentlog.js';
-import { check as authzCheck, can as authzCan, enforce as authzEnforce, decisionRecord, needsReverify, DEFAULT_TENANT, canViewRoom } from '../lib/authz.js';
+import { check as authzCheck, can as authzCan, enforce as authzEnforce, decisionRecord, needsReverify, DEFAULT_TENANT, canViewRoom, actorIdSet } from '../lib/authz.js';
 import { resolveActor } from '../lib/actor.js';
 import { normalizeOverview as normalizeMetaOverview, connectionState as metaConnectionState, lastCompleteDays, looksLikeSample as metaLooksLikeSample, META_API_VERSION } from '../lib/meta-read.js';
 import META_FIXTURE from '../fixtures/meta-overview-sample.json' with { type: 'json' };
@@ -2793,6 +2795,15 @@ export default async function handler(req, res) {
       const body = req.body || {};
       const action = body.action;
 
+      // ══ 下書きを見てよい人 ══════════════════════════════════════
+      // ⚠️ 判定に使うのは**サーバーが確かめた actor だけ**。body.root / body.staffId の
+      //    名乗りは使わない。同一人物の別ID（SSOの staff_id / user_id、本部アカウントに
+      //    紐付けた staffId）は resolveActor が altIds に入れているので、ここで合わせて見る。
+      const boardViewer = {
+        ids: actorIdSet(chatActor),
+        hq: !!chatActor && ['root', 'admin'].includes(String(chatActor.role)),
+      };
+
       // ══ 既読の更新は投稿に一切触れない（これが今回の修正の核心）══
       // 従来は read アクションが { posts, reads } を丸ごと書き戻していたため、
       // 「誰かが掲示板を開く」たびに、その直前に投稿された記事を踏み潰す可能性があった。
@@ -2847,7 +2858,10 @@ export default async function handler(req, res) {
         const pid = String(body.id).slice(0, 64);
         const cur0 = (await blobGet(BOARD_KEY, hasKV, hasSB, gas)) || {};
         const post = (Array.isArray(cur0.posts) ? cur0.posts : []).find(x => x && String(x.id) === pid);
-        if (!post) return res.status(404).json({ ok: false, error: 'not_found' });
+        // ⚠️ 他の人の下書きは「無い」と答える（あることを教えない）
+        if (!post || (newsIsDraft(post) && !newsVisibleFor([post], boardViewer).length)) {
+          return res.status(404).json({ ok: false, error: 'not_found' });
+        }
         const pr = (await blobGet(boardPrKey(pid), hasKV, hasSB, gas)) || {};
         // ⚠️ 分母は**その投稿の公開対象**。全員向けでなければ、対象の店舗の人だけを数える。
         const audience = newsAudienceFor(post, Array.isArray(body.audience) ? body.audience.slice(0, 5000) : []);
@@ -2876,6 +2890,7 @@ export default async function handler(req, res) {
         ids.forEach((id, i) => {
           const post = allPosts.find(x => x && String(x.id) === id);
           if (!post) return;                                   // 消された記事は数えない
+          if (newsIsDraft(post) && !newsVisibleFor([post], boardViewer).length) return;  // 他人の下書きは数えない
           const st = boardPostStatus(post, newsAudienceFor(post, people), prs[i] || {});
           counts[id] = { read: st.counts.read, acked: st.counts.acked, total: st.total };
         });
@@ -2936,7 +2951,10 @@ export default async function handler(req, res) {
       if (req.method === 'GET') {
         // 移行期間: 旧 blob 内の既読と新キーの既読を両方読む
         const split = await blobGet(BOARD_READS_KEY, hasKV, hasSB, gas).catch(() => null);
-        return res.status(200).json({ posts, reads: mergeReads(legacyReads, split), version, configured: true });
+        // ⚠️ 他の人の下書きは**返さない**（画面で隠すだけにしない）。
+        //    下書きが1件も無いときは元の配列をそのまま返す（毎回の作り直しを避ける）。
+        const visible = posts.some(newsIsDraft) ? newsVisibleFor(posts, boardViewer) : posts;
+        return res.status(200).json({ posts: visible, reads: mergeReads(legacyReads, split), version, configured: true });
       }
 
       // 古い版で上書きしようとしていないか（expectedVersion 未指定なら検査しない＝旧クライアントも動く）
@@ -2944,18 +2962,11 @@ export default async function handler(req, res) {
         return res.status(409).json({ ok: false, error: 'stale', version, posts });
       }
 
-      if (action === 'post' && body.post) {
-        const p = body.post;
+      // 記事の中身（本文・添付・ニュースの項目）。投稿と下書きの書き直しで同じ形を使う。
+      const boardContent = (p) => {
         const text = String(p.text || '').slice(0, 8000);
-        const title = String(p.title || '').slice(0, 200);
-        const rec = {
-          id: genId('post'),
-          clientId: String(p.clientId || '').slice(0, 64),   // 二重送信・再送の重複を防ぐ
-          authorId: String(p.authorId || ''),
-          authorName: String(p.authorName || '').slice(0, 80),
-          authorShop: String(p.authorShop || '').slice(0, 80),
-          authorRoot: !!p.authorRoot,
-          title,
+        return {
+          title: String(p.title || '').slice(0, 200),
           important: !!p.important,
           text,
           link: /^https?:\/\//.test(String(p.link || '')) ? String(p.link).slice(0, 500) : '',
@@ -2963,11 +2974,31 @@ export default async function handler(req, res) {
           imgIds: (Array.isArray(p.imgIds) ? p.imgIds : []).map(String).slice(0, 8),
           files: (Array.isArray(p.files) ? p.files : []).slice(0, 8).map(f => ({ id: String(f.id || ''), name: String(f.name || 'file').slice(0, 120), type: String(f.type || ''), size: Number(f.size) || 0 })),
           videoUrl: (() => { const v = videoEmbed(p.videoUrl); return v ? String(p.videoUrl).slice(0, 500) : ''; })(),
-          pinned: false,
           // ニュースの項目（カテゴリー／公開対象／確認要否／期限／ピックアップ／表紙）。
           // ⚠️ 既存の投稿は項目が無いままでよい。ここで既定値を過去の投稿に書き込まない。
           ...newsMeta(p),
-          createdAt: new Date().toISOString(),
+        };
+      };
+
+      if (action === 'post' && body.post) {
+        const p = body.post;
+        const content = boardContent(p);
+        const text = content.text, title = content.title;
+        // 下書きとして保存するか、そのまま公開するか。⚠️ 未指定は従来どおり「公開」。
+        const status = newsStatus(p.status);
+        const now = new Date().toISOString();
+        const rec = {
+          id: genId('post'),
+          clientId: String(p.clientId || '').slice(0, 64),   // 二重送信・再送の重複を防ぐ
+          authorId: String(p.authorId || ''),
+          authorName: String(p.authorName || '').slice(0, 80),
+          authorShop: String(p.authorShop || '').slice(0, 80),
+          authorRoot: !!p.authorRoot,
+          ...content,
+          pinned: false,
+          status,
+          ...(status === NEWS_DRAFT ? { updatedAt: now } : {}),
+          createdAt: now,
         };
         if (!upsertPost(posts, rec, BOARD_POST_CAP).added) {  // 再送＝既にある。通知も送り直さない
           await bumpActor(rec.authorId);
@@ -2983,9 +3014,69 @@ export default async function handler(req, res) {
         if (!w.ok) return res.status(409).json({ ok: false, error: 'conflict', message: '他の投稿と重なりました。もう一度お試しください。' });
         if (dup) { await bumpActor(rec.authorId); return res.status(200).json({ ok: true, post: rec, duplicate: true }); }
         await bumpActor(rec.authorId);
-        sendPush(hasKV, hasSB, gas, { kind: 'board', title: 'NAORU', body: `${rec.important ? '❗' : '📣'} 重要掲示板／${title || rec.authorName || 'お知らせ'}：${text}`.slice(0, 150) || '新しい掲示があります', url: '/?tab=board' });
+        // ⚠️ 下書きは誰にも知らせない（通知も未読も立てない）
+        if (rec.status !== NEWS_DRAFT) {
+          sendPush(hasKV, hasSB, gas, { kind: 'board', title: 'NAORU', body: `${rec.important ? '❗' : '📣'} 重要掲示板／${title || rec.authorName || 'お知らせ'}：${text}`.slice(0, 150) || '新しい掲示があります', url: '/?tab=board' });
+        }
         return res.status(200).json({ ok: true, post: rec });
       }
+      // ── 下書きの書き直し ──────────────────────────────────────
+      // ⚠️ **下書きのときだけ**書き換える。公開済みの記事は差し替えない
+      //    （既読・「確認しました」が付いた記事を後から変えると、何を確認したのか分からなくなる）。
+      // ⚠️ 本人か本部かは**サーバーが確かめた actor** で判定する（body.root は見ない）。
+      if (action === 'editDraft' && body.id && body.post) {
+        const target = posts.find(x => x && String(x.id) === String(body.id));
+        if (!target) return res.status(404).json({ ok: false, error: 'not_found' });
+        if (!boardCanSeeDetail(chatActor, target)) return res.status(403).json({ ok: false, error: 'forbidden', code: 'hq_or_author' });
+        if (!newsIsDraft(target)) return res.status(409).json({ ok: false, error: 'not_draft', message: '公開済みの記事は書き換えられません。' });
+        const content = boardContent(body.post);
+        const at = new Date().toISOString();
+        const w = await mutatePosts((cur) => {
+          const i = cur.findIndex(x => x && String(x.id) === String(body.id));
+          if (i < 0) return null;
+          if (!newsIsDraft(cur[i])) return null;               // 書いている間に公開されていた
+          const next = cur.slice();
+          next[i] = { ...next[i], ...content, status: NEWS_DRAFT, updatedAt: at };
+          return next;
+        });
+        if (!w.ok) {
+          if (w.reason === 'not_found') return res.status(409).json({ ok: false, error: 'not_draft' });
+          return res.status(409).json({ ok: false, error: 'conflict', message: '他の書き込みと重なりました。もう一度お試しください。' });
+        }
+        return res.status(200).json({ ok: true, id: String(body.id), updatedAt: at });
+      }
+
+      // ── 下書き → 公開 ────────────────────────────────────────
+      // ⚠️ 公開した時刻を createdAt にする。先週書いた下書きを今日出したのに
+      //    「先週の記事」として埋もれる（＝誰の未読にもならない）のを防ぐ。
+      if (action === 'publish' && body.id) {
+        const target = posts.find(x => x && String(x.id) === String(body.id));
+        if (!target) return res.status(404).json({ ok: false, error: 'not_found' });
+        if (!boardCanSeeDetail(chatActor, target)) return res.status(403).json({ ok: false, error: 'forbidden', code: 'hq_or_author' });
+        if (!newsIsDraft(target)) return res.status(200).json({ ok: true, already: true });
+        // ⚠️ 宛先があいまいな記事は出させない（店舗指定なのに店舗が空、など）
+        const chk = newsCanPublish(target);
+        if (!chk.ok) return res.status(400).json({ ok: false, error: 'cannot_publish', reason: chk.reason });
+        const at = new Date().toISOString();
+        const w = await mutatePosts((cur) => {
+          const i = cur.findIndex(x => x && String(x.id) === String(body.id));
+          if (i < 0) return null;
+          if (!newsIsDraft(cur[i])) return null;               // 既に誰かが公開していた
+          const next = cur.slice();
+          next[i] = { ...next[i], status: NEWS_PUBLISHED, createdAt: at, updatedAt: at };
+          return next;
+        });
+        if (!w.ok) {
+          if (w.reason === 'not_found') return res.status(200).json({ ok: true, already: true });
+          return res.status(409).json({ ok: false, error: 'conflict', message: '他の書き込みと重なりました。もう一度お試しください。' });
+        }
+        await bumpActor(String(target.authorId || ''));
+        sendPush(hasKV, hasSB, gas, { kind: 'board', title: 'NAORU',
+          body: `${target.important ? '❗' : '📣'} 重要掲示板／${target.title || target.authorName || 'お知らせ'}：${target.text || ''}`.slice(0, 150) || '新しい掲示があります',
+          url: '/?tab=board' });
+        return res.status(200).json({ ok: true, createdAt: at });
+      }
+
       if (action === 'uploadImage' && body.dataUrl) {
         const dataUrl = String(body.dataUrl);
         if (!/^data:image\/(png|jpe?g|gif|webp);base64,/.test(dataUrl)) return res.status(400).json({ ok: false, error: 'bad_image' });

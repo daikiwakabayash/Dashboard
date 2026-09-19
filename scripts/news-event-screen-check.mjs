@@ -143,6 +143,17 @@ await page.getByRole('button', { name: /ニュース/ }).first().click().catch((
 await page.waitForTimeout(3000);
 check('ニュースの画面が開く', (await txt()).includes('10/5セミナー開催'));
 
+// ⚠️ ニュース一覧のカードを作り替えたとき、イベントの案内は**一覧カードから詳細側へ移った**。
+//    一覧は「開く／保存」だけの小さいカードにしたため。参加するには記事を開く。
+//    （一覧にも出すかどうかはオーナーの判断待ち。ここでは**いまの動き**を検査する。）
+check('🔴 一覧のカードにはイベントの案内を出していない（記事を開いてから）',
+  (await page.locator('[data-news-events]').count()) === 0);
+// ⚠️ 記事を開くと既読が付く。「一覧を見ただけでは既読にしない」を先に確かめてから開く。
+check('⚠️ 一覧を開いただけでは既読にしない', !calls.some(c => c.body && c.body.action === 'readpost'),
+  JSON.stringify(calls.filter(c => c.body && c.body.action === 'readpost').length));
+await page.getByText('10/5セミナー開催', { exact: false }).first().click();
+await page.waitForTimeout(2000);
+
 // ⭐ イベントリンクが解決されている
 const panel = page.locator('[data-news-events]').first();
 check('記事にイベントの案内が出る', (await panel.count()) > 0);
@@ -174,8 +185,6 @@ check('参加後はチャット画面へ移動する', (await txt()).includes('�
 // ── 閲覧・リアクション状況 ─────────────────────────────────────────
 await page.getByRole('button', { name: /ニュース/ }).first().click().catch(() => {});
 await page.waitForTimeout(2500);
-check('⚠️ 一覧を開いただけでは既読にしない', !calls.some(c => c.body && c.body.action === 'readpost'),
-  JSON.stringify(Object.keys(pr.r)));
 
 await page.getByText('10/5セミナー開催', { exact: false }).first().click().catch(() => {});
 await page.waitForTimeout(2500);

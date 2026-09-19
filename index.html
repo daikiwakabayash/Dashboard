@@ -806,6 +806,12 @@
         .ev-fact b { display: block; font-size: 9px; letter-spacing: 1.4px; color: #9a9aa3; font-weight: 700; margin-bottom: 5px; }
         .ev-fact span { font-size: 12px; color: var(--nowl-ink); line-height: 1.7; }
         .ev-chatbox { padding: 18px; background: var(--nowl-bg); border: 1px solid var(--nowl-line); border-radius: 12px; margin: 16px 0; }
+        /* 過去の開催のふりかえり */
+        .ev-recap { padding: 18px; background: #fff; border: 1px solid var(--nowl-line); border-radius: 12px; margin: 16px 0; }
+        .ev-recap-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+        @media (min-width: 640px) { .ev-recap-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+        @media (min-width: 900px) { .ev-recap-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+        .ev-recap-photo { position: relative; aspect-ratio: 4 / 3; border-radius: 10px; overflow: hidden; background: #f0efee; border: 1px solid var(--nowl-line); display: block; width: 100%; }
     </style>
     <!-- pdf.js は財務PDF機能でのみ使用。deferで初回描画をブロックしない（deferはDOMContentLoaded前に順序実行される） -->
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -1491,6 +1497,51 @@
             const one = t.match(/(\d{1,2})\s*[:：]\s*(\d{2})/);
             return one ? { start: `${one[1].padStart(2, '0')}:${one[2]}`, end: '' } : { start: '', end: '' };
         };
+        // ── 過去の開催のふりかえり（lib/event-recap.js と同じ）────────────
+        // ⚠️ 写真があるのに掲載許可が未確認なら保存しない。理由も画面に出す。
+        const EVR_MAX_PHOTOS = 12, EVR_MAX_FILES = 8, EVR_NOTE_MAX = 2000;
+        const evrNormalize = (input) => {
+            const src = (input && typeof input === 'object' && !Array.isArray(input)) ? input : {};
+            const str = (v, n) => String(v == null ? '' : v).slice(0, n);
+            const arr = (v) => (Array.isArray(v) ? v : []);
+            const u = str(src.videoUrl, 500).trim();
+            return {
+                note: str(src.note, EVR_NOTE_MAX),
+                photoIds: [...new Set(arr(src.photoIds).map(x => str(x, 64)).filter(Boolean))].slice(0, EVR_MAX_PHOTOS),
+                files: arr(src.files).slice(0, EVR_MAX_FILES).map(f => ({ id: str(f && f.id, 64), name: str(f && f.name, 120) || 'file', type: str(f && f.type, 80), size: Number(f && f.size) || 0 })).filter(f => f.id),
+                videoUrl: /^https:\/\/[^\s]+$/i.test(u) ? u : '',
+                consent: src.consent === true,
+                updatedAt: Number(src.updatedAt) || 0,
+                updatedBy: str(src.updatedBy, 64),
+            };
+        };
+        const evrCounts = (r) => { const x = evrNormalize(r); return { photos: x.photoIds.length, files: x.files.length, hasVideo: !!x.videoUrl, hasNote: !!x.note.trim() }; };
+        const evrHas = (r) => { const c = evrCounts(r); return c.hasNote || c.photos > 0 || c.files > 0 || c.hasVideo; };
+        const evrReady = (r) => {
+            const x = evrNormalize(r);
+            if (!evrHas(x)) return { ok: false, reason: 'empty' };
+            if (x.photoIds.length > 0 && !x.consent) return { ok: false, reason: 'consent_unconfirmed' };
+            return { ok: true };
+        };
+        const EVR_REASON = {
+            empty: 'ふりかえりの内容がありません。',
+            consent_unconfirmed: '写真に写っている方の掲載許可を確かめてから保存してください。',
+        };
+        const evrSummary = (r) => {
+            const c = evrCounts(r); const parts = [];
+            if (c.hasNote) parts.push('レポート');
+            if (c.photos) parts.push(`写真${c.photos}枚`);
+            if (c.files) parts.push(`資料${c.files}件`);
+            if (c.hasVideo) parts.push('録画');
+            return parts.join('・');
+        };
+        const evrCanEdit = (ctx, ev) => {
+            if (ctx && ctx.isHq === true) return true;
+            const me = String((ctx && ctx.meId) || ''); const owner = String((ev && ev.ownerId) || '');
+            return !!me && !!owner && me === owner;
+        };
+        const evrVisible = (ev, isPast) => !!isPast && !!ev && ev.status !== 'draft';
+
         const evfRead = (row, section, meta) => {
             const c = (row && row.cells) || {};
             const m = (meta && typeof meta === 'object') ? meta : {};
@@ -1518,6 +1569,7 @@
                 welcome: { firstTimer: !!w.firstTimer, listenOnly: !!w.listenOnly, partial: !!w.partial },
                 featured: !!m.featured, status: ['draft', 'open', 'cancelled'].includes(m.status) ? m.status : 'open',
                 cancelReason: String(m.cancelReason || ''), tags: Array.isArray(m.tags) ? m.tags : [],
+                recap: evrNormalize(m.recap),
             };
         };
         const evfIsPast = (ev, now) => {
@@ -6137,6 +6189,11 @@
             const [evRsvp, setEvRsvp] = useState({ counts: {}, mine: {} });
             const [evRsvpBusy, setEvRsvpBusy] = useState('');
             const [evNotice, setEvNotice] = useState('');
+            // 過去の開催のふりかえり（編集中の内容。null = 編集していない）
+            const [evRecapEdit, setEvRecapEdit] = useState(null);   // { id, note, photoIds, files, videoUrl, consent }
+            const [evRecapBusy, setEvRecapBusy] = useState(false);
+            const [evRecapErr, setEvRecapErr] = useState('');
+            const [evPhoto, setEvPhoto] = useState(null);           // ふりかえり写真の拡大 {list:[imgId], i}
             const evPost = async (payload) => {
                 const r = await fetch('/api/plan-store', { method: 'POST', cache: 'no-store',
                     headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() },
@@ -6175,6 +6232,53 @@
                 if (!j.ok) { setEvNotice(j.message || '参加者を取得できませんでした'); return; }
                 if (!j.detail) { setEvNotice('参加者の氏名は主催者と本部だけが見られます'); return; }
                 setEvRoster({ id: ev.id, roster: j.roster, chatOnly: j.chatOnly || [], chatOnlyLabel: j.chatOnlyLabel || '' });
+            };
+            // ── 過去の開催のふりかえり ────────────────────────────────
+            const evRecapOpen = (ev) => {
+                const r = evrNormalize(ev && ev.recap);
+                setEvRecapErr('');
+                setEvRecapEdit({ id: ev.id, note: r.note, photoIds: r.photoIds, files: r.files, videoUrl: r.videoUrl, consent: r.consent });
+            };
+            const evRecapClose = () => { setEvRecapEdit(null); setEvRecapErr(''); };
+            // 写真・配布資料を取り込む。⚠️ 実体は別キーへ送り、画面にはIDだけ持つ。
+            const evRecapTakeFiles = async (fileList) => {
+                const files = [...(fileList || [])].slice(0, EVR_MAX_PHOTOS);
+                for (const f of files) {
+                    const dataUrl = await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(String(fr.result || '')); fr.onerror = () => res(''); fr.readAsDataURL(f); });
+                    if (!dataUrl) continue;
+                    if (/^image\//.test(f.type)) {
+                        const j = await evPost({ action: 'uploadImage', dataUrl }).catch(() => null);
+                        if (j && j.ok && j.id) { chatImgCache[j.id] = dataUrl; setEvRecapEdit(p => p ? { ...p, photoIds: [...new Set([...p.photoIds, j.id])].slice(0, EVR_MAX_PHOTOS) } : p); }
+                    } else {
+                        const j = await evPost({ action: 'uploadFile', dataUrl, name: f.name, fileType: f.type }).catch(() => null);
+                        if (j && j.ok && j.id) setEvRecapEdit(p => p ? { ...p, files: [...p.files, { id: j.id, name: f.name, type: f.type, size: f.size }].slice(0, EVR_MAX_FILES) } : p);
+                    }
+                }
+            };
+            const evRecapSave = async () => {
+                if (!evRecapEdit || evRecapBusy) return;
+                const recap = evrNormalize(evRecapEdit);
+                const chk = evrReady(recap);
+                // 空にする（消す）のは許す
+                if (!chk.ok && chk.reason !== 'empty') { setEvRecapErr(EVR_REASON[chk.reason] || '保存できませんでした'); return; }
+                setEvRecapBusy(true); setEvRecapErr('');
+                try {
+                    const j = await evPost({ action: 'recap_set', id: evRecapEdit.id, recap });
+                    if (!j.ok) { setEvRecapErr(j.message || EVR_REASON[j.error] || 'うまくいきませんでした'); return; }
+                    await evLoad();
+                    evRecapClose();
+                    setEvNotice('ふりかえりを保存しました');
+                } finally { setEvRecapBusy(false); }
+            };
+            // 配布資料を取り出す（ニュースの添付と同じ保存先）
+            const evRecapOpenFile = async (f) => {
+                try {
+                    const r = await fetch(`/api/plan-store?type=events&file=${encodeURIComponent(f.id)}`, { cache: 'no-store', headers: ccAuthHeaders() });
+                    const j = await r.json();
+                    if (!j || !j.ok || !j.dataUrl) { setEvNotice('資料を開けませんでした'); return; }
+                    const a = document.createElement('a'); a.href = j.dataUrl; a.download = j.name || f.name || 'file';
+                    document.body.appendChild(a); a.click(); a.remove();
+                } catch { setEvNotice('資料を開けませんでした'); }
             };
             // 「企画する」。⚠️ **下書きとして作る**（空の公開行を即座に作らない）。
             const evCreateDraft = async (section) => {
@@ -6571,7 +6675,7 @@
             //    キーボードだけで操作している人が、閉じたあとに迷子にならないようにする。
             const nowlFocusRef = useRef(null);
             useEffect(() => {
-                const open = profileEdit || profileView || boardComposerOpen || boardStatusId || boardOpenId || evDetailId || evPlanOpen;
+                const open = profileEdit || profileView || boardComposerOpen || boardStatusId || boardOpenId || evDetailId || evPlanOpen || evPhoto;
                 if (!open) {
                     // 閉じた: 覚えていた場所へフォーカスを戻す
                     const el = nowlFocusRef.current; nowlFocusRef.current = null;
@@ -6584,6 +6688,8 @@
                     e.stopPropagation();
                     // 内側（確認・記事の全画面・状況）から先に閉じる
                     if (evConfirm) { setEvConfirm(false); return; }
+                    if (evPhoto) { setEvPhoto(null); return; }
+                    if (evRecapEdit) { evRecapClose(); return; }
                     if (evPlanOpen) { setEvPlanOpen(false); return; }
                     if (evDetailId) { setEvDetailId(''); setEvRoster(null); return; }
                     if (boardStatusId) { setBoardStatusId(''); return; }
@@ -6594,7 +6700,7 @@
                 };
                 window.addEventListener('keydown', onKey);
                 return () => window.removeEventListener('keydown', onKey);
-            }, [profileEdit, profileView, boardComposerOpen, boardStatusId, boardOpenId, evDetailId, evPlanOpen, evConfirm]);
+            }, [profileEdit, profileView, boardComposerOpen, boardStatusId, boardOpenId, evDetailId, evPlanOpen, evConfirm, evPhoto, evRecapEdit]);
             // 組織図: 「売上で絞る」がONのときだけ、選択月の店舗別スタッフ売上（by_staff）を集計取得。
             // 既定はOFF＝在籍ロスターを即表示（読み込みなし）。
             useEffect(() => {
@@ -16267,9 +16373,12 @@
                                                                         {c ? <span>参加予定 {c.going}人{c.waitlist > 0 ? `・待ち ${c.waitlist}人` : ''}</span> : <span>参加状況を確認中…</span>}
                                                                         {seatText(e) && <span className="ml-auto" style={{ color: c && c.full ? 'var(--nowl-red)' : undefined }}>{seatText(e)}</span>}
                                                                     </div>
-                                                                    {past ? (
-                                                                        <button data-ev-action={e.id} onClick={() => evOpenDetail(e)} className="ev-action">開催のふりかえりを見る</button>
-                                                                    ) : e.status === 'cancelled' ? (
+                                                                    {past ? (<>
+                                                                        {/* ⚠️ 中身が無ければ「0件」と書かず、何も出さない */}
+                                                                        {evrSummary(e.recap) && <div data-ev-recap-sum={e.id} className="text-[11px] font-bold text-[#5c7564] mb-2">ふりかえり: {evrSummary(e.recap)}</div>}
+                                                                        <button data-ev-action={e.id} onClick={() => evOpenDetail(e)} className="ev-action">
+                                                                            {evrHas(e.recap) ? '開催のふりかえりを見る' : 'この会の詳細を見る'}</button>
+                                                                    </>) : e.status === 'cancelled' ? (
                                                                         <button className="ev-action" disabled>この会は中止になりました</button>
                                                                     ) : (
                                                                         <button data-ev-action={e.id} disabled={evRsvpBusy === e.id}
@@ -16380,6 +16489,127 @@
                                                         </div>
                                                     )}
 
+                                                    {/* ── 過去の開催のふりかえり ──────────────────────────
+                                                        ⚠️ 終わった会にだけ出す。これから開く会に「ふりかえり」を出さない。
+                                                        ⚠️ 書けるのは主催者と本部だけ。写真は掲載許可を確かめるまで保存できない。 */}
+                                                    {evrVisible(detail, isPastEv(detail)) && (() => {
+                                                        const rc = evrNormalize(detail.recap);
+                                                        const canEdit = evrCanEdit({ isHq: chatIsRoot || authIsHq, meId: chatMyId }, detail);
+                                                        const editing = !!(evRecapEdit && evRecapEdit.id === detail.id);
+                                                        const draft = editing ? evRecapEdit : null;
+                                                        const chk = editing ? evrReady(evrNormalize(draft)) : null;
+                                                        return (
+                                                            <div data-ev-recap={detail.id} className="ev-recap">
+                                                                <div className="flex items-center gap-2 flex-wrap">
+                                                                    <div className="text-[11px] font-black text-[#9a9aa3] tracking-wider">開催のふりかえり</div>
+                                                                    {!editing && evrHas(rc) && <span className="text-[11px] text-[#72747d]">{evrSummary(rc)}</span>}
+                                                                    {canEdit && !editing && (
+                                                                        <button data-ev-recap-edit={detail.id} onClick={() => evRecapOpen(detail)}
+                                                                            className="ml-auto px-3 h-9 rounded-lg border border-[#e4e4eb] bg-white text-[12px] font-bold text-[#4a4c53] hover:bg-[#f6f6f8]">
+                                                                            {evrHas(rc) ? '書き直す' : 'ふりかえりを書く'}</button>
+                                                                    )}
+                                                                </div>
+
+                                                                {!editing ? (
+                                                                    evrHas(rc) ? (
+                                                                        <div className="mt-3 flex flex-col gap-3">
+                                                                            {rc.note && <p data-ev-recap-note className="text-[13px] leading-[1.9] text-[#3f4149] whitespace-pre-wrap">{rc.note}</p>}
+                                                                            {rc.photoIds.length > 0 && (
+                                                                                <div data-ev-recap-photos className="ev-recap-grid">
+                                                                                    {rc.photoIds.map((id, i) => (
+                                                                                        <button key={id} data-ev-recap-photo={id} onClick={() => setEvPhoto({ list: rc.photoIds, i })} className="ev-recap-photo" aria-label="写真を大きく見る">
+                                                                                            <ChatImage imgId={id} className="w-full h-full object-cover absolute inset-0" />
+                                                                                        </button>
+                                                                                    ))}
+                                                                                </div>
+                                                                            )}
+                                                                            {rc.files.length > 0 && (
+                                                                                <div data-ev-recap-files className="flex flex-wrap gap-2">
+                                                                                    {rc.files.map(f => (
+                                                                                        <button key={f.id} data-ev-recap-file={f.id} onClick={() => evRecapOpenFile(f)}
+                                                                                            className="inline-flex items-center gap-2 h-10 px-3 rounded-lg border border-[#e4e4eb] bg-white text-[12px] font-bold text-[#3f4149] hover:bg-[#f6f6f8] max-w-full">
+                                                                                            <FileText size={14} className="shrink-0 text-[#9a9aa3]" /><span className="truncate">{f.name}</span>
+                                                                                        </button>
+                                                                                    ))}
+                                                                                </div>
+                                                                            )}
+                                                                            {rc.videoUrl && (
+                                                                                <a data-ev-recap-video href={rc.videoUrl} target="_blank" rel="noopener noreferrer"
+                                                                                   className="inline-flex items-center gap-2 h-10 px-3 rounded-lg border border-[#e4e4eb] bg-white text-[12px] font-bold text-[#3f4149] hover:bg-[#f6f6f8] self-start">
+                                                                                    ▶ 録画を見る</a>
+                                                                            )}
+                                                                            {rc.photoIds.length > 0 && (
+                                                                                <p className="text-[11px] text-[#9a9aa3]">※ 写真は、写っている方の掲載許可を確認したうえで載せています。</p>
+                                                                            )}
+                                                                        </div>
+                                                                    ) : (
+                                                                        <p data-ev-recap-empty className="mt-2 text-[12px] text-[#9a9aa3]">
+                                                                            まだありません。{canEdit ? 'レポート・写真・配布資料・録画を残せます。' : '主催者か本部が書くと、ここに出ます。'}
+                                                                        </p>
+                                                                    )
+                                                                ) : (
+                                                                    <div data-ev-recap-editor className="mt-3 flex flex-col gap-3">
+                                                                        <textarea data-ev-recap-note-input value={draft.note} rows={5}
+                                                                            onChange={e => setEvRecapEdit(p => ({ ...p, note: e.target.value.slice(0, EVR_NOTE_MAX) }))}
+                                                                            placeholder="当日の様子や、決まったこと、次につながることを書いてください…"
+                                                                            className="w-full resize-none rounded-lg border border-[#e4e4eb] bg-white px-3.5 py-2.5 text-[13px] text-[#18191c] placeholder:text-[#9a9aa3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
+                                                                        {draft.photoIds.length > 0 && (
+                                                                            <div className="ev-recap-grid">
+                                                                                {draft.photoIds.map(id => (
+                                                                                    <div key={id} className="ev-recap-photo">
+                                                                                        <ChatImage imgId={id} className="w-full h-full object-cover absolute inset-0" />
+                                                                                        <button data-ev-recap-photo-del={id} aria-label="写真を外す"
+                                                                                            onClick={() => setEvRecapEdit(p => ({ ...p, photoIds: p.photoIds.filter(x => x !== id) }))}
+                                                                                            className="absolute top-1 right-1 w-6 h-6 rounded-full bg-[#18191c] text-white flex items-center justify-center z-10"><X size={12} /></button>
+                                                                                    </div>
+                                                                                ))}
+                                                                            </div>
+                                                                        )}
+                                                                        {draft.files.length > 0 && (
+                                                                            <div className="flex flex-wrap gap-2">
+                                                                                {draft.files.map((f, i) => (
+                                                                                    <span key={f.id} className="relative inline-flex items-center gap-1.5 pl-3 pr-7 h-10 rounded-lg border border-[#e4e4eb] bg-white text-[12px] font-bold text-[#3f4149] max-w-[220px]">
+                                                                                        <FileText size={14} className="shrink-0 text-[#9a9aa3]" /><span className="truncate">{f.name}</span>
+                                                                                        <button aria-label="資料を外す" onClick={() => setEvRecapEdit(p => ({ ...p, files: p.files.filter((_, j) => j !== i) }))}
+                                                                                            className="absolute top-1/2 -translate-y-1/2 right-1.5 w-5 h-5 text-[#9a9aa3] hover:text-rose-500 flex items-center justify-center"><X size={12} /></button>
+                                                                                    </span>
+                                                                                ))}
+                                                                            </div>
+                                                                        )}
+                                                                        <label data-ev-recap-add className="inline-flex items-center gap-2 h-11 px-4 rounded-lg border border-dashed border-[#d0cacc] bg-white text-[12px] font-bold text-[#4a4c53] cursor-pointer hover:bg-[#f6f6f8] self-start">
+                                                                            ＋ 写真・配布資料を追加
+                                                                            <input type="file" multiple className="hidden" onChange={e => { evRecapTakeFiles(e.target.files); e.target.value = ''; }} />
+                                                                        </label>
+                                                                        <label className="flex flex-col gap-1.5">
+                                                                            <span className="text-[12px] font-bold text-[#3f4149]">録画のURL<span className="ml-1.5 font-normal text-[11px] text-[#9a9aa3]">（任意・https のみ）</span></span>
+                                                                            <input data-ev-recap-video-input value={draft.videoUrl} onChange={e => setEvRecapEdit(p => ({ ...p, videoUrl: e.target.value }))}
+                                                                                placeholder="https://…" className="w-full h-11 rounded-lg border border-[#e4e4eb] bg-white px-3.5 text-[13px] text-[#18191c] placeholder:text-[#9a9aa3] focus:outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-100 transition" />
+                                                                        </label>
+                                                                        {/* ⚠️ 写真があるときは、掲載許可を確かめるまで保存させない。自動では立てない。 */}
+                                                                        {draft.photoIds.length > 0 && (
+                                                                            <label data-ev-recap-consent className="flex items-start gap-2.5 p-3 rounded-lg border border-[#e4e4eb] bg-white cursor-pointer min-h-[44px]">
+                                                                                <input type="checkbox" checked={!!draft.consent} onChange={e => setEvRecapEdit(p => ({ ...p, consent: e.target.checked }))}
+                                                                                    className="w-4 h-4 mt-0.5 accent-[#F37021]" />
+                                                                                <span className="text-[12px] leading-relaxed text-[#3f4149]">写真に写っている方の<b>掲載許可を確認しました</b>
+                                                                                    <span className="block text-[11px] text-[#9a9aa3] mt-0.5">確認できていない写真は載せないでください。</span></span>
+                                                                            </label>
+                                                                        )}
+                                                                        {evRecapErr && <p data-ev-recap-err className="text-[12px] font-bold" style={{ color: '#a53648' }}>{evRecapErr}</p>}
+                                                                        <div className="flex flex-wrap gap-2">
+                                                                            <button data-ev-recap-save disabled={evRecapBusy || !(chk && (chk.ok || chk.reason === 'empty'))}
+                                                                                onClick={evRecapSave} className="nowl-primary disabled:opacity-50">{evRecapBusy ? '保存しています…' : '保存する'}</button>
+                                                                            <button data-ev-recap-cancel onClick={evRecapClose}
+                                                                                className="px-4 py-3 rounded-lg border border-[#e4e4eb] text-[12px] font-bold text-[#4a4c53]">やめる</button>
+                                                                        </div>
+                                                                        {chk && !chk.ok && chk.reason !== 'empty' && (
+                                                                            <p data-ev-recap-why className="text-[11px]" style={{ color: '#a53648' }}>{EVR_REASON[chk.reason]}</p>
+                                                                        )}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })()}
+
                                                     {/* グループチャット。⚠️ 同じイベントに新しいルームを作らない。 */}
                                                     <div className="ev-chatbox">
                                                         <div className="text-[11px] font-black text-[#9a9aa3] tracking-wider mb-2">グループチャット</div>
@@ -16425,6 +16655,30 @@
                                             </div>
                                         </div>
                                     )}
+
+                                    {/* ふりかえり写真の拡大。⚠️ チャットの拡大表示はチャット画面の中にしかないため、ここに用意する。 */}
+                                    {evPhoto && (() => {
+                                        const list = (evPhoto.list || []).filter(Boolean);
+                                        if (!list.length) return null;
+                                        const i = Math.max(0, Math.min(evPhoto.i || 0, list.length - 1));
+                                        const go = (d) => setEvPhoto(v => ({ ...v, i: ((v.i || 0) + d + list.length) % list.length }));
+                                        return (
+                                            <div data-ev-photo className="fixed inset-0 z-[110] bg-black/90 flex items-center justify-center" onClick={() => setEvPhoto(null)}>
+                                                <button aria-label="閉じる" onClick={() => setEvPhoto(null)}
+                                                    className="absolute top-3 right-3 w-11 h-11 rounded-full bg-white/15 text-white flex items-center justify-center"><X size={20} /></button>
+                                                {list.length > 1 && (<>
+                                                    <button aria-label="前の写真" onClick={e => { e.stopPropagation(); go(-1); }}
+                                                        className="absolute left-2 top-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-white/15 text-white flex items-center justify-center">‹</button>
+                                                    <button aria-label="次の写真" onClick={e => { e.stopPropagation(); go(1); }}
+                                                        className="absolute right-2 top-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-white/15 text-white flex items-center justify-center">›</button>
+                                                    <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/70 text-[12px] font-bold">{i + 1} / {list.length}</div>
+                                                </>)}
+                                                <div className="max-w-[92vw] max-h-[86vh]" onClick={e => e.stopPropagation()}>
+                                                    <ChatImage imgId={list[i]} className="max-w-[92vw] max-h-[86vh] object-contain" />
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
 
                                     {/* ── 企画する（従来の編集表を開く）── */}
                                     {evPlanOpen && (

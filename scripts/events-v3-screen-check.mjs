@@ -39,6 +39,10 @@ const countsOf = (id) => {
   return { ...c, capacity: cap, capacityText: id === 'r2' ? '各店1名' : '',
            seatsLeft: cap === null ? null : Math.max(0, cap - c.going), full: cap === null ? false : c.going >= cap };
 };
+// 1x1 の透明PNG（架空の写真。実物は使いません）
+const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+const uploads = {};   // 写真・配布資料の実体（架空）
+let upN = 0;
 const calls = [];
 const json = (res, o) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(o)); };
 
@@ -58,6 +62,11 @@ const server = http.createServer((req, res) => {
       const type = req.method === 'GET' ? url.searchParams.get('type') : body.type;
       if (type === 'ccflags') return json(res, { flags: { cc_all: true, cc_authz: 'off' }, configured: true, env: 'preview' });
       if (type === 'events') {
+        if (req.method === 'GET' && url.searchParams.get('file')) {
+          const f = uploads[url.searchParams.get('file')];
+          if (!f) { res.statusCode = 404; return json(res, { ok: false, error: 'not_found' }); }
+          return json(res, { ok: true, name: f.name, type: f.type, dataUrl: f.dataUrl });
+        }
         if (req.method === 'GET') return json(res, { sections, meta, configured: true, me: '__root__' });
         const a = body.action;
         if (a === 'rsvp_counts') {
@@ -81,13 +90,39 @@ const server = http.createServer((req, res) => {
                       waitlist: [], interested: [], invited: [], cancelled: [] },
             chatOnly: ['s5'], chatOnlyLabel: 'チャット参加中・出欠未回答' });
         }
-        if (a === 'meta_set') { meta[body.id] = { ...(meta[body.id] || {}), ...(body.meta || {}) }; return json(res, { ok: true, id: body.id, meta: meta[body.id] }); }
+        if (a === 'meta_set') {
+          // ⚠️ サーバーと同じく、ここからは recap を変えさせない
+          const { recap: _ignored, ...m } = (body.meta || {});
+          meta[body.id] = { ...(meta[body.id] || {}), ...m };
+          return json(res, { ok: true, id: body.id, meta: meta[body.id] });
+        }
+        if (a === 'recap_set') {
+          const r = body.recap || {};
+          const photos = Array.isArray(r.photoIds) ? r.photoIds : [];
+          const has = !!(String(r.note || '').trim() || photos.length || (r.files || []).length || r.videoUrl);
+          // ⚠️ サーバーと同じく、写真があるのに掲載許可が未確認なら保存しない
+          if (has && photos.length && r.consent !== true) {
+            return json(res, { ok: false, error: 'consent_unconfirmed', message: '写真に写っている方の掲載許可を確かめてから保存してください。' });
+          }
+          meta[body.id] = { ...(meta[body.id] || {}), recap: r };
+          return json(res, { ok: true, id: body.id, recap: r });
+        }
+        if (a === 'uploadImage') { const id = `img_${++upN}`; uploads[id] = { name: 'photo', type: 'image/png', dataUrl: body.dataUrl }; return json(res, { ok: true, id }); }
+        if (a === 'uploadFile') { const id = `file_${++upN}`; uploads[id] = { name: body.name, type: body.fileType, dataUrl: body.dataUrl }; return json(res, { ok: true, id }); }
         if (a === 'upsertRow') {
           const sk = body.section; sections[sk] = sections[sk] || [];
           sections[sk].push({ id: body.row.id, cells: body.row.cells || {} });
           return json(res, { ok: true, row: body.row });
         }
         return json(res, { ok: true });
+      }
+      // ふりかえり写真の表示経路（ChatImage は raw の画像バイトを取りに来る）
+      if (type === 'chat' && url.searchParams.get('img')) {
+        const id = url.searchParams.get('img');
+        const u = uploads[id];
+        const b64 = u && /^data:image\/[^;]+;base64,/.test(String(u.dataUrl)) ? String(u.dataUrl).split(',')[1] : PNG_1PX;
+        res.setHeader('Content-Type', 'image/png');
+        return res.end(Buffer.from(b64, 'base64'));
       }
       if (type === 'board') return json(res, { posts: [], reads: {}, configured: true, ok: true, counts: {} });
       if (type === 'chat') return json(res, { rooms: [], messages: {}, reads: {},
@@ -274,13 +309,69 @@ check('🔴 日付が読めない予定ではカレンダーを作らない（�
 await page.keyboard.press('Escape');
 await page.waitForTimeout(600);
 
-// ── 過去の開催 ──────────────────────────────────────
+// ── 過去の開催とふりかえり ──────────────────────────────
 await page.locator('[data-ev-tab="past"]').first().click();
 await page.waitForTimeout(900);
 check('過去の開催を見られる', (await page.locator('[data-ev-card="r4"]').count()) === 1);
-check('過去のカードは「ふりかえり」になる', (await txt()).includes('開催のふりかえりを見る'));
+check('ふりかえりが無いうちは「0件」と書かない', (await page.locator('[data-ev-recap-sum]').count()) === 0);
+
+await page.locator('[data-ev-action="r4"]').first().click();
+await page.waitForTimeout(1000);
+check('過去の会の詳細が開く', (await page.locator('[data-nowl-modal="event"]').count()) === 1);
+check('ふりかえりの枠が出る', (await page.locator('[data-ev-recap="r4"]').count()) === 1);
+check('まだ無いときは「まだありません」と出す', (await page.locator('[data-ev-recap-empty]').count()) === 1);
+check('主催者・本部には「ふりかえりを書く」が出る', (await page.locator('[data-ev-recap-edit="r4"]').count()) === 1);
+
+await page.locator('[data-ev-recap-edit="r4"]').first().click();
+await page.waitForTimeout(600);
+check('ふりかえりの入力が開く', (await page.locator('[data-ev-recap-editor]').count()) === 1);
+check('写真が無いうちは掲載許可の確認を出さない', (await page.locator('[data-ev-recap-consent]').count()) === 0);
+
+// 写真を1枚入れる → 掲載許可を確かめるまで保存できない
+await page.locator('[data-ev-recap-add] input[type="file"]').first().setInputFiles({
+  name: 'asa.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1PX, 'base64'),
+});
+await page.waitForTimeout(1200);
+check('写真を入れられる', (await page.locator('[data-ev-recap-editor] .ev-recap-photo').count()) === 1);
+check('🔴 写真を入れると掲載許可の確認が出る', (await page.locator('[data-ev-recap-consent]').count()) === 1);
+const saveDisabled = await page.locator('[data-ev-recap-save]').first().isDisabled();
+check('🔴 許可を確かめるまで保存できない', saveDisabled === true);
+check('🔴 なぜ保存できないかを画面に書く', (await page.locator('[data-ev-recap-why]').count()) === 1,
+  (await page.locator('[data-ev-recap-why]').first().innerText().catch(() => '')).slice(0, 40));
+
+await page.locator('[data-ev-recap-note-input]').first().fill('朝ランの記録です。次回は皇居3周にしましょう。');
+await page.locator('[data-ev-recap-video-input]').first().fill('https://example.com/rec');
+await page.locator('[data-ev-recap-consent] input[type="checkbox"]').first().check();
+await page.waitForTimeout(500);
+check('許可を確かめると保存できるようになる', (await page.locator('[data-ev-recap-save]').first().isDisabled()) === false);
+await page.locator('[data-ev-recap-save]').first().click();
+await page.waitForTimeout(1800);
+check('保存すると入力が閉じる', (await page.locator('[data-ev-recap-editor]').count()) === 0);
+const savedRecap = (meta.r4 || {}).recap || {};
+check('サーバーにレポート・写真・録画が届いている',
+  String(savedRecap.note || '').includes('朝ラン') && (savedRecap.photoIds || []).length === 1 && savedRecap.videoUrl === 'https://example.com/rec');
+check('掲載許可の確認も一緒に記録している', savedRecap.consent === true);
+check('保存したレポートが画面に出る', (await page.locator('[data-ev-recap-note]').count()) === 1);
+check('写真が画面に出る', (await page.locator('[data-ev-recap-photos] .ev-recap-photo').count()) === 1);
+check('録画のリンクが出る', (await page.locator('[data-ev-recap-video]').count()) === 1);
+check('写真は許可を確認したうえで載せていると書いてある', (await txt()).includes('掲載許可を確認したうえで載せています'));
+
+// 写真の拡大
+await page.locator('[data-ev-recap-photos] .ev-recap-photo').first().click();
+await page.waitForTimeout(700);
+check('写真を大きく見られる', (await page.locator('[data-ev-photo]').count()) === 1);
+await page.keyboard.press('Escape');
+await page.waitForTimeout(600);
+check('Escape で写真を閉じられる', (await page.locator('[data-ev-photo]').count()) === 0);
+
+await page.keyboard.press('Escape');
+await page.waitForTimeout(800);
+check('一覧のカードにふりかえりの中身が出る', (await page.locator('[data-ev-recap-sum="r4"]').count()) === 1,
+  (await page.locator('[data-ev-recap-sum="r4"]').first().innerText().catch(() => '')));
+
 await page.locator('[data-ev-tab="find"]').first().click();
 await page.waitForTimeout(700);
+check('これから開く会に「ふりかえり」は出さない', (await page.locator('[data-ev-recap]').count()) === 0);
 
 // ── 企画する（空の公開行を作らない）───────────────────
 const before = await page.locator('[data-ev-card]').count();

@@ -153,7 +153,10 @@ describe('index.html - ニュースの名称', () => {
   it('「お知らせ」は一覧の見出しとカテゴリー名として使う（画面名ではない）', () => {
     expect(html).toContain("{ key: 'notice', label: 'お知らせ'");
     expect(html).toContain('お知らせ <span>UPDATES</span>');
-    expect(html).toContain('ピックアップ <span>PICKUP</span>');
+  });
+  it('ピックアップの節は出さない（オーナー指示でカット）', () => {
+    expect(html).not.toContain('ピックアップ <span>PICKUP</span>');
+    expect(html).not.toContain('data-news-hero=');
   });
   it('内部IDは board のまま（保存先を変えない）', () => {
     expect(html).toContain("{ id: 'board'");

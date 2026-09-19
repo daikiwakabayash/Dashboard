@@ -127,18 +127,11 @@ check('「＋ お知らせを投稿」ボタンが出る', (await page.getByRole
 check('確認が必要なお知らせのバーが出る', (await page.locator('[data-news-ackbar]').count()) > 0);
 check('締切の日付が出る', /9\/25 締切/.test(t), (t.match(/9\/25[^\n]*/) || [''])[0]);
 
-// ── ピックアップ ────────────────────────────────────────
-check('ピックアップが1件だけ大きく出る', (await page.locator('[data-news-hero]').count()) === 1);
-check('ピックアップは featured の記事', (await page.locator('[data-news-hero="p1"]').count()) === 1);
-check('写真が無いピックアップは文字の表紙になる', (await page.locator('[data-news-hero] .nowl-graphic').count()) === 1);
-check('EDITOR\'S PICK の印が出る', t.includes("EDITOR'S PICK"));
-check('ピックアップの肩書きが試作どおり', t.includes('NOWL / KNOWLEDGE JOURNAL'), (t.match(/NOWL \/ [A-Z ]+/) || [''])[0]);
-check('ピックアップの短い言葉が出る', t.includes('学びは、つながるほど強くなる。'));
+// ── ピックアップは出さない（オーナー指示でカット）─────────────
+check('🔴 ピックアップの節を出さない', (await page.locator('[data-news-hero]').count()) === 0 && !t.includes('PICKUP'));
 const h1px = await page.locator('[data-news-fv-title]').first().evaluate(el => Math.round(parseFloat(getComputedStyle(el).fontSize)));
 check('PCの大見出しが十分大きい（試作に寄せる）', h1px >= 38, `${h1px}px`);
-const coverPx = await page.locator('[data-news-hero] .nowl-graphic strong').first().evaluate(el => Math.round(parseFloat(getComputedStyle(el).fontSize)));
-check('ピックアップの英字が十分大きい', coverPx >= 40, `${coverPx}px`);
-check('PICKUP / UPDATES の見出しが出る', t.includes('PICKUP') && t.includes('UPDATES'));
+check('UPDATES の見出しは残す', t.includes('UPDATES'));
 
 // ── カード ──────────────────────────────────────────────
 const cards = await page.locator('[data-news-card]').count();
@@ -226,7 +219,7 @@ check('見つからないときは案内と解除ボタンが出る',
 await page.locator('[data-news-clearfilter]').first().click();
 await page.waitForTimeout(800);
 
-// ── 🔴 ピックアップ指定が無くても第一印象を空にしない ─────────────
+// ── 🔴 第一印象はファーストビューが担う（ピックアップは無い）───────
 await page.evaluate(() => fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ type: 'board', action: '__nofeat' }) }));
 await page.reload({ waitUntil: 'commit' });
@@ -236,10 +229,8 @@ if (await pw2.count()) { await pw2.first().fill(process.env.STUB_PW || 'pw'); aw
 await page.getByRole('button', { name: /ニュース/ }).first().click().catch(() => {});
 await page.waitForTimeout(2500);
 t = await txt();
-check('🔴 ピックアップ指定が無くても、いちばん新しい記事が大きく出る',
-  (await page.locator('[data-news-hero]').count()) === 1 && t.includes('いちばん新しいお知らせ'),
-  t.includes('いちばん新しいお知らせ') ? '注記あり' : '注記なし');
-check('指定が無いときは EDITOR\'S PICK を付けない（指定済みと区別する）', !t.includes("EDITOR'S PICK"));
+check('🔴 ピックアップ指定の有無にかかわらず、ファーストビューが出る',
+  (await page.locator('[data-news-fv]').count()) === 1 && t.includes('次のNAORUへ。'));
 
 // ── 記事を開く ──────────────────────────────────────────
 await page.locator('[data-news-card="p1"] button').first().click();

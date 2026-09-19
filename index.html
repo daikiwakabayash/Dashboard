@@ -588,6 +588,11 @@
             margin: 0 0 20px; isolation: isolate;
         }
         @media (min-width: 900px) { .nowl-fv { grid-template-columns: 1fr 1.12fr; margin: 4px 0 26px; } }
+        /* ⚠️ 全面に広げる形。画面の端まで出し、上の余白も角丸も作らない。 */
+        .nowl-fv.full { border-radius: 0; margin: 0; }
+        @media (min-width: 900px) { .nowl-fv.full { grid-template-columns: 1fr 1.25fr; margin: 0; min-height: 420px; } }
+        @media (min-width: 1280px) { .nowl-fv.full { min-height: 500px; } }
+        @media (min-width: 1600px) { .nowl-fv.full { min-height: 560px; } }
         .nowl-fv-copy {
             position: relative; z-index: 2; color: #fff; padding: 26px 22px 24px;
             display: flex; flex-direction: column; align-items: flex-start;
@@ -595,6 +600,8 @@
         }
         @media (min-width: 900px) { .nowl-fv-copy { padding: 40px 34px 34px; } }
         @media (min-width: 1280px) { .nowl-fv-copy { padding: 52px 46px 42px; } }
+        @media (min-width: 900px)  { .nowl-fv.full .nowl-fv-copy { padding: 44px 40px 38px 46px; } }
+        @media (min-width: 1280px) { .nowl-fv.full .nowl-fv-copy { padding: 58px 52px 46px 60px; } }
         .nowl-fv-over { font-size: 9px; letter-spacing: 2.6px; font-weight: 800; color: rgba(255,255,255,.82); margin-bottom: 14px; }
         @media (min-width: 900px) { .nowl-fv-over { font-size: 10px; letter-spacing: 3px; margin-bottom: 20px; } }
         .nowl-fv-title { font-size: 30px; line-height: 1.24; letter-spacing: -1.4px; font-weight: 900; margin: 0; }
@@ -622,10 +629,11 @@
         .nowl-fv-photo { position: relative; min-height: 190px; background: #2a2b31; overflow: hidden; }
         @media (min-width: 640px) { .nowl-fv-photo { min-height: 250px; } }
         @media (min-width: 900px) { .nowl-fv-photo { min-height: 100%; } }
-        .nowl-fv-photo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+        /* 人が写っている下寄りを見せる（天井ばかりが大きく出ないように） */
+        .nowl-fv-photo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center 64%; }
         /* 斜めの境目は**デスクトップだけ**。スマホでは切らない。 */
         @media (min-width: 900px) {
-            .nowl-fv-copy { clip-path: polygon(0 0, 100% 0, calc(100% - 78px) 100%, 0 100%); margin-right: -78px; }
+            .nowl-fv-copy { clip-path: polygon(0 0, 100% 0, calc(100% - 118px) 100%, 0 100%); margin-right: -118px; }
         }
         .nowl-fv-ph { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
             background: linear-gradient(135deg, #2f3038 0%, #23242a 100%); color: rgba(255,255,255,.55); text-align: center; padding: 20px; }
@@ -1211,13 +1219,19 @@
 
         // サムネは固定サイズの箱で表示（読み込み前後で高さが変わらない＝チャットのスクロールがガタつかない）。
         // 全体はタップでライトボックス表示（トリミング無し）。
-        const ChatImage = ({ imgId, onClick }) => {
+        // ⚠️ className を渡したときは、その大きさで描く。
+        //    以前は渡しても無視して 180px の枠で描いていたため、表紙やファーストビューの
+        //    写真が小さいまま出ていた（チャットの添付は従来どおりの枠のまま）。
+        const ChatImage = ({ imgId, onClick, className }) => {
             const [loaded, setLoaded] = React.useState(!!chatImgCache[imgId]);
+            const box = className
+                ? `overflow-hidden bg-[#F2F4F7] relative ${className}`
+                : 'w-[180px] h-[180px] md:w-[200px] md:h-[200px] rounded-lg border border-[#EAECF0] overflow-hidden bg-[#F2F4F7] cursor-zoom-in shrink-0 relative';
             return (
-                <div onClick={onClick} className="w-[180px] h-[180px] md:w-[200px] md:h-[200px] rounded-lg border border-[#EAECF0] overflow-hidden bg-[#F2F4F7] cursor-zoom-in shrink-0 relative">
+                <div onClick={onClick} className={box}>
                     {!loaded && <div className="absolute inset-0 animate-pulse bg-[#EEF0F3]" />}
                     <AuthImg imgId={imgId} loading="lazy" decoding="async" onLoad={() => setLoaded(true)}
-                        className="w-full h-full object-cover" alt="添付画像" />
+                        className="absolute inset-0 w-full h-full object-cover" alt="添付画像" />
                 </div>
             );
         };
@@ -1389,7 +1403,7 @@
         };
         const orgMapPathOf = (k) => ORG_MAP_PATHS[k] || ORG_MAP_PATHS.other;
         const ORG_MAP_NOTE = '地図は簡略化した飾りです（出典: Natural Earth／パブリックドメイン）。位置や距離を正確に示すものではありません。';
-        const ORG_COLLAPSE_OVER = 12;
+        const ORG_COLLAPSE_OVER = Infinity;   // ⚠️ すべての地域を最初から開く（オーナー指示）
 
         // ── 業務AIの回答（lib/ai-answer.js と同じ）────────────────────
         // 正本の契約は naoru-ai-platform/AGENTS.md §3。
@@ -15716,13 +15730,6 @@
                                 const hay = `${p.title || ''} ${p.text || ''} ${p.link || ''} ${chatResolveName(p.authorId, p.authorName || '')} ${p.authorShop || ''}`;
                                 return hay.includes(bq);
                             });
-                            // ⚠️ ピックアップは**絞り込みの影響を受けない**ようにする（タブを変えるたびに入れ替わらない）。
-                            //    指定（ピックアップ）があればそれ、無ければいちばん新しい記事。
-                            const heroPost = (() => {
-                                const mineAll = livePosts.filter(p => p && (chatIsRoot || newsForMe(p, { shop: chatMyShop, shops: authState.shops })));
-                                const byNew = mineAll.slice().sort((a, b) => (Date.parse(b.createdAt || '') || 0) - (Date.parse(a.createdAt || '') || 0));
-                                return byNew.find(p => p.featured) || byNew[0] || null;
-                            })();
                             const posts = filtered.slice().sort((a, b) => {
                                 if (!!b.pinned !== !!a.pinned) return b.pinned ? 1 : -1;
                                 const da = Date.parse(a.createdAt || '') || 0, db = Date.parse(b.createdAt || '') || 0;
@@ -16017,8 +16024,7 @@
                                 );
                             };
                             return (
-                                <div data-nowl="news" className="nowl p-4 md:p-6 font-sans" style={{ background: 'linear-gradient(180deg, #FBFBFC 0%, #F6F6F8 40%, #F6F6F8 100%)', color: '#18191c' }} onClick={() => boardMenuId && setBoardMenuId('')}>
-                                    <div className="max-w-6xl mx-auto">
+                                <div data-nowl="news" className="nowl font-sans" style={{ background: 'linear-gradient(180deg, #FBFBFC 0%, #F6F6F8 40%, #F6F6F8 100%)', color: '#18191c' }} onClick={() => boardMenuId && setBoardMenuId('')}>
                                         {/* ── ファーストビュー ──────────────────────────────
                                             ⚠️ 文言と写真は本部が画面から差し替える（コードに焼き付けない）。
                                             ⚠️ 写真が未設定でも成り立つように、文字だけの面で出す。 */}
@@ -16026,7 +16032,7 @@
                                             const hero = newsNormalizeHero((boardData || {}).hero);
                                             const canEditHero = chatIsRoot || authIsHq;
                                             return (
-                                                <section data-news-fv className="nowl-fv">
+                                                <section data-news-fv className="nowl-fv full">
                                                     <div className="nowl-fv-copy">
                                                         <div className="nowl-fv-over">{hero.overline}</div>
                                                         <h1 data-news-fv-title className="nowl-fv-title">
@@ -16048,14 +16054,10 @@
                                                         </div>
                                                     </div>
                                                     <div className="nowl-fv-photo">
+                                                        {/* ⚠️ 既定は同梱の集合写真（オーナー提供）。本部が差し替えればそちらを出す。 */}
                                                         {hero.imgId
-                                                            ? <ChatImage imgId={hero.imgId} className="absolute inset-0 w-full h-full object-cover" />
-                                                            : (
-                                                                <div data-news-fv-noimg className="nowl-fv-ph">
-                                                                    <b>写真はまだ設定されていません</b>
-                                                                    <span>{canEditHero ? '右上の「写真と言葉を変える」から差し替えられます。' : '本部が設定すると、ここに出ます。'}</span>
-                                                                </div>
-                                                            )}
+                                                            ? <ChatImage imgId={hero.imgId} className="absolute inset-0 w-full h-full" />
+                                                            : <img data-news-fv-default src="/news-hero.jpg" alt="NAORUグループ褒章授与式" className="absolute inset-0 w-full h-full object-cover" />}
                                                         {canEditHero && (
                                                             <button data-news-fv-edit onClick={boardHeroOpen} className="nowl-fv-edit">写真と言葉を変える</button>
                                                         )}
@@ -16064,6 +16066,7 @@
                                             );
                                         })()}
 
+                                        <div className="max-w-6xl mx-auto p-4 md:p-6">
                                         <div className="flex items-center justify-end gap-2 mb-4">
                                                 {/* 更新フィード（何がいつ更新されたか） */}
                                                 <div className="relative">
@@ -16338,50 +16341,6 @@
                                                             </button>
                                                         </div>
                                                     );
-                                                })()}
-
-                                                {/* ピックアップ（1件だけ大きく） */}
-                                                {/* ⚠️ 指定が無ければ**いちばん新しい記事**を出す。
-                                                    指定されるまで何も出ないと、画面の第一印象が空になってしまうため。 */}
-                                                {(() => {
-                                                    const f = heroPost;
-                                                    if (!f) return null;
-                                                    const pinned = !!f.featured;
-                                                    const cs = newsCoverStyle(f, { hero: true });
-                                                    return (<>
-                                                        <div className="nowl-sechead">
-                                                            <h2>ピックアップ <span>PICKUP</span></h2>
-                                                            <span className="nowl-small">{pinned ? '本部から、今届けたいこと' : 'いちばん新しいお知らせ'}</span>
-                                                        </div>
-                                                        <article data-news-hero={f.id} className="nowl-hero">
-                                                            <div className="nowl-hero-visual">
-                                                                {cs.imgId
-                                                                    ? <ChatImage imgId={cs.imgId} className="w-full h-full object-cover absolute inset-0" />
-                                                                    : (<>
-                                                                        <div className="nowl-graphic">
-                                                                            <small>{cs.journal || cs.kicker}</small>
-                                                                            <strong>{(cs.heroWords && cs.heroWords.length ? cs.heroWords : [cs.line1, cs.line2]).map((w, i) => (
-                                                                                <React.Fragment key={i}>{i > 0 && <br />}{w}</React.Fragment>
-                                                                            ))}</strong>
-                                                                            <em>{cs.caption}</em>
-                                                                        </div>
-                                                                        {pinned && <span className="nowl-vislabel">EDITOR'S PICK</span>}
-                                                                    </>)}
-                                                            </div>
-                                                            <div className="nowl-hero-body">
-                                                                <div className="flex items-center gap-1.5 flex-wrap">
-                                                                    <span className="nowl-badge">{f.authorRoot ? '本部から' : '店舗から'}</span>
-                                                                    {newsCatOf(f.category) && <span className="nowl-badge neutral"># {newsCatOf(f.category).label}</span>}
-                                                                </div>
-                                                                <h2>{f.title || (f.text || '').slice(0, 40)}</h2>
-                                                                <p className="line-clamp-3">{(f.text || '').slice(0, 110)}</p>
-                                                                <div className="nowl-hero-bottom">
-                                                                    <NewsAuthor p={f} />
-                                                                    <button onClick={() => openBoardPost(f)} aria-label="ピックアップ記事を読む" className="nowl-circle">↗</button>
-                                                                </div>
-                                                            </div>
-                                                        </article>
-                                                    </>);
                                                 })()}
 
                                                 {/* お知らせ一覧 */}

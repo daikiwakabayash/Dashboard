@@ -83,7 +83,7 @@ if (existsSync('owner.html')) {
 }
 
 // 静的アセットを public/ へコピー（画像・PWA）。owner.html は上で処理済みなので除外。
-for (const f of ['logo.png', 'Naoru_landscape.png', 'mascot.png', 'naoru_heart.png',
+for (const f of ['logo.png', 'Naoru_landscape.png', 'mascot.png', 'naoru_heart.png', 'news-hero.jpg',
   'manifest.webmanifest', 'sw.js', 'icon-192.png', 'icon-512.png', 'icon-512-maskable.png', 'apple-touch-icon.png']) {
   if (existsSync(f)) copyFileSync(f, `${OUT}/${f}`);
 }

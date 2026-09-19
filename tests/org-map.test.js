@@ -88,11 +88,12 @@ describe('🔴 地図は飾りだと分かるようにする', () => {
   });
 });
 
-describe('店舗が多い地域は閉じて出す', () => {
-  const many = { shops: new Array(COLLAPSE_OVER + 1).fill(0).map((_, i) => ({ id: i })) };
+describe('地域の開閉', () => {
+  const many = { shops: new Array(200).fill(0).map((_, i) => ({ id: i })) };
   const few = { shops: [{ id: 1 }] };
-  it('多いところは閉じる・少ないところは開く', () => {
-    expect(defaultOpen(many)).toBe(false);
+  it('🔴 オーナー指示により、店舗数にかかわらず最初から開く', () => {
+    expect(COLLAPSE_OVER).toBe(Infinity);
+    expect(defaultOpen(many)).toBe(true);
     expect(defaultOpen(few)).toBe(true);
   });
   it('🔴 検索中はすべて開く（探しているものが隠れない）', () => {

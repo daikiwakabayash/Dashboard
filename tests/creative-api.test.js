@@ -12,7 +12,7 @@ const CLAIMS = Object.fromEntries(CLAIM_CHECKS.map(c => [c.key, true]));
 const KV = 'https://kv.test';
 const STORE_URL = 'https://abc123.public.blob.vercel-storage.com/creative/a.png';
 const ASSET_KEY = 'creative-asset-master-key-for-tests-0123456789';
-let store, genCalls, jobState, blobBytes, blobRanges;
+let store, genCalls, jobState, blobBytes, blobRanges, limitsState;
 const FLAGS = 'naoru:cc:flags:v1:preview';
 const CREATIVE = 'naoru:creative:v1:preview';
 
@@ -38,10 +38,18 @@ function installFetchMock() {
       return { ok: true, status: m ? 206 : 200, headers: new Map(), json: async () => ({}),
                arrayBuffer: async () => part.buffer.slice(part.byteOffset, part.byteOffset + part.byteLength) };
     }
+    // ③のテンプレ文字数上限。①は既定値を持たないので、ここが無いと依頼は出せない。
+    if (u.includes('/v1/creative/limits')) {
+      if (limitsState === 'down') return { ok: false, status: 503, json: async () => ({}) };
+      if (limitsState === 'broken') return ok({ text_limits: {} });
+      return ok({ api_version: 'creative-library-1', template_version: 'abstract-card-v1', mode: 'sample',
+                  text_limits: { headline: 28, body: 120, cta: 14 },
+                  revision_instructions_max: 1000, max_artifact_bytes: 67108864 });
+    }
     if (u.includes('/v1/creative/generate')) {
       genCalls.push(JSON.parse(String(opts.body)));
       if (!jobState) return { ok: false, status: 500, json: async () => ({}) };
-      if (jobState.accept === 422) return { ok: false, status: 422, json: async () => ({ error: { code: 'STRUCTURED_TEXT_CHANGE_REQUIRED' } }) };
+      if (jobState.accept === 422) return { ok: false, status: 422, json: async () => ({ error: jobState.error422 || { code: 'STRUCTURED_TEXT_CHANGE_REQUIRED' } }) };
       if (jobState.accept === 409) return { ok: false, status: 409, json: async () => ({ error: { code: 'CONFLICT' } }) };
       return { ok: true, status: 202, headers: new Map(), json: async () => ({ job_id: 'job_up_1', status: 'queued', poll_after_ms: 1000 }) };
     }
@@ -64,6 +72,7 @@ beforeEach(async () => {
   process.env.CREATIVE_ASSET_KEY = ASSET_KEY;
   delete process.env.CREATIVE_GEN_API_BASE; delete process.env.CREATIVE_GEN_API_KEY;
   jobState = null;
+  limitsState = 'ok';
   dataKey = newDataKey();
   blobBytes = Buffer.from(await encryptBytes(dataKey, 'f_test', PLAIN));
   installFetchMock(); _clearBearerCache();
@@ -518,5 +527,156 @@ describe('🔴 承認の前に人が確かめる', () => {
   it('素材の区分は既定でデモ（実素材だと名乗らせない）', async () => {
     expect((await newAsset()).kind).toBe('demo');
     expect((await newAsset()).kindLabel).toBe('デモ素材');
+  });
+});
+
+// ── ③のテンプレ文字数上限（GET /v1/creative/limits）────────────────
+// ⚠️ ①に既定値を置かない。取れなければ送らない（422になるまで試さない）。
+describe('③のテンプレ文字数上限', () => {
+  it('上限をそのまま返す（①で値を作らない）', async () => {
+    connect();
+    const r = await post({ action: 'limits' });
+    expect(r.body.ok).toBe(true);
+    expect(r.body.limits).toMatchObject({ loaded: true, text: { headline: 28, body: 120, cta: 14 },
+      revisionMax: 1000, maxBytes: 67108864, templateVersion: 'abstract-card-v1' });
+  });
+
+  it('🔴 未接続なら未取得のまま返す（①の既定値で埋めない）', async () => {
+    const r = await post({ action: 'limits' });
+    expect(r.body.limits.loaded).toBe(false);
+    expect(r.body.limits.text).toEqual({});
+    expect(r.body.limits.reason).toContain('CREATIVE_GEN_API_BASE');
+  });
+
+  it('🔴 ③が落ちていたら未取得。理由を残す', async () => {
+    connect(); limitsState = 'down';
+    const r = await post({ action: 'limits' });
+    expect(r.body.limits.loaded).toBe(false);
+    expect(r.body.limits.reason).toContain('503');
+  });
+
+  it('🔴 上限が取れないあいだは生成を依頼しない', async () => {
+    connect(); limitsState = 'down'; jobState = { poll: { status: 'queued' } };
+    const a = await newAsset();
+    const c = (await post({ action: 'creative_create', asset_id: a.id })).body.creative;
+    const g = await post({ action: 'generate', creative_id: c.id });
+    expect(g.body.creative.status).toBe('failed');
+    expect(g.body.creative.failureReason).toContain('テンプレ上限');
+    expect(genCalls).toHaveLength(0);                       // ③を呼びに行かない
+  });
+
+  it('🔴 上限を超えた文言は送らず、どの項目が何文字超えたかを出す', async () => {
+    connect(); jobState = { poll: { status: 'queued' } };
+    const a = await newAsset();
+    const c = (await post({ action: 'creative_create', asset_id: a.id,
+      creative: { headline: 'あ'.repeat(40) } })).body.creative;
+    const g = await post({ action: 'generate', creative_id: c.id });
+    expect(g.body.creative.status).toBe('failed');
+    expect(g.body.creative.failureReason).toContain('見出しが28文字を超えています（40文字）');
+    expect(genCalls).toHaveLength(0);
+  });
+
+  it('上限ちょうどは送れる', async () => {
+    connect(); jobState = { poll: { status: 'queued' } };
+    const a = await newAsset();
+    const c = (await post({ action: 'creative_create', asset_id: a.id,
+      creative: { headline: 'あ'.repeat(28), body: 'い'.repeat(120), cta: 'う'.repeat(14) } })).body.creative;
+    const g = await post({ action: 'generate', creative_id: c.id });
+    expect(g.body.ok).toBe(true);
+    expect(genCalls).toHaveLength(1);
+  });
+
+  it('③の422は field/max/got をそのまま人の言葉にして残す', async () => {
+    // ③のテンプレが①の見ている上限より厳しくなった場合（①は通すが③が拒む）
+    connect();
+    jobState = { accept: 422, poll: {},
+      error422: { code: 'INVALID_TEXT_CHANGE', field: 'headline', max: 28, got: 31 } };
+    const a = await newAsset();
+    const c = (await post({ action: 'creative_create', asset_id: a.id })).body.creative;
+    const g = await post({ action: 'generate', creative_id: c.id });
+    expect(g.body.creative.status).toBe('failed');
+    expect(g.body.creative.failureReason).toContain('見出しが28文字を超えています（31文字）');
+  });
+});
+
+describe('下書きの文言を直す', () => {
+  it('下書きのあいだは直せる', async () => {
+    connect();
+    const a = await newAsset();
+    const c = (await post({ action: 'creative_create', asset_id: a.id })).body.creative;
+    const r = await post({ action: 'creative_text', creative_id: c.id,
+      text: { headline: '相談の流れ', body: 'デモの案内', cta: '確認する' } });
+    expect(r.body.ok).toBe(true);
+    expect(r.body.creative).toMatchObject({ headline: '相談の流れ', body: 'デモの案内', cta: '確認する' });
+  });
+
+  it('🔴 上限を超えたら保存もしない（画面と保存がずれない）', async () => {
+    connect();
+    const a = await newAsset();
+    const c = (await post({ action: 'creative_create', asset_id: a.id })).body.creative;
+    const r = await post({ action: 'creative_text', creative_id: c.id, text: { headline: 'あ'.repeat(29) } });
+    expect(r.body.ok).toBe(false);
+    expect(r.body.error.message).toContain('28文字を超えています');
+    const back = (await post({ action: 'list' })).body.creatives.find(x => x.id === c.id);
+    expect(back.headline).toBe('');
+  });
+
+  it('🔴 上限が未取得なら保存しない', async () => {
+    connect(); limitsState = 'broken';
+    const a = await newAsset();
+    const c = (await post({ action: 'creative_create', asset_id: a.id })).body.creative;
+    const r = await post({ action: 'creative_text', creative_id: c.id, text: { headline: 'あ' } });
+    expect(r.body.ok).toBe(false);
+    expect(r.body.error.code).toBe('limits_unavailable');
+  });
+
+  it('🔴 承認済み・確認待ちの文言は直せない（版を上げる操作でしか変わらない）', async () => {
+    connect();
+    jobState = { poll: { status: 'completed', mode: 'sample',
+      files: [{ src: 'job', jobId: 'job_up_1', index: 0, contentType: 'image/png', bytes: 10 }] } };
+    const a = await newAsset();
+    const c = (await post({ action: 'creative_create', asset_id: a.id })).body.creative;
+    await post({ action: 'generate', creative_id: c.id });
+    await post({ action: 'job_status', creative_id: c.id });
+    const r = await post({ action: 'creative_text', creative_id: c.id, text: { headline: 'あとから書き換え' } });
+    expect(r.body.ok).toBe(false);
+    expect(r.body.error.code).toBe('invalid_transition');
+  });
+});
+
+describe('修正依頼に文言が要る', () => {
+  const toReview = async () => {
+    jobState = { poll: { status: 'completed', mode: 'sample',
+      files: [{ src: 'job', jobId: 'job_up_1', index: 0, contentType: 'image/png', bytes: 10 }] } };
+    const a = await newAsset();
+    const c = (await post({ action: 'creative_create', asset_id: a.id })).body.creative;
+    await post({ action: 'generate', creative_id: c.id });
+    await post({ action: 'job_status', creative_id: c.id });
+    return c.id;
+  };
+
+  it('🔴 自由文だけの修正依頼は③へ送らない（記録は残す）', async () => {
+    connect();
+    const id = await toReview();
+    genCalls.length = 0;
+    await post({ action: 'revise', creative_id: id, text: 'よくして' });
+    const g = await post({ action: 'generate', creative_id: id });
+    expect(g.body.creative.status).toBe('failed');
+    expect(g.body.creative.failureReason).toContain('直した文言');
+    expect(genCalls).toHaveLength(0);
+    // 人が何と言ったかは消えていない
+    expect(g.body.creative.revisions[0].text).toBe('よくして');
+  });
+
+  it('直した文言を添えれば送れる', async () => {
+    connect();
+    const id = await toReview();
+    genCalls.length = 0;
+    await post({ action: 'revise', creative_id: id, text: '見出しを変えて',
+      text_changes: { headline: '新しい見出し' } });
+    const g = await post({ action: 'generate', creative_id: id });
+    expect(g.body.ok).toBe(true);
+    expect(genCalls[0].text_changes).toEqual({ headline: '新しい見出し' });
+    expect(genCalls[0].revision_instructions).toBe('見出しを変えて');
   });
 });

@@ -4170,6 +4170,11 @@
                 busy: false, error: '', notice: '', comparing: null, files: null,
                 newAsset: { title: '', channel: 'meta', companyId: '', shopId: '', rightsNote: '', kind: 'demo' }, uploading: [],
                 approving: '', claims: {},
+                // ③のテンプレ文字数上限。⚠️ **①に既定値を持たない。** 取れるまでは loaded:false。
+                limits: { loaded: false, reason: '未取得', text: {} },
+                // 編集中の文言（案ごと）。保存するまでサーバーへは送らない。
+                editing: '', draftText: { appeal: '', headline: '', body: '', cta: '' },
+                revising: '', reviseText: '',
             });
             const [aiTrial, setAiTrial] = useState({
                 loading: false, cfg: null, roomId: '', q: '', answers: {}, order: [],
@@ -4281,6 +4286,8 @@
 
             // ── Creative Library（本部/root限定・cc_creative_library）──────────
             // 生成そのものは③。ここは「依頼する・見る・比べる・直してもらう・承認する」だけ。
+            const CV_TEXT_FIELDS = ['headline', 'body', 'cta'];
+            const CV_TEXT_LABEL = { headline: '見出し', body: '本文', cta: 'ボタンの文言' };
             const cvPost = async (payload) => {
                 const r = await fetch('/api/plan-store', { method: 'POST', cache: 'no-store',
                     headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() },
@@ -4293,6 +4300,17 @@
                 if (!j.ok) { setCv(p => ({ ...p, error: (j.error && j.error.message) || '' })); return; }
                 setCv(p => ({ ...p, assets: j.assets || [], creatives: j.creatives || [],
                     channels: j.channels || [], generator: j.generator || null, error: '' }));
+                // ③のテンプレ上限。一覧とは別に取る（③が遅くても一覧を止めない）。
+                // ⚠️ 失敗しても①の既定値で埋めない。未取得のままにして送信を止める。
+                const l = await cvPost({ action: 'limits' });
+                setCv(p => ({ ...p, limits: (l.ok && l.limits) ? l.limits : { loaded: false, reason: '上限を取得できませんでした', text: {} } }));
+            };
+            // 文字数の残り。上限が未取得なら「—」を出す（0や満了にしない）。
+            const cvCount = (limits, field, value) => {
+                const n = String(value || '').length;
+                if (!limits || !limits.loaded) return { n, max: null, over: false, label: `${n}文字 / 上限未取得` };
+                const max = limits.text[field];
+                return { n, max, over: n > max, label: `${n} / ${max}文字` };
             };
             // 素材の実ファイル。**暗号化してから**保存先(Vercel Blob)へ送る。
             // ⚠️ 平文を保存先へ置かない。保存先URLは画面では使わず、サーバーへ渡すだけ。
@@ -25501,6 +25519,21 @@
                                         <div className="mt-1 text-amber-800">未接続のあいだは生成を依頼しても<b>サンプルを作りません</b>。素材の登録と、手元のファイルを案にすることはできます。</div>
                                     </div>
                                 )}
+                                {/* ⚠️ 上限は③のテンプレの都合で変わる。①に既定値を置かないので、
+                                       取れていないあいだは依頼を出さない（422になるまで試さない）。 */}
+                                {c.generator && c.generator.connected && !c.limits.loaded && (
+                                    <div data-cv-limits="missing" className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-[12px] text-amber-900">
+                                        <b>③のテンプレ文字数上限が未取得です。</b>{c.limits.reason || ''}
+                                        <div className="mt-1 text-amber-800">取れるまで<b>生成・修正の依頼は出しません</b>。①側に仮の上限を置くと、③がテンプレを変えたときに画面だけ古い上限を出すためです。</div>
+                                    </div>
+                                )}
+                                {c.limits.loaded && (
+                                    <div data-cv-limits="loaded" className="text-[11px] text-ink-400">
+                                        ③のテンプレ上限: 見出し {c.limits.text.headline}文字 / 本文 {c.limits.text.body}文字 / ボタン {c.limits.text.cta}文字
+                                        {c.limits.templateVersion ? `・${c.limits.templateVersion}` : ''}
+                                        {c.limits.fetchedAt ? `・取得 ${new Date(c.limits.fetchedAt).toLocaleTimeString('ja-JP')}` : ''}
+                                    </div>
+                                )}
                                 {c.error && <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-[12px] text-red-800">{c.error}</div>}
                                 {c.notice && <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-[12px] text-emerald-800">{c.notice}</div>}
 
@@ -25634,18 +25667,62 @@
                                                         ? `${Number(cr.cost.amount).toLocaleString()} ${cr.cost.currency || ''}` : '未記録'}</div>
                                                     {cr.claims && cr.claims.at ? <div className="text-[11px] text-emerald-800">内容の確認済み（{cr.claims.by || '—'}）</div> : null}
                                                     {cr.reviewer && <div className="text-[11px] text-emerald-800">承認: {cr.reviewer.name || cr.reviewer.id}</div>}
+                                                    {/* 下書きの文言。⚠️ 上限は③から取った値だけを使う（①に既定値を持たない）。 */}
+                                                    {(cr.status === 'draft' || cr.status === 'failed') && (
+                                                        c.editing === cr.id ? (
+                                                            <div data-cv-text={cr.id} className="mt-2 p-3 rounded-xl border border-ink-200 bg-ink-50/40 space-y-2">
+                                                                {[['appeal', '訴求（③へは送りますが上限の対象外）', 1],
+                                                                  ['headline', '見出し', 1], ['body', '本文', 3], ['cta', 'ボタンの文言', 1]].map(([k, label, rows]) => {
+                                                                    const cnt = k === 'appeal' ? null : cvCount(c.limits, k, c.draftText[k]);
+                                                                    const Tag = rows > 1 ? 'textarea' : 'input';
+                                                                    return (
+                                                                        <label key={k} className="block">
+                                                                            <span className="flex items-center gap-2 text-[11px] font-bold text-ink-600">
+                                                                                {label}
+                                                                                {cnt && <span className={`ml-auto font-normal ${cnt.over ? 'text-red-700 font-bold' : (cnt.max === null ? 'text-amber-700' : 'text-ink-400')}`}>{cnt.label}</span>}
+                                                                            </span>
+                                                                            <Tag data-cv-text-field={k} rows={rows > 1 ? rows : undefined} value={c.draftText[k]}
+                                                                                onChange={e => { const v = e.target.value; setCv(p => ({ ...p, draftText: { ...p.draftText, [k]: v } })); }}
+                                                                                className={`mt-1 w-full px-3 py-2 rounded-lg border text-[12px] ${cnt && cnt.over ? 'border-red-400 bg-red-50' : 'border-ink-200'}`} />
+                                                                        </label>
+                                                                    );
+                                                                })}
+                                                                <div className="flex flex-wrap items-center gap-2">
+                                                                    <button data-cv-text-save={cr.id} disabled={c.busy || !c.limits.loaded || CV_TEXT_FIELDS.some(k => cvCount(c.limits, k, c.draftText[k]).over)}
+                                                                        className="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-ink-900 text-white disabled:opacity-40"
+                                                                        onClick={cvBusy(async () => {
+                                                                            const j = await cvPost({ action: 'creative_text', creative_id: cr.id, text: c.draftText });
+                                                                            if (!j.ok) { setCv(p => ({ ...p, error: `${j.error.message}（${j.error.code}）` })); return; }
+                                                                            setCv(p => ({ ...p, editing: '', notice: '文言を保存しました', error: '' }));
+                                                                            await cvLoad();
+                                                                        })}>保存</button>
+                                                                    <button className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200"
+                                                                        onClick={() => setCv(p => ({ ...p, editing: '' }))}>やめる</button>
+                                                                    {!c.limits.loaded && <span className="text-[11px] text-amber-700">上限が未取得のため保存できません</span>}
+                                                                </div>
+                                                            </div>
+                                                        ) : null
+                                                    )}
                                                     <div className="flex flex-wrap gap-2 pt-1">
+                                                        {(cr.status === 'draft' || cr.status === 'failed') && c.editing !== cr.id && (
+                                                            <button data-cv-text-open={cr.id} disabled={c.busy} className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-300 hover:bg-ink-50 disabled:opacity-40"
+                                                                onClick={() => setCv(p => ({ ...p, editing: cr.id, error: '',
+                                                                    draftText: { appeal: cr.appeal || '', headline: cr.headline || '', body: cr.body || '', cta: cr.cta || '' } }))}>文言を書く</button>
+                                                        )}
                                                         {(cr.status === 'draft' || cr.status === 'failed') && (
-                                                            <button disabled={c.busy} className="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-ink-900 text-white disabled:opacity-40"
+                                                            // ⚠️ 上限が未取得のあいだは依頼を出さない。
+                                                            <button disabled={c.busy || !c.limits.loaded} title={c.limits.loaded ? '' : '③のテンプレ上限が未取得です'}
+                                                                className="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-ink-900 text-white disabled:opacity-40"
                                                                 onClick={() => cvGenerate(cr.id)}>③へ生成を依頼</button>
                                                         )}
                                                         {cr.status === 'review' && (
                                                             <>
-                                                                <button disabled={c.busy} className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-300 hover:bg-ink-50 disabled:opacity-40"
-                                                                    onClick={() => {
-                                                                        const text = window.prompt('どこを直しますか？（修正履歴に残ります）');
-                                                                        if (text && text.trim()) cvAct({ action: 'revise', creative_id: cr.id, text }, '修正を依頼しました');
-                                                                    }}>修正を依頼</button>
+                                                                {/* ⚠️ 自由文だけでは③が422にする契約。**直した文言そのもの**を必ず添える。 */}
+                                                                <button data-cv-revise-open={cr.id} disabled={c.busy || !c.limits.loaded}
+                                                                    title={c.limits.loaded ? '' : '③のテンプレ上限が未取得です'}
+                                                                    className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-300 hover:bg-ink-50 disabled:opacity-40"
+                                                                    onClick={() => setCv(p => ({ ...p, revising: p.revising === cr.id ? '' : cr.id, reviseText: '', error: '',
+                                                                        draftText: { appeal: cr.appeal || '', headline: cr.headline || '', body: cr.body || '', cta: cr.cta || '' } }))}>修正を依頼</button>
                                                                 <button disabled={c.busy} data-cv-approve={cr.id} className="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-emerald-700 text-white disabled:opacity-40"
                                                                     onClick={() => setCv(p => ({ ...p, approving: p.approving === cr.id ? '' : cr.id, claims: {}, error: '' }))}>承認する</button>
                                                             </>
@@ -25655,6 +25732,51 @@
                                                                 onClick={() => cvDeliver(cr.id)}>完成ファイルを取得</button>
                                                         )}
                                                     </div>
+                                                    {/* 修正依頼。人の原文（何を直したいか）と、直した文言の両方を残す。 */}
+                                                    {c.revising === cr.id && (
+                                                        <div data-cv-revise={cr.id} className="mt-2 p-3 rounded-xl border border-ink-200 bg-ink-50/40 space-y-2">
+                                                            <label className="block">
+                                                                <span className="text-[11px] font-bold text-ink-600">どこを直しますか？（履歴に残ります）</span>
+                                                                <textarea data-cv-revise-text rows={2} value={c.reviseText}
+                                                                    onChange={e => { const v = e.target.value; setCv(p => ({ ...p, reviseText: v })); }}
+                                                                    className="mt-1 w-full px-3 py-2 rounded-lg border border-ink-200 text-[12px]" />
+                                                            </label>
+                                                            {CV_TEXT_FIELDS.map(k => {
+                                                                const cnt = cvCount(c.limits, k, c.draftText[k]);
+                                                                const Tag = k === 'body' ? 'textarea' : 'input';
+                                                                return (
+                                                                    <label key={k} className="block">
+                                                                        <span className="flex items-center gap-2 text-[11px] font-bold text-ink-600">
+                                                                            {CV_TEXT_LABEL[k]}
+                                                                            <span className={`ml-auto font-normal ${cnt.over ? 'text-red-700 font-bold' : (cnt.max === null ? 'text-amber-700' : 'text-ink-400')}`}>{cnt.label}</span>
+                                                                        </span>
+                                                                        <Tag data-cv-revise-field={k} rows={k === 'body' ? 3 : undefined} value={c.draftText[k]}
+                                                                            onChange={e => { const v = e.target.value; setCv(p => ({ ...p, draftText: { ...p.draftText, [k]: v } })); }}
+                                                                            className={`mt-1 w-full px-3 py-2 rounded-lg border text-[12px] ${cnt.over ? 'border-red-400 bg-red-50' : 'border-ink-200'}`} />
+                                                                    </label>
+                                                                );
+                                                            })}
+                                                            <div className="flex flex-wrap items-center gap-2">
+                                                                <button data-cv-revise-send={cr.id}
+                                                                    disabled={c.busy || !c.limits.loaded || !c.reviseText.trim()
+                                                                              || CV_TEXT_FIELDS.some(k => cvCount(c.limits, k, c.draftText[k]).over)
+                                                                              || !CV_TEXT_FIELDS.some(k => String(c.draftText[k] || '').trim())}
+                                                                    className="px-3 py-1.5 rounded-lg text-[12px] font-bold bg-ink-900 text-white disabled:opacity-40"
+                                                                    onClick={async () => {
+                                                                        await cvAct({ action: 'revise', creative_id: cr.id, text: c.reviseText,
+                                                                            text_changes: CV_TEXT_FIELDS.reduce((o, k) => {
+                                                                                if (String(c.draftText[k] || '').trim()) o[k] = c.draftText[k];
+                                                                                return o;
+                                                                            }, {}) }, '修正を依頼しました');
+                                                                        setCv(p => ({ ...p, revising: '', reviseText: '' }));
+                                                                    }}>この内容で修正を依頼</button>
+                                                                <button className="px-3 py-1.5 rounded-lg text-[12px] font-bold border border-ink-200"
+                                                                    onClick={() => setCv(p => ({ ...p, revising: '', reviseText: '' }))}>やめる</button>
+                                                            </div>
+                                                            <div className="text-[11px] text-ink-400">③は自由文だけの依頼を受け付けません。直した文言を1つ以上入れてください（空欄の項目は前の版を引き継ぎます）。</div>
+                                                        </div>
+                                                    )}
+
                                                     {/* ⚠️ 承認の前に人が確かめる。自動でチェックを入れない。 */}
                                                     {c.approving === cr.id && (
                                                         <div data-cv-claims={cr.id} className="mt-2 p-3 rounded-xl border border-emerald-200 bg-emerald-50/50">

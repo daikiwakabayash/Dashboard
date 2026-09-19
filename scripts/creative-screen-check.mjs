@@ -369,13 +369,30 @@ let dlBytes = 0, dlName = '';
 if (dl) { dlName = dl.suggestedFilename(); const p2 = await dl.path().catch(() => null); if (p2) dlBytes = fs.statSync(p2).size; }
 check('🔴 完成ファイルを実際に保存できる', dlBytes > 0, dlBytes ? `${dlName} / ${dlBytes} byte` : '保存できず');
 
-// ── 修正依頼（前の版を残す）────────────────────────────────────
+// ── ③のテンプレ上限（①に既定値を置かない）──────────────────────
 await page.locator('[data-cv-add-draft]').first().click();
 await page.waitForTimeout(2000);
-await page.getByRole('button', { name: /③へ生成を依頼/ }).first().click().catch(() => {});
-await page.waitForTimeout(2500);
-check('🔴 ③未接続では「失敗」と出て、サンプルを作らない',
-  (await txt()).includes('失敗') && (await txt()).includes('未接続'));
+
+// このスタブは③未接続なので、上限も取れていない。
+check('🔴 上限が未取得だと画面にそう出る（勝手な既定値を出さない）',
+  (await page.locator('[data-cv-limits="missing"]').count()) > 0
+  || (await page.locator('[data-cv-limits="loaded"]').count()) === 0);
+
+// 文言の入力欄を開いて、残り文字数が「上限未取得」と出ることを見る。
+const openText = page.locator('[data-cv-text-open]').first();
+const hasOpen = (await openText.count()) > 0;
+if (hasOpen) { await openText.click(); await page.waitForTimeout(400); }
+check('下書きの文言を書く欄が開く', hasOpen && (await page.locator('[data-cv-text-field="headline"]').count()) > 0);
+check('🔴 上限が未取得のあいだは「上限未取得」と出す（0や満了にしない）',
+  (await txt()).includes('上限未取得'));
+check('🔴 上限が未取得のあいだは文言を保存させない',
+  await page.locator('[data-cv-text-save]').first().isDisabled().catch(() => false));
+
+// ⚠️ 依頼そのものを押させない。未接続のままサンプルを作らない、より手前で止める。
+const genBtn = page.getByRole('button', { name: /③へ生成を依頼/ }).first();
+check('🔴 ③未接続・上限未取得では生成を依頼できない（サンプルを作らない）',
+  await genBtn.isDisabled().catch(() => false));
+check('未接続の理由が画面に出ている', (await txt()).includes('未接続'));
 
 // ── 画面の写し ──────────────────────────────────────────────
 await page.screenshot({ path: path.join(OUT, 'creative-screen.png'), fullPage: true });

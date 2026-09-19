@@ -78,6 +78,12 @@ const flagOn = async () => { await call({ method: 'POST', headers: ROOT(), body:
 const configure = (over = {}) => post({ action: 'settings_set', shopId: '9001',
   setting: { shopName: 'テスト院', enabled: true, closing: true, preopen: true, roomId: 'room1', targetNew: 8, ...over } });
 
+// オープン前（プレオープンより前）の店舗。本オープンは 10/1、対象月は 10月。
+const configurePrep = (over = {}) => post({ action: 'settings_set', shopId: '9001',
+  setting: { shopName: 'テスト院', enabled: true, roomId: 'room1', targetNew: 150,
+    preOpenDate: '2026-09-27', openDate: '2026-10-01', targetDeadline: '2026-09-30',
+    targetMonth: '2026-10', sendAt: '00:00', ...over } });
+
 const roomMsgs = () => JSON.parse(store.get('naoru:chat:m:room1') || '[]');
 
 describe('誰が設定を変えられるか', () => {
@@ -152,7 +158,7 @@ describe('フラグONのあとの送信', () => {
     const m = roomMsgs()[0];
     expect(m.fromStaffId).toBe('__daily_report__');
     expect(m.fromName).toBe('日報（自動）');
-    expect(m.auto.kind).toBe('closing');
+    expect(m.auto.phase).toBe('open');      // 日付未設定＝既存店なので日報
   });
   it('🔴 出典・対象期間・取得時刻が本文に入る', async () => {
     await configure(); await flagOn();
@@ -233,17 +239,30 @@ describe('下書きの確認（送らずに見る）', () => {
     expect(r.body.text).toContain('【日報】テスト院　9/19(土)');
     expect(roomMsgs()).toEqual([]);
   });
-  it('集客速報は売上を取りに行かない（予約だけ）', async () => {
-    await configure();
-    await get({ action: 'preview', shopId: '9001', kind: 'preopen', date: '2026-09-19' });
+  it('🔴 オープン前は売上を取りに行かない（まだ営業していない）', async () => {
+    await configurePrep();
+    await get({ action: 'preview', shopId: '9001', phase: 'prep', date: '2026-09-19' });
     expect(soCalls.some(u => u.includes('sales/summary'))).toBe(false);
     expect(soCalls.some(u => u.includes('by-channel'))).toBe(true);
   });
-  it('集客速報に「あと何人」が出る', async () => {
-    await configure();
-    const r = await get({ action: 'preview', shopId: '9001', kind: 'preopen', date: '2026-09-19' });
-    expect(r.body.text).toContain('本日の新規予約　4名');
-    expect(r.body.text).toContain('あと 4名');
+  it('🔴 オープン前は対象月（本オープン月）の範囲で予約を取る', async () => {
+    await configurePrep();
+    await get({ action: 'preview', shopId: '9001', phase: 'prep', date: '2026-09-19' });
+    const u = soCalls.find(x => x.includes('by-channel'));
+    expect(u).toContain('from=2026-10-01');
+    expect(u).toContain('to=2026-10-31');
+  });
+  it('オープン前の下書きに目標までの残りが出る', async () => {
+    await configurePrep();
+    const r = await get({ action: 'preview', shopId: '9001', phase: 'prep', date: '2026-09-19' });
+    expect(r.body.phase).toBe('prep');
+    expect(r.body.text).toContain('オープン前 集客レポート');
+    expect(r.body.text).toContain('目標まで、あと');
+  });
+  it('期間を指定しなければ、その店舗の今日の期間になる', async () => {
+    await configure();                      // 日付未設定＝既存店
+    const r = await get({ action: 'preview', shopId: '9001', date: '2026-09-19' });
+    expect(r.body.phase).toBe('open');
   });
   it('🔴 店舗オーナーは下書きも見られない（他店の売上が見えないように）', async () => {
     await configure();
@@ -271,10 +290,11 @@ describe('自動実行の入口', () => {
     const r = await get({ action: 'cronrun', kind: 'preopen' }, CRON());
     expect(r.statusCode).toBe(200);
   });
-  it('未知の種別は集客速報として扱う（売上を勝手に流さない）', async () => {
-    await configure();
+  it('🔴 自動実行は種類を指定できない（店舗ごとの期間で決まる）', async () => {
+    await configurePrep();
     const r = await get({ action: 'cronrun', kind: 'everything' }, CRON());
-    expect(r.body.kind).toBe('preopen');
+    expect(r.body.kind).toBeUndefined();
+    expect(r.body.results[0].phase).toBe('prep');
   });
   it('🔴 「集計実行」を観測できたとは主張しない', async () => {
     const r = await get({});

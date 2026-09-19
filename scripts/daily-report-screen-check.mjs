@@ -24,20 +24,55 @@ let flagOn = false;
 let settings = { version: 'daily-report-1', shops: {} };
 let sent = [];
 
-const DEFAULTS = { shopId: '', shopName: '', enabled: false, roomId: '', closing: false, preopen: false,
-  trigger: 'aggregate', closingAt: '22:00', preopenAt: '10:00', targetNew: null };
+const DEFAULTS = { shopId: '', shopName: '', enabled: false, roomId: '',
+  preOpenDate: '', openDate: '', targetNew: null, targetDeadline: '', targetMonth: '',
+  trigger: 'aggregate', closingAt: '22:00', sendAt: '19:00' };
 
-const PREVIEW_CLOSING = [
-  '【日報】テスト院A　9/19(土)', '', '■ 売上', '　売上合計　¥482,000', '　新規 未取得 ／ 既存 未取得', '',
-  '■ 来店', '　来店 24名（新規 6名 ／ 既存 18名）', '', '────────',
-  '出典: SalonOne sales/summary / marketing/by-channel', '対象期間: 2026-09-19（1日）',
-  '取得時刻: 2026-09-19 21:05 JST', '※ 「集計実行」の前に取得した場合は確定前の値になることがあります。',
-].join('\n');
-const PREVIEW_PREOPEN = [
-  '【本日の集客速報】テスト院A　9/19(土) 09:30 時点', '', '　本日の新規予約　5名', '　目標 8名　→　あと 3名', '',
-  '■ 媒体別（本日の新規予約）', '　ホットペッパー　3件', '', '────────',
-  '出典: SalonOne marketing/by-channel', '対象期間: 2026-09-19（1日）', '取得時刻: 2026-09-19 09:30 JST',
-].join('\n');
+// 期間は店舗の日付から決まる（lib/daily-report.js の phaseOf と同じ規則の最小版）
+const phaseOf = (s) => {
+  const today = '2026-09-19';
+  if (!s || (!s.preOpenDate && !s.openDate)) return 'open';
+  if (s.openDate && today >= s.openDate) return 'open';
+  if (s.preOpenDate && today < s.preOpenDate) return 'prep';
+  if (s.preOpenDate) return 'preopen';
+  return 'prep';
+};
+
+const PREVIEW = {
+  open: [
+    '【日報】テスト院A　9/19(土)', '', '■ 売上', '　売上合計　¥482,000', '　新規 未取得 ／ 既存 未取得', '',
+    '■ 来店', '　来店 24名（新規 6名 ／ 既存 18名）', '', '────────',
+    '出典: SalonOne sales/summary / marketing/by-channel', '対象期間: 2026-09-19（1日）',
+    '取得時刻: 2026-09-19 21:05 JST', '※ 「集計実行」の前に取得した場合は確定前の値になることがあります。',
+  ].join('\n'),
+  prep: [
+    '【オープン前 集客レポート】テスト院A', '2026/09/19（土） 19:00時点・日本時間', '',
+    'プレオープン 9/27(日)　／　本オープン 10/1(木)', '',
+    '■ 目標まで、あと54名', '　目標150名・集客目標の締切 9/30(水)',
+    '　累計の有効予約人数 96名 ／ 目標 150名　達成率 64%',
+    '　（10月の新規来店予約が対象・取消・重複を除く）', '',
+    '■ 本日の動き', '　新規予約 9件 ／ キャンセル 2件 ／ 増減 +7件', '',
+    '■ 媒体別の予約状況（本日 00:00〜19:00）',
+    '　Meta広告　新規 5件 ／ 取消 1件 ／ 累計 52名',
+    '　チラシ　新規 2件 ／ 取消 1件 ／ 累計 24名', '',
+    '■ 累計広告費・獲得単価（2026-10-01〜2026-09-19・税別）',
+    '　Meta広告　¥104,000', '　チラシ　¥48,000',
+    '　合計広告費 ¥152,000　／　CPA（有効予約ベース） ¥1,583 / 名', '', '────────',
+    '出典: SalonOne marketing/by-channel',
+    '対象期間: 2026-10-01〜2026-10-31（10月来店予定ぶんの累計）',
+    '取得時刻: 2026-09-19 19:00 JST',
+    '※ 予約時点の数字です。来店・入会の結果はオープン後の日報で出します。',
+  ].join('\n'),
+  preopen: [
+    '【プレオープン 日次レポート】テスト院A', '2026/09/28（月） 19:00時点・日本時間', '',
+    '■ 本日の実績', '　売上 ¥120,000', '　来店 6名（新規 4名 ／ 既存 2名）', '',
+    '■ 本オープンに向けた集客（本オープン 10/1(木)）', '　本オープンまで、あと54名', '', '────────',
+    '出典: SalonOne sales/summary / marketing/by-channel',
+    '対象期間: 2026-09-28（当日の実績）／ 本オープン月（集客の累計）',
+    '取得時刻: 2026-09-28 19:00 JST',
+    '※ 「集計実行」の前に取得した場合、当日の売上は確定前の値になることがあります。',
+  ].join('\n'),
+};
 
 const json = (res, o) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(o)); };
 
@@ -61,12 +96,14 @@ const server = http.createServer((req, res) => {
       if (type === 'dailyreport') {
         const action = req.method === 'GET' ? (url.searchParams.get('action') || '') : String(body.action || '');
         if (req.method === 'GET' && action === 'preview') {
-          const kind = url.searchParams.get('kind') || 'closing';
-          return json(res, { ok: true, kind, text: kind === 'preopen' ? PREVIEW_PREOPEN : PREVIEW_CLOSING,
-            missing: kind === 'preopen' ? [] : ['売上の内訳'], ready: { ok: true }, flagOn });
+          const id = url.searchParams.get('shopId') || '';
+          const phase = url.searchParams.get('phase') || phaseOf(settings.shops[id]);
+          return json(res, { ok: true, phase, text: PREVIEW[phase] || PREVIEW.open,
+            missing: phase === 'prep' ? [] : ['売上の内訳'], ready: { ok: true }, flagOn });
         }
         if (req.method === 'GET') {
-          return json(res, { ok: true, settings, recent: [], flagOn, today: '2026-09-19',
+          const phases = Object.fromEntries(Object.values(settings.shops).map(x => [x.shopId, phaseOf(x)]));
+          return json(res, { ok: true, settings, recent: [], flagOn, phases, today: '2026-09-19',
             salonOneConfigured: true, cronConfigured: true, aggregateTriggerConfirmed: false });
         }
         if (action === 'settings_set') {
@@ -74,12 +111,13 @@ const server = http.createServer((req, res) => {
           const prev = settings.shops[id] || { ...DEFAULTS, shopId: id };
           const next = { ...prev, ...(body.setting || {}), shopId: id };
           settings = { ...settings, shops: { ...settings.shops, [id]: next } };
-          return json(res, { ok: true, setting: next, flagOn });
+          return json(res, { ok: true, setting: next, phase: phaseOf(next), flagOn });
         }
         if (action === 'send') {
-          if (!flagOn) return json(res, { ok: true, sent: false, reason: 'dry_run', flagOn, text: PREVIEW_CLOSING });
-          sent.push({ shopId: body.shopId, kind: body.kind });
-          return json(res, { ok: true, sent: true, reason: 'ok', flagOn, text: PREVIEW_CLOSING });
+          const phase = body.phase || phaseOf(settings.shops[String(body.shopId || '')]);
+          if (!flagOn) return json(res, { ok: true, sent: false, reason: 'dry_run', flagOn, phase, text: PREVIEW[phase] });
+          sent.push({ shopId: body.shopId, phase });
+          return json(res, { ok: true, sent: true, reason: 'ok', flagOn, phase, text: PREVIEW[phase] });
         }
         return json(res, { ok: true });
       }
@@ -181,25 +219,46 @@ await shopRow(1).locator('select').first().selectOption('room1');
 await page.waitForTimeout(800);
 check('送信先を選ぶと「いま送る」が押せる', !(await shopRow(1).getByRole('button', { name: /いま送る/ }).first().isDisabled()));
 
-// ── 下書きの確認 ──────────────────────────────────────────────
-await shopRow(1).getByRole('button', { name: '日報の下書き' }).first().click();
+// ── 期間ごとに出るレポートが変わる ──────────────────────────────
+// 日付を入れていない店舗＝既存店なので「オープン後」
+check('日付未設定の店舗は「オープン後」と出る',
+  (await page.locator('[data-dr-phase="1"]').first().innerText()) === 'オープン後');
+
+await shopRow(1).getByRole('button', { name: 'いまの期間の下書き' }).first().click();
 await page.waitForTimeout(1200);
 check('下書きが出る', (await page.locator('[data-dr-preview]').count()) === 1);
 let pv = await page.locator('[data-dr-preview]').first().innerText();
-check('日報の見出しが出る', pv.includes('【日報】テスト院A'));
+check('オープン後は日報が出る', pv.includes('【日報】テスト院A'));
 check('🔴 出典・対象期間・取得時刻が本文に入っている',
   pv.includes('出典: SalonOne') && pv.includes('対象期間:') && pv.includes('取得時刻:'));
 check('🔴 取れなかった項目は「未取得」と書かれている（0ではない）', pv.includes('未取得'));
 check('🔴 取れていない項目を画面でも知らせる', pv.includes('取れていない項目'));
 check('🔴 確定前の可能性を断っている', pv.includes('確定前の値になることがあります'));
 
-await shopRow(1).getByRole('button', { name: '速報の下書き' }).first().click();
+// ── 日付を入れると期間が切り替わる ─────────────────────────────
+await shopRow(1).locator('[data-dr-preopendate]').first().fill('2026-09-27');
+await page.waitForTimeout(900);
+await shopRow(1).locator('[data-dr-opendate]').first().fill('2026-10-01');
 await page.waitForTimeout(1200);
+check('🔴 プレオープン日より前なら「オープン前」に変わる',
+  (await page.locator('[data-dr-phase="1"]').first().innerText()) === 'オープン前',
+  await page.locator('[data-dr-phase="1"]').first().innerText());
+
+await shopRow(1).getByRole('button', { name: 'いまの期間の下書き' }).first().click();
+await page.waitForTimeout(1500);
 pv = await page.locator('[data-dr-preview]').first().innerText();
-check('集客速報の下書きも見られる', pv.includes('【本日の集客速報】'));
-check('🔴 「目標に対してあと何人」が出る', pv.includes('あと 3名'));
-check('🔴 媒体別の内訳が出る', pv.includes('媒体別') && pv.includes('ホットペッパー'));
-check('🔴 集客速報に売上を出さない', !pv.includes('売上合計'));
+check('🔴 目標が未設定なら「あと何人」を出せないと知らせる',
+  (await shopRow(1).innerText()).includes('目標が未設定なので'));
+check('オープン前は集客レポートが出る', pv.includes('オープン前 集客レポート'));
+check('🔴 プレオープン日と本オープン日が出る', pv.includes('プレオープン 9/27(日)') && pv.includes('本オープン 10/1(木)'));
+check('🔴 目標までの残りが出る', pv.includes('目標まで、あと54名'));
+check('🔴 累計の有効予約人数と達成率が出る', pv.includes('累計の有効予約人数 96名') && pv.includes('達成率 64%'));
+check('🔴 対象と除外の条件が書いてある', pv.includes('10月の新規来店予約が対象') && pv.includes('取消・重複を除く'));
+check('🔴 本日の新規・キャンセル・増減が出る', pv.includes('新規予約 9件 ／ キャンセル 2件 ／ 増減 +7件'));
+check('🔴 媒体別が累計つきで出る', pv.includes('Meta広告　新規 5件 ／ 取消 1件 ／ 累計 52名'));
+check('🔴 広告費とCPAが出る', pv.includes('合計広告費 ¥152,000') && pv.includes('¥1,583 / 名'));
+check('🔴 オープン前に売上を出さない（まだ営業していない）', !pv.includes('売上'));
+check('🔴 対象期間は本オープン月の範囲', pv.includes('対象期間: 2026-10-01〜2026-10-31'));
 
 // ── 🔴 フラグOFFの間は押しても送らない ────────────────────────
 sent = [];

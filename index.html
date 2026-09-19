@@ -5798,10 +5798,18 @@
              * ⚠️ 取れていない項目は「未取得」と出す（0 で埋めない）。
              * ⚠️ 外向きの操作はここでは実行しない。承認へ回すだけ。
              */
-            // ── 日報・集客速報の自動送信（オーナー設定の中） ───────────────────────
+            // ── 日報・集客レポートの自動配信（オーナー設定の中） ───────────────────
+            // 店舗は3つの期間を通り、期間ごとに別のテンプレートが出る（lib/daily-report.js）。
+            const DR_PHASE_JA = { prep: 'オープン前', preopen: 'プレオープン', open: 'オープン後' };
+            const DR_PHASE_CLS = {
+                prep: 'bg-amber-50 text-amber-700',
+                preopen: 'bg-violet-50 text-violet-700',
+                open: 'bg-emerald-50 text-emerald-700',
+            };
+
             // ⚠️ ここは**設定と下書き確認**の画面。実際に流れるのは
             //    フラグ cc_daily_report が ON で、かつ店舗ごとのチェックが入っている所だけ。
-            const [drData, setDrData] = useState({ loaded: false, shops: {}, flagOn: false, rooms: [], err: '' });
+            const [drData, setDrData] = useState({ loaded: false, shops: {}, phases: {}, flagOn: false, rooms: [], err: '' });
             const [drBusy, setDrBusy] = useState('');
             const [drPreview, setDrPreview] = useState(null);   // { shopId, kind, text, missing }
 
@@ -5817,6 +5825,7 @@
                     setDrData({
                         loaded: true, err: '',
                         shops: (j.settings && j.settings.shops) || {},
+                        phases: (j.phases && typeof j.phases === 'object') ? j.phases : {},
                         flagOn: j.flagOn === true,
                         salonOneConfigured: j.salonOneConfigured === true,
                         cronConfigured: j.cronConfigured === true,
@@ -5835,39 +5844,44 @@
                         body: JSON.stringify({ type: 'dailyreport', action: 'settings_set', shopId, setting: patch }),
                     });
                     const j = await r.json().catch(() => null);
-                    if (j && j.ok) setDrData(p => ({ ...p, shops: { ...p.shops, [shopId]: j.setting }, err: '' }));
+                    // 期間（オープン前／プレオープン／オープン後）はサーバーが日付から決める。
+                    // 返ってきた値でバッジを更新し、画面が古い期間を出し続けないようにする。
+                    if (j && j.ok) setDrData(p => ({ ...p,
+                        shops: { ...p.shops, [shopId]: j.setting },
+                        phases: j.phase ? { ...p.phases, [shopId]: j.phase } : p.phases,
+                        err: '' }));
                     else setDrData(p => ({ ...p, err: (j && j.message) || '保存できませんでした' }));
                 } catch { setDrData(p => ({ ...p, err: '保存できませんでした' })); }
                 setDrBusy('');
             };
 
-            const drShowPreview = async (shopId, kind, shopName) => {
-                setDrBusy(shopId); setDrPreview({ shopId, kind, text: '', loading: true });
+            const drShowPreview = async (shopId, phase, shopName) => {
+                setDrBusy(shopId); setDrPreview({ shopId, phase, text: '', loading: true });
                 try {
-                    const q = `type=dailyreport&action=preview&shopId=${encodeURIComponent(shopId)}&kind=${kind}&shopName=${encodeURIComponent(shopName || '')}`;
+                    const q = `type=dailyreport&action=preview&shopId=${encodeURIComponent(shopId)}&phase=${encodeURIComponent(phase || '')}&shopName=${encodeURIComponent(shopName || '')}`;
                     const r = await fetch(`/api/plan-store?${q}`, { cache: 'no-store', headers: ccAuthHeaders() });
                     const j = await r.json().catch(() => null);
-                    if (j && j.ok) setDrPreview({ shopId, kind, text: j.text, missing: j.missing || [], ready: j.ready, loading: false });
-                    else setDrPreview({ shopId, kind, text: '', error: (j && j.message) || '下書きを作れませんでした', loading: false });
-                } catch { setDrPreview({ shopId, kind, text: '', error: '下書きを作れませんでした', loading: false }); }
+                    if (j && j.ok) setDrPreview({ shopId, phase: j.phase || phase, text: j.text, missing: j.missing || [], ready: j.ready, loading: false });
+                    else setDrPreview({ shopId, phase, text: '', error: (j && j.message) || '下書きを作れませんでした', loading: false });
+                } catch { setDrPreview({ shopId, phase, text: '', error: '下書きを作れませんでした', loading: false }); }
                 setDrBusy('');
             };
 
             // 「いま送る」。⚠️ フラグOFFの間はサーバー側が下書きしか返さない（ここでは止めない＝
             //    画面の出し分けと実際の停止を二重にしない。止めるのはサーバーの仕事）。
-            const drSendNow = async (shopId, kind) => {
+            const drSendNow = async (shopId, phase) => {
                 setDrBusy(shopId);
                 try {
                     const r = await fetch('/api/plan-store', {
                         method: 'POST', headers: { 'Content-Type': 'application/json', ...ccAuthHeaders() },
-                        body: JSON.stringify({ type: 'dailyreport', action: 'send', shopId, kind }),
+                        body: JSON.stringify({ type: 'dailyreport', action: 'send', shopId, phase }),
                     });
                     const j = await r.json().catch(() => null);
                     const why = { dry_run: 'フラグがOFFなので送っていません（下書きのみ）', already: '本日ぶんは送信済みです',
                                   same_content: '前回と同じ内容なので送りませんでした', no_data: '数字が取れていないので送りませんでした',
                                   disabled: '自動送信がOFFの店舗です', no_room: '送信先が未設定です', no_kind: '送る種類が選ばれていません' };
                     setDrData(p => ({ ...p, err: (j && j.sent) ? '' : (why[j && j.reason] || '送れませんでした') }));
-                    if (j && j.sent) setDrPreview({ shopId, kind, text: j.text || '', sentAt: Date.now(), loading: false });
+                    if (j && j.sent) setDrPreview({ shopId, phase, text: j.text || '', sentAt: Date.now(), loading: false });
                 } catch { setDrData(p => ({ ...p, err: '送れませんでした' })); }
                 setDrBusy('');
             };
@@ -5882,9 +5896,10 @@
                     <div data-dr-panel className="bg-white border border-slate-200 rounded-2xl p-4">
                         <div className="flex items-start gap-3 flex-wrap">
                             <div className="flex-1 min-w-[200px]">
-                                <h2 className="text-[15px] font-black text-slate-900">日報・集客速報の自動送信</h2>
+                                <h2 className="text-[15px] font-black text-slate-900">日報・集客レポートの自動配信</h2>
                                 <p className="text-[11.5px] font-medium text-slate-500 mt-0.5 leading-relaxed">
-                                    SalonOne の数字をグループチャットへ自動で流します。<span className="font-black">チェックを入れた店舗だけ</span>が対象です。
+                                    SalonOne の数字をグループチャットへ自動で流します。<span className="font-black">チェックを入れた店舗だけ</span>が対象です。<br />
+                                    <span className="font-black">オープン前／プレオープン／オープン後</span>の3つで、出るレポートが変わります（日付から自動で切り替わります）。
                                 </p>
                             </div>
                             <span data-dr-flag className={`px-2.5 py-1 rounded-lg text-[11px] font-black ${drData.flagOn ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
@@ -5898,7 +5913,9 @@
                             {!drData.aggregateConfirmed && <p>・SalonOneの「集計実行」を押した瞬間を受け取るしくみ（Webhook）は<span className="font-black">未確認</span>です。いまは入金ベース売上の動きが落ち着いたのを合図にしています（推測なので、文面にも「確定前の可能性」を書いています）。</p>}
                             {drData.loaded && !drData.salonOneConfigured && <p>・SalonOneのキーが未設定です。数字が取れないので送りません。</p>}
                             {drData.loaded && !drData.cronConfigured && <p>・自動実行の合言葉（CRON_SECRET）が未設定です。時間どおりの送信はまだできません。</p>}
-                            <p>・同じ店舗・同じ日・同じ種類は<span className="font-black">1回だけ</span>。取れなかった数字は0ではなく「未取得」と書きます。</p>
+                            <p>・同じ店舗・同じ日・同じ期間は<span className="font-black">1回だけ</span>。取れなかった数字は0ではなく「未取得」と書きます。</p>
+                            <p>・オープン前の「本日の増減」は<span className="font-black">前日との差</span>で出します。初日は前日の記録が無いので増減だけ出ません（累計は出ます）。</p>
+                            <p>・広告費は<span className="font-black">マーケの広告費欄（店舗別・対象月）</span>から読みます。入っていない媒体は0円にせず、CPAも作りません。</p>
                         </div>
 
                         {drData.err && <p className="mt-2 text-[12px] font-bold text-rose-700">{drData.err}</p>}
@@ -5909,6 +5926,7 @@
                                 const id = String(sh.id);
                                 const s = on(id);
                                 const enabled = !!(s && s.enabled);
+                                const phase = (drData.phases && drData.phases[id]) || 'open';
                                 return (
                                     <div key={id} data-dr-shop={id} className="py-2.5">
                                         <div className="flex items-center gap-2 flex-wrap">
@@ -5918,10 +5936,12 @@
                                                     className="w-4 h-4 accent-slate-900" />
                                                 <span className="text-[13px] font-black text-slate-800">{sh.name}</span>
                                             </label>
-                                            <button onClick={() => drShowPreview(id, 'closing', sh.name)} disabled={drBusy === id}
-                                                className="px-2.5 py-1 rounded-lg bg-white ring-1 ring-slate-300 text-[11px] font-black text-slate-700 hover:bg-slate-50 disabled:opacity-40">日報の下書き</button>
-                                            <button onClick={() => drShowPreview(id, 'preopen', sh.name)} disabled={drBusy === id}
-                                                className="px-2.5 py-1 rounded-lg bg-white ring-1 ring-slate-300 text-[11px] font-black text-slate-700 hover:bg-slate-50 disabled:opacity-40">速報の下書き</button>
+                                            {/* いまこの店舗がどの期間か。期間ごとに出るテンプレートが違う。 */}
+                                            <span data-dr-phase={id} className={`px-2 py-0.5 rounded-lg text-[10.5px] font-black ${DR_PHASE_CLS[phase] || 'bg-slate-100 text-slate-500'}`}>
+                                                {DR_PHASE_JA[phase] || '—'}
+                                            </span>
+                                            <button onClick={() => drShowPreview(id, phase, sh.name)} disabled={drBusy === id}
+                                                className="px-2.5 py-1 rounded-lg bg-white ring-1 ring-slate-300 text-[11px] font-black text-slate-700 hover:bg-slate-50 disabled:opacity-40">いまの期間の下書き</button>
                                         </div>
 
                                         {enabled && (
@@ -5935,29 +5955,40 @@
                                                         {drData.rooms.map(r => <option key={r.id} value={r.id}>{r.name || r.shop || r.id}</option>)}
                                                     </select>
                                                 </label>
+                                                {/* ⚠️ 日付を入れない店舗は「既存店」として、常に営業後の日報になる。 */}
                                                 <label className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600">
-                                                    <input type="checkbox" checked={!!val(id, 'closing', false)} disabled={drBusy === id}
-                                                        onChange={e => drSave(id, { closing: e.target.checked })} className="w-3.5 h-3.5 accent-slate-900" />
-                                                    営業後の日報
-                                                </label>
-                                                <label className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600">
-                                                    <input type="checkbox" checked={!!val(id, 'preopen', false)} disabled={drBusy === id}
-                                                        onChange={e => drSave(id, { preopen: e.target.checked })} className="w-3.5 h-3.5 accent-slate-900" />
-                                                    オープン前の速報
-                                                    <input type="time" value={val(id, 'preopenAt', '10:00')} disabled={drBusy === id}
-                                                        onChange={e => drSave(id, { preopenAt: e.target.value })}
+                                                    プレオープン
+                                                    <input type="date" data-dr-preopendate={id} value={val(id, 'preOpenDate', '')} disabled={drBusy === id}
+                                                        onChange={e => drSave(id, { preOpenDate: e.target.value })}
                                                         className="px-1.5 py-0.5 rounded-lg border border-slate-300 text-[11px] font-bold" />
                                                 </label>
                                                 <label className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600">
-                                                    1日の新規目標
+                                                    本オープン
+                                                    <input type="date" data-dr-opendate={id} value={val(id, 'openDate', '')} disabled={drBusy === id}
+                                                        onChange={e => drSave(id, { openDate: e.target.value })}
+                                                        className="px-1.5 py-0.5 rounded-lg border border-slate-300 text-[11px] font-bold" />
+                                                </label>
+                                                <label className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600">
+                                                    集客の目標
                                                     <input type="number" min="0" placeholder="未設定" defaultValue={val(id, 'targetNew', '') === null ? '' : val(id, 'targetNew', '')}
                                                         disabled={drBusy === id}
                                                         onBlur={e => drSave(id, { targetNew: e.target.value === '' ? null : e.target.value })}
                                                         className="w-16 px-1.5 py-0.5 rounded-lg border border-slate-300 text-[11px] font-bold" />
-                                                    人
+                                                    人まで
+                                                    <input type="date" data-dr-deadline={id} value={val(id, 'targetDeadline', '')} disabled={drBusy === id}
+                                                        onChange={e => drSave(id, { targetDeadline: e.target.value })}
+                                                        className="px-1.5 py-0.5 rounded-lg border border-slate-300 text-[11px] font-bold" />
+                                                </label>
+                                                <label className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600">
+                                                    配信時刻
+                                                    <input type="time" value={val(id, 'sendAt', '19:00')} disabled={drBusy === id}
+                                                        onChange={e => drSave(id, { sendAt: e.target.value })}
+                                                        className="px-1.5 py-0.5 rounded-lg border border-slate-300 text-[11px] font-bold" />
                                                 </label>
                                                 {!val(id, 'roomId', '') && <span className="text-[10.5px] font-black text-amber-700">送信先が未設定なので送りません</span>}
-                                                <button onClick={() => drSendNow(id, 'closing')} disabled={drBusy === id || !val(id, 'roomId', '')}
+                                                {phase !== 'open' && val(id, 'targetNew', null) === null &&
+                                                    <span className="text-[10.5px] font-black text-amber-700">目標が未設定なので「あと何人」を出せません</span>}
+                                                <button onClick={() => drSendNow(id, phase)} disabled={drBusy === id || !val(id, 'roomId', '')}
                                                     className="px-2.5 py-1 rounded-lg bg-slate-900 text-white text-[11px] font-black hover:bg-slate-800 disabled:opacity-40">
                                                     {drData.flagOn ? 'いま送る' : 'いま送る（下書きのみ）'}
                                                 </button>
@@ -5972,7 +6003,7 @@
                         {drPreview && (
                             <div data-dr-preview className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
                                 <div className="flex items-center gap-2">
-                                    <span className="text-[11px] font-black text-slate-500">{drPreview.kind === 'preopen' ? 'オープン前の集客速報' : '営業後の日報'}の下書き</span>
+                                    <span className="text-[11px] font-black text-slate-500">{DR_PHASE_JA[drPreview.phase] || ''}のレポートの下書き</span>
                                     {drPreview.sentAt && <span className="text-[11px] font-black text-emerald-600">送信しました</span>}
                                     <button onClick={() => setDrPreview(null)} className="ml-auto text-[11px] font-black text-slate-400 hover:text-slate-600">閉じる</button>
                                 </div>

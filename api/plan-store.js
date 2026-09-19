@@ -77,7 +77,9 @@ import { isOn as ccIsOn } from '../lib/ccflags.js';
 // 日報・集客速報（?type=dailyreport）。文面と判断はすべてこのモジュール側にある。
 // ⚠️ jstYmd は meo.js のものと名前が衝突するので別名にする（JST の切り方は同じ）。
 import {
-  CLOSING as DR_CLOSING, PREOPEN as DR_PREOPEN, KINDS as DR_KINDS, REPORT_VERSION as DR_VERSION,
+  PREP as DR_PREP, PREOPEN as DR_PREOPEN, OPEN as DR_OPEN, PHASES as DR_PHASES,
+  REPORT_VERSION as DR_VERSION, SNAP_KEY as DR_SNAP_KEY,
+  phaseOf as drPhaseOf, monthRange as drMonthRange,
   SETTINGS_KEY as DR_SETTINGS_KEY, LOG_KEY as DR_LOG_KEY,
   jstYmd as drJstYmd, normalizeSettings as drNormalizeSettings, normalizeShopSetting as drNormalizeShopSetting,
   settingReady as drSettingReady, buildReport as drBuildReport, reportReady as drReportReady,
@@ -119,6 +121,7 @@ const CHAT_MSG_PREFIX = 'naoru:chat:m:';      // メッセージはルーム別�
 // ※以前あった索引(midx)は廃止。送信時に空ベースから作り直して他ルームを消す不具合があったため、
 //   GETは権威ある rooms 一覧から per-room キーをMGETでまとめて引く方式に変更した。
 const CHAT_IMG_PREFIX = 'naoru:chat:img:';    // 画像は1枚1キーで別保存（blob肥大化を避ける）
+const DR_PROBE_CAP = 20;                       // 1回の自動実行で「集計実行」を見に行く店舗数の上限
 const DR_SENDER_ID = '__daily_report__';      // 日報の自動投稿。人の staffId と衝突しない固定ID
 const DR_SENDER_NAME = '日報（自動）';          // 発言者名。人の発言と見分けられるようにする
 const CHAT_MSG_CAP = 400;                     // 1ルームあたり保持する最大メッセージ数（古いものから破棄）
@@ -576,6 +579,7 @@ export default async function handler(req, res) {
   if (reqType === 'dailyreport') {
     const DR_SET_KEY = ccKey(DR_SETTINGS_KEY);
     const DR_LOG_K = ccKey(DR_LOG_KEY);
+    const DR_SNAP_KEY_ENV = ccKey(DR_SNAP_KEY);
     const DR_OBS_KEY = ccKey('naoru:dailyreport:obs:v1');
 
     const verified = !!chatActor && chatActor.verified === true;
@@ -611,21 +615,46 @@ export default async function handler(req, res) {
       } catch (_) { return null; }
     };
 
+    // 前日までの累計スナップショット（媒体別）。本日ぶんの増減はこれとの差で出す。
+    const drLoadSnaps = async () => {
+      const v = await blobGet(DR_SNAP_KEY_ENV, hasKV, hasSB, gas).catch(() => null);
+      return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+    };
+
     // 1店舗ぶんの文面を作る（送らない）。
-    const drBuild = async (setting, kind, ymd) => {
-      const q = { from: ymd, to: ymd, shop_id: setting.shopId };
-      const needSales = kind === DR_CLOSING;
+    // 🔴 期間ごとに見る範囲が違う:
+    //    prep / preopen … 対象月（本オープン月）ぶんの累計を見る。remaining_count＝まだ来ていない有効な新規予約。
+    //    open           … その日1日ぶんの実績を見る。
+    const drBuild = async (setting, phase, ymd) => {
+      const needSales = phase !== DR_PREP;                 // オープン前はまだ売上が無い
+      const mr = drMonthRange(setting.targetMonth);
+      // 集客の累計は対象月の範囲で取る。対象月が未設定なら当日のみ（勝手な範囲を作らない）。
+      const chQ = (phase === DR_OPEN || !mr)
+        ? { from: ymd, to: ymd, shop_id: setting.shopId }
+        : { from: mr.from, to: mr.to, shop_id: setting.shopId };
       const [sumRaw, chRaw] = await Promise.all([
-        needSales ? drSoGet('sales/summary', q) : Promise.resolve(null),
-        drSoGet('marketing/by-channel', q),
+        needSales ? drSoGet('sales/summary', { from: ymd, to: ymd, shop_id: setting.shopId }) : Promise.resolve(null),
+        drSoGet('marketing/by-channel', chQ),
       ]);
-      return drBuildReport(kind, {
+      // 店舗別の広告費（既存の ?type=adspend ストア）。対象月ぶんだけ。
+      let spend = null;
+      if (phase !== DR_OPEN && mr) {
+        try {
+          const all = (await blobGet(ADSPEND_KEY, hasKV, hasSB, gas)) || {};
+          const bucket = (all.spend && all.spend[setting.targetMonth]) || null;
+          const shops = bucket && bucket.__shops__;
+          spend = (shops && shops[setting.shopName]) || null;
+        } catch (_) { spend = null; }
+      }
+      const snaps = await drLoadSnaps();
+      return drBuildReport(phase, {
         shopId: setting.shopId,
         shopName: setting.shopName || setting.shopId,
-        ymd,
+        ymd, setting,
         summary: needSales ? drNormalizeSummary(sumRaw) : null,
         channels: drNormalizeChannels(chRaw),
-        target: setting.targetNew,
+        prevSnap: snaps[String(setting.shopId)] || null,
+        spend,
         fetchedAt: Date.now(),
       });
     };
@@ -643,7 +672,9 @@ export default async function handler(req, res) {
         imgIds: [], links: [], mentions: [],
         createdAt: new Date().toISOString(),
         // 自動投稿であることを本文の外にも残す（人の発言と混ざらないように）
-        auto: { kind: report.kind, ymd: report.ymd, shopId: setting.shopId, version: DR_VERSION },
+        // 自動投稿であることと、どの期間のレポートかを本文の外にも残す。
+        // card はチャット側で見本どおりのカードを描くための構造（text は読めるだけの控え）。
+        auto: { phase: report.kind, ymd: report.ymd, shopId: setting.shopId, version: DR_VERSION, card: report.card },
       };
       if (hasKV) await kvAppendJson(CHAT_MSG_PREFIX + String(setting.roomId), msg, CHAT_MSG_CAP);
       else {
@@ -654,22 +685,27 @@ export default async function handler(req, res) {
     };
 
     // 1店舗ぶんを「判定 → 作成 → 送信 → 記録」まで。dry=true なら作るだけ。
-    const drRunOne = async (setting, kind, ymd, { dry, force }) => {
+    const drRunOne = async (setting, phase, ymd, { dry, force }) => {
       const ready = drSettingReady(setting);
-      if (!ready.ok) return { shopId: setting.shopId, sent: false, reason: ready.reason };
-      const report = await drBuild(setting, kind, ymd);
+      if (!ready.ok) return { shopId: setting.shopId, phase, sent: false, reason: ready.reason };
+      const report = await drBuild(setting, phase, ymd);
       const rr = drReportReady(report);
-      if (!rr.ok) return { shopId: setting.shopId, sent: false, reason: rr.reason, missing: report.missing, text: report.text };
+      if (!rr.ok) return { shopId: setting.shopId, phase, sent: false, reason: rr.reason, missing: report.missing, text: report.text };
       const hash = drContentHash(report.text);
-      const log = await drLoadLog();
-      const key = drSendKey(setting.shopId, ymd, kind);
-      const decide = drShouldSend({ log, key, hash, force });
-      if (!decide.send) return { shopId: setting.shopId, sent: false, reason: decide.reason, text: report.text };
-      if (dry) return { shopId: setting.shopId, sent: false, reason: 'dry_run', text: report.text, missing: report.missing };
+      const key = drSendKey(setting.shopId, ymd, phase);
+      const decide = drShouldSend({ log: await drLoadLog(), key, hash, force });
+      if (!decide.send) return { shopId: setting.shopId, phase, sent: false, reason: decide.reason, text: report.text };
+      if (dry) return { shopId: setting.shopId, phase, sent: false, reason: 'dry_run', text: report.text, card: report.card, missing: report.missing };
       const messageId = await drPost(setting, report);
       // 🔴 記録は送信の直後。ここを飛ばすと再実行で二重に出る。
       await blobSet(DR_LOG_K, drRecordSent(await drLoadLog(), key, { at: Date.now(), hash, messageId, roomId: setting.roomId }), hasKV, hasSB, gas);
-      return { shopId: setting.shopId, sent: true, reason: 'ok', messageId, missing: report.missing, text: report.text };
+      // 明日の「本日ぶんの増減」を出すために、今日の累計を残す。
+      // ⚠️ 送れた日だけ残す（送っていない日の累計を基準にすると増減がずれる）。
+      if (report.snapshot) {
+        const snaps = await drLoadSnaps();
+        await blobSet(DR_SNAP_KEY_ENV, { ...snaps, [String(setting.shopId)]: report.snapshot }, hasKV, hasSB, gas);
+      }
+      return { shopId: setting.shopId, phase, sent: true, reason: 'ok', messageId, missing: report.missing, text: report.text };
     };
 
     if (req.method === 'GET') {
@@ -683,19 +719,25 @@ export default async function handler(req, res) {
           return res.status(401).json({ ok: false, error: 'unauthorized' });
         }
         if (!isCron && !isRoot) return res.status(403).json({ ok: false, error: 'forbidden', code: 'cron_only' });
-        const kind = DR_KINDS.includes(String(req.query.kind || '')) ? String(req.query.kind) : DR_PREOPEN;
+        // 🔴 期間は店舗ごとに決まる（オープン前／プレオープン／オープン後）。
+        //    呼び出し側が種類を指定して一括で流す作りにはしない。
         // 🔴 フラグOFFの間は**送らない**。何が送られる予定かだけ返す（画面で確認できる）。
         const dry = !drOn || req.query.dry === '1';
         const settings = await drLoadSettings();
         const log = await drLoadLog();
         const now = Date.now();
-        const plan = drPlanRun({ settings, kind, log, nowMs: now });
+        const plan = drPlanRun({ settings, log, nowMs: now });
         const ymd = drJstYmd(now);
         const results = [];
+        let probes = 0;
         for (const p of plan) {
-          if (p.reason === 'manual_only') { results.push({ shopId: p.setting.shopId, sent: false, reason: 'manual_only' }); continue; }
-          if (p.reason === 'already') { results.push({ shopId: p.setting.shopId, sent: false, reason: 'already' }); continue; }
+          if (p.reason === 'manual_only') { results.push({ shopId: p.setting.shopId, phase: p.phase, sent: false, reason: 'manual_only' }); continue; }
+          if (p.reason === 'already') { results.push({ shopId: p.setting.shopId, phase: p.phase, sent: false, reason: 'already' }); continue; }
           if (p.reason === 'needs_aggregate_check') {
+            // ⚠️ SalonOne は 60回/分 の制限がある。1回の実行で叩く店舗数に上限を設け、
+            //    あふれた店舗は次の実行に回す（全店を一度に叩いて制限に当てない）。
+            if (probes >= DR_PROBE_CAP) { results.push({ shopId: p.setting.shopId, phase: p.phase, sent: false, reason: 'probe_deferred' }); continue; }
+            probes++;
             // 「集計実行」は直接観測できないため、入金ベース売上の動きで代用する（仮案）。
             const obsAll = (await blobGet(DR_OBS_KEY, hasKV, hasSB, gas).catch(() => null)) || {};
             const obsKey = `${p.setting.shopId}|${ymd}`;
@@ -703,13 +745,15 @@ export default async function handler(req, res) {
             const cur = { digest: sum ? sum.digest : null, at: now };
             const det = drDetectAggregationRun(obsAll[obsKey] || null, cur);
             await blobSet(DR_OBS_KEY, { ...obsAll, [obsKey]: drAdvanceObservation(obsAll[obsKey] || null, cur) }, hasKV, hasSB, gas);
-            if (!det.settled) { results.push({ shopId: p.setting.shopId, sent: false, reason: `aggregate_${det.reason}` }); continue; }
+            if (!det.settled) { results.push({ shopId: p.setting.shopId, phase: p.phase, sent: false, reason: `aggregate_${det.reason}` }); continue; }
           } else if (!p.due) {
-            results.push({ shopId: p.setting.shopId, sent: false, reason: p.reason }); continue;
+            results.push({ shopId: p.setting.shopId, phase: p.phase, sent: false, reason: p.reason }); continue;
           }
-          results.push(await drRunOne(p.setting, kind, ymd, { dry, force: false }));
+          results.push(await drRunOne(p.setting, p.phase, ymd, { dry, force: false }));
         }
-        return res.status(200).json({ ok: true, kind, ymd, dry, flagOn: drOn, planned: plan.length, results: results.map(r => ({ ...r, text: undefined })) });
+        // ⚠️ 結果に本文を含めない（実行ログに売上が残らないように）
+        return res.status(200).json({ ok: true, ymd, dry, flagOn: drOn, planned: plan.length,
+          results: results.map(r => ({ ...r, text: undefined, card: undefined })) });
       }
 
       // ここから先は本部/root だけ（設定と売上の下書きが見えるため）
@@ -719,14 +763,16 @@ export default async function handler(req, res) {
       // ── 下書きの確認（送らない）────────────────────────────────────
       if (action === 'preview') {
         const shopId = String(req.query.shopId || '').slice(0, 40);
-        const kind = DR_KINDS.includes(String(req.query.kind || '')) ? String(req.query.kind) : DR_CLOSING;
         const settings = await drLoadSettings();
         const setting = settings.shops[shopId] || drNormalizeShopSetting({ shopId, shopName: String(req.query.shopName || '') }, shopId);
         if (!setting.shopId) return res.status(400).json({ ok: false, error: 'shop_required' });
         const ymd = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || '')) ? String(req.query.date) : drJstYmd(Date.now());
-        const report = await drBuild({ ...setting, shopName: setting.shopName || String(req.query.shopName || '') }, kind, ymd);
-        return res.status(200).json({ ok: true, kind, ymd, text: report.text, missing: report.missing,
-          ready: drReportReady(report), setting: drSettingReady(setting), flagOn: drOn });
+        // 期間の指定が無ければ、その日の店舗の期間を使う（人が別の期間を見たいときだけ指定できる）
+        const phase = DR_PHASES.includes(String(req.query.phase || '')) ? String(req.query.phase)
+          : drPhaseOf(setting, Date.now());
+        const report = await drBuild({ ...setting, shopName: setting.shopName || String(req.query.shopName || '') }, phase, ymd);
+        return res.status(200).json({ ok: true, phase, ymd, text: report.text, card: report.card,
+          missing: report.missing, ready: drReportReady(report), setting: drSettingReady(setting), flagOn: drOn });
       }
 
       const settings = await drLoadSettings();
@@ -734,9 +780,11 @@ export default async function handler(req, res) {
       // 直近の送信記録だけ返す（全部返すと重い）
       const recent = Object.entries(log).sort((a, b) => (b[1].at || 0) - (a[1].at || 0)).slice(0, 100)
         .map(([k, v]) => ({ key: k, at: v.at, roomId: v.roomId }));
+      const nowMs = Date.now();
+      const phases = Object.fromEntries(Object.values(settings.shops).map(x => [x.shopId, drPhaseOf(x, nowMs)]));
       return res.status(200).json({
-        ok: true, settings, recent, flagOn: drOn,
-        today: drJstYmd(Date.now()),
+        ok: true, settings, recent, flagOn: drOn, phases,
+        today: drJstYmd(nowMs),
         salonOneConfigured: !!String(process.env.SALONONE_API_KEY || '').trim(),
         cronConfigured: !!String(process.env.CRON_SECRET || '').trim(),
         // 🔴 画面に「未確認」を出すための印。確定した事実として表示させない。
@@ -759,18 +807,20 @@ export default async function handler(req, res) {
       const next = drNormalizeShopSetting({ ...prev, ...patch, shopId,
         updatedAt: Date.now(), updatedBy: String(chatActor.id || '').slice(0, 80) }, shopId);
       await blobSet(DR_SET_KEY, { ...cur, shops: { ...cur.shops, [shopId]: next } }, hasKV, hasSB, gas);
-      return res.status(200).json({ ok: true, setting: next, ready: drSettingReady(next), flagOn: drOn });
+      // 期間は日付から決まる。保存のたびに返して、画面の表示が古いままにならないようにする。
+      return res.status(200).json({ ok: true, setting: next, phase: drPhaseOf(next, Date.now()),
+        ready: drSettingReady(next), flagOn: drOn });
     }
 
     // 人が押す「いま送る」。フラグOFFなら送らず下書きだけ返す。
     if (action === 'send') {
       const shopId = String(body.shopId || '').slice(0, 40);
-      const kind = DR_KINDS.includes(String(body.kind || '')) ? String(body.kind) : DR_CLOSING;
       const cur = await drLoadSettings();
       const setting = cur.shops[shopId];
       if (!setting) return res.status(400).json({ ok: false, error: 'shop_not_configured' });
       const ymd = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date || '')) ? String(body.date) : drJstYmd(Date.now());
-      const r = await drRunOne(setting, kind, ymd, { dry: !drOn, force: body.force === true });
+      const phase = DR_PHASES.includes(String(body.phase || '')) ? String(body.phase) : drPhaseOf(setting, Date.now());
+      const r = await drRunOne(setting, phase, ymd, { dry: !drOn, force: body.force === true });
       return res.status(200).json({ ok: true, flagOn: drOn, ...r });
     }
 

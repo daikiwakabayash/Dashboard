@@ -514,3 +514,61 @@ describe('ニュースの下書き', () => {
     expect(again.body.already).toBe(true);
   });
 });
+
+// ── ファーストビュー（NAORUニュースのいちばん上の一枚）────────────────
+describe('ファーストビュー', () => {
+  const heroRaw = () => JSON.parse(store.get('naoru:news:hero:v1') || 'null');
+  const staffHdr = (owner, pw) => {
+    process.env.AUTH_SALT = process.env.AUTH_SALT || 'salt-for-test';
+    process.env.SETTLEMENT_OWNER_PASSWORDS = JSON.stringify({ 'セラピスト花子': 'staff-pw' });
+    return { 'x-cc-owner': encodeURIComponent(owner), 'x-cc-token': hashOwnerToken(owner, pw, process.env.AUTH_SALT) };
+  };
+
+  it('未設定でも既定の文言で返す（空の面にしない）', async () => {
+    const r = await get();
+    expect(r.body.hero).toBeTruthy();
+    expect(r.body.hero.title).toContain('次のNAORUへ');
+    expect(r.body.hero.imgId).toBe('');
+  });
+
+  it('本部は差し替えられる', async () => {
+    const r = await post({ action: 'hero_set', hero: { title: '新しい見出し', lead: 'そえる言葉' } });
+    expect(r.body.ok).toBe(true);
+    expect(heroRaw().title).toBe('新しい見出し');
+    expect((await get()).body.hero.title).toBe('新しい見出し');
+  });
+
+  it('🔴 本部でない人は差し替えられない', async () => {
+    const r = await call({ method: 'POST', headers: staffHdr('セラピスト花子', 'staff-pw'),
+      body: { type: 'board', action: 'hero_set', hero: { title: '勝手に書き換え' } } });
+    expect(r.statusCode).toBe(403);
+    expect(heroRaw()).toBe(null);
+  });
+
+  it('🔴 写真があるのに掲載許可が未確認なら保存しない', async () => {
+    const r = await post({ action: 'hero_set', hero: { imgId: 'img1', consent: false } });
+    expect(r.body.ok).toBe(false);
+    expect(r.body.error).toBe('consent_unconfirmed');
+    expect(r.body.message).toContain('掲載許可');
+    expect(heroRaw()).toBe(null);
+  });
+
+  it('許可を確かめれば写真も保存できる', async () => {
+    const r = await post({ action: 'hero_set', hero: { imgId: 'img1', consent: true } });
+    expect(r.body.ok).toBe(true);
+    expect(heroRaw().imgId).toBe('img1');
+    expect(heroRaw().consent).toBe(true);
+  });
+
+  it('空欄にしたら既定の文言に戻す', async () => {
+    await post({ action: 'hero_set', hero: { title: '  ' } });
+    expect(heroRaw().title).toContain('次のNAORUへ');
+  });
+
+  it('ファーストビューを変えても、記事は1バイトも変わらない', async () => {
+    await post(mkPost('hv1', '記事'));
+    const before = JSON.stringify(rawBoard());
+    await post({ action: 'hero_set', hero: { title: '見出し' } });
+    expect(JSON.stringify(rawBoard())).toBe(before);
+  });
+});

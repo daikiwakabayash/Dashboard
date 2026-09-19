@@ -29,6 +29,7 @@ const posts = [
     text: 'プロフィールから始まる、新しいコミュニケーション。', category: 'praise',
     reactions: {}, comments: [], imgIds: [], files: [], createdAt: '2026-08-28T01:00:00.000Z' },
 ];
+let hero = null;   // ファーストビュー（未設定＝既定の文言）
 const calls = [];
 const json = (res, o) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(o)); };
 
@@ -56,8 +57,9 @@ const server = http.createServer((req, res) => {
           return json(res, { ok: true, counts });
         }
         if (req.method === 'POST' && body.action === 'post') { posts.unshift({ ...body.post, id: 'new1', reactions: {}, comments: [], createdAt: new Date().toISOString() }); return json(res, { ok: true, post: posts[0] }); }
+        if (req.method === 'POST' && body.action === 'hero_set') { hero = body.hero; return json(res, { ok: true, hero }); }
         if (req.method === 'POST') return json(res, { ok: true, posts });
-        return json(res, { posts, reads: {}, configured: true });
+        return json(res, { posts, reads: {}, configured: true, hero });
       }
       if (type === 'chat') return json(res, { rooms: [], messages: {}, reads: {},
         dir: { staff: STAFF.map(x => ({ id: x.staff_id, name: x.name, shop: x.shop_name })) }, notes: {}, configured: true });
@@ -117,8 +119,8 @@ await page.waitForTimeout(3000);
 let t = await txt();
 
 // ── 見出し ──────────────────────────────────────────────
-check('大見出しが試作V3の言葉になっている', t.includes('チームの今を、') && t.includes('もっと近くに'));
-check('INSIDE NOWL の小見出しが出る', t.includes('INSIDE NOWL'));
+check('ファーストビューが出る', t.includes('この仲間と、') && t.includes('次のNAORUへ。'));
+check('ファーストビューの肩書きが出る', t.includes('NAORU NEWS / ONE TEAM'));
 check('「＋ お知らせを投稿」ボタンが出る', (await page.getByRole('button', { name: /お知らせを投稿/ }).count()) > 0);
 
 // ── 確認が必要なお知らせ ────────────────────────────────
@@ -132,7 +134,7 @@ check('写真が無いピックアップは文字の表紙になる', (await pag
 check('EDITOR\'S PICK の印が出る', t.includes("EDITOR'S PICK"));
 check('ピックアップの肩書きが試作どおり', t.includes('NOWL / KNOWLEDGE JOURNAL'), (t.match(/NOWL \/ [A-Z ]+/) || [''])[0]);
 check('ピックアップの短い言葉が出る', t.includes('学びは、つながるほど強くなる。'));
-const h1px = await page.locator('.nowl-h1').first().evaluate(el => Math.round(parseFloat(getComputedStyle(el).fontSize)));
+const h1px = await page.locator('[data-news-fv-title]').first().evaluate(el => Math.round(parseFloat(getComputedStyle(el).fontSize)));
 check('PCの大見出しが十分大きい（試作に寄せる）', h1px >= 38, `${h1px}px`);
 const coverPx = await page.locator('[data-news-hero] .nowl-graphic strong').first().evaluate(el => Math.round(parseFloat(getComputedStyle(el).fontSize)));
 check('ピックアップの英字が十分大きい', coverPx >= 40, `${coverPx}px`);
@@ -159,8 +161,8 @@ const overflow = await page.evaluate(() => document.documentElement.scrollWidth 
 check('スマホでは1列に並ぶ', cols1 === 1, `${cols1} 列`);
 check('スマホで横スクロールが出ない', !overflow);
 // スマホ: 見出しが小さくなりすぎない／押せる大きさ／はみ出さない
-const h1m = await page.locator('.nowl-h1').first().evaluate(el => Math.round(parseFloat(getComputedStyle(el).fontSize)));
-check('スマホの大見出しも読みやすい大きさ', h1m >= 24 && h1m <= 34, `${h1m}px`);
+const h1m = await page.locator('[data-news-fv-title]').first().evaluate(el => Math.round(parseFloat(getComputedStyle(el).fontSize)));
+check('スマホの大見出しも読みやすい大きさ', h1m >= 26 && h1m <= 38, `${h1m}px`);
 const small = await page.evaluate(() => {
   const bad = [];
   for (const el of document.querySelectorAll('button, a[href], input, select')) {

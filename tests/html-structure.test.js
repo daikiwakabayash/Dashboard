@@ -138,14 +138,17 @@ describe('index.html - ニュースの名称', () => {
   it('画面名としての「掲示板」が残っていない', () => {
     expect(html).not.toContain('掲示板');
   });
-  it('メニュー名は「ニュース」', () => {
-    expect(html).toContain("label: 'ニュース'");
+  it('メニュー名は「NAORUニュース」', () => {
+    expect(html).toContain("label: 'NAORUニュース'");
     expect(html).toContain("{ id: 'board'");
   });
-  it('大見出しは試作V3の言葉（「チームの今を、もっと近くに.」）', () => {
-    expect(html).toContain('チームの今を、');
-    expect(html).toContain('もっと近くに');
-    expect(html).toContain('INSIDE NOWL');
+  it('ファーストビューの言葉は本部が画面から変えられる（コードに焼き付けない）', () => {
+    // 既定の文言は持つが、保存された内容があればそちらを出す
+    expect(html).toContain('NAORU NEWS / ONE TEAM');
+    expect(html).toContain('この仲間と、');
+    expect(html).toContain('次のNAORUへ。');
+    expect(html).toContain('data-news-fv-title');
+    expect(html).toContain('newsNormalizeHero((boardData || {}).hero)');
   });
   it('「お知らせ」は一覧の見出しとカテゴリー名として使う（画面名ではない）', () => {
     expect(html).toContain("{ key: 'notice', label: 'お知らせ'");

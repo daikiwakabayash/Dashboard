@@ -174,20 +174,31 @@ const tokens = await page.evaluate(() => {
 });
 check('試作の赤と墨黒が使われている', !!tokens && tokens.red === '#b92d3d' && tokens.ink === '#18191c', JSON.stringify(tokens));
 
-// スタッフのカードが列で並ぶ（PC4列・中間3列・スマホ2列）
-const cols = async (w) => {
+// セラピストの名前の並び。
+// ⚠️ 以前は .nowl-people の**カード2/3/4列**を見ていたが、組織図を地図の画面へ作り替えた際に
+//    店舗カードの中の名前は .org-people（横に並べて折り返す）へ変わった。
+//    消えた仕組みを検査し続けても落ちるだけなので、**いまの並び方**を検査する。
+const peopleLayout = async (w) => {
   await page.setViewportSize({ width: w, height: 900 });
   await page.waitForTimeout(700);
   return page.evaluate(() => {
-    const g = document.querySelector('.nowl-people');
-    if (!g) return 0;
-    return getComputedStyle(g).gridTemplateColumns.split(' ').filter(Boolean).length;
+    const g = document.querySelector('.org-people');
+    if (!g) return null;
+    const cs = getComputedStyle(g);
+    const kids = [...g.children];
+    const tops = new Set(kids.map(k => Math.round(k.getBoundingClientRect().top)));
+    return { display: cs.display, wrap: cs.flexWrap, count: kids.length, rows: tops.size,
+             inside: kids.every(k => k.getBoundingClientRect().right <= g.getBoundingClientRect().right + 1) };
   });
 };
-const c390 = await cols(390), c768 = await cols(768), c1440 = await cols(1440);
-check('スマホ(390px)は2列', c390 === 2, String(c390));
-check('中間(768px)は3列', c768 === 3, String(c768));
-check('PC(1440px)は4列', c1440 === 4, String(c1440));
+const l390 = await peopleLayout(390);
+check('店舗カードの中にセラピストの名前が並ぶ', !!l390 && l390.count > 0, JSON.stringify(l390));
+check('横に並べて折り返す（列を固定しない）',
+  !!l390 && l390.display === 'flex' && l390.wrap === 'wrap', JSON.stringify(l390));
+check('🔴 スマホ幅でも名前がカードからはみ出さない', !!l390 && l390.inside === true, JSON.stringify(l390));
+const l1440 = await peopleLayout(1440);
+check('広い画面では折り返しが減る（同じか少ない行数）',
+  !!l1440 && !!l390 && l1440.rows <= l390.rows, `390px ${l390 && l390.rows}行 / 1440px ${l1440 && l1440.rows}行`);
 check('横に溢れていない（390px）', await (async () => {
   await page.setViewportSize({ width: 390, height: 900 }); await page.waitForTimeout(700);
   return page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1);

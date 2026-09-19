@@ -102,7 +102,18 @@ check('ニュースが開く', (await txt()).includes('沖縄セミナー'));
 // ── 一覧のバッジ ──
 let t = await txt();
 check('カテゴリーのバッジが出る', t.includes('イベント') && t.includes('ルール・手順'));
-check('ピックアップのバッジが出る', t.includes('ピックアップ'));
+// ⚠️ ニュース一覧のカードを小さくしたとき、バッジ類（カテゴリー・ピックアップ・期限）は
+//    **記事を開いた側**へ移した。一覧に「ピックアップ」の札は出ない。
+check('🔴 一覧のカードにピックアップの札を出さない（カードを小さく保つ）',
+  (await page.locator('[data-news-badges]').count()) === 0);
+// ⚠️ .first() だと外側の要素（記事を開かない方）に当たる。見出しそのものを押す。
+await page.getByText('沖縄セミナー', { exact: true }).last().click();
+await page.waitForTimeout(1800);
+check('記事を開くとピックアップの札が出る',
+  (await page.locator('[data-news-badges]').first().innerText().catch(() => '')).includes('ピックアップ'));
+await page.keyboard.press('Escape');
+await page.waitForTimeout(1000);
+t = await txt();
 check('期限が出る', /2026-09-20 まで|期限切れ/.test(t), (t.match(/2026-09-20[^\n]*/) || [''])[0]);
 check('項目の無い古い投稿もそのまま出る', t.includes('古い投稿'));
 
@@ -115,16 +126,28 @@ check('項目の無い投稿は絞り込みで消える（カテゴリー未設�
 await page.locator('[data-news-catfilter-btn="rule"]').first().click();
 await page.waitForTimeout(1000);
 
-// ── ピックアップだけ ──
-await page.locator('[data-news-filter="featured"]').first().click();
+// ── 絞り込みの並び ──
+// ⚠️ 以前あった「ピックアップ」はオーナーの指示で外した。
+//    消えた仕組みを検査し続けても落ちるだけなので、**いま出す3つ**を検査し、
+//    ピックアップが戻っていないことも併せて確かめる。
+const filters = await page.locator('[data-news-filter]').evaluateAll(
+  els => els.map(e => e.getAttribute('data-news-filter')));
+check('絞り込みは「すべて／未読／保存済み」の3つ', filters.join(',') === 'all,unread,saved', filters.join(','));
+check('ピックアップは出さない（外した機能が戻っていない）', !filters.includes('featured'));
+
+await page.locator('[data-news-filter="saved"]').first().click();
 await page.waitForTimeout(1200);
 t = await txt();
-check('ピックアップだけ出せる', t.includes('沖縄セミナー') && !t.includes('返金手順の変更'));
+check('保存済みだけ出せる', !t.includes('返金手順の変更'), t.includes('返金手順の変更') ? '絞れていない' : '');
 await page.locator('[data-news-filter="all"]').first().click();
 await page.waitForTimeout(1000);
+t = await txt();
+check('「すべて」に戻せる', t.includes('返金手順の変更'));
 
 // ── 投稿フォーム ──
-await page.getByRole('button', { name: /投稿する/ }).first().click().catch(() => {});
+// ⚠️ 投稿の入口は画面の上から「＋投稿」（data-news-post-btn）へ移した。
+//    文言で探すと名前を変えるたびに落ちるので、印で探す。
+await page.locator('[data-news-post-btn]').first().click();
 await page.waitForTimeout(1500);
 check('投稿フォームが開く', (await page.locator('[data-news-cat]').count()) > 0);
 check('カテゴリーが選べる', (await page.locator('[data-news-cat-btn]').count()) === 6);

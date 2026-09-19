@@ -6,6 +6,7 @@ import {
   requestRevision, approve, deliverables, compareSet, normalizeStore,
   publicFile, publicAsset, publicCreative, buildGenerateRequest, pendingRevision,
   jobProgress, DEFAULT_FORMATS,
+  normalizeLimits, textOverflows, textSendable, textErrorMessage, TEXT_FIELDS,
 } from '../lib/creative.js';
 
 const CTX = { tenantId: 'naoru', actorId: '__root__', actorName: '本部' };
@@ -496,5 +497,106 @@ describe('生成設定・制作費・CTA・親Creative を保持する', () => {
     expect(v2.sourceCreativeVersion).toBe(1);
     expect(v2.version).toBe(2);
     expect(v2.revisions[0].snapshot).toMatchObject({ headline: '元の見出し', cta: '予約する' });
+  });
+});
+
+// ── ③のテンプレ文字数上限（GET /v1/creative/limits）────────────────
+// ⚠️ ①に既定値を置かない。取れなければ「未取得」のまま扱い、送信を止める。
+describe('③のテンプレ文字数上限', () => {
+  const RAW = { api_version: 'creative-library-1', template_version: 'abstract-card-v1', mode: 'sample',
+                text_limits: { headline: 28, body: 120, cta: 14 },
+                revision_instructions_max: 1000, max_artifact_bytes: 67108864 };
+
+  it('③の応答をそのまま読む（①で値を作らない）', () => {
+    const l = normalizeLimits(RAW);
+    expect(l.loaded).toBe(true);
+    expect(l.text).toEqual({ headline: 28, body: 120, cta: 14 });
+    expect(l.revisionMax).toBe(1000);
+    expect(l.maxBytes).toBe(67108864);
+    expect(l.templateVersion).toBe('abstract-card-v1');
+  });
+
+  it('🔴 取得できなければ未取得のまま。①の既定値で埋めない', () => {
+    for (const bad of [null, undefined, {}, 'x', { text_limits: {} }, { text_limits: { headline: 28 } }]) {
+      const l = normalizeLimits(bad);
+      expect(l.loaded).toBe(false);
+      expect(l.text).toEqual({});
+    }
+  });
+
+  it('🔴 壊れた値（0・負数・文字列・NaN）は採用しない', () => {
+    for (const v of [0, -1, '28', NaN, Infinity, null]) {
+      expect(normalizeLimits({ ...RAW, text_limits: { ...RAW.text_limits, headline: v } }).loaded).toBe(false);
+    }
+  });
+
+  it('上限ちょうどは通し、1文字超えたら field/max/got を返す', () => {
+    const l = normalizeLimits(RAW);
+    expect(textOverflows(l, { headline: 'あ'.repeat(28) }).errors).toEqual([]);
+    expect(textOverflows(l, { headline: 'あ'.repeat(29) }).errors)
+      .toEqual([{ field: 'headline', max: 28, got: 29 }]);
+    expect(textOverflows(l, { headline: 'あ'.repeat(30), cta: 'い'.repeat(15) }).errors).toHaveLength(2);
+  });
+
+  it('🔴 上限が未取得のときは「超過なし」と答えない（判定できない）', () => {
+    const l = normalizeLimits(null);
+    expect(textOverflows(l, { headline: 'あ'.repeat(999) })).toEqual({ known: false, errors: [] });
+    expect(textSendable(l, { headline: 'あ' }).ok).toBe(false);
+    expect(textSendable(l, { headline: 'あ' }).error).toBe('limits_unavailable');
+  });
+
+  it('🔴 上限が未取得なら、短い文でも送らせない', () => {
+    expect(textSendable({ loaded: false, text: {} }, { headline: 'あ', body: 'い', cta: 'う' }).ok).toBe(false);
+  });
+
+  it('未入力の項目は判定しない（空を超過にしない）', () => {
+    const l = normalizeLimits(RAW);
+    expect(textSendable(l, { headline: 'あ' }).ok).toBe(true);
+    expect(textSendable(l, {}).ok).toBe(true);
+  });
+
+  it('超過は人が読める文にする', () => {
+    expect(textErrorMessage([{ field: 'headline', max: 28, got: 31 }]))
+      .toBe('見出しが28文字を超えています（31文字）');
+    expect(textErrorMessage([])).toBe('');
+    expect(textErrorMessage(null)).toBe('');
+  });
+});
+
+describe('修正依頼を③が受け取れる形にする', () => {
+  const a2 = () => confirmRights(buildAsset({ title: 'x', files: [IMG] }, CTX).asset, 'confirmed', CTX).asset;
+  const reviewed2 = (as) => completeJob(startJob(buildCreative(as, {}, CTX, 1000).creative, CTX, 1000).creative,
+    { ok: true, files: [IMG], mode: 'sample' }, 2000).creative;
+
+  it('🔴 文言が空のままでは③へ送らない（③は422で拒否する契約）', () => {
+    const as = a2();
+    const c = requestRevision(reviewed2(as), { text: 'よくして' }, CTX, 3000).creative;
+    // 人の原文は履歴に残る
+    expect(c.revisions[0].text).toBe('よくして');
+    // でも送れない
+    const r = buildGenerateRequest(c, as, { jobId: 'j1' });
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe('text_changes_required');
+  });
+
+  it('🔴 空文字を text_changes に入れない（③は空を拒否する）', () => {
+    const as = a2();
+    const c = requestRevision(reviewed2(as), { text: '見出しだけ直す',
+      textChanges: { headline: '新しい見出し', body: '   ' } }, CTX, 3000).creative;
+    const r = buildGenerateRequest(c, as, { jobId: 'j2' });
+    expect(r.ok).toBe(true);
+    expect(r.request.text_changes).toEqual({ headline: '新しい見出し' });
+    expect(Object.values(r.request.text_changes).every(v => String(v).trim())).toBe(true);
+  });
+
+  it('1つでも文言があれば送れる', () => {
+    const as = a2();
+    const c = requestRevision(reviewed2(as), { text: 'CTAだけ', textChanges: { cta: '予約する' } }, CTX, 3000).creative;
+    expect(buildGenerateRequest(c, as, { jobId: 'j3' }).ok).toBe(true);
+  });
+
+  it('初回（version 1）は text_changes を要求しない', () => {
+    const as = a2();
+    expect(buildGenerateRequest(buildCreative(as, {}, CTX).creative, as, { jobId: 'j4' }).ok).toBe(true);
   });
 });

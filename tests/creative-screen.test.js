@@ -19,7 +19,10 @@ beforeAll(() => {
   // 画面のJSXブロック（最初の出現はポーリング登録なので、JSX側の目印で切り出す）
   const marker = "{currentPage === 'creative' && ccOn('cc_creative_library') && (() => {";
   const from = html.indexOf(marker);
-  screen = from >= 0 ? html.slice(from, from + 30000) : '';
+  // ⚠️ 固定の文字数で切らない（画面に項目を足すたびに、末尾の検査が静かに消えるため）。
+  //    次の画面のマーカーまでを「この画面」として切り出す。
+  const next = html.indexOf("{currentPage === '", from + marker.length);
+  screen = from >= 0 ? html.slice(from, next > from ? next : html.length) : '';
 });
 
 describe('クリエイティブ画面: 入口と権限', () => {

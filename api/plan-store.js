@@ -28,7 +28,12 @@ import {
   buildAsset, confirmRights, buildCreative, startJob, completeJob,
   requestRevision, approve as approveCreative, deliverables, compareSet, normalizeStore as normalizeCreativeStore,
   buildGenerateRequest, jobProgress, publicAsset, publicCreative,
+  normalizeLimits as normalizeCreativeLimits, textSendable as creativeTextSendable,
+  textErrorMessage as creativeTextErrorMessage,
 } from '../lib/creative.js';
+// ③のテンプレ文字数上限のキャッシュ。①は既定値を持たないので、取れた値だけを短時間持つ。
+let CREATIVE_LIMITS_CACHE = new Map();   // tenantId -> { at, v }
+const CREATIVE_LIMITS_TTL = 60000;
 // 素材・制作物は暗号文でしか保存しない。復号はここ（認証付き配信口）だけで行う。
 import {
   CHUNK as CREATIVE_CHUNK, masterKeyFrom as creativeMasterKeyFrom,
@@ -1315,6 +1320,39 @@ export default async function handler(req, res) {
     const genBase = String(process.env.CREATIVE_GEN_API_BASE || '').trim().replace(/\/+$/, '');
     const genKey = String(process.env.CREATIVE_GEN_API_KEY || '').trim();
     const genReady = !!(genBase && genKey);
+    const genReason = genBase ? (genKey ? '' : '③生成APIの認証キー（CREATIVE_GEN_API_KEY）が未設定です')
+                              : '③生成APIの接続先（CREATIVE_GEN_API_BASE）が未設定です';
+
+    // ③のテンプレ文字数上限を取りに行く。
+    // ⚠️ **①に既定値を置かない。** 取れなければ loaded:false のまま返し、画面は送信を止める。
+    const fetchLimits = async () => {
+      if (!genReady) return { loaded: false, reason: genReason, text: {} };
+      const now = Date.now();
+      // ⚠️ キャッシュは本番だけ。preview/検証では毎回取りに行く
+      //    （③がテンプレを変えた直後に、古い上限のまま確認してしまわないように）。
+      const cacheable = process.env.VERCEL_ENV === 'production';
+      const hit = cacheable ? CREATIVE_LIMITS_CACHE.get(tenantId) : null;
+      if (hit && hit.at > now - CREATIVE_LIMITS_TTL) return { ...hit.v, fetchedAt: hit.at };
+      let raw = null, reason = '';
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 10000);   // ③の契約に合わせて10秒
+        try {
+          const up = await fetch(`${genBase}/v1/creative/limits`, { signal: ctrl.signal,
+            headers: { Authorization: `Bearer ${genKey}`, 'X-Tenant-Id': tenantId, Accept: 'application/json' } });
+          if (up.ok) raw = await up.json().catch(() => null);
+          else reason = `③が ${up.status} を返しました`;
+        } finally { clearTimeout(timer); }
+      } catch (_) { reason = '③へ接続できませんでした'; }
+      const lim = normalizeCreativeLimits(raw);
+      if (!lim.loaded) return { ...lim, reason: reason || lim.reason };
+      if (cacheable) CREATIVE_LIMITS_CACHE.set(tenantId, { at: now, v: lim });
+      return { ...lim, fetchedAt: now };
+    };
+
+    if (action === 'limits') {
+      return res.status(200).json({ ok: true, limits: await fetchLimits() });
+    }
 
     // ── 暗号化保存の親鍵 ────────────────────────────────────────────
     // ⚠️ 未設定なら **保存させない**。平文で置いて「あとで暗号化する」にしない。
@@ -1406,9 +1444,7 @@ export default async function handler(req, res) {
         // 保存の準備。鍵が無ければ**登録させない**（平文で置かない）。
         storage: { ready: !!master, reason: master ? '' : '素材の保存鍵（CREATIVE_ASSET_KEY・32文字以上）が未設定です' },
         // 生成の接続状態。未接続なら画面で「未接続」と出す（sample と混ぜない）。
-        generator: { connected: genReady,
-                     reason: genBase ? (genKey ? '' : '③生成APIの認証キー（CREATIVE_GEN_API_KEY）が未設定です')
-                                     : '③生成APIの接続先（CREATIVE_GEN_API_BASE）が未設定です' } });
+        generator: { connected: genReady, reason: genReason } });
     }
 
     // 暗号化して保存したファイルを、記録できる形に直す。
@@ -1502,6 +1538,37 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, creative: publicCreative(out) });
     }
 
+    // 下書きの文言を直す。⚠️ 下書き（と失敗した案）だけ。承認済み・確認中には触らせない。
+    //    上限の判定は③の limits に任せる（①に既定値を置かない）。
+    if (action === 'creative_text') {
+      const id = String(body.creative_id || '').slice(0, 64);
+      const limits = await fetchLimits();
+      const t = (body.text && typeof body.text === 'object') ? body.text : {};
+      const next = {};
+      for (const k of ['appeal', 'headline', 'body', 'cta']) {
+        if (t[k] !== undefined) next[k] = String(t[k] == null ? '' : t[k]);
+      }
+      // 上限を超えたものは**保存もしない**（画面と保存がずれない）。
+      const sendable = creativeTextSendable(limits, next);
+      if (!sendable.ok) {
+        return res.status(200).json(cerr(sendable.error,
+          sendable.error === 'limits_unavailable'
+            ? `③のテンプレ上限を取得できていません（${limits.reason || '理由不明'}）`
+            : `文字数が③のテンプレ上限を超えています。${creativeTextErrorMessage(sendable.errors)}`));
+      }
+      let out = null, err = '';
+      const done = await mutateCreative((st) => {
+        const c = st.creatives[id];
+        if (!mine(c)) { err = 'not_found'; return null; }
+        if (c.status !== 'draft' && c.status !== 'failed') { err = 'invalid_transition'; return null; }
+        st.creatives[id] = { ...c, ...next, updatedAt: Date.now() }; out = st.creatives[id]; return true;
+      });
+      if (err) return res.status(200).json(cerr(err, err === 'invalid_transition' ? '下書きのあいだだけ直せます' : ''));
+      if (!done.ok) return res.status(200).json(cerr('busy_retry', '', true));
+      await cAudit({ action: 'creative_text', entity: 'creative', entityId: id, after: { fields: Object.keys(next) } });
+      return res.status(200).json({ ok: true, creative: publicCreative(out) });
+    }
+
     // ③へ生成を依頼する。**受付だけ**して即返す（長い動画を同期で待たない）。
     // 生成ロジックはここに書かない。結果は job_status で受け取る。
     if (action === 'generate') {
@@ -1539,9 +1606,28 @@ export default async function handler(req, res) {
           job_id: job.id, status: 'failed', reason });
       };
 
-      if (!built.ok) return await fail(`依頼を組み立てられませんでした（${built.error}）`);
+      if (!built.ok) {
+        return await fail(built.error === 'text_changes_required'
+          // ③は自由文だけの修正依頼を受け付けない契約。ここで止めて、何が要るかを出す。
+          ? '修正依頼に「直した文言」が入っていません。見出し・本文・ボタンの文言のどれかを書いてください'
+          : `依頼を組み立てられませんでした（${built.error}）`);
+      }
       // ⚠️ 未接続。**sample を作って成功に見せない。**
       if (!genReady) return await fail('③の生成APIが未接続です（接続先・認証キーが未設定）');
+
+      // ③のテンプレ上限に対して、送る前に止める。
+      // ⚠️ 上限が未取得なら**送らない**（422になるまで試さない）。画面が古いままでも
+      //    ここで止まるので、ブラウザ側の判定だけに頼らない。
+      const limits = await fetchLimits();
+      const sendable = creativeTextSendable(limits, {
+        headline: built.request.headline, body: built.request.body, cta: built.request.cta,
+        ...(built.request.text_changes || {}),
+      });
+      if (!sendable.ok) {
+        return await fail(sendable.error === 'limits_unavailable'
+          ? `③のテンプレ上限を取得できないため送っていません（${limits.reason || '理由不明'}）`
+          : `文字数が③のテンプレ上限を超えています。${creativeTextErrorMessage(sendable.errors)}`);
+      }
 
       let accepted = null;
       try {
@@ -1558,7 +1644,13 @@ export default async function handler(req, res) {
         } finally { clearTimeout(timer); }
         const raw = await up.json().catch(() => null);
         if (up.status === 202 || (up.ok && raw && raw.job_id)) accepted = raw || {};
-        else if (up.status === 422) return await fail(`③が修正内容を解釈できませんでした（${(raw && raw.error && raw.error.code) || 422}）`);
+        else if (up.status === 422) {
+          // ③は field/max/got を添えて返す。**そのまま画面へ出す**（コードだけにしない）。
+          const e = (raw && raw.error) || {};
+          const detail = e.field ? creativeTextErrorMessage([{ field: e.field, max: e.max, got: e.got }]) : '';
+          return await fail(detail ? `③が受け付けませんでした。${detail}`
+                                   : `③が修正内容を解釈できませんでした（${e.code || 422}）`);
+        }
         else if (up.status === 409) return await fail('同じIDで別の内容の依頼があります（版の競合）');
         else return await fail(`生成APIが ${up.status} を返しました`);
       } catch (_) { return await fail('生成APIへ接続できませんでした'); }

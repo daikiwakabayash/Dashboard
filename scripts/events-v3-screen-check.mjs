@@ -403,14 +403,25 @@ await page.waitForTimeout(900);
 const evBox = await page.evaluate(() => {
   const hero = document.querySelector('.ev-hero');
   const art = document.querySelector('.ev-hero-art');
-  const foot = document.querySelector('.ev-art-foot');
+  const date = document.querySelector('.ev-art-date');
   if (!hero || !art) return null;
   const a = art.getBoundingClientRect();
-  const f = foot ? foot.getBoundingClientRect() : null;
+  // ⚠️ スマホでは飾りの脚注は出さないので、日付が飾りの中に収まっているかを見る
+  const d = date ? date.getBoundingClientRect() : null;
   return { h: Math.round(hero.getBoundingClientRect().height),
-           inside: f ? (f.bottom <= a.bottom + 1 && f.top >= a.top - 1) : false };
+           inside: !!d && d.bottom <= a.bottom + 1 && d.top >= a.top - 1 };
 });
-check('🔴 スマホで見出しカードが高くなりすぎない', !!evBox && evBox.h <= 620, evBox ? `${evBox.h}px` : 'なし');
+check('🔴 スマホで見出しカードが高くなりすぎない', !!evBox && evBox.h <= 420, evBox ? `${evBox.h}px` : 'なし');
+// ⚠️ 1件目にたどり着くまでが長いと、何件あっても読まれない
+const toFirst = await page.evaluate(() => {
+  const c = document.querySelector('[data-ev-card]');
+  if (!c) return -1;
+  // 下書きの帯は普段は出ない（この検査の中で1件作っているため）ので、その分は差し引く
+  const d = document.querySelector('[data-ev-drafts]');
+  const dh = d ? Math.round(d.getBoundingClientRect().height) + 16 : 0;
+  return Math.round(c.getBoundingClientRect().top + window.scrollY) - dh;
+});
+check('🔴 スマホで1件目までが遠すぎない', toFirst > 0 && toFirst <= 360, `${toFirst}px`);   // ⚠️ この検査では「参加予定の次の会」の帯も出ている
 // ⚠️ 1件あたりが長いと、スマホで1〜2件しか並ばない
 const evCard = await page.evaluate(() => {
   const c = document.querySelector('[data-ev-card]');

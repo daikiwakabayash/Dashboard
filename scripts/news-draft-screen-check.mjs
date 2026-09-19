@@ -192,17 +192,48 @@ check('理念の言葉が出る', fvTxt.includes('元気な社会を創造する
 check('肩書きが出る', fvTxt.includes('NAORU NEWS / ONE TEAM'));
 check('しめの言葉が出る', fvTxt.includes('ともにつくる。'));
 check('写真が未設定でも、同梱の集合写真で成り立つ（空の面にしない）', (await page.locator('[data-news-fv-default]').count()) === 1);
-check('🔴 「お知らせを投稿」が押せる形で出ている', (await page.locator('[data-news-fv-post]').count()) === 1);
-await page.locator('[data-news-fv-post]').first().click();
+// ⚠️ ファーストビューには操作を置かない（縦を使わないため）
+check('🔴 ファーストビューに投稿ボタンを置かない', (await page.locator('[data-news-fv] [data-news-post-btn]').count()) === 0);
+check('🔴 ファーストビューに差し替えボタンを置かない', (await page.locator('[data-news-fv] [data-news-fv-edit]').count()) === 0);
+// ⚠️ 横並びは**スマホだけ**（PCは横幅に余裕があり、横に並べると見出しが不自然に折れる）
+await page.setViewportSize({ width: 390, height: 844 });
+await page.waitForTimeout(700);
+check('🔴 スマホではそえる言葉を見出しの横に並べる（縦に積まない）', await page.evaluate(() => {
+  const t = document.querySelector('[data-news-fv-title]'), l = document.querySelector('[data-news-fv-lead]');
+  if (!t || !l) return false;
+  const a = t.getBoundingClientRect(), b = l.getBoundingClientRect();
+  return b.left >= a.right - 2;               // 右どなりにある
+}));
+await page.setViewportSize({ width: 1400, height: 1000 });
+await page.waitForTimeout(700);
+check('PCでは見出しが不自然に折れない（2行まで）', await page.evaluate(() => {
+  const t = document.querySelector('[data-news-fv-title]');
+  if (!t) return false;
+  const line = parseFloat(getComputedStyle(t).lineHeight) || 1;
+  return Math.round(t.getBoundingClientRect().height / line) <= 2;
+}));
+check('🔴 しめの言葉は写真の中に置く（縦に一段使わない）', await page.evaluate(() => {
+  const ph = document.querySelector('.nowl-fv-photo'), sg = document.querySelector('[data-news-fv-sign]');
+  return !!(ph && sg && ph.contains(sg));
+}));
+
+// 投稿は一覧の見出しの「＋」から
+check('🔴 一覧の見出しに「＋」の投稿ボタンが出る', (await page.locator('[data-news-post-btn]').count()) === 1);
+await page.locator('[data-news-post-btn]').first().click();
 await page.waitForTimeout(900);
-check('🔴 「お知らせを投稿」から投稿の画面が開く', (await page.locator('[data-nowl-modal="compose"]').count()) === 1);
+check('🔴 「＋」から投稿の画面が開く', (await page.locator('[data-nowl-modal="compose"]').count()) === 1);
 await page.keyboard.press('Escape');
 await page.waitForTimeout(700);
 
-// 写真の差し替え（本部だけ）
-check('本部には「写真と言葉を変える」が出る', (await page.locator('[data-news-fv-edit]').count()) === 1);
-await page.locator('[data-news-fv-edit]').first().click();
-await page.waitForTimeout(700);
+// 写真の差し替えはオーナー設定から（どの画面からでも開ける）
+await page.evaluate(() => {
+  const b = [...document.querySelectorAll('button')].find(x => /オーナー設定|設定/.test(x.innerText || ''));
+  if (b) b.click();
+});
+await page.waitForTimeout(2000);
+check('本部には設定に「写真と言葉を変える」が出る', (await page.locator('[data-news-hero-open]').count()) === 1);
+await page.locator('[data-news-hero-open]').first().click();
+await page.waitForTimeout(900);
 check('差し替えの画面が開く', (await page.locator('[data-nowl-modal="hero"]').count()) === 1);
 check('写真が無いうちは掲載許可の確認を出さない', (await page.locator('[data-news-hero-consent]').count()) === 0);
 await page.locator('[data-news-hero-pick] input[type="file"]').first().setInputFiles({
@@ -219,12 +250,15 @@ await page.locator('[data-news-hero-save]').first().click();
 await page.waitForTimeout(1800);
 check('保存すると差し替えの画面が閉じる', (await page.locator('[data-nowl-modal="hero"]').count()) === 0);
 check('サーバーに写真と掲載許可が届いている', !!(hero && hero.imgId) && hero.consent === true);
+// ニュースへ戻って、差し替えが反映されているか見る
+await page.getByRole('button', { name: /ニュース/ }).first().click().catch(() => {});
+await page.waitForTimeout(2200);
 await page.evaluate(() => { window.scrollTo(0, 0); for (const el of document.querySelectorAll('*')) { if (el.scrollTop > 0) el.scrollTop = 0; } });
 await page.waitForTimeout(700);
 check('差し替えた写真に入れ替わる（既定の写真が消える）', (await page.locator('[data-news-fv-default]').count()) === 0);
 
 // ── 下書き → 下見 → 投稿 ──────────────────────────────────
-await page.getByRole('button', { name: /お知らせを投稿/ }).first().click();
+await page.locator('[data-news-post-btn]').first().click();
 await page.waitForTimeout(800);
 check('投稿の画面が開く', (await page.locator('[data-nowl-modal="compose"]').count()) === 1);
 check('「入力／下見」の切り替えが出る', (await page.locator('[data-news-composer-tabs]').count()) === 1);
@@ -301,16 +335,15 @@ check('スマホで画面からはみ出さない', overflow.length === 0, overf
 const fvBox = await page.evaluate(() => {
   const fv = document.querySelector('[data-news-fv]');
   const ph = document.querySelector('.nowl-fv-photo');
-  const sign = document.querySelector('.nowl-fv-sign');
-  const btn = document.querySelector('[data-news-fv-post]');
-  if (!fv || !ph) return null;
-  const f = fv.getBoundingClientRect(), p = ph.getBoundingClientRect();
-  const gap = (sign && btn) ? Math.round(sign.getBoundingClientRect().top - btn.getBoundingClientRect().bottom) : -1;
-  return { h: Math.round(f.height), photo: Math.round(p.height), gap };
+  const cp = document.querySelector('.nowl-fv-copy');
+  if (!fv || !ph || !cp) return null;
+  return { h: Math.round(fv.getBoundingClientRect().height),
+           photo: Math.round(ph.getBoundingClientRect().height),
+           copy: Math.round(cp.getBoundingClientRect().height) };
 });
-check('スマホで写真の帯がきちんと見える', !!fvBox && fvBox.photo >= 170, fvBox ? `${fvBox.photo}px` : 'なし');
-check('🔴 スマホで下に大きな空きを作らない', !!fvBox && fvBox.gap >= 0 && fvBox.gap <= 60, fvBox ? `すき間 ${fvBox.gap}px` : 'なし');
-check('スマホのファーストビューが高くなりすぎない', !!fvBox && fvBox.h <= 700, fvBox ? `${fvBox.h}px` : 'なし');
+check('スマホで写真の帯がきちんと見える', !!fvBox && fvBox.photo >= 140, fvBox ? `${fvBox.photo}px` : 'なし');
+check('🔴 スマホの言葉の面が厚くなりすぎない', !!fvBox && fvBox.copy <= 190, fvBox ? `${fvBox.copy}px` : 'なし');
+check('🔴 スマホのファーストビューが高くなりすぎない', !!fvBox && fvBox.h <= 380, fvBox ? `${fvBox.h}px` : 'なし');
 const small = await page.evaluate(() => {
   const bad = [];
   for (const el of document.querySelectorAll('[data-nowl="news"] button, [data-nowl="news"] a[href]')) {

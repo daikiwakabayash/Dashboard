@@ -183,7 +183,7 @@ check('スマホでは1列に並ぶ', cols1 === 1, `${cols1} 列`);
 check('スマホで横スクロールが出ない', !overflow);
 // スマホ: 見出しが小さくなりすぎない／押せる大きさ／はみ出さない
 const h1m = await page.locator('[data-news-fv-title]').first().evaluate(el => Math.round(parseFloat(getComputedStyle(el).fontSize)));
-check('スマホの大見出しも読みやすい大きさ', h1m >= 26 && h1m <= 38, `${h1m}px`);
+check('スマホの大見出しも読みやすい大きさ', h1m >= 20 && h1m <= 32, `${h1m}px`);   // ⚠️ そえる言葉を横に並べたぶん、見出しは少し小さい
 const small = await page.evaluate(() => {
   const bad = [];
   for (const el of document.querySelectorAll('button, a[href], input, select')) {

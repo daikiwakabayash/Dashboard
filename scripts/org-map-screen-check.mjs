@@ -152,10 +152,10 @@ check('REGION INDEX が出る', (await page.locator('[data-org-index]').count())
 const idx = await page.locator('[data-org-index-item]').count();
 check('索引に地域が並ぶ', idx >= 9, `${idx} 件`);
 
-// ── 店舗とスタッフ ──────────────────────────────────────
+// ── 店舗とセラピスト ────────────────────────────────────
 check('店舗カードが出る', (await page.locator('[data-org-shop]').count()) >= 10);
-check('スタッフ名が出る', t.includes('青木0') && t.includes('石田0'));
-check('店舗ごとのスタッフ数が出る', /スタッフ \d+名/.test(t));
+check('セラピスト名が出る', t.includes('青木0') && t.includes('石田0'));
+check('🔴 呼び名は「セラピスト」（「スタッフ」とは出さない）', /セラピスト \d+名/.test(t) && !/スタッフ \d+名/.test(t));
 
 // ── 開閉（店舗が多い地域）────────────────────────────────
 await page.evaluate(() => { const b = document.querySelector('[data-org-band="kanto"]'); if (b) b.scrollIntoView(); });

@@ -297,6 +297,20 @@ const overflow = await page.evaluate(() => {
   return [...new Set(out)].slice(0, 6);
 });
 check('スマホで画面からはみ出さない', overflow.length === 0, overflow.join(' / '));
+// ⚠️ スマホのファーストビュー: 中身に合った高さで、写真もきちんと見えること
+const fvBox = await page.evaluate(() => {
+  const fv = document.querySelector('[data-news-fv]');
+  const ph = document.querySelector('.nowl-fv-photo');
+  const sign = document.querySelector('.nowl-fv-sign');
+  const btn = document.querySelector('[data-news-fv-post]');
+  if (!fv || !ph) return null;
+  const f = fv.getBoundingClientRect(), p = ph.getBoundingClientRect();
+  const gap = (sign && btn) ? Math.round(sign.getBoundingClientRect().top - btn.getBoundingClientRect().bottom) : -1;
+  return { h: Math.round(f.height), photo: Math.round(p.height), gap };
+});
+check('スマホで写真の帯がきちんと見える', !!fvBox && fvBox.photo >= 170, fvBox ? `${fvBox.photo}px` : 'なし');
+check('🔴 スマホで下に大きな空きを作らない', !!fvBox && fvBox.gap >= 0 && fvBox.gap <= 60, fvBox ? `すき間 ${fvBox.gap}px` : 'なし');
+check('スマホのファーストビューが高くなりすぎない', !!fvBox && fvBox.h <= 700, fvBox ? `${fvBox.h}px` : 'なし');
 const small = await page.evaluate(() => {
   const bad = [];
   for (const el of document.querySelectorAll('[data-nowl="news"] button, [data-nowl="news"] a[href]')) {

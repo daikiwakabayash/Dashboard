@@ -294,7 +294,17 @@ await page.waitForTimeout(1200);
 check('🔴 フラグOFFのまま押しても送られない', sent.length === 0, `${sent.length} 通`);
 check('🔴 送っていないことを画面で伝える', (await panel().first().innerText()).includes('フラグがOFFなので送っていません'));
 
-// ── フラグをONにしてから ───────────────────────────────────────
+// ── 🔴 フラグを画面から切り替えたら、読み込み直さなくても表示が揃うか ──────
+//    ここがずれると「送らない」と出しながら実際は送る（またはその逆）になる。
+await page.getByRole('button', { name: 'ONにする' }).last().click().catch(() => {});
+await page.waitForTimeout(1800);
+check('🔴 フラグをONにすると、読み込み直さなくてもパネルの表示が変わる',
+  (await page.locator('[data-dr-flag]').first().innerText()).includes('送信ON'),
+  await page.locator('[data-dr-flag]').first().innerText());
+check('🔴 ONになったら「1通も送りません」を出し続けない',
+  !(await panel().first().innerText()).includes('1通も送りません'));
+
+// ── 読み込み直しても同じ ───────────────────────────────────────
 await page.evaluate(async () => {
   await fetch('/api/plan-store', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ type: 'ccflags', action: 'set', key: 'cc_daily_report', value: true }) });

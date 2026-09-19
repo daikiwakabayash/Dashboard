@@ -4087,7 +4087,11 @@
                 setCcBusy(key);
                 try {
                     const j = await ccPost({ type: 'ccflags', action: value === '__kill__' ? 'kill' : 'set', key, value });
-                    if (j && j.flags) setCcFlags(j.flags); else setCcErr(ccErrText(j && j.error));
+                    if (j && j.flags) {
+                        setCcFlags(j.flags);
+                        // 日報パネルはフラグの状態を画面に出すので、変えたら取り直す。
+                        if (key === 'cc_daily_report' || key === 'cc_all') setDrData(p => ({ ...p, loaded: false }));
+                    } else setCcErr(ccErrText(j && j.error));
                 } finally { setCcBusy(''); }
             };
             const ccFmtDt = (ms) => { if (!ms) return '—'; const d = new Date(Number(ms)); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
@@ -5887,11 +5891,15 @@
             };
 
             const DailyReportPanel = () => {
-                React.useEffect(() => { if (!drData.loaded) drLoad(); }, []);
+                React.useEffect(() => { if (!drData.loaded) drLoad(); }, [drData.loaded]);
                 const shops = (soShops || []).slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ja'));
                 const on = (id) => drData.shops[String(id)] || null;
                 const val = (id, k, d) => { const s = on(id); return s && s[k] != null ? s[k] : d; };
                 const enabledCount = Object.values(drData.shops).filter(s => s && s.enabled).length;
+                // 🔴 フラグはこのパネルを開いたあとに変わりうる。自分が読み込んだ古い写しではなく
+                //    いまのフラグ（ccFlags）を正とする。ここがずれると「送らない」と表示しながら
+                //    実際には送る（またはその逆）という、いちばん危ない食い違いになる。
+                const drLive = ccOn('cc_daily_report');
                 return (
                     <div data-dr-panel className="bg-white border border-slate-200 rounded-2xl p-4">
                         <div className="flex items-start gap-3 flex-wrap">
@@ -5902,14 +5910,14 @@
                                     <span className="font-black">オープン前／プレオープン／オープン後</span>の3つで、出るレポートが変わります（日付から自動で切り替わります）。
                                 </p>
                             </div>
-                            <span data-dr-flag className={`px-2.5 py-1 rounded-lg text-[11px] font-black ${drData.flagOn ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
-                                {drData.flagOn ? '送信ON' : '送信OFF（下書きのみ）'}
+                            <span data-dr-flag className={`px-2.5 py-1 rounded-lg text-[11px] font-black ${drLive ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
+                                {drLive ? '送信ON' : '送信OFF（下書きのみ）'}
                             </span>
                         </div>
 
                         {/* 🔴 いまの状態を正直に出す。「動いている」と誤解させない。 */}
                         <div data-dr-notes className="mt-3 rounded-xl bg-amber-50 border border-amber-200 p-3 text-[11.5px] font-bold text-amber-900 leading-relaxed space-y-1">
-                            {!drData.flagOn && <p>・いまは<span className="font-black">1通も送りません</span>。文面を確かめてから、上の一覧で「日報の自動送信」をONにしてください。</p>}
+                            {!drLive && <p>・いまは<span className="font-black">1通も送りません</span>。文面を確かめてから、上の一覧で「日報の自動送信」をONにしてください。</p>}
                             {!drData.aggregateConfirmed && <p>・SalonOneの「集計実行」を押した瞬間を受け取るしくみ（Webhook）は<span className="font-black">未確認</span>です。いまは入金ベース売上の動きが落ち着いたのを合図にしています（推測なので、文面にも「確定前の可能性」を書いています）。</p>}
                             {drData.loaded && !drData.salonOneConfigured && <p>・SalonOneのキーが未設定です。数字が取れないので送りません。</p>}
                             {drData.loaded && !drData.cronConfigured && <p>・自動実行の合言葉（CRON_SECRET）が未設定です。時間どおりの送信はまだできません。</p>}
@@ -5990,7 +5998,7 @@
                                                     <span className="text-[10.5px] font-black text-amber-700">目標が未設定なので「あと何人」を出せません</span>}
                                                 <button onClick={() => drSendNow(id, phase)} disabled={drBusy === id || !val(id, 'roomId', '')}
                                                     className="px-2.5 py-1 rounded-lg bg-slate-900 text-white text-[11px] font-black hover:bg-slate-800 disabled:opacity-40">
-                                                    {drData.flagOn ? 'いま送る' : 'いま送る（下書きのみ）'}
+                                                    {drLive ? 'いま送る' : 'いま送る（下書きのみ）'}
                                                 </button>
                                             </div>
                                         )}

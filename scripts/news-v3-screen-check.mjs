@@ -27,7 +27,7 @@ const posts = [
     reactions: { '👍': ['s1'] }, comments: [], imgIds: [], files: [], createdAt: '2026-09-11T01:00:00.000Z' },
   { id: 'p4', authorId: 'hq1', authorName: '本部 広報チーム', authorRoot: true, title: '新しい仲間の「好き」を、見つけてみよう。',
     text: 'プロフィールから始まる、新しいコミュニケーション。', category: 'praise',
-    reactions: {}, comments: [], imgIds: [], files: [], createdAt: '2026-08-28T01:00:00.000Z' },
+    reactions: {}, comments: [], imgIds: ['i1'], coverImgId: 'i1', files: [], createdAt: '2026-08-28T01:00:00.000Z' },
 ];
 let hero = null;   // ファーストビュー（未設定＝既定の文言）
 const calls = [];
@@ -60,6 +60,10 @@ const server = http.createServer((req, res) => {
         if (req.method === 'POST' && body.action === 'hero_set') { hero = body.hero; return json(res, { ok: true, hero }); }
         if (req.method === 'POST') return json(res, { ok: true, posts });
         return json(res, { posts, reads: {}, configured: true, hero });
+      }
+      if (type === 'chat' && url.searchParams.get('img')) {
+        res.setHeader('Content-Type', 'image/jpeg');
+        return res.end(fs.readFileSync('/home/user/dashboard/news-hero.jpg'));
       }
       if (type === 'chat') return json(res, { rooms: [], messages: {}, reads: {},
         dir: { staff: STAFF.map(x => ({ id: x.staff_id, name: x.name, shop: x.shop_name })) }, notes: {}, configured: true });
@@ -134,6 +138,20 @@ check('PCの大見出しが十分大きい（試作に寄せる）', h1px >= 38,
 check('UPDATES の見出しは残す', t.includes('UPDATES'));
 
 // ── カード ──────────────────────────────────────────────
+// ⚠️ 写真の表紙が真ん中で切れて読めなくならないこと・1件が詰まっていること
+const cardBox = await page.evaluate(() => {
+  const cov = document.querySelector('[data-news-card="p4"] .nowl-cover');
+  const img = cov && cov.querySelector('img');
+  const eng = document.querySelectorAll('[data-news-card="p4"] .nowl-engage').length;
+  const meta = document.querySelectorAll('[data-news-card="p4"] .nowl-postmeta').length;
+  if (!cov) return null;
+  const r = cov.getBoundingClientRect();
+  return { ratio: +(r.width / r.height).toFixed(2), pos: img ? getComputedStyle(img).objectPosition : '-',
+           fit: img ? getComputedStyle(img).objectFit : '-', rows: eng + meta };
+});
+check('🔴 写真の表紙は横長（16:9）で出す', !!cardBox && Math.abs(cardBox.ratio - 1.78) < 0.08, cardBox ? String(cardBox.ratio) : 'なし');
+check('🔴 写真は上から切る（見出しの入った画像でも文字が残る）', !!cardBox && /0%|top/.test(cardBox.pos), cardBox ? cardBox.pos : 'なし');
+check('🔴 下の情報は1行にまとめる（既読を2回書かない）', !!cardBox && cardBox.rows === 1, cardBox ? `${cardBox.rows} 行` : 'なし');
 const cards = await page.locator('[data-news-card]').count();
 check('カードが記事の数だけ出る', cards === 4, `${cards} 件`);
 const cover = await page.locator('[data-news-card="p2"] .nowl-cover strong').first().innerText().catch(() => '');

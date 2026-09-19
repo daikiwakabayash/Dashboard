@@ -29,6 +29,9 @@ MONTHS.forEach((ym, mi) => {
   }
 });
 let nextId = 1;
+let hero = null;                       // ファーストビュー（未設定＝既定の文言）
+const heroImgs = {};                   // 架空の写真
+const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 const calls = [];
 const json = (res, o) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(o)); };
 // ⚠️ サーバーと同じく、他人の下書きは返さない。ここでは root で見ているので全部見える。
@@ -51,6 +54,13 @@ const server = http.createServer((req, res) => {
       if (type === 'ccflags') return json(res, { flags: { cc_all: true, cc_authz: 'off' }, configured: true, env: 'preview' });
       if (type === 'board') {
         if (req.method === 'POST' && body.action === 'status_counts') return json(res, { ok: true, counts: {} });
+        if (req.method === 'POST' && body.action === 'uploadImage') { const id = `himg_${nextId++}`; heroImgs[id] = body.dataUrl; return json(res, { ok: true, id }); }
+        if (req.method === 'POST' && body.action === 'hero_set') {
+          const h = body.hero || {};
+          // ⚠️ サーバーと同じく、写真があるのに掲載許可が未確認なら保存しない
+          if (h.imgId && h.consent !== true) return json(res, { ok: false, error: 'consent_unconfirmed', message: '写真に写っている方の掲載許可を確かめてから保存してください。' });
+          hero = h; return json(res, { ok: true, hero });
+        }
         if (req.method === 'POST' && body.action === 'post') {
           const rec = { ...body.post, id: `new${nextId++}`, reactions: {}, comments: [],
             status: body.post.status === 'draft' ? 'draft' : 'published',
@@ -73,7 +83,13 @@ const server = http.createServer((req, res) => {
         }
         if (req.method === 'POST' && body.action === 'delete') { posts = posts.filter(x => x.id !== body.id); return json(res, { ok: true }); }
         if (req.method === 'POST') return json(res, { ok: true, posts: visible() });
-        return json(res, { posts: visible(), reads: {}, configured: true });
+        return json(res, { posts: visible(), reads: {}, configured: true, hero });
+      }
+      if (type === 'chat' && url.searchParams.get('img')) {
+        const d = heroImgs[url.searchParams.get('img')] || '';
+        const b64 = /^data:image\/[^;]+;base64,/.test(d) ? d.split(',')[1] : PNG_1PX;
+        res.setHeader('Content-Type', 'image/png');
+        return res.end(Buffer.from(b64, 'base64'));
       }
       if (type === 'chat') return json(res, { rooms: [], messages: {}, reads: {},
         dir: { staff: STAFF.map(x => ({ id: x.staff_id, name: x.name, shop: x.shop_name })) }, notes: {}, configured: true });
@@ -165,6 +181,47 @@ check('絞ると出す件数が最初に戻る', (await page.locator('[data-news
 await page.locator('[data-news-month-btn="all"]').first().click();
 await page.waitForTimeout(900);
 check('「すべての期間」で戻る', (await page.locator('[data-news-card]').count()) === 12, `${await page.locator('[data-news-card]').count()} 件`);
+
+// ── ファーストビュー ───────────────────────────────────────
+await page.evaluate(() => { window.scrollTo(0, 0); for (const el of document.querySelectorAll('*')) { if (el.scrollTop > 0) el.scrollTop = 0; } });
+await page.waitForTimeout(500);
+check('ファーストビューが出る', (await page.locator('[data-news-fv]').count()) === 1);
+const fvTxt = await page.locator('[data-news-fv]').first().innerText().catch(() => '');
+check('見出しが出る', fvTxt.includes('この仲間と、') && fvTxt.includes('次のNAORUへ。'));
+check('理念の言葉が出る', fvTxt.includes('元気な社会を創造する。'));
+check('肩書きが出る', fvTxt.includes('NAORU NEWS / ONE TEAM'));
+check('しめの言葉が出る', fvTxt.includes('ともにつくる。'));
+check('写真が未設定でも成り立つ（空の面にしない）', (await page.locator('[data-news-fv-noimg]').count()) === 1);
+check('🔴 「お知らせを投稿」が押せる形で出ている', (await page.locator('[data-news-fv-post]').count()) === 1);
+await page.locator('[data-news-fv-post]').first().click();
+await page.waitForTimeout(900);
+check('🔴 「お知らせを投稿」から投稿の画面が開く', (await page.locator('[data-nowl-modal="compose"]').count()) === 1);
+await page.keyboard.press('Escape');
+await page.waitForTimeout(700);
+
+// 写真の差し替え（本部だけ）
+check('本部には「写真と言葉を変える」が出る', (await page.locator('[data-news-fv-edit]').count()) === 1);
+await page.locator('[data-news-fv-edit]').first().click();
+await page.waitForTimeout(700);
+check('差し替えの画面が開く', (await page.locator('[data-nowl-modal="hero"]').count()) === 1);
+check('写真が無いうちは掲載許可の確認を出さない', (await page.locator('[data-news-hero-consent]').count()) === 0);
+await page.locator('[data-news-hero-pick] input[type="file"]').first().setInputFiles({
+  name: 'team.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1PX, 'base64'),
+});
+await page.waitForTimeout(1500);
+check('🔴 写真を入れると掲載許可の確認が出る', (await page.locator('[data-news-hero-consent]').count()) === 1);
+check('🔴 許可を確かめるまで保存できない', (await page.locator('[data-news-hero-save]').first().isDisabled()) === true);
+await page.locator('[data-news-hero-title]').first().fill('この仲間と、\n次のNAORUへ。');
+await page.locator('[data-news-hero-consent] input[type="checkbox"]').first().check();
+await page.waitForTimeout(500);
+check('許可を確かめると保存できるようになる', (await page.locator('[data-news-hero-save]').first().isDisabled()) === false);
+await page.locator('[data-news-hero-save]').first().click();
+await page.waitForTimeout(1800);
+check('保存すると差し替えの画面が閉じる', (await page.locator('[data-nowl-modal="hero"]').count()) === 0);
+check('サーバーに写真と掲載許可が届いている', !!(hero && hero.imgId) && hero.consent === true);
+await page.evaluate(() => { window.scrollTo(0, 0); for (const el of document.querySelectorAll('*')) { if (el.scrollTop > 0) el.scrollTop = 0; } });
+await page.waitForTimeout(700);
+check('写真が出るようになる（「まだ設定されていません」が消える）', (await page.locator('[data-news-fv-noimg]').count()) === 0);
 
 // ── 下書き → 下見 → 投稿 ──────────────────────────────────
 await page.getByRole('button', { name: /お知らせを投稿/ }).first().click();

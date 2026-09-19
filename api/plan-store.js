@@ -65,6 +65,8 @@ import { normalizeIntro, canEditProfile } from '../lib/profile-fields.js';
 import { normalizeMeta as newsMeta, audienceFor as newsAudienceFor, canPublish as newsCanPublish } from '../lib/news-post.js';
 import { normalizeStatus as newsStatus, isDraft as newsIsDraft, visibleFor as newsVisibleFor,
          DRAFT as NEWS_DRAFT, PUBLISHED as NEWS_PUBLISHED } from '../lib/news-archive.js';
+import { HERO_KEY as NEWS_HERO_KEY, normalizeHero as newsNormalizeHero, canEditHero as newsCanEditHero,
+         heroReady as newsHeroReady, HERO_REASON as NEWS_HERO_REASON } from '../lib/news-hero.js';
 import { prKey as boardPrKey, normalizePr, markRead as boardMarkRead, markAck as boardMarkAck,
          postStatus as boardPostStatus, canSeeDetail as boardCanSeeDetail, outOfAudience as boardOutOfAudience } from '../lib/board-status.js';
 // ── Command Center（Phase 0〜2）。既存の type= には一切触れない追加のみ ──
@@ -3008,7 +3010,9 @@ export default async function handler(req, res) {
         // ⚠️ 他の人の下書きは**返さない**（画面で隠すだけにしない）。
         //    下書きが1件も無いときは元の配列をそのまま返す（毎回の作り直しを避ける）。
         const visible = posts.some(newsIsDraft) ? newsVisibleFor(posts, boardViewer) : posts;
-        return res.status(200).json({ posts: visible, reads: mergeReads(legacyReads, split), version, configured: true });
+        // ファーストビュー（画面のいちばん上の一枚）。未設定なら既定の文言で返す。
+        const hero = newsNormalizeHero(await blobGet(NEWS_HERO_KEY, hasKV, hasSB, gas).catch(() => null));
+        return res.status(200).json({ posts: visible, reads: mergeReads(legacyReads, split), version, configured: true, hero });
       }
 
       // 古い版で上書きしようとしていないか（expectedVersion 未指定なら検査しない＝旧クライアントも動く）
@@ -3074,6 +3078,21 @@ export default async function handler(req, res) {
         }
         return res.status(200).json({ ok: true, post: rec });
       }
+      // ── ファーストビューの差し替え ──────────────────────────
+      // ⚠️ 全社の顔になる場所なので、**本部・管理者だけ**。サーバー側で確かめる。
+      // ⚠️ 写真があるのに掲載許可が未確認なら保存しない。理由を返す。
+      if (action === 'hero_set' && body.hero) {
+        if (!newsCanEditHero(chatActor)) {
+          return res.status(403).json({ ok: false, error: 'forbidden', code: 'hq_only',
+            message: 'ファーストビューを変えられるのは本部・管理者だけです' });
+        }
+        const hero = newsNormalizeHero({ ...(body.hero || {}), updatedAt: Date.now(), updatedBy: String((chatActor && chatActor.id) || '') });
+        const chk = newsHeroReady(hero);
+        if (!chk.ok) return res.status(200).json({ ok: false, error: chk.reason, message: NEWS_HERO_REASON[chk.reason] || '保存できませんでした' });
+        await blobSet(NEWS_HERO_KEY, hero, hasKV, hasSB, gas);
+        return res.status(200).json({ ok: true, hero });
+      }
+
       // ── 下書きの書き直し ──────────────────────────────────────
       // ⚠️ **下書きのときだけ**書き換える。公開済みの記事は差し替えない
       //    （既読・「確認しました」が付いた記事を後から変えると、何を確認したのか分からなくなる）。
